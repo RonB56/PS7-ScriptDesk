@@ -1,0 +1,61 @@
+# Visual Studio / .NET build output
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+bld/
+build/
+
+# Visual Studio local/user files
+.vs/
+*.user
+*.suo
+*.rsuser
+*.userosscache
+*.sln.docstates
+
+# Test output
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# NuGet
+*.nupkg
+packages/
+project.assets.json
+
+# MSIX / installer/package output
+AppPackages/
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.msi
+*.cab
+*.cer
+*.pfx
+
+# Logs / local runtime data
+*.log
+logs/
+Log/
+Logs/
+cache/
+Cache/
+Temp/
+tmp/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment / secrets
+.env
+*.secret.json
+appsettings.Development.json

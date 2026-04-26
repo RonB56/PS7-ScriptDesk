@@ -1,0 +1,83 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Color x:Key="Theme.Shadow.Color">#5B6B82</Color>
+
+    <SolidColorBrush x:Key="Theme.App.Background" Color="#EEF4FB"/>
+    <SolidColorBrush x:Key="Theme.Surface.Primary" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="Theme.Surface.Secondary" Color="#F8FBFF"/>
+    <SolidColorBrush x:Key="Theme.Surface.Tertiary" Color="#EAF2FB"/>
+    <SolidColorBrush x:Key="Theme.Surface.Hover" Color="#E2ECF8"/>
+    <SolidColorBrush x:Key="Theme.Surface.Pressed" Color="#D8E5F5"/>
+
+    <SolidColorBrush x:Key="Theme.Border.Subtle" Color="#D3DEEB"/>
+    <SolidColorBrush x:Key="Theme.Border.Strong" Color="#B7C6D8"/>
+
+    <SolidColorBrush x:Key="Theme.Text.Primary" Color="#172033"/>
+    <SolidColorBrush x:Key="Theme.Text.Secondary" Color="#5E7188"/>
+    <SolidColorBrush x:Key="Theme.Text.Inverse" Color="#FFFFFF"/>
+
+    <SolidColorBrush x:Key="Theme.Accent.Primary" Color="#2563EB"/>
+    <SolidColorBrush x:Key="Theme.Accent.Hover" Color="#3B82F6"/>
+    <SolidColorBrush x:Key="Theme.Accent.Pressed" Color="#1D4ED8"/>
+    <SolidColorBrush x:Key="Theme.Accent.Foreground" Color="#FFFFFF"/>
+
+    <SolidColorBrush x:Key="Theme.Control.Background" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="Theme.Control.Border" Color="#C8D5E5"/>
+    <SolidColorBrush x:Key="Theme.Control.Foreground" Color="#172033"/>
+    <SolidColorBrush x:Key="Theme.Control.HoverBackground" Color="#F5F9FF"/>
+    <SolidColorBrush x:Key="Theme.Control.PressedBackground" Color="#EAF2FD"/>
+
+    <SolidColorBrush x:Key="Theme.Input.Background" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="Theme.Input.Foreground" Color="#172033"/>
+    <SolidColorBrush x:Key="Theme.Input.Border" Color="#C8D5E5"/>
+    <SolidColorBrush x:Key="Theme.Input.FocusBorder" Color="#2563EB"/>
+
+    <SolidColorBrush x:Key="Theme.Menu.Background" Color="#F8FBFF"/>
+    <SolidColorBrush x:Key="Theme.Menu.Foreground" Color="#172033"/>
+
+    <SolidColorBrush x:Key="Theme.Selection.Background" Color="#DBEAFE"/>
+
+    <SolidColorBrush x:Key="Theme.Status.Warning.Background" Color="#FFF7E1"/>
+    <SolidColorBrush x:Key="Theme.Status.Warning.Border" Color="#E2B74D"/>
+    <SolidColorBrush x:Key="Theme.Status.Warning.Foreground" Color="#7C4A03"/>
+    <SolidColorBrush x:Key="Theme.Status.Error.Background" Color="#FEF2F2"/>
+    <SolidColorBrush x:Key="Theme.Status.Error.Border" Color="#F87171"/>
+    <SolidColorBrush x:Key="Theme.Status.Error.Foreground" Color="#991B1B"/>
+    <SolidColorBrush x:Key="Theme.Status.Info.Foreground" Color="#1D4ED8"/>
+
+    <SolidColorBrush x:Key="Theme.ScrollBar.Track" Color="#DDE6F1"/>
+    <SolidColorBrush x:Key="Theme.ScrollBar.Thumb" Color="#9FB0C4"/>
+    <SolidColorBrush x:Key="Theme.ScrollBar.ThumbHover" Color="#7A91AA"/>
+
+    <SolidColorBrush x:Key="Theme.Icon.Accent" Color="#2563EB"/>
+    <SolidColorBrush x:Key="Theme.Icon.Primary" Color="#2563EB"/>
+    <SolidColorBrush x:Key="Theme.Icon.Muted" Color="#6B7280"/>
+    <SolidColorBrush x:Key="Theme.Icon.Success" Color="#16A34A"/>
+    <SolidColorBrush x:Key="Theme.Icon.Warning" Color="#D97706"/>
+    <SolidColorBrush x:Key="Theme.Icon.Danger" Color="#DC2626"/>
+
+    <!-- Existing keys retained for the rest of the shell/editor -->
+    <SolidColorBrush x:Key="Theme.Editor.Background" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="Theme.Editor.Foreground" Color="#111827"/>
+    <SolidColorBrush x:Key="Theme.Editor.LineHighlight" Color="#F3F7FB"/>
+    <SolidColorBrush x:Key="Theme.Editor.LineNumber" Color="#64748B"/>
+
+    <SolidColorBrush x:Key="Theme.Console.Background" Color="#F8FAFC"/>
+    <SolidColorBrush x:Key="Theme.Console.Foreground" Color="#111827"/>
+
+    <SolidColorBrush x:Key="Theme.Panel.Background" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="Theme.Panel.Border" Color="#C8D5E5"/>
+    <SolidColorBrush x:Key="Theme.Panel.Foreground" Color="#172033"/>
+    <SolidColorBrush x:Key="Theme.Panel.DimForeground" Color="#64748B"/>
+
+    <SolidColorBrush x:Key="Theme.Syntax.Keyword" Color="#2563EB"/>
+    <SolidColorBrush x:Key="Theme.Syntax.String" Color="#C2410C"/>
+    <SolidColorBrush x:Key="Theme.Syntax.Comment" Color="#15803D"/>
+    <SolidColorBrush x:Key="Theme.Syntax.Variable" Color="#1D4ED8"/>
+    <SolidColorBrush x:Key="Theme.Syntax.Cmdlet" Color="#92400E"/>
+    <SolidColorBrush x:Key="Theme.Syntax.Type" Color="#0F766E"/>
+    <SolidColorBrush x:Key="Theme.Syntax.Number" Color="#047857"/>
+    <SolidColorBrush x:Key="Theme.Syntax.Parameter" Color="#4338CA"/>
+
+</ResourceDictionary>

@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+	<RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- Exclude any nested project folders that should not belong to this project.
+       These exclusions guard against stray subfolders (e.g. from a bad ZIP extract)
+       being picked up by the SDK default **/*.cs glob. -->
+  <ItemGroup>
+    <Compile Remove="PowerShellStudio.Shell\**\*.cs" />
+    <Compile Remove="PowerShellStudio.UI\**\*.cs" />
+    <EmbeddedResource Remove="PowerShellStudio.Shell\**\*" />
+    <EmbeddedResource Remove="PowerShellStudio.UI\**\*" />
+    <None Remove="PowerShellStudio.Shell\**\*" />
+    <None Remove="PowerShellStudio.UI\**\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PowerShellStudio.Application\PowerShellStudio.Application.csproj" />
+    <ProjectReference Include="..\PowerShellStudio.Editor\PowerShellStudio.Editor.csproj" />
+  </ItemGroup>
+
+</Project>

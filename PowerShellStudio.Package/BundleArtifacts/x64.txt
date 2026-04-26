@@ -1,0 +1,2 @@
+MainPackage=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.9.0_x64.msix
+SymbolPackage=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Package_1.0.9.0_x64.appxsym
