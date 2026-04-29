@@ -59,3 +59,8 @@ desktop.ini
 .env
 *.secret.json
 appsettings.Development.json
+
+# Local archives / backup ZIPs
+*.zip
+*.7z
+*.rar
