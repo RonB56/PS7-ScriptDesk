@@ -64,3 +64,10 @@ appsettings.Development.json
 *.zip
 *.7z
 *.rar
+
+# Local Codex and personal test files
+.codex/
+PowerShellStudio_User_Guide.docx
+PowerShellStudio_Professionalization_Roadmap_Checklist.docx
+TestScript.ps1
+.codex
