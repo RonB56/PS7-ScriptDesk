@@ -259,17 +259,21 @@ namespace PowerShellStudio.Shell.Editor
             process.StartInfo.ArgumentList.Add("Bypass");
             process.StartInfo.ArgumentList.Add("-File");
             process.StartInfo.ArgumentList.Add(workerArtifacts.ScriptPath);
-            PowerShellBackgroundProcessEnvironment.Apply(process.StartInfo, "MetadataBuilder", runtimePath);
+            var backgroundEnvironmentApplied = PowerShellBackgroundProcessEnvironment.Apply(process.StartInfo, "MetadataBuilder", runtimePath);
+            var configuredModulePath = GetEnvironmentValue(process.StartInfo, "PSModulePath");
 
             MetadataPerformanceLog.AppendSection(performanceLogPath, "External PowerShell worker process");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Worker script path: {workerArtifacts.ScriptPath}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Worker snapshot output path: {workerArtifacts.OutputPath}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Worker working directory: {workerArtifacts.WorkingDirectory}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"PowerShellBackgroundProcessEnvironment applied: {backgroundEnvironmentApplied}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment HOME: {GetEnvironmentValue(process.StartInfo, "HOME")}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment USERPROFILE: {GetEnvironmentValue(process.StartInfo, "USERPROFILE")}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment TEMP: {GetEnvironmentValue(process.StartInfo, "TEMP")}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment TMP: {GetEnvironmentValue(process.StartInfo, "TMP")}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment PSModuleAnalysisCachePath: {GetEnvironmentValue(process.StartInfo, "PSModuleAnalysisCachePath")}");
-            WriteModulePathEntries(performanceLogPath, GetEnvironmentValue(process.StartInfo, "PSModulePath"));
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"PSModulePath contains Documents\\PowerShell: {PowerShellBackgroundProcessEnvironment.ModulePathContainsUserDocumentsPowerShell(configuredModulePath)}");
+            WriteModulePathEntries(performanceLogPath, configuredModulePath);
 
             AppLogger.Info("EditorMetadataBuilder", $"Starting external PowerShell metadata scan using '{runtimePath}'. ScriptPath='{workerArtifacts.ScriptPath}', OutputPath='{workerArtifacts.OutputPath}'.");
             var processStartStopwatch = Stopwatch.StartNew();
@@ -601,6 +605,12 @@ $statusPrefix = '{{EditorMetadataBuilderProtocol.StatusPrefix}}'
 $outputPath = '{{escapedOutputPath}}'
 $performanceLogPath = '{{escapedPerformanceLogPath}}'
 $debugTraceEnabled = {{(AppLogger.IsDebugEnabled ? "$true" : "$false")}}
+$backgroundHome = [Environment]::GetEnvironmentVariable('HOME')
+$backgroundUserProfile = [Environment]::GetEnvironmentVariable('USERPROFILE')
+$backgroundTemp = [Environment]::GetEnvironmentVariable('TEMP')
+$backgroundTmp = [Environment]::GetEnvironmentVariable('TMP')
+$backgroundPsModulePath = [Environment]::GetEnvironmentVariable('PSModulePath')
+$backgroundPsModuleAnalysisCachePath = [Environment]::GetEnvironmentVariable('PSModuleAnalysisCachePath')
 
 function Write-Status {
     param(
@@ -661,6 +671,47 @@ function Write-PerformanceLog {
     catch {
         # The profiler must not affect metadata loading.
     }
+}
+
+function Test-ModulePathContainsUserDocumentsPowerShell {
+    param([string]$ModulePath)
+
+    if ([string]::IsNullOrWhiteSpace($ModulePath)) {
+        return $false
+    }
+
+    $documentsPowerShellPath = [System.IO.Path]::Combine([Environment]::GetFolderPath([System.Environment+SpecialFolder]::MyDocuments), 'PowerShell')
+    if ([string]::IsNullOrWhiteSpace($documentsPowerShellPath)) {
+        return $false
+    }
+
+    foreach ($entry in @($ModulePath -split [System.IO.Path]::PathSeparator)) {
+        if ([string]::IsNullOrWhiteSpace($entry)) {
+            continue
+        }
+
+        try {
+            $normalizedEntry = [System.IO.Path]::GetFullPath($entry.Trim()).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        }
+        catch {
+            $normalizedEntry = $entry.Trim().TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        }
+
+        try {
+            $normalizedProtectedPath = [System.IO.Path]::GetFullPath($documentsPowerShellPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        }
+        catch {
+            $normalizedProtectedPath = $documentsPowerShellPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        }
+
+        if ($normalizedEntry.Equals($normalizedProtectedPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $normalizedEntry.StartsWith($normalizedProtectedPath + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $normalizedEntry.StartsWith($normalizedProtectedPath + [System.IO.Path]::AltDirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 $loadedMetadataModules = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -961,6 +1012,7 @@ try {
     Write-PerformanceLog ("TEMP: {0}" -f [Environment]::GetEnvironmentVariable('TEMP'))
     Write-PerformanceLog ("TMP: {0}" -f [Environment]::GetEnvironmentVariable('TMP'))
     Write-PerformanceLog ("PSModuleAnalysisCachePath: {0}" -f [Environment]::GetEnvironmentVariable('PSModuleAnalysisCachePath'))
+    Write-PerformanceLog ("PSModulePath contains Documents\PowerShell: {0}" -f (Test-ModulePathContainsUserDocumentsPowerShell -ModulePath ([Environment]::GetEnvironmentVariable('PSModulePath'))))
     $psModulePathEntries = @(([Environment]::GetEnvironmentVariable('PSModulePath') -split [System.IO.Path]::PathSeparator) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     Write-PerformanceLog ("PSModulePath entry count: {0}" -f $psModulePathEntries.Count)
     for ($modulePathIndex = 0; $modulePathIndex -lt $psModulePathEntries.Count; $modulePathIndex++) {
@@ -1103,6 +1155,8 @@ try {
 
     $workerOutputRoot = Join-Path ([System.IO.Path]::GetDirectoryName($outputPath)) 'parameter-workers'
     [System.IO.Directory]::CreateDirectory($workerOutputRoot) | Out-Null
+    Write-PerformanceLog ("PowerShellBackgroundProcessEnvironment applied in metadata parent: {0}" -f (-not (Test-ModulePathContainsUserDocumentsPowerShell -ModulePath $backgroundPsModulePath)))
+    Write-PerformanceLog ("Metadata parent environment template: HOME='{0}'; USERPROFILE='{1}'; TEMP='{2}'; TMP='{3}'; PSModulePathContainsDocumentsPowerShell={4}" -f $backgroundHome, $backgroundUserProfile, $backgroundTemp, $backgroundTmp, (Test-ModulePathContainsUserDocumentsPowerShell -ModulePath $backgroundPsModulePath))
     Write-PerformanceLog ("Parallel parameter metadata extraction selected. WorkerCount={0}; CpuCount={1}; DefaultCap={2}; Override='{3}'; DistinctCommands={4}" -f $metadataWorkerCount, $cpuCount, $workerCap, $workerOverrideText, $totalCount)
 
     $workerBuckets = @()
@@ -1133,13 +1187,60 @@ try {
             [string]$CommandInputPath,
             [string]$WorkerOutputPath,
             [string]$WorkerLogPath,
-            [bool]$WorkerDebugTraceEnabled
+            [bool]$WorkerDebugTraceEnabled,
+            [string]$BackgroundHome,
+            [string]$BackgroundUserProfile,
+            [string]$BackgroundTemp,
+            [string]$BackgroundTmp,
+            [string]$BackgroundPsModulePath,
+            [string]$BackgroundPsModuleAnalysisCachePath
         )
 
         $ErrorActionPreference = 'Stop'
         $WarningPreference = 'SilentlyContinue'
         $ProgressPreference = 'SilentlyContinue'
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+        function Test-WorkerModulePathContainsUserDocumentsPowerShell {
+            param([string]$ModulePath)
+
+            if ([string]::IsNullOrWhiteSpace($ModulePath)) {
+                return $false
+            }
+
+            $documentsPowerShellPath = [System.IO.Path]::Combine([Environment]::GetFolderPath([System.Environment+SpecialFolder]::MyDocuments), 'PowerShell')
+            if ([string]::IsNullOrWhiteSpace($documentsPowerShellPath)) {
+                return $false
+            }
+
+            foreach ($entry in @($ModulePath -split [System.IO.Path]::PathSeparator)) {
+                if ([string]::IsNullOrWhiteSpace($entry)) {
+                    continue
+                }
+
+                try {
+                    $normalizedEntry = [System.IO.Path]::GetFullPath($entry.Trim()).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+                }
+                catch {
+                    $normalizedEntry = $entry.Trim().TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+                }
+
+                try {
+                    $normalizedProtectedPath = [System.IO.Path]::GetFullPath($documentsPowerShellPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+                }
+                catch {
+                    $normalizedProtectedPath = $documentsPowerShellPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+                }
+
+                if ($normalizedEntry.Equals($normalizedProtectedPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    $normalizedEntry.StartsWith($normalizedProtectedPath + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    $normalizedEntry.StartsWith($normalizedProtectedPath + [System.IO.Path]::AltDirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $true
+                }
+            }
+
+            return $false
+        }
 
         function Write-WorkerPerformanceLog {
             param([string]$Message)
@@ -1159,6 +1260,30 @@ try {
 
         $workerTempRoot = Join-Path ([System.IO.Path]::GetDirectoryName($WorkerOutputPath)) ('temp-{0:D2}' -f $WorkerIndex)
         try {
+            if (-not [string]::IsNullOrWhiteSpace($BackgroundHome)) {
+                [Environment]::SetEnvironmentVariable('HOME', $BackgroundHome, 'Process')
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($BackgroundUserProfile)) {
+                [Environment]::SetEnvironmentVariable('USERPROFILE', $BackgroundUserProfile, 'Process')
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($BackgroundTemp)) {
+                [Environment]::SetEnvironmentVariable('TEMP', $BackgroundTemp, 'Process')
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($BackgroundTmp)) {
+                [Environment]::SetEnvironmentVariable('TMP', $BackgroundTmp, 'Process')
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($BackgroundPsModulePath)) {
+                [Environment]::SetEnvironmentVariable('PSModulePath', $BackgroundPsModulePath, 'Process')
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($BackgroundPsModuleAnalysisCachePath)) {
+                [Environment]::SetEnvironmentVariable('PSModuleAnalysisCachePath', $BackgroundPsModuleAnalysisCachePath, 'Process')
+            }
+
             [System.IO.Directory]::CreateDirectory($workerTempRoot) | Out-Null
             [Environment]::SetEnvironmentVariable('TEMP', $workerTempRoot, 'Process')
             [Environment]::SetEnvironmentVariable('TMP', $workerTempRoot, 'Process')
@@ -1522,7 +1647,7 @@ try {
             throw "Worker $WorkerIndex could not read assigned command list '$CommandInputPath'. $($_.Exception.Message)"
         }
 
-        Write-WorkerPerformanceLog ("Started. Commands={0}; ProcessId={1}; Temp='{2}'" -f $workerCommands.Count, $PID, [Environment]::GetEnvironmentVariable('TEMP'))
+        Write-WorkerPerformanceLog ("Started. Commands={0}; ProcessId={1}; HOME='{2}'; USERPROFILE='{3}'; TEMP='{4}'; TMP='{5}'; PSModuleAnalysisCachePath='{6}'; PSModulePathContainsDocumentsPowerShell={7}" -f $workerCommands.Count, $PID, [Environment]::GetEnvironmentVariable('HOME'), [Environment]::GetEnvironmentVariable('USERPROFILE'), [Environment]::GetEnvironmentVariable('TEMP'), [Environment]::GetEnvironmentVariable('TMP'), [Environment]::GetEnvironmentVariable('PSModuleAnalysisCachePath'), (Test-WorkerModulePathContainsUserDocumentsPowerShell -ModulePath ([Environment]::GetEnvironmentVariable('PSModulePath'))))
 
         $items = New-Object System.Collections.ArrayList
         $totalParameterCount = 0
@@ -1685,7 +1810,7 @@ try {
         $bucketJson = ConvertTo-Json -InputObject $bucketRecords -Compress -Depth 4
         [System.IO.File]::WriteAllText($workerInputPath, $bucketJson, [System.Text.UTF8Encoding]::new($false))
 
-        $job = Start-Job -Name ('PowerShellStudio.Metadata.{0:D2}' -f $workerNumber) -ScriptBlock $parameterWorkerScript -ArgumentList $workerNumber, $workerInputPath, $workerOutputPath, $performanceLogPath, $debugTraceEnabled
+        $job = Start-Job -Name ('PowerShellStudio.Metadata.{0:D2}' -f $workerNumber) -ScriptBlock $parameterWorkerScript -ArgumentList $workerNumber, $workerInputPath, $workerOutputPath, $performanceLogPath, $debugTraceEnabled, $backgroundHome, $backgroundUserProfile, $backgroundTemp, $backgroundTmp, $backgroundPsModulePath, $backgroundPsModuleAnalysisCachePath
         [void]$metadataJobs.Add([PSCustomObject]@{
             Job = $job
             WorkerIndex = $workerNumber

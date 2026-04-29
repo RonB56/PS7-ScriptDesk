@@ -219,7 +219,11 @@
                                 <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Pressed}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="RootBorder" Property="Opacity" Value="0.55" />
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Secondary}" />
+                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Border.Strong}" />
+                                <Setter TargetName="RootBorder" Property="Opacity" Value="0.6" />
                             </Trigger>
                             <EventTrigger RoutedEvent="MouseEnter">
                                 <BeginStoryboard>

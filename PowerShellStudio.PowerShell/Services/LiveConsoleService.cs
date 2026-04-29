@@ -8,8 +8,9 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
-using PowerShellStudio.Application.Interfaces;
 using PowerShellStudio.Application.Diagnostics;
+using PowerShellStudio.Application.Interfaces;
+using PowerShellStudio.Application.Utilities;
 using PowerShellStudio.Domain.Models;
 
 namespace PowerShellStudio.PowerShell.Services
@@ -358,7 +359,7 @@ namespace PowerShellStudio.PowerShell.Services
 
         private static string BuildTerminalStartupCommand()
         {
-            var quotedSnapshotRoot = QuotePowerShellSingleQuotedString(GetSnapshotRootDirectory());
+            var quotedSnapshotRoot = QuotePowerShellSingleQuotedString(GetSnapshotRootDirectory(createIfMissing: true));
             var helperScriptBlock = string.Join(
                 " ",
                 "{",
@@ -1168,16 +1169,22 @@ namespace PowerShellStudio.PowerShell.Services
                 return;
             }
 
+            if (!TryValidateManagedSnapshotPath(snapshotPath, out var normalizedRootDirectory, out var normalizedSnapshotPath))
+            {
+                return;
+            }
+
             try
             {
-                if (File.Exists(snapshotPath))
+                if (File.Exists(normalizedSnapshotPath))
                 {
-                    File.Delete(snapshotPath);
+                    File.Delete(normalizedSnapshotPath);
+                    AppLogger.Info("LiveConsole", $"Deleted terminal snapshot '{Path.GetFileName(normalizedSnapshotPath)}' from '{normalizedRootDirectory}'.");
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Best effort cleanup only.
+                AppLogger.Warning("LiveConsole", $"Failed to delete terminal snapshot '{normalizedSnapshotPath}'. {ex.Message}");
             }
         }
 
@@ -1728,33 +1735,40 @@ namespace PowerShellStudio.PowerShell.Services
         {
             try
             {
-                var rootDirectory = GetSnapshotRootDirectory();
+                var rootDirectory = GetSnapshotRootDirectory(createIfMissing: false);
                 if (!Directory.Exists(rootDirectory))
                 {
                     return;
                 }
 
+                AppLogger.Info("LiveConsole", $"Cleaning stale terminal snapshots from '{rootDirectory}'.");
                 foreach (var file in Directory.EnumerateFiles(rootDirectory, "*.ps1", SearchOption.TopDirectoryOnly))
                 {
                     try
                     {
+                        if (!TryValidateManagedSnapshotPath(file, out _, out var normalizedSnapshotPath))
+                        {
+                            continue;
+                        }
+
                         var fileName = Path.GetFileName(file);
                         if (!IsManagedSnapshotFileName(fileName))
                         {
                             continue;
                         }
 
-                        File.Delete(file);
+                        File.Delete(normalizedSnapshotPath);
+                        AppLogger.Info("LiveConsole", $"Deleted stale terminal snapshot '{Path.GetFileName(normalizedSnapshotPath)}'.");
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // Best effort only.
+                        AppLogger.Warning("LiveConsole", $"Failed to delete stale terminal snapshot '{file}'. {ex.Message}");
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Best effort only.
+                AppLogger.Warning("LiveConsole", $"Stale terminal snapshot cleanup failed. {ex.Message}");
             }
         }
 
@@ -1831,8 +1845,7 @@ namespace PowerShellStudio.PowerShell.Services
 
         private static string CreateExecutionSnapshot(string documentDisplayName, string scriptContent)
         {
-            var rootDirectory = GetSnapshotRootDirectory();
-            Directory.CreateDirectory(rootDirectory);
+            var rootDirectory = GetSnapshotRootDirectory(createIfMissing: true);
 
             var fileName = $"{ScriptSnapshotFilePrefix}{Guid.NewGuid():N}.ps1";
             var fullPath = Path.Combine(rootDirectory, fileName);
@@ -1842,8 +1855,7 @@ namespace PowerShellStudio.PowerShell.Services
 
         private static string CreateDispatchInstructionSnapshot(string scriptPath, string startToken, string completionToken, bool executeInCurrentScope)
         {
-            var rootDirectory = GetSnapshotRootDirectory();
-            Directory.CreateDirectory(rootDirectory);
+            var rootDirectory = GetSnapshotRootDirectory(createIfMissing: true);
 
             var fileName = $"{DispatchInstructionFilePrefix}{Guid.NewGuid():N}.ps1";
             var fullPath = Path.Combine(rootDirectory, fileName);
@@ -1861,8 +1873,7 @@ namespace PowerShellStudio.PowerShell.Services
 
         private static string CreateShortDispatchSnapshot(string scriptContent)
         {
-            var rootDirectory = GetSnapshotRootDirectory();
-            Directory.CreateDirectory(rootDirectory);
+            var rootDirectory = GetSnapshotRootDirectory(createIfMissing: true);
 
             // This wrapper path is the only file name typed into the interactive
             // PowerShell prompt. Keep it deliberately short so PSReadLine/ConPTY
@@ -1876,9 +1887,14 @@ namespace PowerShellStudio.PowerShell.Services
             return fullPath;
         }
 
-        private static string GetSnapshotRootDirectory()
+        private static string GetSnapshotRootDirectory(bool createIfMissing)
         {
-            return Path.Combine(Path.GetTempPath(), "PowerShellStudio", "TerminalSnapshots");
+            if (!AppTemporaryStorage.TryGetManagedRootDirectory("TerminalSnapshots", createIfMissing, out var rootDirectory, out var failureReason))
+            {
+                throw new IOException($"Terminal snapshot storage is unavailable. {failureReason}");
+            }
+
+            return rootDirectory;
         }
 
         private static bool IsManagedSnapshotFileName(string? fileName)
@@ -1893,6 +1909,29 @@ namespace PowerShellStudio.PowerShell.Services
                    fileName.StartsWith(DispatchSnapshotFilePrefix, StringComparison.OrdinalIgnoreCase) ||
                    fileName.StartsWith(DispatchInstructionFilePrefix, StringComparison.OrdinalIgnoreCase) ||
                    LegacySnapshotFileNamePattern.IsMatch(fileName);
+        }
+
+        private static bool TryValidateManagedSnapshotPath(string snapshotPath, out string normalizedRootDirectory, out string normalizedSnapshotPath)
+        {
+            normalizedRootDirectory = string.Empty;
+            normalizedSnapshotPath = string.Empty;
+
+            try
+            {
+                var rootDirectory = GetSnapshotRootDirectory(createIfMissing: false);
+                if (!AppTemporaryStorage.TryValidateManagedPath(rootDirectory, snapshotPath, out normalizedRootDirectory, out normalizedSnapshotPath, out var failureReason))
+                {
+                    AppLogger.Warning("LiveConsole", $"Skipped terminal snapshot deletion outside the managed temp root. Path='{snapshotPath}'. {failureReason}");
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("LiveConsole", $"Skipped terminal snapshot deletion because the managed temp root could not be resolved. Path='{snapshotPath}'. {ex.Message}");
+                return false;
+            }
         }
 
         public const string TerminalClearToken = "__PSSTUDIO_CLEAR_TERMINAL__";

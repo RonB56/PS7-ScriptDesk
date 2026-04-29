@@ -2429,7 +2429,7 @@ namespace PowerShellStudio.Shell
 
         private async System.Threading.Tasks.Task RunSelectionFromEditorAsync(TextEditor editorTextEditor)
         {
-            if (ViewModel is null)
+            if (ViewModel?.IsRunAvailable != true)
             {
                 return;
             }
@@ -2900,8 +2900,13 @@ namespace PowerShellStudio.Shell
                 safeName = safeName.Replace(invalid, '_');
             }
 
+            if (!AppTemporaryStorage.TryGetManagedRootDirectory("DebugSnapshots", createIfMissing: true, out var debugSnapshotRoot, out var failureReason))
+            {
+                throw new IOException($"Debug snapshot storage is unavailable. {failureReason}");
+            }
+
             var snapshotPath = Path.Combine(
-                Path.GetTempPath(),
+                debugSnapshotRoot,
                 $"PowerShellStudio_Debug_{safeName}_{Guid.NewGuid():N}.ps1");
 
             File.WriteAllText(snapshotPath, tab.Content ?? string.Empty);
@@ -2963,9 +2968,15 @@ namespace PowerShellStudio.Shell
         private void MarkTabStaleForDebugSnapshot(EditorTabViewModel tab, string reason)
         {
             tab.MarkExternallyStale();
-            ViewModel.StatusText = "Saved file changed; debugging visible editor content";
+
+            var viewModel = ViewModel;
+            if (viewModel is not null)
+            {
+                viewModel.StatusText = "Saved file changed; debugging visible editor content";
+                viewModel.RefreshCommandStates();
+            }
+
             AppLogger.Warning("Debug", $"Saved script path was not used for Debug because {reason}. Tab='{tab.Title}'. Visible editor content will be debugged from a temporary snapshot.");
-            ViewModel.RefreshCommandStates();
         }
 
         private void TryDeleteTemporaryDebugSnapshot(string? snapshotPath)
@@ -2975,15 +2986,29 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
+            if (!AppTemporaryStorage.TryGetManagedRootDirectory("DebugSnapshots", createIfMissing: false, out var debugSnapshotRoot, out var rootFailureReason))
+            {
+                AppLogger.Warning("Debug", $"Skipped debug snapshot cleanup because the managed temp root could not be resolved. Path='{snapshotPath}'. {rootFailureReason}");
+                return;
+            }
+
+            if (!AppTemporaryStorage.TryValidateManagedPath(debugSnapshotRoot, snapshotPath, out _, out var normalizedSnapshotPath, out var validationFailureReason))
+            {
+                AppLogger.Warning("Debug", $"Skipped debug snapshot cleanup outside the managed temp root. Path='{snapshotPath}'. {validationFailureReason}");
+                return;
+            }
+
             try
             {
-                if (File.Exists(snapshotPath))
+                if (File.Exists(normalizedSnapshotPath))
                 {
-                    File.Delete(snapshotPath);
+                    File.Delete(normalizedSnapshotPath);
+                    AppLogger.Info("Debug", $"Deleted debug snapshot '{Path.GetFileName(normalizedSnapshotPath)}' from '{debugSnapshotRoot}'.");
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                AppLogger.Warning("Debug", $"Failed to delete debug snapshot '{normalizedSnapshotPath}'. {ex.Message}");
             }
         }
 

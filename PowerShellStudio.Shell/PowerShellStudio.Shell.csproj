@@ -12,6 +12,7 @@
     <AssemblyVersion>1.2.1.0</AssemblyVersion>
     <FileVersion>1.2.1.0</FileVersion>
     <InformationalVersion>1.2.1</InformationalVersion>
+	<ApplicationIcon>Assets\PowerShellStudio.Safe.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -42,5 +43,4 @@
     <ProjectReference Include="..\PowerShellStudio.PowerShell\PowerShellStudio.PowerShell.csproj" />
     <ProjectReference Include="..\PowerShellStudio.UI\PowerShellStudio.UI.csproj" />
   </ItemGroup>
-
 </Project>

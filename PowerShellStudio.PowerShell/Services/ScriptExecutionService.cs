@@ -5,7 +5,9 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using PowerShellStudio.Application.Diagnostics;
 using PowerShellStudio.Application.Interfaces;
+using PowerShellStudio.Application.Utilities;
 using PowerShellStudio.Domain.Models;
 
 namespace PowerShellStudio.PowerShell.Services
@@ -216,8 +218,7 @@ namespace PowerShellStudio.PowerShell.Services
 
         private static string CreateExecutionSnapshot(string documentDisplayName, string scriptContent)
         {
-            var rootDirectory = GetSnapshotRootDirectory();
-            Directory.CreateDirectory(rootDirectory);
+            var rootDirectory = GetSnapshotRootDirectory(createIfMissing: true);
 
             var safeName = MakeSafeFileName(documentDisplayName);
             var fileName = $"{ExecutionSnapshotFilePrefix}{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}_{Environment.ProcessId}_{Guid.NewGuid():N}_{safeName}.ps1";
@@ -243,16 +244,22 @@ namespace PowerShellStudio.PowerShell.Services
 
         private static void TryDeleteSnapshot(string snapshotPath)
         {
+            if (!TryValidateManagedSnapshotPath(snapshotPath, out var normalizedRootDirectory, out var normalizedSnapshotPath))
+            {
+                return;
+            }
+
             try
             {
-                if (File.Exists(snapshotPath))
+                if (File.Exists(normalizedSnapshotPath))
                 {
-                    File.Delete(snapshotPath);
+                    File.Delete(normalizedSnapshotPath);
+                    AppLogger.Info("ScriptExecution", $"Deleted execution snapshot '{Path.GetFileName(normalizedSnapshotPath)}' from '{normalizedRootDirectory}'.");
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Best effort cleanup only.
+                AppLogger.Warning("ScriptExecution", $"Failed to delete execution snapshot '{normalizedSnapshotPath}'. {ex.Message}");
             }
         }
 
@@ -260,39 +267,51 @@ namespace PowerShellStudio.PowerShell.Services
         {
             try
             {
-                var rootDirectory = GetSnapshotRootDirectory();
+                var rootDirectory = GetSnapshotRootDirectory(createIfMissing: false);
                 if (!Directory.Exists(rootDirectory))
                 {
                     return;
                 }
 
+                AppLogger.Info("ScriptExecution", $"Cleaning stale execution snapshots from '{rootDirectory}'.");
                 foreach (var file in Directory.EnumerateFiles(rootDirectory, "*.ps1", SearchOption.TopDirectoryOnly))
                 {
                     try
                     {
+                        if (!TryValidateManagedSnapshotPath(file, out _, out var normalizedSnapshotPath))
+                        {
+                            continue;
+                        }
+
                         var fileName = Path.GetFileName(file);
                         if (!IsManagedSnapshotFileName(fileName))
                         {
                             continue;
                         }
 
-                        File.Delete(file);
+                        File.Delete(normalizedSnapshotPath);
+                        AppLogger.Info("ScriptExecution", $"Deleted stale execution snapshot '{Path.GetFileName(normalizedSnapshotPath)}'.");
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // Best effort cleanup only.
+                        AppLogger.Warning("ScriptExecution", $"Failed to delete stale execution snapshot '{file}'. {ex.Message}");
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Best effort cleanup only.
+                AppLogger.Warning("ScriptExecution", $"Stale execution snapshot cleanup failed. {ex.Message}");
             }
         }
 
-        private static string GetSnapshotRootDirectory()
+        private static string GetSnapshotRootDirectory(bool createIfMissing)
         {
-            return Path.Combine(Path.GetTempPath(), "PowerShellStudio", "ExecutionSnapshots");
+            if (!AppTemporaryStorage.TryGetManagedRootDirectory("ExecutionSnapshots", createIfMissing, out var rootDirectory, out var failureReason))
+            {
+                throw new IOException($"Execution snapshot storage is unavailable. {failureReason}");
+            }
+
+            return rootDirectory;
         }
 
         private static bool IsManagedSnapshotFileName(string? fileName)
@@ -304,6 +323,29 @@ namespace PowerShellStudio.PowerShell.Services
 
             return fileName.StartsWith(ExecutionSnapshotFilePrefix, StringComparison.OrdinalIgnoreCase) ||
                    LegacySnapshotFileNamePattern.IsMatch(fileName);
+        }
+
+        private static bool TryValidateManagedSnapshotPath(string snapshotPath, out string normalizedRootDirectory, out string normalizedSnapshotPath)
+        {
+            normalizedRootDirectory = string.Empty;
+            normalizedSnapshotPath = string.Empty;
+
+            try
+            {
+                var rootDirectory = GetSnapshotRootDirectory(createIfMissing: false);
+                if (!AppTemporaryStorage.TryValidateManagedPath(rootDirectory, snapshotPath, out normalizedRootDirectory, out normalizedSnapshotPath, out var failureReason))
+                {
+                    AppLogger.Warning("ScriptExecution", $"Skipped execution snapshot deletion outside the managed temp root. Path='{snapshotPath}'. {failureReason}");
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("ScriptExecution", $"Skipped execution snapshot deletion because the managed temp root could not be resolved. Path='{snapshotPath}'. {ex.Message}");
+                return false;
+            }
         }
     }
 }

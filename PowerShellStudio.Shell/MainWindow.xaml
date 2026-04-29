@@ -22,6 +22,12 @@
         <Style x:Key="ToolbarIconPathStyle" TargetType="Path">
             <Setter Property="Fill" Value="{DynamicResource Theme.Icon.Accent}" />
             <Setter Property="Stretch" Value="Uniform" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsEnabled, RelativeSource={RelativeSource AncestorType=Button}}" Value="False">
+                    <Setter Property="Fill" Value="{DynamicResource Theme.Icon.Muted}" />
+                    <Setter Property="Opacity" Value="0.7" />
+                </DataTrigger>
+            </Style.Triggers>
         </Style>
 
         <Style x:Key="ToolbarIconNeutralPathStyle" TargetType="Path" BasedOn="{StaticResource ToolbarIconPathStyle}">
@@ -92,7 +98,7 @@
 
             <MenuItem Header="_Run" help:ContextHelp.Key="Command.RunScript">
                 <MenuItem Header="_Run Script" InputGestureText="Ctrl+F5" Click="RunScript_Click" IsEnabled="{Binding IsRunAvailable}" help:ContextHelp.Key="Command.RunScript" />
-                <MenuItem Header="Run _Selection" InputGestureText="F8" Click="RunSelection_Click" help:ContextHelp.Key="Command.RunSelection" />
+                <MenuItem Header="Run _Selection" InputGestureText="F8" Click="RunSelection_Click" IsEnabled="{Binding IsRunAvailable}" help:ContextHelp.Key="Command.RunSelection" />
                 <MenuItem Header="_Interrupt" Command="{Binding StopCommand}" help:ContextHelp.Key="Command.Interrupt" />
                 <Separator />
                 <MenuItem x:Name="RefreshEditorMetadataMenuItem"
@@ -229,6 +235,7 @@
                 <!-- Run Selection -->
                 <Button Click="RunSelection_Click"
                         help:ContextHelp.Key="Command.RunSelection"
+                        IsEnabled="{Binding IsRunAvailable}"
                         Padding="10,4" Margin="2,0" MinWidth="150"
                         ToolTip="Run only the currently selected text (F8) in the current shared terminal session — highlight code in the editor first">
                     <StackPanel Orientation="Horizontal">
@@ -1014,6 +1021,7 @@
                                                         <MenuItem Header="Run Selection"
                                                                   help:ContextHelp.Key="Command.RunSelection"
                                                                   InputGestureText="F8"
+                                                                  IsEnabled="{Binding DataContext.IsRunAvailable, Source={x:Reference RootWindow}}"
                                                                   Click="RunSelection_Click" />
                                                         <MenuItem Header="Toggle Breakpoint"
                                                                   help:ContextHelp.Key="Command.ToggleBreakpoint"

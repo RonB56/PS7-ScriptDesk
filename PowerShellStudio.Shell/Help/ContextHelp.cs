@@ -15,12 +15,8 @@ using WpfToolTip = System.Windows.Controls.ToolTip;
 
 namespace PowerShellStudio.Shell.Help
 {
-    public sealed class ContextHelp : DependencyObject
+    public static class ContextHelp
     {
-        public ContextHelp()
-        {
-        }
-
         private const string HelpMenuItemTag = "PowerShellStudio.ContextHelpMenuItem";
         private static readonly Dictionary<Window, ContextHelpWindow> OpenWindows = new();
         private static readonly Dictionary<Window, WeakReference<DependencyObject>> LastHelpTargets = new();
@@ -86,14 +82,14 @@ namespace PowerShellStudio.Shell.Help
             RefreshAllAttachedHelp();
         }
 
-        public static void SetKey(DependencyObject element, string value)
+        public static void SetKey(DependencyObject element, string? value)
         {
             element.SetValue(KeyProperty, value);
         }
 
-        public static string GetKey(DependencyObject element)
+        public static string? GetKey(DependencyObject element)
         {
-            return (string)element.GetValue(KeyProperty);
+            return (string?)element.GetValue(KeyProperty);
         }
 
         public static void OpenOverview(Window owner)

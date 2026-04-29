@@ -22,11 +22,11 @@ namespace PowerShellStudio.Shell.Editor
         private const string AppFolderName = "PowerShellStudio";
         private const string BackgroundFolderName = "BackgroundPowerShell";
 
-        public static void Apply(ProcessStartInfo startInfo, string purpose, string? runtimePath = null)
+        public static bool Apply(ProcessStartInfo startInfo, string purpose, string? runtimePath = null)
         {
             if (startInfo is null)
             {
-                return;
+                return false;
             }
 
             try
@@ -35,25 +35,24 @@ namespace PowerShellStudio.Shell.Editor
                 var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                 if (string.IsNullOrWhiteSpace(localAppData))
                 {
-                    return;
+                    return false;
                 }
 
                 var backgroundRoot = Path.Combine(localAppData, AppFolderName, BackgroundFolderName);
-                var purposeRoot = Path.Combine(backgroundRoot, normalizedPurpose);
-                var homeRoot = Path.Combine(purposeRoot, "Home");
-                var documentsPowerShellRoot = Path.Combine(homeRoot, "Documents", "PowerShell");
-                var moduleRoot = Path.Combine(documentsPowerShellRoot, "Modules");
-                var cacheRoot = Path.Combine(purposeRoot, "Cache");
-                var tempRoot = Path.Combine(purposeRoot, "Temp");
+                var homeRoot = Path.Combine(backgroundRoot, "Home");
+                var userProfileRoot = Path.Combine(backgroundRoot, "UserProfile");
+                var moduleRoot = Path.Combine(backgroundRoot, "Modules");
+                var cacheRoot = Path.Combine(backgroundRoot, "Cache", normalizedPurpose);
+                var tempRoot = Path.Combine(backgroundRoot, "Temp", normalizedPurpose);
 
                 Directory.CreateDirectory(homeRoot);
-                Directory.CreateDirectory(documentsPowerShellRoot);
+                Directory.CreateDirectory(userProfileRoot);
                 Directory.CreateDirectory(moduleRoot);
                 Directory.CreateDirectory(cacheRoot);
                 Directory.CreateDirectory(tempRoot);
 
                 startInfo.Environment["HOME"] = homeRoot;
-                startInfo.Environment["USERPROFILE"] = homeRoot;
+                startInfo.Environment["USERPROFILE"] = userProfileRoot;
                 startInfo.Environment["PSModuleAnalysisCachePath"] = Path.Combine(cacheRoot, "ModuleAnalysisCache");
                 startInfo.Environment["POWERSHELL_UPDATECHECK"] = "Off";
                 startInfo.Environment["POWERSHELL_TELEMETRY_OPTOUT"] = "1";
@@ -69,7 +68,8 @@ namespace PowerShellStudio.Shell.Editor
 
                 AppLogger.Debug(
                     "PowerShellBackgroundEnvironment",
-                    $"Configured background PowerShell environment. Purpose='{normalizedPurpose}', Home='{homeRoot}', Runtime='{runtimePath ?? string.Empty}'.");
+                    $"Configured background PowerShell environment. Purpose='{normalizedPurpose}', Home='{homeRoot}', UserProfile='{userProfileRoot}', Temp='{tempRoot}', Runtime='{runtimePath ?? string.Empty}'.");
+                return true;
             }
             catch (Exception ex)
             {
@@ -79,7 +79,26 @@ namespace PowerShellStudio.Shell.Editor
                 AppLogger.Warning(
                     "PowerShellBackgroundEnvironment",
                     $"Failed to configure isolated PowerShell environment for purpose '{purpose}': {ex.Message}");
+                return false;
             }
+        }
+
+        public static bool ModulePathContainsUserDocumentsPowerShell(string? modulePath)
+        {
+            if (string.IsNullOrWhiteSpace(modulePath))
+            {
+                return false;
+            }
+
+            foreach (var entry in modulePath.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (IsUserDocumentsPowerShellPath(entry))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static string BuildSafeModulePath(string? runtimePath, string appLocalModuleRoot)
