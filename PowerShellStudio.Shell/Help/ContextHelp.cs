@@ -94,7 +94,7 @@ namespace PowerShellStudio.Shell.Help
 
         public static void OpenOverview(Window owner)
         {
-            OpenTopic(owner, "App.Overview");
+            OpenTopic(owner, HelpTopicCatalog.OverviewKey);
         }
 
         public static bool OpenForFocusedElement(Window owner)
@@ -125,7 +125,7 @@ namespace PowerShellStudio.Shell.Help
                 return;
             }
 
-            var topic = HelpTopicCatalog.Get(key);
+            var topic = HelpTopicCatalog.Get(key, $"ContextHelp.OpenTopic ({owner.GetType().Name})");
             if (!OpenWindows.TryGetValue(owner, out var window) || !window.IsLoaded)
             {
                 window = new ContextHelpWindow(topic)
@@ -141,6 +141,28 @@ namespace PowerShellStudio.Shell.Help
             window.ShowTopic(topic);
             window.Show();
             window.Activate();
+        }
+
+        public static IReadOnlyList<string> ValidateWindowTopics(Window window)
+        {
+            if (window is null)
+            {
+                throw new ArgumentNullException(nameof(window));
+            }
+
+            if (window is not FrameworkElement root)
+            {
+                return Array.Empty<string>();
+            }
+
+            var keys = EnumerateFrameworkElements(root)
+                .Select(GetKey)
+                .Where(static key => !string.IsNullOrWhiteSpace(key))
+                .Select(static key => key!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            return HelpTopicCatalog.ValidateKeys(keys, $"Window:{window.GetType().Name}");
         }
 
         private static void OnKeyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -178,7 +200,7 @@ namespace PowerShellStudio.Shell.Help
             }
 
             var key = ResolveHelpKey(element);
-            var topic = HelpTopicCatalog.Get(key);
+            var topic = HelpTopicCatalog.Get(key, $"ContextHelp.ApplyHelp ({element.GetType().Name})");
             element.ToolTip = BuildQuickHelpTooltip(topic);
             ToolTipService.SetShowOnDisabled(element, true);
             EnsureContextMenuHelpItem(element, key);
@@ -514,7 +536,7 @@ namespace PowerShellStudio.Shell.Help
                 return rememberedKey!;
             }
 
-            return "App.Overview";
+            return HelpTopicCatalog.OverviewKey;
         }
 
         private static bool IsSpecificHelpKey(string? key)
@@ -572,11 +594,33 @@ namespace PowerShellStudio.Shell.Help
                 current = GetParent(current);
             }
 
-            return "App.Overview";
+            return HelpTopicCatalog.OverviewKey;
         }
 
         private static DependencyObject? GetParent(DependencyObject current)
         {
+            if (current is FrameworkContentElement frameworkContentElement)
+            {
+                if (frameworkContentElement.Parent is not null)
+                {
+                    return frameworkContentElement.Parent;
+                }
+
+                if (frameworkContentElement.TemplatedParent is not null)
+                {
+                    return frameworkContentElement.TemplatedParent;
+                }
+            }
+
+            if (current is ContentElement contentElement)
+            {
+                var logicalParent = ContentOperations.GetParent(contentElement);
+                if (logicalParent is not null)
+                {
+                    return logicalParent;
+                }
+            }
+
             if (current is FrameworkElement frameworkElement)
             {
                 if (frameworkElement.Parent is not null)
@@ -590,7 +634,12 @@ namespace PowerShellStudio.Shell.Help
                 }
             }
 
-            return VisualTreeHelper.GetParent(current);
+            if (current is Visual || current is System.Windows.Media.Media3D.Visual3D)
+            {
+                return VisualTreeHelper.GetParent(current);
+            }
+
+            return null;
         }
     }
 }

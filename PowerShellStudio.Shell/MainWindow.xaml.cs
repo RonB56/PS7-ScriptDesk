@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -16,6 +18,16 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using WpfToolTip = System.Windows.Controls.ToolTip;
 using WpfPoint = System.Windows.Point;
+using WpfMenuItem = System.Windows.Controls.MenuItem;
+using WpfColor = System.Windows.Media.Color;
+using WpfBrush = System.Windows.Media.Brush;
+using WpfBrushes = System.Windows.Media.Brushes;
+using WpfTextBox = System.Windows.Controls.TextBox;
+using WpfButton = System.Windows.Controls.Button;
+using WpfOrientation = System.Windows.Controls.Orientation;
+using WpfHorizontalAlignment = System.Windows.HorizontalAlignment;
+using WpfSolidColorBrush = System.Windows.Media.SolidColorBrush;
+using WpfColors = System.Windows.Media.Colors;
 using ICSharpCode.AvalonEdit;
 using ICSharpCode.AvalonEdit.CodeCompletion;
 using ICSharpCode.AvalonEdit.Editing;
@@ -88,6 +100,7 @@ namespace PowerShellStudio.Shell
         // _pendingScrollToEnd removed: no longer needed (xterm.js handles scroll).
         private readonly Dictionary<TextEditor, EditorTabViewModel> _tabByEditor = new();
         private readonly Dictionary<TextEditor, BreakpointLineBackgroundRenderer> _breakpointRenderers = new();
+        private readonly Dictionary<TextEditor, BreakpointGlyphMargin> _breakpointGlyphMargins = new();
         private readonly Dictionary<TextEditor, ErrorMarkerRenderer> _errorRenderers = new();
         private readonly Dictionary<TextEditor, DiagnosticGlyphMargin> _diagnosticGlyphMargins = new();
         private readonly Dictionary<TextEditor, PowerShellSyntaxColorizer> _syntaxColorizers = new();
@@ -214,6 +227,7 @@ namespace PowerShellStudio.Shell
                 ApplyShellLayoutFromSettings();
                 // Apply saved theme (5B) and zoom (2B) before anything is shown.
                 _themeService.ApplyTheme(ViewModel?.CurrentThemeName ?? "Dark");
+                ApplyEditorHighlightSettingsToAllEditors();
                 StartupTimingLogger.Log("MainWindow", $"Shell layout applied in {startupStopwatch.ElapsedMilliseconds} ms");
 
                 if (ViewModel is null)
@@ -225,6 +239,7 @@ namespace PowerShellStudio.Shell
                 ViewModel.BindToCurrentSynchronizationContext();
                 ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
                 ViewModel.PropertyChanged += ViewModel_PropertyChanged;
+                ContextHelp.ValidateWindowTopics(this);
                 ApplyExplorerVisibilityLayout();
                 RefreshDebugCommandAvailability(false);
                 StartEditorMetadataWarmup();
@@ -322,7 +337,11 @@ namespace PowerShellStudio.Shell
                 var activeEditor = FindActiveEditor();
                 if (activeEditor is not null && activeEditor.IsKeyboardFocusWithin)
                 {
-                    await ShowEditorQuickInfoAtCaretAsync(activeEditor, updateStatusOnly: false).ConfigureAwait(true);
+                    var quickInfoShown = await ShowEditorQuickInfoAtCaretAsync(activeEditor, updateStatusOnly: false).ConfigureAwait(true);
+                    if (!quickInfoShown)
+                    {
+                        ContextHelp.OpenTopic(this, "Editor.Area");
+                    }
                 }
                 else
                 {
@@ -865,7 +884,11 @@ namespace PowerShellStudio.Shell
             if (Keyboard.Modifiers == ModifierKeys.None && e.Key == Key.F1)
             {
                 e.Handled = true;
-                await ShowEditorQuickInfoAtCaretAsync(editorTextEditor, updateStatusOnly: false).ConfigureAwait(true);
+                var quickInfoShown = await ShowEditorQuickInfoAtCaretAsync(editorTextEditor, updateStatusOnly: false).ConfigureAwait(true);
+                if (!quickInfoShown)
+                {
+                    ContextHelp.OpenTopic(this, "Editor.Area");
+                }
                 return;
             }
 
@@ -992,7 +1015,8 @@ namespace PowerShellStudio.Shell
         {
             if (sender is FrameworkElement frameworkElement)
             {
-                ContextHelp.OpenTopic(this, frameworkElement.Tag as string);
+                var helpKey = ContextHelp.GetKey(frameworkElement) ?? frameworkElement.Tag as string;
+                ContextHelp.OpenTopic(this, helpKey);
                 return;
             }
 
@@ -1496,6 +1520,7 @@ namespace PowerShellStudio.Shell
             editorTextEditor.Options.EnableRectangularSelection = true;
             editorTextEditor.Options.IndentationSize = 4;
             editorTextEditor.Options.HighlightCurrentLine = true;
+            ApplyEditorHighlightSettings(editorTextEditor);
 
             editorTextEditor.TextChanged += EditorTextEditor_TextChanged;
             editorTextEditor.TextArea.Caret.PositionChanged += EditorTextEditor_CaretPositionChanged;
@@ -1503,7 +1528,6 @@ namespace PowerShellStudio.Shell
             editorTextEditor.TextArea.TextEntered += EditorTextArea_TextEntered;
             editorTextEditor.TextArea.TextEntering += EditorTextArea_TextEntering;
             editorTextEditor.PreviewKeyDown += EditorTextEditor_PreviewKeyDown;
-            editorTextEditor.PreviewMouseLeftButtonDown += EditorTextEditor_PreviewMouseLeftButtonDown;
             editorTextEditor.GotKeyboardFocus += EditorTextEditor_GotKeyboardFocus;
 
             var syntaxColorizer = new PowerShellSyntaxColorizer();
@@ -1565,6 +1589,7 @@ namespace PowerShellStudio.Shell
             var breakpointRenderer = new BreakpointLineBackgroundRenderer(tab);
             _breakpointRenderers[editorTextEditor] = breakpointRenderer;
             EnsureBackgroundRendererAttached(editorTextEditor, breakpointRenderer);
+            EnsureBreakpointGlyphMarginAttached(editorTextEditor, tab);
 
             var errorRenderer = EnsureErrorRendererAttached(editorTextEditor);
             ApplyPersistedSyntaxDiagnosticsToEditor(errorRenderer, tab, editorTextEditor);
@@ -1704,6 +1729,38 @@ namespace PowerShellStudio.Shell
             return errorRenderer;
         }
 
+        private void EnsureBreakpointGlyphMarginAttached(TextEditor editorTextEditor, EditorTabViewModel tab)
+        {
+            if (!_breakpointGlyphMargins.TryGetValue(editorTextEditor, out var margin))
+            {
+                margin = new BreakpointGlyphMargin(tab);
+                margin.BreakpointLineClicked += lineNumber => OnBreakpointGlyphLineClicked(editorTextEditor, lineNumber);
+                _breakpointGlyphMargins[editorTextEditor] = margin;
+            }
+            else
+            {
+                margin.SetTab(tab);
+            }
+
+            // Keep the breakpoint target as its own narrow column, separate from
+            // diagnostics, folding, line numbers, and the editable text area.
+            if (editorTextEditor.TextArea.LeftMargins.Contains(margin))
+            {
+                editorTextEditor.TextArea.LeftMargins.Remove(margin);
+            }
+
+            editorTextEditor.TextArea.LeftMargins.Insert(0, margin);
+            margin.Refresh();
+        }
+
+        private void RefreshBreakpointGlyphMargin(TextEditor editorTextEditor)
+        {
+            if (_breakpointGlyphMargins.TryGetValue(editorTextEditor, out var margin))
+            {
+                margin.Refresh();
+            }
+        }
+
         private void EnsureDiagnosticGlyphMarginAttached(TextEditor editorTextEditor)
         {
             if (!_diagnosticGlyphMargins.TryGetValue(editorTextEditor, out var margin))
@@ -1779,6 +1836,12 @@ namespace PowerShellStudio.Shell
                 _breakpointRenderers.Remove(editorTextEditor);
             }
 
+            if (_breakpointGlyphMargins.TryGetValue(editorTextEditor, out var breakpointGlyphMargin))
+            {
+                editorTextEditor.TextArea.LeftMargins.Remove(breakpointGlyphMargin);
+                _breakpointGlyphMargins.Remove(editorTextEditor);
+            }
+
             editorTextEditor.TextArea.TextView.MouseMove -= OnTextViewMouseMove;
             editorTextEditor.TextArea.TextView.MouseLeave -= OnTextViewMouseLeave;
             editorTextEditor.TextArea.TextView.MouseHover -= OnTextViewMouseHover;
@@ -1807,6 +1870,7 @@ namespace PowerShellStudio.Shell
             if (e.PropertyName == nameof(EditorTabViewModel.BreakpointVersion))
             {
                 editorTextEditor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+                RefreshBreakpointGlyphMargin(editorTextEditor);
                 RefreshBreakpointsList();
                 RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
                 return;
@@ -2154,11 +2218,11 @@ namespace PowerShellStudio.Shell
             return !inSingleQuote && !inDoubleQuote;
         }
 
-        private async Task ShowEditorQuickInfoAtCaretAsync(TextEditor editorTextEditor, bool updateStatusOnly)
+        private async Task<bool> ShowEditorQuickInfoAtCaretAsync(TextEditor editorTextEditor, bool updateStatusOnly)
         {
             if (editorTextEditor.Document is null)
             {
-                return;
+                return false;
             }
 
             var cts = BeginQuickInfoRequest();
@@ -2174,7 +2238,7 @@ namespace PowerShellStudio.Shell
 
                 if (cancellationToken.IsCancellationRequested || quickInfo is null)
                 {
-                    return;
+                    return false;
                 }
 
                 if (ViewModel is not null)
@@ -2186,14 +2250,18 @@ namespace PowerShellStudio.Shell
                 {
                     ShowEditorToolTip(editorTextEditor.TextArea.TextView, quickInfo.ToString());
                 }
+
+                return true;
             }
             catch (OperationCanceledException)
             {
+                return false;
             }
             catch (ObjectDisposedException)
             {
                 // A hover/F1 request can be canceled while the editor is closing or while a newer
                 // request takes over. Treat that as a normal stale quick-info request.
+                return false;
             }
             finally
             {
@@ -2473,15 +2541,39 @@ namespace PowerShellStudio.Shell
 
         private void ToggleBreakpointForEditor(TextEditor editorTextEditor)
         {
-            if (editorTextEditor.DataContext is not EditorTabViewModel tab || editorTextEditor.Document is null)
+            if (editorTextEditor.Document is null)
             {
                 return;
             }
 
             var caretOffset = Math.Clamp(editorTextEditor.CaretOffset, 0, editorTextEditor.Document.TextLength);
             var lineNumber = editorTextEditor.Document.GetLineByOffset(caretOffset).LineNumber;
+            ToggleBreakpointForEditorLine(editorTextEditor, lineNumber);
+        }
+
+        private void OnBreakpointGlyphLineClicked(TextEditor editorTextEditor, int lineNumber)
+        {
+            ToggleBreakpointForEditorLine(editorTextEditor, lineNumber);
+        }
+
+        private void ToggleBreakpointForEditorLine(TextEditor editorTextEditor, int lineNumber)
+        {
+            if (editorTextEditor.DataContext is not EditorTabViewModel tab || editorTextEditor.Document is null)
+            {
+                return;
+            }
+
+            if (lineNumber < 1 || lineNumber > editorTextEditor.Document.LineCount)
+            {
+                return;
+            }
+
+            var documentLine = editorTextEditor.Document.GetLineByNumber(lineNumber);
+            editorTextEditor.CaretOffset = documentLine.Offset;
+
             var breakpointAdded = tab.ToggleBreakpoint(lineNumber);
             editorTextEditor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+            RefreshBreakpointGlyphMargin(editorTextEditor);
             RefreshBreakpointsList();
             RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
 
@@ -2491,44 +2583,6 @@ namespace PowerShellStudio.Shell
                     ? $"Breakpoint added on line {lineNumber}"
                     : $"Breakpoint removed from line {lineNumber}";
             }
-        }
-
-        private void EditorTextEditor_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-        {
-            if (sender is not TextEditor editorTextEditor || editorTextEditor.Document is null)
-            {
-                return;
-            }
-
-            if (e.ChangedButton != MouseButton.Left || Keyboard.Modifiers != ModifierKeys.None)
-            {
-                return;
-            }
-
-            var gutterWidth = editorTextEditor.TextArea.LeftMargins
-                .OfType<FrameworkElement>()
-                .Sum(static margin => margin.ActualWidth);
-            var clickPointInEditor = e.GetPosition(editorTextEditor);
-            if (clickPointInEditor.X > gutterWidth + 2)
-            {
-                return;
-            }
-
-            var textView = editorTextEditor.TextArea.TextView;
-            textView.EnsureVisualLines();
-
-            var pointInTextView = e.GetPosition(textView);
-            var documentPoint = new System.Windows.Point(0, pointInTextView.Y + textView.ScrollOffset.Y);
-            var position = textView.GetPositionFloor(documentPoint);
-            if (position is null || position.Value.Line <= 0 || position.Value.Line > editorTextEditor.Document.LineCount)
-            {
-                return;
-            }
-
-            var documentLine = editorTextEditor.Document.GetLineByNumber(position.Value.Line);
-            editorTextEditor.CaretOffset = documentLine.Offset;
-            ToggleBreakpointForEditor(editorTextEditor);
-            e.Handled = true;
         }
 
         private void EditorTextEditor_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
@@ -2621,6 +2675,7 @@ namespace PowerShellStudio.Shell
         private void ApplyTheme(string themeName)
         {
             _themeService.ApplyTheme(themeName);
+            ApplyEditorHighlightSettingsToAllEditors();
             if (ViewModel is not null)
             {
                 ViewModel.CurrentThemeName = themeName;
@@ -2631,6 +2686,518 @@ namespace PowerShellStudio.Shell
             foreach (var editor in _editorByTab.Values)
             {
                 editor.TextArea.TextView.Redraw();
+            }
+        }
+
+
+        // -------------------------------------------------------------------------
+        // Editor highlight / selection color settings
+        // -------------------------------------------------------------------------
+
+        private void ForceHighContrastSelectionText_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel is null)
+            {
+                return;
+            }
+
+            ViewModel.ForceHighContrastSelectedText = ForceHighContrastSelectionTextMenuItem.IsChecked == true;
+            ApplyEditorHighlightSettingsToAllEditors();
+            ViewModel.StatusText = ViewModel.ForceHighContrastSelectedText
+                ? "Editor selected text: high-contrast foreground enabled"
+                : "Editor selected text: preserving syntax colors";
+        }
+
+        private void SelectionHighlightThemeDefault_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel is null)
+            {
+                return;
+            }
+
+            ViewModel.EditorSelectionBackgroundHex = null;
+            ApplyEditorHighlightSettingsToAllEditors();
+            ViewModel.StatusText = "Editor selection background: active theme default";
+        }
+
+        private void SelectionHighlightPreset_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel is null || sender is not WpfMenuItem menuItem || menuItem.Tag is not string tag)
+            {
+                return;
+            }
+
+            if (!TryNormalizeHexColor(tag, out var normalizedHex))
+            {
+                return;
+            }
+
+            ViewModel.EditorSelectionBackgroundHex = normalizedHex;
+            ApplyEditorHighlightSettingsToAllEditors();
+            ViewModel.StatusText = $"Editor selection background: {normalizedHex}";
+        }
+
+        private void SelectionHighlightCustom_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel is null)
+            {
+                return;
+            }
+
+            var currentColor = GetEffectiveSelectionBackgroundColor();
+            var selectedHex = PromptForEditorColorHex(
+                "Custom Selection Background",
+                "Enter the editor selection background color as #RRGGBB.",
+                currentColor);
+
+            if (selectedHex is null)
+            {
+                return;
+            }
+
+            ViewModel.EditorSelectionBackgroundHex = selectedHex;
+            ApplyEditorHighlightSettingsToAllEditors();
+            ViewModel.StatusText = $"Editor selection background: {selectedHex}";
+        }
+
+        private void CurrentLineHighlightThemeDefault_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel is null)
+            {
+                return;
+            }
+
+            ViewModel.EditorCurrentLineBackgroundHex = null;
+            ApplyEditorHighlightSettingsToAllEditors();
+            ViewModel.StatusText = "Editor current-line highlight: active theme default";
+        }
+
+        private void CurrentLineHighlightPreset_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel is null || sender is not WpfMenuItem menuItem || menuItem.Tag is not string tag)
+            {
+                return;
+            }
+
+            if (!TryNormalizeHexColor(tag, out var normalizedHex))
+            {
+                return;
+            }
+
+            ViewModel.EditorCurrentLineBackgroundHex = normalizedHex;
+            ApplyEditorHighlightSettingsToAllEditors();
+            ViewModel.StatusText = $"Editor current-line highlight: {normalizedHex}";
+        }
+
+        private void CurrentLineHighlightCustom_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel is null)
+            {
+                return;
+            }
+
+            var currentColor = GetEffectiveCurrentLineBackgroundColor();
+            var selectedHex = PromptForEditorColorHex(
+                "Custom Current-Line Background",
+                "Enter the editor current-line highlight color as #RRGGBB.",
+                currentColor);
+
+            if (selectedHex is null)
+            {
+                return;
+            }
+
+            ViewModel.EditorCurrentLineBackgroundHex = selectedHex;
+            ApplyEditorHighlightSettingsToAllEditors();
+            ViewModel.StatusText = $"Editor current-line highlight: {selectedHex}";
+        }
+
+        private void RestoreEditorHighlightDefaults_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel is null)
+            {
+                return;
+            }
+
+            ViewModel.EditorSelectionBackgroundHex = null;
+            ViewModel.EditorCurrentLineBackgroundHex = null;
+            ViewModel.ForceHighContrastSelectedText = true;
+            ApplyEditorHighlightSettingsToAllEditors();
+            ViewModel.StatusText = "Editor highlight colors restored to defaults";
+        }
+
+        private void ApplyEditorHighlightSettingsToAllEditors()
+        {
+            UpdateEditorHighlightMenuState();
+
+            foreach (var editorTextEditor in _editorByTab.Values)
+            {
+                ApplyEditorHighlightSettings(editorTextEditor);
+            }
+        }
+
+        private void ApplyEditorHighlightSettings(TextEditor editorTextEditor)
+        {
+            var selectionBackgroundColor = GetEffectiveSelectionBackgroundColor();
+            var selectionBackgroundBrush = CreateFrozenBrush(selectionBackgroundColor);
+            SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionBrush", selectionBackgroundBrush);
+
+            if (ViewModel?.ForceHighContrastSelectedText ?? true)
+            {
+                var selectionForegroundBrush = CreateFrozenBrush(GetBestTextColorForBackground(selectionBackgroundColor));
+                SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionForeground", selectionForegroundBrush);
+            }
+            else if (!ClearDependencyPropertyIfAvailable(editorTextEditor.TextArea, "SelectionForegroundProperty"))
+            {
+                SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionForeground", null);
+            }
+
+            var currentLineBackgroundBrush = CreateFrozenBrush(GetEffectiveCurrentLineBackgroundColor());
+            SetPropertyIfAvailable(editorTextEditor.TextArea.TextView, "CurrentLineBackground", currentLineBackgroundBrush);
+
+            editorTextEditor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+            editorTextEditor.TextArea.TextView.Redraw();
+        }
+
+        private void UpdateEditorHighlightMenuState()
+        {
+            if (ViewModel is null)
+            {
+                return;
+            }
+
+            ForceHighContrastSelectionTextMenuItem.IsChecked = ViewModel.ForceHighContrastSelectedText;
+            UpdateSelectionPresetMenuState(ViewModel.EditorSelectionBackgroundHex);
+            UpdateCurrentLinePresetMenuState(ViewModel.EditorCurrentLineBackgroundHex);
+        }
+
+        private void UpdateSelectionPresetMenuState(string? selectedHex)
+        {
+            var normalized = NormalizeComparableHex(selectedHex);
+            SelectionThemeDefaultMenuItem.IsChecked = normalized is null;
+            SetPresetMenuItemChecked(SelectionPowerShellBlueMenuItem, normalized);
+            SetPresetMenuItemChecked(SelectionNavyMenuItem, normalized);
+            SetPresetMenuItemChecked(SelectionCharcoalMenuItem, normalized);
+            SetPresetMenuItemChecked(SelectionPurpleMenuItem, normalized);
+            SetPresetMenuItemChecked(SelectionGoldMenuItem, normalized);
+        }
+
+        private void UpdateCurrentLinePresetMenuState(string? selectedHex)
+        {
+            var normalized = NormalizeComparableHex(selectedHex);
+            CurrentLineThemeDefaultMenuItem.IsChecked = normalized is null;
+            SetPresetMenuItemChecked(CurrentLineSubtleNavyMenuItem, normalized);
+            SetPresetMenuItemChecked(CurrentLineSoftSlateMenuItem, normalized);
+            SetPresetMenuItemChecked(CurrentLineSoftPurpleMenuItem, normalized);
+            SetPresetMenuItemChecked(CurrentLineSoftGoldMenuItem, normalized);
+        }
+
+        private static void SetPresetMenuItemChecked(WpfMenuItem menuItem, string? selectedHex)
+        {
+            menuItem.IsChecked = selectedHex is not null &&
+                                 menuItem.Tag is string tag &&
+                                 string.Equals(NormalizeComparableHex(tag), selectedHex, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private string? PromptForEditorColorHex(string title, string instruction, WpfColor initialColor)
+        {
+            var result = (string?)null;
+            var initialHex = FormatColorHex(initialColor);
+
+            var dialog = new Window
+            {
+                Owner = this,
+                Title = title,
+                SizeToContent = SizeToContent.WidthAndHeight,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                ResizeMode = ResizeMode.NoResize,
+                Background = TryFindResource("Theme.Surface.Primary") as WpfBrush ?? WpfBrushes.White,
+                Foreground = TryFindResource("Theme.Text.Primary") as WpfBrush ?? WpfBrushes.Black
+            };
+
+            var root = new StackPanel
+            {
+                Margin = new Thickness(16),
+                MinWidth = 360
+            };
+
+            var instructionText = new TextBlock
+            {
+                Text = instruction,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+
+            var input = new WpfTextBox
+            {
+                Text = initialHex,
+                MinWidth = 220,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+
+            var preview = new Border
+            {
+                Height = 28,
+                CornerRadius = new CornerRadius(4),
+                BorderThickness = new Thickness(1),
+                BorderBrush = TryFindResource("Theme.Border.Strong") as WpfBrush ?? WpfBrushes.Gray,
+                Background = CreateFrozenBrush(initialColor),
+                Margin = new Thickness(0, 0, 0, 14)
+            };
+
+            input.TextChanged += (_, _) =>
+            {
+                if (TryNormalizeHexColor(input.Text, out var normalizedHex) && TryParseHexColor(normalizedHex, out var parsedColor))
+                {
+                    preview.Background = CreateFrozenBrush(parsedColor);
+                }
+            };
+
+            var buttons = new StackPanel
+            {
+                Orientation = WpfOrientation.Horizontal,
+                HorizontalAlignment = WpfHorizontalAlignment.Right
+            };
+
+            var okButton = new WpfButton
+            {
+                Content = "OK",
+                IsDefault = true,
+                MinWidth = 82,
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+
+            var cancelButton = new WpfButton
+            {
+                Content = "Cancel",
+                IsCancel = true,
+                MinWidth = 82
+            };
+
+            okButton.Click += (_, _) =>
+            {
+                if (!TryNormalizeHexColor(input.Text, out var normalizedHex))
+                {
+                    System.Windows.MessageBox.Show(
+                        this,
+                        "Please enter a valid color in #RRGGBB format. Example: #0F4C81",
+                        "Invalid Color",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                    input.Focus();
+                    input.SelectAll();
+                    return;
+                }
+
+                result = normalizedHex;
+                dialog.DialogResult = true;
+            };
+
+            buttons.Children.Add(okButton);
+            buttons.Children.Add(cancelButton);
+            root.Children.Add(instructionText);
+            root.Children.Add(input);
+            root.Children.Add(preview);
+            root.Children.Add(buttons);
+            dialog.Content = root;
+
+            input.SelectAll();
+            input.Focus();
+
+            return dialog.ShowDialog() == true ? result : null;
+        }
+
+        private WpfColor GetEffectiveSelectionBackgroundColor()
+        {
+            if (TryParseHexColor(ViewModel?.EditorSelectionBackgroundHex, out var customColor))
+            {
+                return customColor;
+            }
+
+            if (TryGetResourceBrushColor("Theme.Editor.SelectionBackground", out var editorSelectionColor))
+            {
+                return editorSelectionColor;
+            }
+
+            if (TryGetResourceBrushColor("Theme.Selection.Background", out var themeSelectionColor))
+            {
+                return themeSelectionColor;
+            }
+
+            return WpfColor.FromRgb(0x0F, 0x4C, 0x81);
+        }
+
+        private WpfColor GetEffectiveCurrentLineBackgroundColor()
+        {
+            if (TryParseHexColor(ViewModel?.EditorCurrentLineBackgroundHex, out var customColor))
+            {
+                return customColor;
+            }
+
+            if (TryGetResourceBrushColor("Theme.Editor.CurrentLineBackground", out var editorCurrentLineColor))
+            {
+                return editorCurrentLineColor;
+            }
+
+            if (TryGetResourceBrushColor("Theme.Editor.LineHighlight", out var lineHighlightColor))
+            {
+                return lineHighlightColor;
+            }
+
+            return WpfColor.FromRgb(0x17, 0x21, 0x31);
+        }
+
+        private bool TryGetResourceBrushColor(string resourceKey, out WpfColor color)
+        {
+            if (TryFindResource(resourceKey) is WpfSolidColorBrush solidColorBrush)
+            {
+                color = solidColorBrush.Color;
+                return true;
+            }
+
+            color = WpfColors.Transparent;
+            return false;
+        }
+
+        private static bool TryNormalizeHexColor(string? value, out string normalizedHex)
+        {
+            normalizedHex = string.Empty;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            var text = value.Trim();
+            if (!text.StartsWith("#", StringComparison.Ordinal))
+            {
+                text = "#" + text;
+            }
+
+            if (text.Length == 4)
+            {
+                text = $"#{text[1]}{text[1]}{text[2]}{text[2]}{text[3]}{text[3]}";
+            }
+
+            if (text.Length != 7)
+            {
+                return false;
+            }
+
+            if (!byte.TryParse(text.Substring(1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _) ||
+                !byte.TryParse(text.Substring(3, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _) ||
+                !byte.TryParse(text.Substring(5, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _))
+            {
+                return false;
+            }
+
+            normalizedHex = text.ToUpperInvariant();
+            return true;
+        }
+
+        private static string? NormalizeComparableHex(string? value)
+        {
+            return TryNormalizeHexColor(value, out var normalizedHex) ? normalizedHex : null;
+        }
+
+        private static bool TryParseHexColor(string? value, out WpfColor color)
+        {
+            if (!TryNormalizeHexColor(value, out var normalizedHex))
+            {
+                color = WpfColors.Transparent;
+                return false;
+            }
+
+            color = WpfColor.FromRgb(
+                byte.Parse(normalizedHex.Substring(1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture),
+                byte.Parse(normalizedHex.Substring(3, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture),
+                byte.Parse(normalizedHex.Substring(5, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
+            return true;
+        }
+
+        private static string FormatColorHex(WpfColor color)
+        {
+            return $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+        }
+
+        private static WpfSolidColorBrush CreateFrozenBrush(WpfColor color)
+        {
+            var brush = new WpfSolidColorBrush(color);
+            brush.Freeze();
+            return brush;
+        }
+
+        private static WpfColor GetBestTextColorForBackground(WpfColor backgroundColor)
+        {
+            var whiteContrast = GetContrastRatio(WpfColors.White, backgroundColor);
+            var blackContrast = GetContrastRatio(WpfColors.Black, backgroundColor);
+            return whiteContrast >= blackContrast ? WpfColors.White : WpfColors.Black;
+        }
+
+        private static double GetContrastRatio(WpfColor foreground, WpfColor background)
+        {
+            var foregroundLuminance = GetRelativeLuminance(foreground);
+            var backgroundLuminance = GetRelativeLuminance(background);
+            var lighter = Math.Max(foregroundLuminance, backgroundLuminance);
+            var darker = Math.Min(foregroundLuminance, backgroundLuminance);
+            return (lighter + 0.05d) / (darker + 0.05d);
+        }
+
+        private static double GetRelativeLuminance(WpfColor color)
+        {
+            return (0.2126d * LinearizeSrgbChannel(color.R)) +
+                   (0.7152d * LinearizeSrgbChannel(color.G)) +
+                   (0.0722d * LinearizeSrgbChannel(color.B));
+        }
+
+        private static double LinearizeSrgbChannel(byte value)
+        {
+            var normalized = value / 255d;
+            return normalized <= 0.03928d
+                ? normalized / 12.92d
+                : Math.Pow((normalized + 0.055d) / 1.055d, 2.4d);
+        }
+
+        private static bool SetPropertyIfAvailable(object target, string propertyName, object? value)
+        {
+            try
+            {
+                var propertyInfo = target.GetType().GetProperty(
+                    propertyName,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.FlattenHierarchy);
+
+                if (propertyInfo is null || !propertyInfo.CanWrite)
+                {
+                    return false;
+                }
+
+                propertyInfo.SetValue(target, value);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool ClearDependencyPropertyIfAvailable(DependencyObject target, string dependencyPropertyFieldName)
+        {
+            try
+            {
+                var fieldInfo = target.GetType().GetField(
+                    dependencyPropertyFieldName,
+                    BindingFlags.Static | BindingFlags.Public | BindingFlags.FlattenHierarchy);
+
+                if (fieldInfo?.GetValue(null) is not DependencyProperty dependencyProperty)
+                {
+                    return false;
+                }
+
+                target.ClearValue(dependencyProperty);
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -4711,6 +5278,7 @@ namespace PowerShellStudio.Shell
             if (_editorByTab.TryGetValue(targetTab, out var editor))
             {
                 editor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+                RefreshBreakpointGlyphMargin(editor);
 
                 if (editor.Document is not null && lineNumber <= editor.Document.LineCount)
                 {
@@ -4734,6 +5302,7 @@ namespace PowerShellStudio.Shell
                 if (_editorByTab.TryGetValue(tab, out var editor))
                 {
                     editor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+                    RefreshBreakpointGlyphMargin(editor);
                 }
             }
         }
@@ -4747,10 +5316,11 @@ namespace PowerShellStudio.Shell
 
             row.Tab.ToggleBreakpoint(row.LineNumber);
 
-            // Force the renderer for this tab's editor to redraw.
+            // Force the renderer and breakpoint gutter for this tab's editor to redraw.
             if (_editorByTab.TryGetValue(row.Tab, out var editor))
             {
                 editor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+                RefreshBreakpointGlyphMargin(editor);
             }
 
             RefreshBreakpointsList();
@@ -4804,6 +5374,7 @@ namespace PowerShellStudio.Shell
             if (_editorByTab.TryGetValue(row.Tab, out var editor))
             {
                 editor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+                RefreshBreakpointGlyphMargin(editor);
             }
 
             RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);

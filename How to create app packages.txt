@@ -1,0 +1,6 @@
+in developer powershell:
+dotnet restore .\PowerShellStudio.slnx -r win-x64 --force
+
+Then rebuild
+Then build packages
+then create packages

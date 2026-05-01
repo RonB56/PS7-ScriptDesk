@@ -86,6 +86,11 @@ namespace PowerShellStudio.UI.ViewModels
 
         // Active theme name (5B).
         private string _currentThemeName = "Dark";
+
+        // Editor highlight/selection color preferences.
+        private string? _editorSelectionBackgroundHex;
+        private string? _editorCurrentLineBackgroundHex;
+        private bool _forceHighContrastSelectedText = true;
         private int _workspaceFileCount;
         private int _workspaceFolderCount;
         private int _workspaceReloadGeneration;
@@ -416,6 +421,54 @@ namespace PowerShellStudio.UI.ViewModels
                 if (!string.Equals(_currentThemeName, value, StringComparison.Ordinal))
                 {
                     _currentThemeName = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // Editor highlight/selection colors
+        // -------------------------------------------------------------------------
+
+        /// <summary>Optional editor selection background color as #RRGGBB. Null = active theme default.</summary>
+        public string? EditorSelectionBackgroundHex
+        {
+            get => _editorSelectionBackgroundHex;
+            set
+            {
+                var normalized = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+                if (!string.Equals(_editorSelectionBackgroundHex, normalized, StringComparison.OrdinalIgnoreCase))
+                {
+                    _editorSelectionBackgroundHex = normalized;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        /// <summary>Optional editor current-line highlight background color as #RRGGBB. Null = active theme default.</summary>
+        public string? EditorCurrentLineBackgroundHex
+        {
+            get => _editorCurrentLineBackgroundHex;
+            set
+            {
+                var normalized = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+                if (!string.Equals(_editorCurrentLineBackgroundHex, normalized, StringComparison.OrdinalIgnoreCase))
+                {
+                    _editorCurrentLineBackgroundHex = normalized;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        /// <summary>When true, selected editor text uses an automatic black/white foreground for readability.</summary>
+        public bool ForceHighContrastSelectedText
+        {
+            get => _forceHighContrastSelectedText;
+            set
+            {
+                if (_forceHighContrastSelectedText != value)
+                {
+                    _forceHighContrastSelectedText = value;
                     OnPropertyChanged();
                 }
             }
@@ -950,6 +1003,9 @@ namespace PowerShellStudio.UI.ViewModels
 
             TrySetOptionalProperty(settings, "Theme", _currentThemeName);
             TrySetOptionalProperty(settings, "EditorZoomLevel", _editorZoomLevel);
+            TrySetOptionalProperty(settings, "EditorSelectionBackgroundHex", _editorSelectionBackgroundHex);
+            TrySetOptionalProperty(settings, "EditorCurrentLineBackgroundHex", _editorCurrentLineBackgroundHex);
+            TrySetOptionalProperty(settings, "ForceHighContrastSelectedText", _forceHighContrastSelectedText);
 
             return settings;
         }
@@ -975,6 +1031,10 @@ namespace PowerShellStudio.UI.ViewModels
             {
                 EditorZoomLevel = persistedEditorZoomLevel.Value;
             }
+
+            EditorSelectionBackgroundHex = TryGetOptionalStringProperty(settings, "EditorSelectionBackgroundHex");
+            EditorCurrentLineBackgroundHex = TryGetOptionalStringProperty(settings, "EditorCurrentLineBackgroundHex");
+            ForceHighContrastSelectedText = TryGetOptionalBoolProperty(settings, "ForceHighContrastSelectedText") ?? true;
             _selectedTabFilePathToRestore = NormalizeStoredPath(settings.SelectedTabFilePath);
 
             _recentFilePaths.Clear();
@@ -1091,6 +1151,30 @@ namespace PowerShellStudio.UI.ViewModels
                 }
 
                 return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static bool? TryGetOptionalBoolProperty(object target, string propertyName)
+        {
+            if (target is null || string.IsNullOrWhiteSpace(propertyName))
+            {
+                return null;
+            }
+
+            try
+            {
+                var propertyInfo = target.GetType().GetProperty(propertyName);
+                if (propertyInfo is null || !propertyInfo.CanRead)
+                {
+                    return null;
+                }
+
+                var value = propertyInfo.GetValue(target);
+                return value is bool boolValue ? boolValue : null;
             }
             catch
             {

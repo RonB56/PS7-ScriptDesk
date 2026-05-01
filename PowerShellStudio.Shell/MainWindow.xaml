@@ -1,4 +1,4 @@
-<Window x:Class="PowerShellStudio.Shell.MainWindow"
+﻿<Window x:Class="PowerShellStudio.Shell.MainWindow"
         x:Name="RootWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -94,6 +94,36 @@
                     <MenuItem Header="_Light"   Click="ThemeLight_Click" help:ContextHelp.Key="Theme.Light" />
                     <MenuItem Header="_ISE Blue" Click="ThemeIseBlue_Click" help:ContextHelp.Key="Theme.IseBlue" />
                 </MenuItem>
+                <MenuItem Header="Editor _Highlight Colors">
+                    <MenuItem x:Name="ForceHighContrastSelectionTextMenuItem"
+                              Header="Force _high-contrast selected text"
+                              IsCheckable="True"
+                              Click="ForceHighContrastSelectionText_Click" />
+                    <Separator />
+                    <MenuItem Header="_Selection background">
+                        <MenuItem x:Name="SelectionThemeDefaultMenuItem" Header="Use active _theme default" IsCheckable="True" Click="SelectionHighlightThemeDefault_Click" />
+                        <Separator />
+                        <MenuItem x:Name="SelectionPowerShellBlueMenuItem" Header="PowerShell blue" IsCheckable="True" Tag="#0F4C81" Click="SelectionHighlightPreset_Click" />
+                        <MenuItem x:Name="SelectionNavyMenuItem" Header="Deep navy" IsCheckable="True" Tag="#0B2A4A" Click="SelectionHighlightPreset_Click" />
+                        <MenuItem x:Name="SelectionCharcoalMenuItem" Header="Charcoal" IsCheckable="True" Tag="#374151" Click="SelectionHighlightPreset_Click" />
+                        <MenuItem x:Name="SelectionPurpleMenuItem" Header="Purple" IsCheckable="True" Tag="#6D28D9" Click="SelectionHighlightPreset_Click" />
+                        <MenuItem x:Name="SelectionGoldMenuItem" Header="Gold" IsCheckable="True" Tag="#F59E0B" Click="SelectionHighlightPreset_Click" />
+                        <Separator />
+                        <MenuItem Header="_Custom selection color..." Click="SelectionHighlightCustom_Click" />
+                    </MenuItem>
+                    <MenuItem Header="_Current line background">
+                        <MenuItem x:Name="CurrentLineThemeDefaultMenuItem" Header="Use active _theme default" IsCheckable="True" Click="CurrentLineHighlightThemeDefault_Click" />
+                        <Separator />
+                        <MenuItem x:Name="CurrentLineSubtleNavyMenuItem" Header="Subtle navy" IsCheckable="True" Tag="#082F49" Click="CurrentLineHighlightPreset_Click" />
+                        <MenuItem x:Name="CurrentLineSoftSlateMenuItem" Header="Soft slate" IsCheckable="True" Tag="#334155" Click="CurrentLineHighlightPreset_Click" />
+                        <MenuItem x:Name="CurrentLineSoftPurpleMenuItem" Header="Soft purple" IsCheckable="True" Tag="#3B0764" Click="CurrentLineHighlightPreset_Click" />
+                        <MenuItem x:Name="CurrentLineSoftGoldMenuItem" Header="Soft gold" IsCheckable="True" Tag="#78350F" Click="CurrentLineHighlightPreset_Click" />
+                        <Separator />
+                        <MenuItem Header="C_ustom current-line color..." Click="CurrentLineHighlightCustom_Click" />
+                    </MenuItem>
+                    <Separator />
+                    <MenuItem Header="_Restore highlight defaults" Click="RestoreEditorHighlightDefaults_Click" />
+                </MenuItem>
             </MenuItem>
 
             <MenuItem Header="_Run" help:ContextHelp.Key="Command.RunScript">
@@ -104,16 +134,16 @@
                 <MenuItem x:Name="RefreshEditorMetadataMenuItem"
                           Header="Refresh PowerShell Editor Metadata"
                           Click="RefreshEditorMetadata_Click"
-                          help:ContextHelp.Key="Runtime.Refresh" />
+                          help:ContextHelp.Key="Editor.Metadata" />
                 <Separator />
                 <MenuItem x:Name="DeleteCurrentEditorMetadataCacheMenuItem"
                           Header="Delete Current Runtime Metadata Cache"
                           Click="DeleteCurrentEditorMetadataCache_Click"
-                          help:ContextHelp.Key="Runtime.Refresh" />
+                          help:ContextHelp.Key="Editor.Metadata" />
                 <MenuItem x:Name="DeleteAllEditorMetadataCachesMenuItem"
                           Header="Delete All PowerShell Metadata Caches"
                           Click="DeleteAllEditorMetadataCaches_Click"
-                          help:ContextHelp.Key="Runtime.Refresh" />
+                          help:ContextHelp.Key="Editor.Metadata" />
             </MenuItem>
 
             <MenuItem Header="_Debug" help:ContextHelp.Key="Debug.Area">
@@ -454,7 +484,7 @@
             </StatusBarItem>
             <Separator />
             <StatusBarItem x:Name="EditorMetadataStatusItem"
-                           help:ContextHelp.Key="Status.General"
+                           help:ContextHelp.Key="Editor.Metadata"
                            Visibility="Collapsed">
                 <Border x:Name="EditorMetadataStatusBadge"
                         Background="#FFF59D"
@@ -990,6 +1020,9 @@
                                             <avalonedit:TextEditor FontFamily="Consolas"
                                                                        help:ContextHelp.Key="Editor.Surface"
                                                                        FontSize="14"
+                                                                       Background="{DynamicResource Theme.Editor.Background}"
+                                                                       Foreground="{DynamicResource Theme.Editor.Foreground}"
+                                                                       LineNumbersForeground="{DynamicResource Theme.Editor.LineNumber}"
                                                                        ShowLineNumbers="True"
                                                                        HorizontalScrollBarVisibility="Auto"
                                                                        VerticalScrollBarVisibility="Auto"

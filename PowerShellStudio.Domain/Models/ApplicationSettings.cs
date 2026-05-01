@@ -40,6 +40,15 @@ namespace PowerShellStudio.Domain.Models
         /// <summary>Editor font-size zoom level in points.  Null = default (13 pt).</summary>
         public double? EditorZoomLevel { get; set; }
 
+        /// <summary>Optional editor text-selection background color as a #RRGGBB value. Null = active theme default.</summary>
+        public string? EditorSelectionBackgroundHex { get; set; }
+
+        /// <summary>Optional editor current-line background color as a #RRGGBB value. Null = active theme default.</summary>
+        public string? EditorCurrentLineBackgroundHex { get; set; }
+
+        /// <summary>Whether selected editor text should force a high-contrast foreground instead of preserving syntax colors.</summary>
+        public bool ForceHighContrastSelectedText { get; set; } = true;
+
         /// <summary>Whether contextual help UI is enabled across the shell. Defaults to true.</summary>
         public bool IsContextHelpEnabled { get; set; } = true;
     }

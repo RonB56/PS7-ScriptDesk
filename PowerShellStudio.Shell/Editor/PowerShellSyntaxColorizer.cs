@@ -355,23 +355,110 @@ namespace PowerShellStudio.Shell.Editor
             return null;
         }
 
+        private const double MinimumSyntaxTextContrastRatio = 4.5d;
+
         private static WpfBrush? GetBrush(string? groupName) => groupName switch
         {
-            "Comment"   => ResolveBrush("Theme.Syntax.Comment",   FallbackComment),
-            "String"    => ResolveBrush("Theme.Syntax.String",     FallbackString),
-            "Variable"  => ResolveBrush("Theme.Syntax.Variable",   FallbackVariable),
-            "Parameter" => ResolveBrush("Theme.Syntax.Parameter",  FallbackParameter),
-            "Cmdlet"    => ResolveBrush("Theme.Syntax.Cmdlet",     FallbackCmdlet),
-            "Keyword"   => ResolveBrush("Theme.Syntax.Keyword",    FallbackKeyword),
-            "Type"      => ResolveBrush("Theme.Syntax.Type",       FallbackType),
-            "Number"    => ResolveBrush("Theme.Syntax.Number",     FallbackNumber),
+            "Comment"   => ResolveSyntaxBrush("Comment",   "Theme.Syntax.Comment",   FallbackComment),
+            "String"    => ResolveSyntaxBrush("String",    "Theme.Syntax.String",    FallbackString),
+            "Variable"  => ResolveSyntaxBrush("Variable",  "Theme.Syntax.Variable",  FallbackVariable),
+            "Parameter" => ResolveSyntaxBrush("Parameter", "Theme.Syntax.Parameter", FallbackParameter),
+            "Cmdlet"    => ResolveSyntaxBrush("Cmdlet",    "Theme.Syntax.Cmdlet",    FallbackCmdlet),
+            "Keyword"   => ResolveSyntaxBrush("Keyword",   "Theme.Syntax.Keyword",   FallbackKeyword),
+            "Type"      => ResolveSyntaxBrush("Type",      "Theme.Syntax.Type",      FallbackType),
+            "Number"    => ResolveSyntaxBrush("Number",    "Theme.Syntax.Number",    FallbackNumber),
             _           => null,
         };
+
+        private static WpfBrush ResolveSyntaxBrush(string groupName, string resourceKey, WpfBrush fallback)
+        {
+            var candidate = ResolveBrush(resourceKey, fallback);
+            if (!TryGetSolidColor(candidate, out var candidateColor) ||
+                !TryGetEditorBackgroundColor(out var backgroundColor))
+            {
+                return candidate;
+            }
+
+            var contrastRatio = GetContrastRatio(candidateColor, backgroundColor);
+            if (contrastRatio >= MinimumSyntaxTextContrastRatio)
+            {
+                return candidate;
+            }
+
+            return GetContrastSafeFallbackBrush(groupName, backgroundColor);
+        }
 
         private static WpfBrush ResolveBrush(string resourceKey, WpfBrush fallback)
         {
             if (System.Windows.Application.Current?.Resources[resourceKey] is WpfBrush b) return b;
             return fallback;
+        }
+
+        private static bool TryGetEditorBackgroundColor(out WpfColor color)
+        {
+            if (System.Windows.Application.Current?.Resources["Theme.Editor.Background"] is WpfBrush backgroundBrush &&
+                TryGetSolidColor(backgroundBrush, out color))
+            {
+                return true;
+            }
+
+            color = Colors.White;
+            return true;
+        }
+
+        private static bool TryGetSolidColor(WpfBrush brush, out WpfColor color)
+        {
+            if (brush is WpfSolidColorBrush solidColorBrush)
+            {
+                color = solidColorBrush.Color;
+                return true;
+            }
+
+            color = Colors.Transparent;
+            return false;
+        }
+
+        private static WpfBrush GetContrastSafeFallbackBrush(string groupName, WpfColor backgroundColor)
+        {
+            var backgroundIsLight = GetRelativeLuminance(backgroundColor) >= 0.5d;
+            return FreezeBrush(GetContrastSafeFallbackColor(groupName, backgroundIsLight));
+        }
+
+        private static WpfColor GetContrastSafeFallbackColor(string groupName, bool backgroundIsLight) => groupName switch
+        {
+            "Comment"   => backgroundIsLight ? WpfColor.FromRgb(22, 101, 52)   : WpfColor.FromRgb(134, 239, 172),
+            "String"    => backgroundIsLight ? WpfColor.FromRgb(154, 52, 18)   : WpfColor.FromRgb(253, 186, 116),
+            "Variable"  => backgroundIsLight ? WpfColor.FromRgb(29, 78, 216)   : WpfColor.FromRgb(186, 230, 253),
+            "Parameter" => backgroundIsLight ? WpfColor.FromRgb(109, 40, 217)  : WpfColor.FromRgb(196, 181, 253),
+            "Cmdlet"    => backgroundIsLight ? WpfColor.FromRgb(124, 45, 18)   : WpfColor.FromRgb(252, 211, 77),
+            "Keyword"   => backgroundIsLight ? WpfColor.FromRgb(29, 78, 216)   : WpfColor.FromRgb(147, 197, 253),
+            "Type"      => backgroundIsLight ? WpfColor.FromRgb(15, 118, 110)  : WpfColor.FromRgb(94, 234, 212),
+            "Number"    => backgroundIsLight ? WpfColor.FromRgb(4, 120, 87)    : WpfColor.FromRgb(187, 247, 208),
+            _           => backgroundIsLight ? WpfColor.FromRgb(17, 24, 39)    : WpfColor.FromRgb(226, 232, 240),
+        };
+
+        private static double GetContrastRatio(WpfColor foreground, WpfColor background)
+        {
+            var foregroundLuminance = GetRelativeLuminance(foreground);
+            var backgroundLuminance = GetRelativeLuminance(background);
+            var lighter = Math.Max(foregroundLuminance, backgroundLuminance);
+            var darker = Math.Min(foregroundLuminance, backgroundLuminance);
+            return (lighter + 0.05d) / (darker + 0.05d);
+        }
+
+        private static double GetRelativeLuminance(WpfColor color)
+        {
+            return (0.2126d * LinearizeSrgbChannel(color.R)) +
+                   (0.7152d * LinearizeSrgbChannel(color.G)) +
+                   (0.0722d * LinearizeSrgbChannel(color.B));
+        }
+
+        private static double LinearizeSrgbChannel(byte value)
+        {
+            var normalized = value / 255d;
+            return normalized <= 0.03928d
+                ? normalized / 12.92d
+                : Math.Pow((normalized + 0.055d) / 1.055d, 2.4d);
         }
 
         private static WpfBrush FreezeBrush(WpfColor color)

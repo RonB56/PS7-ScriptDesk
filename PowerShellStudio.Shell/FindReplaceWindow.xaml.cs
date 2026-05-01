@@ -21,6 +21,7 @@ namespace PowerShellStudio.Shell
 
             Loaded += (_, _) =>
             {
+                ContextHelp.ValidateWindowTopics(this);
                 FindTextBox.Focus();
                 FindTextBox.SelectAll();
             };

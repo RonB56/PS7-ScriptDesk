@@ -17,14 +17,14 @@ namespace PowerShellStudio.Shell.Help
 
         public ContextHelpWindow(HelpTopic topic)
         {
-            _topic = topic ?? HelpTopicCatalog.Get("App.Overview");
+            _topic = topic ?? HelpTopicCatalog.Get(HelpTopicCatalog.OverviewKey, "ContextHelpWindow constructor");
             InitializeComponent();
             RenderTopic();
         }
 
         public void ShowTopic(HelpTopic topic)
         {
-            _topic = topic ?? HelpTopicCatalog.Get("App.Overview");
+            _topic = topic ?? HelpTopicCatalog.Get(HelpTopicCatalog.OverviewKey, "ContextHelpWindow.ShowTopic");
             RenderTopic();
         }
 

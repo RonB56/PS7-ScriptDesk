@@ -60,6 +60,8 @@
     <!-- Existing keys retained for the rest of the shell/editor -->
     <SolidColorBrush x:Key="Theme.Editor.Background" Color="#012456"/>
     <SolidColorBrush x:Key="Theme.Editor.Foreground" Color="#EEEDF0"/>
+    <SolidColorBrush x:Key="Theme.Editor.SelectionBackground" Color="#0F4C81"/>
+    <SolidColorBrush x:Key="Theme.Editor.CurrentLineBackground" Color="#0A2F6A"/>
     <SolidColorBrush x:Key="Theme.Editor.LineHighlight" Color="#0A2F6A"/>
     <SolidColorBrush x:Key="Theme.Editor.LineNumber" Color="#7FA0C0"/>
 

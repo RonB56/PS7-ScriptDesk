@@ -1,21 +1,44 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PowerShellStudio.Application.Diagnostics;
 
 namespace PowerShellStudio.Shell.Help
 {
     public static class HelpTopicCatalog
     {
-        private static readonly IReadOnlyDictionary<string, HelpTopic> Topics = BuildTopics();
+        public const string OverviewKey = "App.Overview";
 
-        public static HelpTopic Get(string? key)
+        private static readonly IReadOnlyDictionary<string, HelpTopic> Topics = BuildTopics();
+        private static readonly HashSet<string> LoggedMissingKeys = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> LoggedBrokenRelationships = new(StringComparer.OrdinalIgnoreCase);
+
+        static HelpTopicCatalog()
         {
-            if (!string.IsNullOrWhiteSpace(key) && Topics.TryGetValue(key, out var topic))
+            ValidateTopicRelationships();
+        }
+
+        public static bool TryGet(string? key, out HelpTopic topic)
+        {
+            if (!string.IsNullOrWhiteSpace(key) && Topics.TryGetValue(key, out var resolvedTopic))
+            {
+                topic = resolvedTopic;
+                return true;
+            }
+
+            topic = Topics[OverviewKey];
+            return false;
+        }
+
+        public static HelpTopic Get(string? key, string? source = null)
+        {
+            if (TryGet(key, out var topic))
             {
                 return topic;
             }
 
-            return Topics["App.Overview"];
+            LogMissingKey(key, source);
+            return CreateMissingTopic(key);
         }
 
         public static IReadOnlyList<HelpTopic> GetRelatedTopics(HelpTopic topic)
@@ -44,6 +67,28 @@ namespace PowerShellStudio.Shell.Help
                 .ToArray();
         }
 
+        public static IReadOnlyList<string> ValidateKeys(IEnumerable<string>? keys, string source)
+        {
+            if (keys is null)
+            {
+                return Array.Empty<string>();
+            }
+
+            var missingKeys = keys
+                .Where(static key => !string.IsNullOrWhiteSpace(key))
+                .Select(static key => key.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(static key => !Topics.ContainsKey(key))
+                .ToArray();
+
+            foreach (var key in missingKeys)
+            {
+                LogMissingKey(key, source);
+            }
+
+            return missingKeys;
+        }
+
         private static IReadOnlyDictionary<string, HelpTopic> BuildTopics()
         {
             var topics = new Dictionary<string, HelpTopic>(StringComparer.OrdinalIgnoreCase)
@@ -51,32 +96,33 @@ namespace PowerShellStudio.Shell.Help
                 ["App.Overview"] = Topic(
                     "App.Overview",
                     "PowerShellStudio help overview",
-                    "This app is a Windows-only WPF PowerShell editor with a shared terminal, file tabs, workspace explorer, and debugger tools.",
-                    "Use this overview when you want to understand how the main parts fit together before you start editing or debugging.",
-                    "The app is already useful, but some advanced behaviors still depend on the current implementation of the PowerShell host and debugger rather than a fully mature commercial IDE engine.",
+                    "PowerShellStudio is a Windows-only WPF PowerShell editor and live ConPTY terminal host with workspace browsing, diagnostics, runtime discovery, metadata-backed IntelliSense, and breakpoint-driven debugging.",
+                    "Use this overview when you want the current app-level workflow before drilling into a specific panel or command.",
+                    "The app keeps one shared interactive PowerShell session for terminal work, Run, and Run Selection. Session state carries forward until you interrupt or reset that console.",
                     Section("Suggested first workflow", true,
-                        "Pick or confirm the PowerShell 7 runtime in the Explorer pane.",
-                        "Open a folder if you want a workspace tree, or open a single script file if you just want to edit one file.",
-                        "Use the Editor to write or change a script.",
-                        "Use Run to send the whole script into the shared terminal session, or Run Selection to send only highlighted text.",
-                        "Use Interrupt to stop the current command while keeping the terminal alive.",
-                        "Use Debug when you want breakpoint-based execution instead of a plain run."),
+                        "Wait for runtime discovery to finish, then confirm the selected PowerShell runtime in the Explorer pane.",
+                        "Open a folder if you want workspace navigation, or open one file if you only need a single script tab.",
+                        "Edit in the AvalonEdit editor and watch the diagnostics panel and footer update as you type.",
+                        "Use Ctrl+Space for manual completion and watch the metadata status badge if command metadata is still warming up.",
+                        "Use Run to send the whole visible editor buffer to the shared live console, or Run Selection to send only highlighted text in the current scope.",
+                        "Use Interrupt for Ctrl+C behavior or Reset Console when you need a fresh interactive session.",
+                        "Use Debug when you want breakpoint pauses, stepping, variables, and call stack inspection."),
                     Section("Deep help discovery", false,
-                        "Hover for quick help almost anywhere in the shell.",
-                        "Press F1 while a control has focus to open detailed help for that control or area.",
+                        "Hover many controls to see quick help.",
+                        "Press F1 for focused help. In the editor, F1 first tries command quick info at the caret and falls back to editor help when no quick-info topic is available.",
                         "Right-click many controls and choose 'What does this do?' for context help.",
-                        "Use Help > Context Help or the toolbar Help button if you prefer a visible command."),
+                        "Use Help > Context Help or the toolbar Help button if you prefer an explicit command."),
                     Section("Main areas", false,
                         "Explorer: runtime picker, workspace filter, workspace tree, and the open-tabs list.",
-                        "Editor: tab strip, code editor, syntax messages, and document footer.",
-                        "Console: shared live terminal output plus a command entry box.",
+                        "Editor: tab strip, document summary, code editor, diagnostics panel, and document footer.",
+                        "Console: embedded xterm.js surface backed by a real PowerShell process through Windows ConPTY.",
                         "Debug: variables, call stack, and breakpoint management when the debug panel is shown."),
                     Section("Important behavior notes", false,
-                        "Run and Run Selection use the same shared terminal session, so state can carry forward between commands.",
-                        "Interrupt stops the current command; Reset Console creates a fresh terminal session.",
-                        "Debug can use a temporary snapshot when the current tab has unsaved changes or no file path yet.",
-                        "Syntax help reflects the current parser and editor pipeline, so it is meant to describe the app as it behaves today, not how a future version might behave."),
-                    related: new[] { "Explorer.Area", "Editor.Area", "Console.Area", "Debug.Area" }),
+                        "Run and Run Selection do not require clean diagnostics. Diagnostics are advisory unless a different command explicitly blocks execution.",
+                        "If a saved tab no longer matches the file on disk, Run and Debug use the visible editor content instead of silently executing stale disk content.",
+                        "PowerShell command metadata loads in the background per runtime and can be refreshed or deleted from the Run menu.",
+                        "There is no dedicated Settings dialog today. Layout, theme, zoom, selected runtime, reopened tabs, workspace path, and context-help enablement are persisted automatically."),
+                    related: new[] { "Explorer.Area", "Editor.Area", "Console.Area", "Debug.Area", "Editor.Metadata", "App.Settings", "Help.Troubleshooting", "Help.Packaging" }),
 
                 ["Menu.File"] = Topic(
                     "Menu.File",
@@ -120,26 +166,28 @@ namespace PowerShellStudio.Shell.Help
                 ["Command.OpenFile"] = Topic(
                     "Command.OpenFile",
                     "Open File",
-                    "Opens an existing script or text file into a tab.",
-                    "Use it when you want to work on a file from disk without opening an entire workspace folder.",
-                    "The app opens the file in a tab; it does not automatically add sibling files unless you also open a workspace folder.",
+                    "Opens an existing file into an editor tab.",
+                    "Use it when you want to work on one file from disk without loading a workspace folder.",
+                    "The Open dialog is filtered to `.ps1`, `.txt`, and all files. Drag-and-drop can also open other readable text-like files, but opening one file does not automatically load sibling files into the workspace tree.",
                     Section("Shortcut", false, "Ctrl+O"),
                     Section("Related behavior", false,
-                        "You can also drag supported files onto the editor to open them.",
+                        "If the file is already open, the app switches to that existing tab instead of opening a duplicate.",
+                        "You can also drag supported files onto the editor surface to open them.",
                         "The workspace explorer can open files by double-clicking them in the tree."),
                     related: new[] { "Editor.Surface", "Explorer.WorkspaceTree", "Editor.DragDrop" }),
 
                 ["Command.OpenFolder"] = Topic(
                     "Command.OpenFolder",
                     "Open Folder / Workspace",
-                    "Loads a folder into the workspace explorer so you can browse files and folders inside the app.",
-                    "Use it when you want project-style navigation instead of opening one file at a time.",
-                    "The workspace tree is designed to load quickly at the top level and then expand deeper as you open folders.",
+                    "Loads a folder into the workspace explorer so you can browse it inside the app.",
+                    "Use it when you want project-style navigation, a workspace tree, and a stable startup directory for the shared console.",
+                    "Workspace loading is file-system browsing, not project parsing. The tree loads top-level items first and expands child folders on demand.",
                     Section("Shortcut", false, "Ctrl+Shift+O"),
                     Section("What to expect", false,
                         "Top-level entries appear first.",
                         "Subfolders load as you expand them.",
-                        "The workspace filter helps narrow what you are looking at."),
+                        "The workspace filter narrows the already loaded workspace view instead of rescanning the whole drive on each keystroke.",
+                        "The workspace path becomes the preferred startup directory for the shared console when possible."),
                     related: new[] { "Explorer.Area", "Explorer.WorkspaceTree", "Explorer.WorkspaceFilter" }),
 
                 ["Command.Save"] = Topic(
@@ -147,11 +195,12 @@ namespace PowerShellStudio.Shell.Help
                     "Save",
                     "Writes the active tab back to disk.",
                     "Use it after editing a file you want to keep.",
-                    "If the tab has never been saved before, Save will behave like Save As because there is no existing file path yet.",
+                    "If the tab has never been saved before, Save routes to Save As because there is no existing file path yet.",
                     Section("Shortcut", false, "Ctrl+S"),
                     Section("Related topics", false,
                         "Use Save As when you want a new file name or location.",
-                        "Debugging unsaved changes may use a temporary snapshot if you start debugging before saving."),
+                        "If a clean tab's disk file changed behind the editor, the tab is marked stale so Run and Debug use the visible editor content instead of stale disk text.",
+                        "Save failures are surfaced in the status/output areas and logged."),
                     related: new[] { "Command.SaveAs", "Command.StartDebug" }),
 
                 ["Command.SaveAs"] = Topic(
@@ -159,7 +208,7 @@ namespace PowerShellStudio.Shell.Help
                     "Save As",
                     "Saves the active document under a new path.",
                     "Use it for new tabs, copies, renamed files, or alternate versions.",
-                    "This does not automatically save your old file under the new name too; the tab is moved to the chosen path.",
+                    "If you omit a file extension, the app adds `.ps1`. After a successful Save As, the active tab is rebound to the new path.",
                     Section("Shortcut", false, "Ctrl+Shift+S"),
                     related: new[] { "Command.Save", "Editor.ActiveDocument" }),
 
@@ -237,6 +286,22 @@ namespace PowerShellStudio.Shell.Help
                     "Leaving it off gives a broader search.",
                     related: new[] { "FindReplace.FindText" }),
 
+                ["FindReplace.WholeWord"] = Topic(
+                    "FindReplace.WholeWord",
+                    "Whole word",
+                    "Limits matches to complete words instead of partial text fragments.",
+                    "Use it when you want `Get-Item` to match `Get-Item` but not `Get-ItemProperty`.",
+                    "Whole-word matching narrows the result set and can skip text that only contains the search term as part of a larger token.",
+                    related: new[] { "FindReplace.FindText" }),
+
+                ["FindReplace.Regex"] = Topic(
+                    "FindReplace.Regex",
+                    "Use regex",
+                    "Treats the Find text as a .NET regular expression.",
+                    "Use it when you need pattern-based searching instead of plain text searching.",
+                    "Regex search is more powerful, but invalid or overly broad patterns can produce confusing matches. Turn it off when you only need literal text matching.",
+                    related: new[] { "FindReplace.FindText" }),
+
                 ["FindReplace.FindNext"] = Topic(
                     "FindReplace.FindNext",
                     "Find Next",
@@ -297,9 +362,9 @@ namespace PowerShellStudio.Shell.Help
                 ["Command.ClearOutput"] = Topic(
                     "Command.ClearOutput",
                     "Clear Output",
-                    "Clears the visible console/output area.",
+                    "Clears the visible console area.",
                     "Use it when the console becomes cluttered and you want a cleaner view before the next run.",
-                    "Clearing output does not erase your script tabs or delete files. It only clears visible terminal/output text.",
+                    "If a live PowerShell session is running, the app sends `cls` through that session so PowerShell and PSReadLine redraw their own prompt cleanly. If no session exists yet, the app falls back to a display-only clear.",
                     related: new[] { "Console.Output", "Console.Area" }),
 
                 ["View.Menu"] = Topic(
@@ -358,35 +423,37 @@ namespace PowerShellStudio.Shell.Help
                 ["Command.RunScript"] = Topic(
                     "Command.RunScript",
                     "Run Script",
-                    "Runs the active document in the shared terminal session.",
-                    "Use it when you want to send the whole script into the live PowerShell session.",
-                    "Run uses the shared terminal. Variables, location changes, and imports can carry into later commands. If enabled breakpoints exist, the shell may start a debug session instead of a plain run.",
+                    "Sends the active editor buffer to the shared live PowerShell console.",
+                    "Use it when you want the whole visible script to execute inside the app's current interactive PowerShell session.",
+                    "Run shares state with the terminal. Variables, location changes, imports, and functions can carry into later commands. While execution is active, Run stays disabled so the same session is not dispatched twice at once.",
                     Section("Shortcut", false, "Ctrl+F5"),
                     Section("Expected result", false,
-                        "Script output appears in the console/output pane.",
-                        "The terminal session stays alive after the run unless the script itself exits it."),
-                    related: new[] { "Command.RunSelection", "Console.Area", "Command.StartDebug" }),
+                        "PowerShell output appears in the embedded console pane.",
+                        "If the current saved `.ps1` exactly matches the visible editor text, the run can preserve that file identity. Otherwise the app runs the visible buffer from a temporary snapshot so it never executes stale disk content.",
+                        "The shared terminal session stays alive after the run unless the script itself exits it."),
+                    related: new[] { "Command.RunSelection", "Console.Area", "Command.StartDebug", "Help.Troubleshooting" }),
 
                 ["Command.RunSelection"] = Topic(
                     "Command.RunSelection",
                     "Run Selection",
                     "Runs only the currently highlighted editor text in the shared terminal session.",
                     "Use it for quick experiments, one-off commands, or executing only part of a script.",
-                    "Because it uses the shared terminal, selected code can depend on variables or functions already defined earlier in the same session.",
+                    "Run Selection executes in the current session scope. The selected code can depend on variables, functions, modules, and location changes already present in that shared session.",
                     Section("Shortcut", false, "F8"),
                     Section("Workflow", true,
                         "Highlight the code you want to run.",
                         "Choose Run Selection.",
                         "Watch the console for output and errors.",
-                        "Clear or reset the console if the shared state becomes confusing."),
-                    related: new[] { "Command.RunScript", "Console.Area", "Editor.Surface" }),
+                        "Clear or reset the console if the shared state becomes confusing.",
+                        "If nothing is selected, the command does not run and the status bar tells you to select script text first."),
+                    related: new[] { "Command.RunScript", "Console.Area", "Editor.Surface", "Help.Troubleshooting" }),
 
                 ["Command.Interrupt"] = Topic(
                     "Command.Interrupt",
                     "Interrupt",
                     "Stops the current command or script without throwing away the terminal session.",
                     "Use it when a run hangs, takes too long, or you started the wrong command.",
-                    "Interrupt is different from Reset Console. Interrupt tries to keep the current session alive so you can continue using it.",
+                    "Interrupt sends Ctrl+C into the live terminal session. Unlike Reset Console, it tries to preserve the session so you can keep using the same runtime, variables, and working directory afterward.",
                     Section("Best use", false,
                         "Long loops",
                         "Accidental full-script runs",
@@ -477,19 +544,22 @@ namespace PowerShellStudio.Shell.Help
                 ["Help.Context"] = Topic(
                     "Help.Context",
                     "Context Help",
-                    "Opens deep help for the control or area that currently has focus.",
-                    "Use it when quick hover help is not enough.",
-                    "If the current focus does not map cleanly to a help topic, the app falls back to the overall help overview.",
-                    Section("Shortcut", false, "F1"),
+                    "Opens detailed help for the focused control or area.",
+                    "Use it when quick hover help is not enough or you want to verify how the current control maps to the app's real behavior.",
+                    "If a focused control does not have a matching help topic, the app now shows a visible fallback topic that includes the missing help key and logs the problem instead of failing silently.",
+                    Section("Shortcut and editor behavior", false,
+                        "F1 opens context help for most controls.",
+                        "When the editor has focus, F1 first tries PowerShell quick info at the caret.",
+                        "If the editor caret does not resolve to quick info, F1 falls back to the editor help topic instead of doing nothing."),
                     related: new[] { "App.Overview" }),
 
                 ["Help.About"] = Topic(
                     "Help.About",
                     "About",
-                    "The current About command writes a brief version/identity note into the shell status and output areas.",
-                    "Use it when you want a lightweight confirmation of the running app version without opening full help.",
-                    "About is intentionally brief today. Use the full help overview for actual workflow guidance.",
-                    related: new[] { "App.Overview" }),
+                    "The current About command writes a brief version and identity note into the shell status and output areas.",
+                    "Use it when you want to confirm the running build without opening a separate About dialog.",
+                    "There is no dedicated About window or in-app package/update screen today. Packaging details live in the repo's Windows packaging project, not in a runtime UI.",
+                    related: new[] { "App.Overview", "Help.Packaging", "App.Settings" }),
 
                 ["Explorer.Area"] = Topic(
                     "Explorer.Area",
@@ -508,21 +578,27 @@ namespace PowerShellStudio.Shell.Help
                     "Runtime.Area",
                     "PowerShell Runtime section",
                     "This section shows the preferred runtime, the selected runtime, the executable path, and the discovered runtime list.",
-                    "Use it when you want to confirm or change which PowerShell the app uses.",
-                    "The primary target is the most current installed PowerShell 7.x. Windows PowerShell 5.1 is secondary only.",
+                    "Use it when you want to confirm or change which PowerShell the editor, terminal, Run, and debugging features should use.",
+                    "The app prefers the highest-priority PowerShell 7.x runtime it can validate. Windows PowerShell 5.1 is discovered as a secondary fallback for compatibility scenarios.",
                     Section("Recommended use", true,
                         "Refresh runtimes if the list looks stale.",
                         "Prefer the newest PowerShell 7.x entry for normal work.",
-                        "Check the executable path if you are not sure which host you selected."),
-                    related: new[] { "Runtime.Refresh", "Runtime.Path", "Runtime.List" }),
+                        "Check the executable path if you are not sure which host you selected.",
+                        "If no runtime is detected, Run, Reset Console, and command execution stay unavailable until discovery succeeds."),
+                    Section("How discovery works today", false,
+                        "The app probes known `Program Files\\PowerShell` locations first.",
+                        "On Windows it also checks PowerShell registry entries, `PATH`, and `where.exe` results when needed.",
+                        "Windows PowerShell system paths are added as fallback candidates.",
+                        "Candidate metadata is validated before a runtime is accepted."),
+                    related: new[] { "Runtime.Refresh", "Runtime.Path", "Runtime.List", "Editor.Metadata", "Help.Troubleshooting" }),
 
                 ["Runtime.Refresh"] = Topic(
                     "Runtime.Refresh",
                     "Refresh runtimes",
                     "Rescans the machine for installed PowerShell runtimes.",
                     "Use it after installing or removing a PowerShell version, or if the runtime list looks wrong.",
-                    "Refreshing the list does not automatically rewrite your script tabs or their content.",
-                    related: new[] { "Runtime.Area", "Runtime.List" }),
+                    "Refresh temporarily disables runtime-changing actions while discovery is in progress. It does not modify script tabs, console history, or file contents.",
+                    related: new[] { "Runtime.Area", "Runtime.List", "Help.Troubleshooting" }),
 
                 ["Runtime.Path"] = Topic(
                     "Runtime.Path",
@@ -536,9 +612,9 @@ namespace PowerShellStudio.Shell.Help
                     "Runtime.List",
                     "Detected runtimes list",
                     "Lists the PowerShell runtimes the app found on the machine.",
-                    "Use it to choose the runtime you want the shell to prefer.",
-                    "Primary recommendation: choose the newest PowerShell 7.x entry unless you specifically need a legacy compatibility test.",
-                    related: new[] { "Runtime.Area", "Runtime.Path" }),
+                    "Use it to choose the runtime you want the editor and live console to use next.",
+                    "Changing the selection affects future console startup and editor metadata work for that runtime. If the current console is restarted, it comes back under the newly selected runtime.",
+                    related: new[] { "Runtime.Area", "Runtime.Path", "Editor.Metadata" }),
 
                 ["Explorer.WorkspaceSummary"] = Topic(
                     "Explorer.WorkspaceSummary",
@@ -598,16 +674,16 @@ namespace PowerShellStudio.Shell.Help
                 ["Editor.Area"] = Topic(
                     "Editor.Area",
                     "Editor area",
-                    "This is the main code-writing surface, including the tab strip, document header, editor, syntax panel, and footer.",
-                    "Use it for writing, reading, selecting, and breakpointing script code.",
-                    "The editor works together with the shared terminal and debugger, so actions here can affect console state and debug behavior.",
+                    "This is the main code-writing surface, including the tab strip, document header, editor, diagnostics panel, and footer.",
+                    "Use it for writing, reading, selecting, navigating, and breakpointing PowerShell scripts.",
+                    "The editor is separate from the terminal. Editor IntelliSense and quick info stay in the editor and are deliberately suppressed when terminal input becomes active.",
                     Section("Key parts", false,
                         "Tab strip for multiple files",
                         "Document summary header",
                         "AvalonEdit code surface with line numbers",
-                        "Syntax message panel",
+                        "Diagnostics panel",
                         "Footer with caret, line, selection, breakpoint, and syntax summary text"),
-                    related: new[] { "Editor.TabStrip", "Editor.Surface", "Editor.SyntaxPanel", "Editor.Footer" }),
+                    related: new[] { "Editor.TabStrip", "Editor.Surface", "Editor.SyntaxPanel", "Editor.Footer", "Editor.Metadata", "Help.Troubleshooting" }),
 
                 ["Editor.ActiveDocument"] = Topic(
                     "Editor.ActiveDocument",
@@ -636,13 +712,15 @@ namespace PowerShellStudio.Shell.Help
                 ["Editor.Surface"] = Topic(
                     "Editor.Surface",
                     "Editor surface, line numbers, and breakpoint gutter",
-                    "This is where you type code, select text, use find/replace, and set breakpoints.",
-                    "Use it for everyday script editing.",
-                    "The left gutter includes line numbers and the breakpoint click zone. Running selected text uses the shared terminal session, not an isolated sandbox.",
+                    "This is where you type code, select text, use find/replace, inspect diagnostics, and set breakpoints.",
+                    "Use it for everyday script editing and PowerShell authoring.",
+                    "The left gutter includes line numbers and the breakpoint click zone. The editor supports syntax coloring, command quick info, metadata-backed completion, and drag-and-drop opening for supported files.",
                     Section("Helpful gestures", false,
                         "Click in the left gutter to toggle a breakpoint on that line.",
                         "Press F9 to toggle a breakpoint on the current line.",
                         "Press Ctrl+Space for IntelliSense suggestions when available.",
+                        "Command and parameter completion come from cached and live PowerShell metadata. If metadata is still loading or failed, completion can be reduced until the background metadata work finishes.",
+                        "Press F1 on a command or parameter for quick info at the caret, with fallback to editor help when no quick info is available.",
                         "Use Ctrl+mouse wheel to zoom the editor."),
                     Section("Context menu", false,
                         "Run Selection",
@@ -650,19 +728,20 @@ namespace PowerShellStudio.Shell.Help
                         "Find",
                         "Replace",
                         "What does this do?"),
-                    related: new[] { "Command.RunSelection", "Command.ToggleBreakpoint", "Command.Find", "Command.Replace", "View.Zoom" }),
+                    related: new[] { "Command.RunSelection", "Command.ToggleBreakpoint", "Command.Find", "Command.Replace", "View.Zoom", "Editor.Metadata", "Editor.DragDrop" }),
 
                 ["Editor.SyntaxPanel"] = Topic(
                     "Editor.SyntaxPanel",
-                    "Syntax message panel",
-                    "Shows parser-reported syntax errors for the current tab.",
-                    "Use it when the editor tells you something is structurally wrong with the script.",
-                    "This panel reflects the app's current syntax-diagnostics pipeline. It is there to help you find real issues quickly, but it is not the same thing as executing the script.",
+                    "Diagnostics panel",
+                    "Shows parser and authoring diagnostics for the current tab.",
+                    "Use it when the editor highlights syntax or PowerShell-authoring issues such as parse errors, suspicious commands, or invalid parameters.",
+                    "Diagnostics are advisory. Incomplete syntax such as `if (` will surface here, but the presence of diagnostics does not automatically disable Run or Run Selection.",
                     Section("How to read it", false,
-                        "The summary line tells you whether syntax looks okay or how many errors were found.",
+                        "The summary line tells you whether diagnostics look okay or how many issues were found.",
                         "Each listed message gives line/column context when available.",
-                        "Fix the syntax in the editor and then watch the panel update."),
-                    related: new[] { "Editor.Footer", "Editor.Surface" }),
+                        "Click a diagnostic row to navigate to that location in the active editor.",
+                        "Fix the script and watch the panel update after the background parse completes."),
+                    related: new[] { "Editor.Footer", "Editor.Surface", "Help.Troubleshooting" }),
 
                 ["Editor.Footer"] = Topic(
                     "Editor.Footer",
@@ -691,52 +770,52 @@ namespace PowerShellStudio.Shell.Help
                 ["Console.Area"] = Topic(
                     "Console.Area",
                     "Console area",
-                    "The console hosts a real PowerShell terminal session through Windows ConPTY.",
-                    "Use it when you want live command execution, script output, or a persistent PowerShell session shared with Run and Run Selection.",
-                    "This is a real session, so variables, location changes, modules, and profiles can affect later commands.",
+                    "The console hosts a real interactive PowerShell terminal session through Windows ConPTY and xterm.js.",
+                    "Use it when you want live command execution, script output, prompt-driven interaction, or the shared session used by Run and Run Selection.",
+                    "This is not an editor-owned command box. You type directly into the embedded terminal, and the prompt is produced by PowerShell/PSReadLine. Editor IntelliSense does not attach to terminal typing.",
                     Section("Main parts", false,
-                        "Output display",
+                        "Embedded terminal surface for both output and direct typing",
+                        "Session status text",
                         "Reset Console button",
-                        "Prompt label",
-                        "Command entry box",
-                        "Execute button"),
-                    related: new[] { "Console.Output", "Console.Input", "Console.Execute", "Console.Reset", "Command.RunScript" }),
+                        "Shared session state used by Run, Run Selection, and manual commands"),
+                    related: new[] { "Console.Output", "Console.Reset", "Command.RunScript", "Command.RunSelection", "Help.Troubleshooting" }),
 
                 ["Console.Output"] = Topic(
                     "Console.Output",
-                    "Console output display",
-                    "Shows script output, terminal text, and debugger-related output routed into the console view.",
-                    "Use it to read what your commands actually produced.",
-                    "This is a read-only display area. Type commands in the command input box below instead.",
-                    related: new[] { "Console.Input", "Command.ClearOutput" }),
+                    "Interactive terminal surface",
+                    "Shows script output, prompt text, manual commands, and debugger-related terminal output inside the embedded console.",
+                    "Use it to read results and to type directly into the live PowerShell session.",
+                    "The terminal surface is interactive. If the prompt or cursor looks confusing after a command, Interrupt or Reset Console can recover the session more reliably than editing the visible text.",
+                    related: new[] { "Command.ClearOutput", "Console.Reset", "Help.Troubleshooting" }),
 
                 ["Console.Reset"] = Topic(
                     "Console.Reset",
                     "Reset Console",
                     "Rebuilds the live terminal session.",
                     "Use it when the session state becomes confusing or you want a fresh PowerShell host.",
-                    "Reset Console is stronger than Interrupt. Reset throws away the old session state and starts again.",
+                    "Reset Console is stronger than Interrupt. It discards the old interactive session state and starts a new PowerShell process under the currently selected runtime.",
                     related: new[] { "Command.Interrupt", "Console.Area" }),
 
-                ["Console.Input"] = Topic(
-                    "Console.Input",
-                    "Console command box",
-                    "This is where you type ad-hoc PowerShell commands for the shared terminal session.",
-                    "Use it for quick one-line commands, testing, or follow-up commands after a script run.",
-                    "Because the console is shared, the result can depend on what you ran earlier.",
-                    Section("Tips", false,
-                        "Press Enter to execute.",
-                        "Use the Execute button if you prefer the mouse.",
-                        "Use Reset Console if old session state becomes confusing."),
-                    related: new[] { "Console.Execute", "Console.Area" }),
-
-                ["Console.Execute"] = Topic(
-                    "Console.Execute",
-                    "Execute command",
-                    "Sends the current console input to the live terminal session.",
-                    "Use it instead of pressing Enter if you prefer a visible button.",
-                    "It runs whatever is currently in the console command box, not the editor tab.",
-                    related: new[] { "Console.Input", "Command.RunScript" }),
+                ["Editor.Metadata"] = Topic(
+                    "Editor.Metadata",
+                    "PowerShell editor metadata and IntelliSense cache",
+                    "PowerShellStudio loads command, parameter, syntax, and help metadata in the background for the selected runtime and saves reusable caches for later launches.",
+                    "Use this help when completion looks incomplete, the metadata badge is visible, or you are using the Run-menu metadata refresh and cache-delete commands.",
+                    "Metadata problems reduce IntelliSense quality, but they do not stop the visible editor text from running. Missing or failed metadata states are logged so they can be diagnosed later.",
+                    Section("Metadata states you can see", false,
+                        "Loading or scheduled: the app is still preparing metadata in the background.",
+                        "Ready: a healthy full cache is available for the current runtime.",
+                        "Warning or failed refresh: the app kept using an older healthy cache while a rebuild failed.",
+                        "Failed: no healthy cache could be prepared for the current runtime, so completions may be limited."),
+                    Section("What the Run menu metadata commands do", false,
+                        "Refresh PowerShell Editor Metadata starts a background rebuild for the selected runtime.",
+                        "Delete Current Runtime Metadata Cache removes the saved cache for the selected runtime, then rebuilds it in the background.",
+                        "Delete All PowerShell Metadata Caches removes every saved metadata cache so each runtime will rebuild when used again."),
+                    Section("Troubleshooting hints", true,
+                        "If completion is sparse right after switching runtimes, wait for the metadata badge to clear or finish rebuilding.",
+                        "If metadata failed, use the cache refresh commands and check the app log for `EditorMetadata` and `EditorCompletion` entries.",
+                        "If a runtime never reaches a healthy cache, verify that the selected PowerShell executable starts correctly outside the app."),
+                    related: new[] { "Editor.Surface", "Runtime.Area", "Runtime.List", "Help.Troubleshooting" }),
 
                 ["Debug.Area"] = Topic(
                     "Debug.Area",
@@ -777,6 +856,61 @@ namespace PowerShellStudio.Shell.Help
                     "Use it when you want to clean up old breakpoints quickly.",
                     "This removes the breakpoint from the tracked list; it does not save or reload files.",
                     related: new[] { "Debug.Breakpoints", "Command.ToggleBreakpoint" }),
+
+                ["App.Settings"] = Topic(
+                    "App.Settings",
+                    "Persisted settings and layout state",
+                    "PowerShellStudio does not currently expose a dedicated Settings window. Instead, it persists core shell state automatically between sessions.",
+                    "Use this topic when you want to know what the app remembers on exit and restores on the next launch.",
+                    "Because there is no settings dialog today, changing these values happens through normal UI actions such as resizing panes, changing theme or zoom, choosing a runtime, and toggling context help.",
+                    Section("What is persisted today", false,
+                        "Window position, size, and maximized state",
+                        "Explorer visibility and splitter sizes",
+                        "Console and explorer section heights",
+                        "Last workspace folder",
+                        "Selected runtime path",
+                        "Reopened saved-file tabs and selected tab",
+                        "Recent file paths",
+                        "Theme, editor zoom level, and context-help enabled state"),
+                    related: new[] { "View.Menu", "Help.About", "App.Overview" }),
+
+                ["Help.Troubleshooting"] = Topic(
+                    "Help.Troubleshooting",
+                    "Troubleshooting",
+                    "Use these checks when help, completion, diagnostics, runtime discovery, file operations, or script execution do not behave as expected.",
+                    "Open this topic when a feature seems idle, unavailable, or inconsistent with the current UI state.",
+                    "PowerShellStudio writes detailed diagnostics to the app log. Most help and metadata failures should remain visible and logged instead of failing silently.",
+                    Section("Metadata failed or completion is weak", true,
+                        "Watch the metadata status badge or Run-menu metadata commands for the current runtime state.",
+                        "If completion is sparse right after startup or a runtime switch, wait for the background metadata build to finish.",
+                        "If metadata failed, refresh or delete the cache and check the app log for `EditorMetadata` and `EditorCompletion` entries."),
+                    Section("Script appears not to run or Run is disabled", true,
+                        "Confirm a runtime is selected and runtime discovery is not still refreshing.",
+                        "Run and Run Selection stay disabled while another execution is active, while runtime discovery is active, or while a debug session is active.",
+                        "If nothing is selected, Run Selection does not dispatch and reports that status instead."),
+                    Section("Console prompt or cursor looks wrong", true,
+                        "Remember that the terminal is interactive and owns its own prompt.",
+                        "Use Interrupt if PowerShell is waiting for more input.",
+                        "Use Reset Console if the session state is confused or the prompt never recovers cleanly."),
+                    Section("Help topic missing, diagnostics absent, runtime missing, or file open/save failed", true,
+                        "A missing help topic now shows a visible fallback message with the missing key and logs the problem.",
+                        "If diagnostics do not appear, verify that a PowerShell runtime is available for syntax checking.",
+                        "If no runtime is found, refresh discovery and verify that `pwsh.exe` or Windows PowerShell exists on the machine.",
+                        "If open/save fails, read the status/output message first, then check file permissions, controlled-folder access, and whether the target path still exists."),
+                    Section("App log", false, AppLogger.CurrentLogPath),
+                    related: new[] { "Editor.Metadata", "Console.Area", "Runtime.Area", "Command.RunScript", "Command.RunSelection", "Help.Context" }),
+
+                ["Help.Packaging"] = Topic(
+                    "Help.Packaging",
+                    "Version and packaging",
+                    "The running shell version comes from the app assembly information, while Windows packaging details live in the repo's packaging project and manifest.",
+                    "Use this topic when you want to understand what the app exposes at runtime versus what only exists in the packaging/build configuration.",
+                    "The app does not currently expose an in-app update screen, Store workflow, or AppInstaller UI. Do not assume package-update behavior unless you verify it in the packaging project.",
+                    Section("Current runtime-facing behavior", false,
+                        "The About command writes a brief version note to the shell status/output areas.",
+                        "The status bar also shows the running version string.",
+                        "Packaging and signing are build-time concerns, not a live in-app settings page."),
+                    related: new[] { "Help.About", "Status.Version", "App.Overview" }),
 
                 ["Status.Version"] = StatusTopic(
                     "Status.Version",
@@ -844,6 +978,55 @@ namespace PowerShellStudio.Shell.Help
                 "Use it when you want a compact status readout without opening another panel.",
                 "Status-bar values are lightweight summaries, not full diagnostic reports.",
                 related: new[] { "Editor.Footer", "Console.Area" });
+        }
+
+        private static void ValidateTopicRelationships()
+        {
+            foreach (var topic in Topics.Values)
+            {
+                foreach (var relatedKey in topic.RelatedTopicKeys)
+                {
+                    if (Topics.ContainsKey(relatedKey))
+                    {
+                        continue;
+                    }
+
+                    var relationshipKey = $"{topic.Key}->{relatedKey}";
+                    if (LoggedBrokenRelationships.Add(relationshipKey))
+                    {
+                        AppLogger.Warning("Help", $"Help topic '{topic.Key}' references missing related topic '{relatedKey}'.");
+                    }
+                }
+            }
+        }
+
+        private static void LogMissingKey(string? key, string? source)
+        {
+            var normalizedKey = string.IsNullOrWhiteSpace(key) ? "(null or empty key)" : key.Trim();
+            if (LoggedMissingKeys.Add(normalizedKey))
+            {
+                AppLogger.Warning(
+                    "Help",
+                    $"Help topic key '{normalizedKey}' was requested but no topic exists. Source={source ?? "unknown"}. LogPath={AppLogger.CurrentLogPath}");
+            }
+        }
+
+        private static HelpTopic CreateMissingTopic(string? key)
+        {
+            var normalizedKey = string.IsNullOrWhiteSpace(key) ? "(null or empty key)" : key.Trim();
+            return Topic(
+                "Help.MissingTopic",
+                "Help Topic Not Found",
+                $"PowerShellStudio could not find help content for '{normalizedKey}'.",
+                "Use this message to confirm that the help command is wired, but the requested topic key is missing, stale, or not yet cataloged.",
+                "The app keeps running. The missing key was written to the app log so the help mapping can be corrected.",
+                Section("Requested topic key", false, normalizedKey),
+                Section("What to do next", true,
+                    "Open the main overview topic if you still need general workflow guidance.",
+                    "If this happens repeatedly for the same control, the help key or catalog entry needs to be fixed.",
+                    "Check the app log for the recorded missing-key warning."),
+                Section("App log", false, AppLogger.CurrentLogPath),
+                related: new[] { OverviewKey, "Help.Troubleshooting" });
         }
 
         private static HelpTopic Topic(

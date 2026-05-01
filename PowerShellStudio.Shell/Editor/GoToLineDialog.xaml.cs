@@ -25,6 +25,7 @@ namespace PowerShellStudio.Shell.Editor
 
         private void Window_Loaded(object sender, RoutedEventArgs e)
         {
+            ContextHelp.ValidateWindowTopics(this);
             LineNumberBox.Focus();
         }
 

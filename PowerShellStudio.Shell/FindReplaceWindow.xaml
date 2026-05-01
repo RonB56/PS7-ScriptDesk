@@ -41,12 +41,12 @@
                       VerticalAlignment="Center"
                       Content="_Whole word"
                       ToolTip="Match only complete words"
-                      help:ContextHelp.Key="FindReplace.MatchCase" />
+                      help:ContextHelp.Key="FindReplace.WholeWord" />
             <CheckBox x:Name="UseRegexCheckBox"
                       VerticalAlignment="Center"
                       Content="Use _regex"
                       ToolTip="Treat the search pattern as a .NET regular expression"
-                      help:ContextHelp.Key="FindReplace.MatchCase" />
+                      help:ContextHelp.Key="FindReplace.Regex" />
         </StackPanel>
 
         <!-- Status text -->
