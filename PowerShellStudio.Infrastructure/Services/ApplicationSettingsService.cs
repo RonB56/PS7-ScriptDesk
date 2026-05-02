@@ -38,8 +38,7 @@ namespace PowerShellStudio.Infrastructure.Services
                     return new ApplicationSettings();
                 }
 
-                var settings = JsonSerializer.Deserialize<ApplicationSettings>(json, SerializerOptions) ?? new ApplicationSettings();
-                return NormalizeSettings(settings);
+                return JsonSerializer.Deserialize<ApplicationSettings>(json, SerializerOptions) ?? new ApplicationSettings();
             }
             catch
             {
@@ -72,28 +71,6 @@ namespace PowerShellStudio.Infrastructure.Services
             }
 
             File.Move(temporaryFilePath, _settingsFilePath);
-        }
-
-        private static ApplicationSettings NormalizeSettings(ApplicationSettings settings)
-        {
-            ArgumentNullException.ThrowIfNull(settings);
-
-            if (!Enum.IsDefined(settings.EditorSdkMode))
-            {
-                settings.EditorSdkMode = EditorSdkMode.Disabled;
-            }
-
-            if (!Enum.IsDefined(settings.MetadataEngineMode))
-            {
-                settings.MetadataEngineMode = MetadataEngineMode.HelperProcessOnly;
-            }
-
-            if (!Enum.IsDefined(settings.CompletionEngineMode))
-            {
-                settings.CompletionEngineMode = CompletionEngineMode.ExistingOnly;
-            }
-
-            return settings;
         }
     }
 }
