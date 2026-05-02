@@ -51,5 +51,17 @@ namespace PowerShellStudio.Domain.Models
 
         /// <summary>Whether contextual help UI is enabled across the shell. Defaults to true.</summary>
         public bool IsContextHelpEnabled { get; set; } = true;
+
+        /// <summary>Overall SDK editor integration mode. Defaults to Disabled to preserve existing behavior.</summary>
+        public EditorSdkMode EditorSdkMode { get; set; } = EditorSdkMode.Disabled;
+
+        /// <summary>Metadata engine selection mode. Defaults to HelperProcessOnly to preserve existing behavior.</summary>
+        public MetadataEngineMode MetadataEngineMode { get; set; } = MetadataEngineMode.HelperProcessOnly;
+
+        /// <summary>Completion engine selection mode. Defaults to ExistingOnly to preserve existing behavior.</summary>
+        public CompletionEngineMode CompletionEngineMode { get; set; } = CompletionEngineMode.ExistingOnly;
+
+        /// <summary>Whether SDK-backed behavior should retain a safe fallback path. Defaults to true.</summary>
+        public bool PowerShellSdkFallbackEnabled { get; set; } = true;
     }
 }
