@@ -102,6 +102,10 @@
     </AppxManifest>
   </ItemGroup>
   <ItemGroup>
+    <None Include="Installer\Install.cmd" />
+    <None Include="Installer\Install.ps1" />
+  </ItemGroup>
+  <ItemGroup>
     <Content Include="Images\LargeTile.scale-100.png" />
     <Content Include="Images\LargeTile.scale-125.png" />
     <Content Include="Images\LargeTile.scale-150.png" />
@@ -162,4 +166,27 @@
   <ItemGroup>
     <ProjectReference Include="..\PowerShellStudio.Shell\PowerShellStudio.Shell.csproj" />
   </ItemGroup>
+  <Target Name="CopyCustomInstallerScripts" AfterTargets="Build">
+    <ItemGroup>
+      <GeneratedInstallerRoots Include="$(MSBuildProjectDirectory)\AppPackages\**\Add-AppDevPackage.ps1" />
+      <GeneratedInstallPs1Copies Include="@(GeneratedInstallerRoots)">
+        <Source>Installer\Install.ps1</Source>
+        <Destination>%(RootDir)%(Directory)Install.ps1</Destination>
+      </GeneratedInstallPs1Copies>
+      <GeneratedInstallCmdCopies Include="@(GeneratedInstallerRoots)">
+        <Source>Installer\Install.cmd</Source>
+        <Destination>%(RootDir)%(Directory)Install.cmd</Destination>
+      </GeneratedInstallCmdCopies>
+    </ItemGroup>
+    <Copy
+      SourceFiles="@(GeneratedInstallPs1Copies->'%(Source)')"
+      DestinationFiles="@(GeneratedInstallPs1Copies->'%(Destination)')"
+      SkipUnchangedFiles="true"
+      Condition="'@(GeneratedInstallerRoots)' != ''" />
+    <Copy
+      SourceFiles="@(GeneratedInstallCmdCopies->'%(Source)')"
+      DestinationFiles="@(GeneratedInstallCmdCopies->'%(Destination)')"
+      SkipUnchangedFiles="true"
+      Condition="'@(GeneratedInstallerRoots)' != ''" />
+  </Target>
 </Project>

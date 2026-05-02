@@ -125,6 +125,7 @@ namespace PowerShellStudio.Shell.Editor
                 var validation = EditorMetadataSnapshotValidator.Validate(snapshot);
                 if (!validation.IsHealthy)
                 {
+                    MetadataPerformanceLog.AppendLine(performanceLogPath, $"Final merged snapshot health validation: FAILED. {validation.Message} {EditorMetadataSnapshotValidator.Describe(validation.Health)}");
                     WriteStatus(new EditorMetadataBuilderStatusMessage
                     {
                         Phase = EditorMetadataWarmupPhase.Failed,
@@ -137,6 +138,8 @@ namespace PowerShellStudio.Shell.Editor
                         $"Metadata build failed health validation for runtime '{normalizedRuntimePath}'. {validation.Message} {EditorMetadataSnapshotValidator.Describe(validation.Health)}");
                     return 3;
                 }
+
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Final merged snapshot health validation: PASSED. {EditorMetadataSnapshotValidator.Describe(validation.Health)}");
 
                 var saveStopwatch = Stopwatch.StartNew();
                 var moduleFingerprintHash = EditorMetadataCacheStore.ComputeModuleFingerprintHash(snapshotResult.ModuleFingerprint);
@@ -1121,11 +1124,11 @@ try {
         }
 
         [void]$distinctCommandRecords.Add([PSCustomObject]@{
-            n = [string]$command.Name
-            t = [string]$command.CommandType
-            m = [string]$command.ModuleName
-            s = $sourceName
-            mp = $modulePath
+            Name = [string]$command.Name
+            CommandType = [string]$command.CommandType
+            ModuleName = [string]$command.ModuleName
+            Source = $sourceName
+            ModulePath = $modulePath
         })
     }
 
@@ -1168,7 +1171,7 @@ try {
         }
     }
 
-    $moduleGroups = @($distinctCommandRecords | Group-Object -Property m | Sort-Object -Property Count -Descending)
+    $moduleGroups = @($distinctCommandRecords | Group-Object -Property ModuleName | Sort-Object -Property Count -Descending)
     foreach ($moduleGroup in $moduleGroups) {
         $targetBucket = @($workerBuckets | Sort-Object Count, Index | Select-Object -First 1)[0]
         foreach ($record in @($moduleGroup.Group)) {
@@ -1461,10 +1464,16 @@ try {
             if ($CatalogCommand.PSObject.Properties.Match('s').Count -gt 0) {
                 $desiredSource = [string]$CatalogCommand.s
             }
+            elseif ($CatalogCommand.PSObject.Properties.Match('Source').Count -gt 0) {
+                $desiredSource = [string]$CatalogCommand.Source
+            }
 
             $desiredModulePath = ''
             if ($CatalogCommand.PSObject.Properties.Match('mp').Count -gt 0) {
                 $desiredModulePath = [string]$CatalogCommand.mp
+            }
+            elseif ($CatalogCommand.PSObject.Properties.Match('ModulePath').Count -gt 0) {
+                $desiredModulePath = [string]$CatalogCommand.ModulePath
             }
 
             Ensure-CommandModuleLoaded -ModuleName $desiredModule -ModulePath $desiredModulePath
@@ -1637,17 +1646,93 @@ try {
             })
         }
 
+        function Get-WorkerCommandName {
+            param($CommandRecord)
+
+            if ($null -eq $CommandRecord) {
+                return ''
+            }
+
+            if ($CommandRecord -is [string]) {
+                return [string]$CommandRecord
+            }
+
+            $commandName = ''
+            if ($CommandRecord.PSObject.Properties.Match('Name').Count -gt 0) {
+                $commandName = [string]$CommandRecord.Name
+            }
+
+            if ([string]::IsNullOrWhiteSpace($commandName) -and $CommandRecord.PSObject.Properties.Match('n').Count -gt 0) {
+                $commandName = [string]$CommandRecord.n
+            }
+
+            return $commandName
+        }
+
+        function Test-WorkerCommandNameLooksFlattened {
+            param([string]$CommandName)
+
+            if ([string]::IsNullOrWhiteSpace($CommandName)) {
+                return $false
+            }
+
+            return [regex]::IsMatch($CommandName, '[\r\n]') -or
+                [regex]::IsMatch($CommandName, '\S+\s+\S+') -or
+                [regex]::IsMatch($CommandName, '[,;]')
+        }
+
         $workerStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $workerCommands = @()
+        $workerCommands = New-Object System.Collections.ArrayList
+        $expectedWorkerCommandCount = -1
+        $decodedWorkerCommandCount = 0
         try {
             $workerCommandsJson = [System.IO.File]::ReadAllText($CommandInputPath, [System.Text.Encoding]::UTF8)
-            $workerCommands = @($workerCommandsJson | ConvertFrom-Json)
+            $decodedWorkerInput = ConvertFrom-Json -InputObject $workerCommandsJson
+            $rawWorkerCommands = $decodedWorkerInput
+
+            if ($null -ne $decodedWorkerInput -and $decodedWorkerInput.PSObject.Properties.Match('commands').Count -gt 0) {
+                if ($decodedWorkerInput.PSObject.Properties.Match('expectedCommandCount').Count -gt 0) {
+                    $expectedWorkerCommandCount = [int]$decodedWorkerInput.expectedCommandCount
+                }
+
+                $rawWorkerCommands = $decodedWorkerInput.commands
+            }
+
+            foreach ($workerCommand in @($rawWorkerCommands)) {
+                if ($null -ne $workerCommand) {
+                    [void]$workerCommands.Add($workerCommand)
+                }
+            }
+
+            $decodedWorkerCommandCount = [int]$workerCommands.Count
         }
         catch {
             throw "Worker $WorkerIndex could not read assigned command list '$CommandInputPath'. $($_.Exception.Message)"
         }
 
-        Write-WorkerPerformanceLog ("Started. Commands={0}; ProcessId={1}; HOME='{2}'; USERPROFILE='{3}'; TEMP='{4}'; TMP='{5}'; PSModuleAnalysisCachePath='{6}'; PSModulePathContainsDocumentsPowerShell={7}" -f $workerCommands.Count, $PID, [Environment]::GetEnvironmentVariable('HOME'), [Environment]::GetEnvironmentVariable('USERPROFILE'), [Environment]::GetEnvironmentVariable('TEMP'), [Environment]::GetEnvironmentVariable('TMP'), [Environment]::GetEnvironmentVariable('PSModuleAnalysisCachePath'), (Test-WorkerModulePathContainsUserDocumentsPowerShell -ModulePath ([Environment]::GetEnvironmentVariable('PSModulePath'))))
+        $workerPreviewNames = @($workerCommands | ForEach-Object { Get-WorkerCommandName -CommandRecord $_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 5)
+        $workerPreviewText = if ($workerPreviewNames.Count -gt 0) { $workerPreviewNames -join ', ' } else { '<none>' }
+        $flattenedWorkerCommandCount = @($workerCommands | Where-Object { Test-WorkerCommandNameLooksFlattened -CommandName (Get-WorkerCommandName -CommandRecord $_) }).Count
+
+        Write-WorkerPerformanceLog ("Started. RuntimePath='{0}'; Worker={1}; InputPath='{2}'; ExpectedCommands={3}; ActualDecodedCommands={4}; Preview='{5}'; FlattenedNames={6}; ProcessId={7}; HOME='{8}'; USERPROFILE='{9}'; TEMP='{10}'; TMP='{11}'; PSModuleAnalysisCachePath='{12}'; PSModulePathContainsDocumentsPowerShell={13}" -f [Environment]::ProcessPath, $WorkerIndex, $CommandInputPath, $expectedWorkerCommandCount, $decodedWorkerCommandCount, $workerPreviewText, $flattenedWorkerCommandCount, $PID, [Environment]::GetEnvironmentVariable('HOME'), [Environment]::GetEnvironmentVariable('USERPROFILE'), [Environment]::GetEnvironmentVariable('TEMP'), [Environment]::GetEnvironmentVariable('TMP'), [Environment]::GetEnvironmentVariable('PSModuleAnalysisCachePath'), (Test-WorkerModulePathContainsUserDocumentsPowerShell -ModulePath ([Environment]::GetEnvironmentVariable('PSModulePath'))))
+
+        if ($expectedWorkerCommandCount -gt 1 -and $decodedWorkerCommandCount -eq 1 -and $workerPreviewNames.Count -gt 0 -and (Test-WorkerCommandNameLooksFlattened -CommandName $workerPreviewNames[0])) {
+            $flattenedMessage = "Worker input serialization/deserialization failure. RuntimePath='$([Environment]::ProcessPath)'; Worker=$WorkerIndex; InputPath='$CommandInputPath'; Expected=$expectedWorkerCommandCount; Actual=$decodedWorkerCommandCount; FlattenedCommandName='$($workerPreviewNames[0])'."
+            Write-WorkerPerformanceLog $flattenedMessage
+            throw $flattenedMessage
+        }
+
+        if ($expectedWorkerCommandCount -ge 0 -and $decodedWorkerCommandCount -ne $expectedWorkerCommandCount) {
+            $mismatchMessage = "Worker input command count mismatch. RuntimePath='$([Environment]::ProcessPath)'; Worker=$WorkerIndex; InputPath='$CommandInputPath'; Expected=$expectedWorkerCommandCount; Actual=$decodedWorkerCommandCount."
+            Write-WorkerPerformanceLog $mismatchMessage
+            throw $mismatchMessage
+        }
+
+        if ($flattenedWorkerCommandCount -gt 0) {
+            $invalidMessage = "Worker rejected decoded command records containing whitespace or list-flattening artifacts. RuntimePath='$([Environment]::ProcessPath)'; Worker=$WorkerIndex; InputPath='$CommandInputPath'; InvalidRecords=$flattenedWorkerCommandCount; Preview='$workerPreviewText'."
+            Write-WorkerPerformanceLog $invalidMessage
+            throw $invalidMessage
+        }
 
         $items = New-Object System.Collections.ArrayList
         $totalParameterCount = 0
@@ -1661,9 +1746,9 @@ try {
 
         foreach ($command in $workerCommands) {
             $commandStartTimestamp = [System.Diagnostics.Stopwatch]::GetTimestamp()
-            $title = [string]$command.n
-            $kind = [string]$command.t
-            $moduleName = [string]$command.m
+            $title = Get-WorkerCommandName -CommandRecord $command
+            $kind = if ($command.PSObject.Properties.Match('CommandType').Count -gt 0) { [string]$command.CommandType } else { [string]$command.t }
+            $moduleName = if ($command.PSObject.Properties.Match('ModuleName').Count -gt 0) { [string]$command.ModuleName } else { [string]$command.m }
             $commandMetadataSource = $null
             $resolveErrorMessage = ''
 
@@ -1758,6 +1843,8 @@ try {
         $workerResponse = @{
             ok = $true
             workerIndex = $WorkerIndex
+            expectedCommandCount = $expectedWorkerCommandCount
+            decodedCommandCount = $decodedWorkerCommandCount
             commandCount = $items.Count
             totalParameterCount = $totalParameterCount
             commandErrorCount = $commandErrorCount
@@ -1773,11 +1860,13 @@ try {
 
         $workerJson = $workerResponse | ConvertTo-Json -Compress -Depth 8
         [System.IO.File]::WriteAllText($WorkerOutputPath, $workerJson, [System.Text.UTF8Encoding]::new($false))
-        Write-WorkerPerformanceLog ("Completed. Commands={0}; Parameters={1}; Errors={2}; ParameterErrors={3}; ElapsedMs={4}; OutputPath='{5}'" -f $items.Count, $totalParameterCount, $commandErrorCount, $parameterErrorCount, $workerStopwatch.ElapsedMilliseconds, $WorkerOutputPath)
+        Write-WorkerPerformanceLog ("Completed. RuntimePath='{0}'; Worker={1}; CommandsProcessed={2}; Parameters={3}; Errors={4}; ParameterErrors={5}; ElapsedMs={6}; OutputPath='{7}'" -f [Environment]::ProcessPath, $WorkerIndex, $items.Count, $totalParameterCount, $commandErrorCount, $parameterErrorCount, $workerStopwatch.ElapsedMilliseconds, $WorkerOutputPath)
 
         [PSCustomObject]@{
             WorkerIndex = $WorkerIndex
             OutputPath = $WorkerOutputPath
+            ExpectedCommandCount = $expectedWorkerCommandCount
+            DecodedCommandCount = $decodedWorkerCommandCount
             CommandCount = $items.Count
             ParameterCount = $totalParameterCount
             ErrorCount = $commandErrorCount
@@ -1807,8 +1896,19 @@ try {
         $workerInputPath = Join-Path $workerOutputRoot ('worker-{0:D2}-commands.json' -f $workerNumber)
         $workerOutputPath = Join-Path $workerOutputRoot ('worker-{0:D2}-metadata.json' -f $workerNumber)
         $bucketRecords = @($bucket.Commands | ForEach-Object { $_ })
-        $bucketJson = ConvertTo-Json -InputObject $bucketRecords -Compress -Depth 4
+        # Use an explicit wrapper so worker processes can validate array shape across
+        # Windows PowerShell 5.1 and PowerShell 7 without depending on ConvertFrom-Json quirks.
+        $bucketPayload = [ordered]@{
+            schema = 'PSStudio.MetadataWorkerCommands/1'
+            runtimePath = [string]$runtimePath
+            workerIndex = $workerNumber
+            expectedCommandCount = [int]$bucket.Count
+            commands = @($bucketRecords)
+        }
+        $bucketJson = ConvertTo-Json -InputObject $bucketPayload -Compress -Depth 6
         [System.IO.File]::WriteAllText($workerInputPath, $bucketJson, [System.Text.UTF8Encoding]::new($false))
+        $bucketPreviewNames = @($bucketRecords | ForEach-Object { [string]$_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 5)
+        $bucketPreviewText = if ($bucketPreviewNames.Count -gt 0) { $bucketPreviewNames -join ', ' } else { '<none>' }
 
         $job = Start-Job -Name ('PowerShellStudio.Metadata.{0:D2}' -f $workerNumber) -ScriptBlock $parameterWorkerScript -ArgumentList $workerNumber, $workerInputPath, $workerOutputPath, $performanceLogPath, $debugTraceEnabled, $backgroundHome, $backgroundUserProfile, $backgroundTemp, $backgroundTmp, $backgroundPsModulePath, $backgroundPsModuleAnalysisCachePath
         [void]$metadataJobs.Add([PSCustomObject]@{
@@ -1818,7 +1918,7 @@ try {
             InputPath = $workerInputPath
             OutputPath = $workerOutputPath
         })
-        Write-PerformanceLog ("Started metadata worker {0}. ProcessJobId={1}; Commands={2}; InputPath='{3}'; OutputPath='{4}'" -f $workerNumber, $job.Id, [int]$bucket.Count, $workerInputPath, $workerOutputPath)
+        Write-PerformanceLog ("Started metadata worker {0}. RuntimePath='{1}'; ProcessJobId={2}; ExpectedCommands={3}; InputPath='{4}'; OutputPath='{5}'; Preview='{6}'" -f $workerNumber, $runtimePath, $job.Id, [int]$bucket.Count, $workerInputPath, $workerOutputPath, $bucketPreviewText)
     }
 
     $workerStartStopwatch.Stop()
@@ -1871,10 +1971,10 @@ try {
             $processedCount += [int]$entry.CommandCount
             [void]$completedWorkerOutputs.Add($entry.OutputPath)
             $summaryText = if ($null -ne $summary) {
-                "Commands=$($summary.CommandCount); Parameters=$($summary.ParameterCount); Errors=$($summary.ErrorCount); ParameterErrors=$($summary.ParameterErrorCount); ElapsedMs=$($summary.ElapsedMs)"
+                "Expected=$($summary.ExpectedCommandCount); Decoded=$($summary.DecodedCommandCount); Commands=$($summary.CommandCount); Parameters=$($summary.ParameterCount); Errors=$($summary.ErrorCount); ParameterErrors=$($summary.ParameterErrorCount); ElapsedMs=$($summary.ElapsedMs)"
             }
             else {
-                "Commands=$($entry.CommandCount)"
+                "Expected=$($entry.CommandCount)"
             }
 
             Write-PerformanceLog ("Metadata worker {0} completed. {1}" -f $entry.WorkerIndex, $summaryText)
