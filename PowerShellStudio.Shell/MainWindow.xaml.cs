@@ -430,6 +430,18 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
+            if (!isCtrl && !isShift && e.Key == Key.F8)
+            {
+                if (FindActiveEditor() is TextEditor editorTextEditor &&
+                    editorTextEditor.SelectionLength > 0 &&
+                    !string.IsNullOrWhiteSpace(editorTextEditor.SelectedText))
+                {
+                    e.Handled = true;
+                    await RunSelectionFromEditorAsync(editorTextEditor).ConfigureAwait(true);
+                    return;
+                }
+            }
+
             if (!isCtrl && isShift && e.Key == Key.F5)
             {
                 e.Handled = true;
