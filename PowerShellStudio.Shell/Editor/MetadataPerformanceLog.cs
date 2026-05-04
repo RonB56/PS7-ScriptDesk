@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
+using PowerShellStudio.Application.Utilities;
 namespace PowerShellStudio.Shell.Editor
 {
     internal static class MetadataPerformanceLog
@@ -39,7 +40,7 @@ namespace PowerShellStudio.Shell.Editor
         {
             return Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "PowerShellStudio",
+                ApplicationBranding.InternalName,
                 "Logs");
         }
 

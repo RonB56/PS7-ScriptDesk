@@ -8,10 +8,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
 	<UseWindowsForms>true</UseWindowsForms>
-    <Version>1.2.3</Version>
-    <AssemblyVersion>1.2.3.0</AssemblyVersion>
-    <FileVersion>1.2.3.0</FileVersion>
-    <InformationalVersion>1.2.3</InformationalVersion>
+    <Version>1.2.4</Version>
+    <AssemblyVersion>1.2.4.0</AssemblyVersion>
+    <FileVersion>1.2.4.0</FileVersion>
+    <InformationalVersion>1.2.4</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <AssemblyTitle>PS7 ScriptDesk</AssemblyTitle>
+    <Product>PS7 ScriptDesk</Product>
+    <Description>An ISE-style scripting tool for PowerShell 7.x</Description>
 	<ApplicationIcon>Assets\PowerShellStudio.Safe.ico</ApplicationIcon>
   </PropertyGroup>
 

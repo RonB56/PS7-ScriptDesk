@@ -120,13 +120,13 @@ namespace PowerShellStudio.UI.ViewModels
             _uiSynchronizationContext = SynchronizationContext.Current;
             _applicationVersionText = GetApplicationVersionText();
 
-            Title = $"PowerShellStudio {_applicationVersionText}";
-            WelcomeMessage = "PowerShellStudio shell is running.";
+            Title = $"{ApplicationBranding.PublicName} {_applicationVersionText}";
+            WelcomeMessage = $"{ApplicationBranding.PublicName} shell is running.";
             _runtimeText = "Runtime: Detecting installed PowerShell runtimes...";
             _workspaceText = workspaceService.GetWorkspaceDisplayText();
             _statusText = $"Ready - {_applicationVersionText}";
             _terminalDisplayText =
-                $"PowerShellStudio {_applicationVersionText} terminal pane initialized.{Environment.NewLine}" +
+                $"{ApplicationBranding.PublicName} {_applicationVersionText} terminal pane initialized.{Environment.NewLine}" +
                 $"This phase now hosts a ConPTY-backed PowerShell terminal process inside the application.{Environment.NewLine}";
 
             OpenTabs = new ObservableCollection<EditorTabViewModel>();
@@ -1536,7 +1536,7 @@ namespace PowerShellStudio.UI.ViewModels
 
         private static string BuildSavePermissionDeniedMessage(string path)
         {
-            return $"PowerShellStudio does not have permission to save to {path}. Windows Controlled Folder Access or folder permissions may be blocking the save. Try another folder such as C:\\Temp\\PowerShellStudioSaveTest, or allow PowerShellStudio.Shell.exe in Windows Security.";
+            return $"{ApplicationBranding.PublicName} does not have permission to save to {path}. Windows Controlled Folder Access or folder permissions may be blocking the save. Try another folder such as C:\\Temp\\PS7ScriptDeskSaveTest, or allow the app executable in Windows Security.";
         }
 
         private static string BuildSaveFileNotFoundMessage(string path, bool directoryExists, bool fileExistedBeforeWrite)
@@ -1746,7 +1746,7 @@ namespace PowerShellStudio.UI.ViewModels
         {
             var tab = new EditorTabViewModel(
                 "Untitled1.ps1",
-                "# Welcome to PowerShellStudio\r\n\r\n# This is the future editor surface.");
+                $"# Welcome to {ApplicationBranding.PublicName}\r\n\r\n# {ApplicationBranding.Tagline}.");
 
             OpenTabs.Add(tab);
             SelectedTab = tab;
@@ -2126,7 +2126,7 @@ namespace PowerShellStudio.UI.ViewModels
 
         private void OnAbout()
         {
-            StatusText = $"PowerShellStudio {_applicationVersionText} - ConPTY PowerShell terminal host";
+            StatusText = $"{ApplicationBranding.PublicName} {_applicationVersionText} - ConPTY PowerShell terminal host";
             AppendOutputLine($"About requested - running {_applicationVersionText}");
         }
 
@@ -3053,7 +3053,7 @@ namespace PowerShellStudio.UI.ViewModels
 
                     if (ShouldShowLifecycleMessageInTerminal(record.Text))
                     {
-                        AppendOutputLine($"PowerShellStudio: {record.Text}");
+                        AppendOutputLine($"{ApplicationBranding.PublicName}: {record.Text}");
                     }
 
                     // Refresh session state on lifecycle events only (session start, stop,
@@ -3216,13 +3216,82 @@ namespace PowerShellStudio.UI.ViewModels
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
                 .InformationalVersion;
 
-            if (!string.IsNullOrWhiteSpace(informationalVersion))
+            var displayVersion = NormalizeApplicationVersionForDisplay(informationalVersion);
+            if (!string.IsNullOrWhiteSpace(displayVersion))
             {
-                return $"v{informationalVersion}";
+                return $"v{displayVersion}";
+            }
+
+            var fileVersion = entryAssembly?
+                .GetCustomAttribute<AssemblyFileVersionAttribute>()?
+                .Version;
+
+            displayVersion = NormalizeApplicationVersionForDisplay(fileVersion);
+            if (!string.IsNullOrWhiteSpace(displayVersion))
+            {
+                return $"v{displayVersion}";
             }
 
             var version = entryAssembly?.GetName().Version;
-            return version is null ? "v0.0.0" : $"v{version}";
+            if (version is null)
+            {
+                return "v0.0.0";
+            }
+
+            var major = Math.Max(version.Major, 0);
+            var minor = Math.Max(version.Minor, 0);
+            var patch = Math.Max(version.Build, 0);
+            return $"v{major}.{minor}.{patch}";
+        }
+
+        private static string NormalizeApplicationVersionForDisplay(string? versionText)
+        {
+            if (string.IsNullOrWhiteSpace(versionText))
+            {
+                return string.Empty;
+            }
+
+            var trimmed = versionText.Trim();
+            var metadataStartIndex = trimmed.IndexOfAny(new[] { '+', '-', ' ' });
+            if (metadataStartIndex >= 0)
+            {
+                trimmed = trimmed[..metadataStartIndex];
+            }
+
+            if (trimmed.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+            {
+                trimmed = trimmed[1..];
+            }
+
+            var versionParts = trimmed.Split('.');
+            var displayParts = new List<string>(capacity: 3);
+
+            foreach (var part in versionParts)
+            {
+                if (displayParts.Count == 3)
+                {
+                    break;
+                }
+
+                if (!int.TryParse(part.Trim(), out var numericPart))
+                {
+                    break;
+                }
+
+                displayParts.Add(Math.Max(numericPart, 0).ToString());
+            }
+
+            if (displayParts.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            while (displayParts.Count < 3)
+            {
+                displayParts.Add("0");
+            }
+
+            return string.Join(".", displayParts);
         }
 
         private void OnPropertyChanged([CallerMemberName] string? propertyName = null)

@@ -9,10 +9,10 @@
   <Identity
     Name="b2425902-9934-472a-93bf-9393a49edb57"
     Publisher="CN=PowerShellStudio"
-    Version="1.0.30.0" />
+    Version="1.0.36.0" />
 
   <Properties>
-    <DisplayName>PowerShellStudio</DisplayName>
+    <DisplayName>PS7 ScriptDesk</DisplayName>
     <PublisherDisplayName>rbarn</PublisherDisplayName>
     <Logo>Images\StoreLogo.png</Logo>
   </Properties>
@@ -31,8 +31,8 @@
       Executable="$targetnametoken$.exe"
       EntryPoint="$targetentrypoint$">
       <uap:VisualElements
-        DisplayName="PowerShellStudio"
-        Description="A modern PowerShell 7 script editor and console."
+        DisplayName="PS7 ScriptDesk"
+        Description="An ISE-style scripting tool for PowerShell 7.x."
         BackgroundColor="transparent"
         Square150x150Logo="Images\Square150x150Logo.png"
         Square44x44Logo="Images\Square44x44Logo.png">

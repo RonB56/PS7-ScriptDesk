@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Text.Json;
 using PowerShellStudio.Application.Interfaces;
+using PowerShellStudio.Application.Utilities;
 using PowerShellStudio.Domain.Models;
 
 namespace PowerShellStudio.Infrastructure.Services
@@ -19,8 +20,44 @@ namespace PowerShellStudio.Infrastructure.Services
         public ApplicationSettingsService()
         {
             var localApplicationDataPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            var settingsDirectoryPath = Path.Combine(localApplicationDataPath, "PowerShellStudio");
+            var settingsDirectoryPath = Path.Combine(localApplicationDataPath, ApplicationBranding.InternalName);
             _settingsFilePath = Path.Combine(settingsDirectoryPath, "appsettings.json");
+            TryMigrateLegacySettings(localApplicationDataPath, _settingsFilePath);
+        }
+
+
+        private static void TryMigrateLegacySettings(string localApplicationDataPath, string newSettingsFilePath)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(localApplicationDataPath) || File.Exists(newSettingsFilePath))
+                {
+                    return;
+                }
+
+                var legacySettingsFilePath = Path.Combine(
+                    localApplicationDataPath,
+                    ApplicationBranding.LegacyInternalName,
+                    "appsettings.json");
+
+                if (!File.Exists(legacySettingsFilePath))
+                {
+                    return;
+                }
+
+                var newSettingsDirectory = Path.GetDirectoryName(newSettingsFilePath);
+                if (string.IsNullOrWhiteSpace(newSettingsDirectory))
+                {
+                    return;
+                }
+
+                Directory.CreateDirectory(newSettingsDirectory);
+                File.Copy(legacySettingsFilePath, newSettingsFilePath, overwrite: false);
+            }
+            catch
+            {
+                // Branding migration should never prevent the app from starting.
+            }
         }
 
         public ApplicationSettings LoadSettings()

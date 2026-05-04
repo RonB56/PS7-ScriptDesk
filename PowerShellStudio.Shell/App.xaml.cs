@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 using PowerShellStudio.Application.Diagnostics;
+using PowerShellStudio.Application.Utilities;
 using PowerShellStudio.PowerShell.Services;
 using PowerShellStudio.Shell.Composition;
 
@@ -110,7 +111,7 @@ namespace PowerShellStudio.Shell
             AppLogger.Error("App", source, exception);
             try
             {
-                var folderPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PowerShellStudio");
+                var folderPath = ApplicationBranding.LocalApplicationDataRoot;
                 Directory.CreateDirectory(folderPath);
                 var logPath = Path.Combine(folderPath, "startup-error.log");
                 File.AppendAllText(
@@ -118,8 +119,8 @@ namespace PowerShellStudio.Shell
                     $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {source}{Environment.NewLine}{exception}{Environment.NewLine}{new string('-', 80)}{Environment.NewLine}");
 
                 System.Windows.MessageBox.Show(
-                    $"PowerShellStudio hit a startup/runtime exception.\n\nSource: {source}\n\nDetails: {exception.Message}\n\nA log was written to:\n{logPath}",
-                    "PowerShellStudio Error",
+                    $"PS7 ScriptDesk hit a startup/runtime exception.\n\nSource: {source}\n\nDetails: {exception.Message}\n\nA log was written to:\n{logPath}",
+                    $"{ApplicationBranding.PublicName} Error",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
             }

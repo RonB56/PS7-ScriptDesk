@@ -10,7 +10,7 @@ namespace PowerShellStudio.TerminalSpike
         private static readonly object SyncRoot = new();
         private static readonly string LogDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "PowerShellStudio",
+            "PS7ScriptDesk",
             "TerminalSpike");
         private static readonly string LogPath = Path.Combine(LogDirectory, "terminal-spike.log");
         private static bool _disposed;

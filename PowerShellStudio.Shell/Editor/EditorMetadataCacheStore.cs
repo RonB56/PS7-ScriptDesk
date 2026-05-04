@@ -6,7 +6,9 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using PowerShellStudio.Application.Diagnostics;
+using PowerShellStudio.Application.Utilities;
 
 namespace PowerShellStudio.Shell.Editor
 {
@@ -63,6 +65,8 @@ namespace PowerShellStudio.Shell.Editor
 
     internal static class EditorMetadataCacheStore
     {
+        private static int _legacyCacheMigrationAttempted;
+
         private const int SnapshotFormatVersion = 1;
         private const string SnapshotFileName = "metadata-cache.bin";
         private const string ManifestFileName = "manifest.json";
@@ -638,10 +642,63 @@ namespace PowerShellStudio.Shell.Editor
 
         public static string GetCacheRootDirectory()
         {
-            return Path.Combine(
+            var cacheRoot = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "PowerShellStudio",
+                ApplicationBranding.InternalName,
                 "EditorMetadataCache");
+
+            TryMigrateLegacyCacheRoot(cacheRoot);
+            return cacheRoot;
+        }
+
+        private static void TryMigrateLegacyCacheRoot(string cacheRoot)
+        {
+            if (Interlocked.Exchange(ref _legacyCacheMigrationAttempted, 1) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(cacheRoot) || Directory.Exists(cacheRoot))
+                {
+                    return;
+                }
+
+                var legacyCacheRoot = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    ApplicationBranding.LegacyInternalName,
+                    "EditorMetadataCache");
+
+                if (!Directory.Exists(legacyCacheRoot))
+                {
+                    return;
+                }
+
+                CopyDirectory(legacyCacheRoot, cacheRoot);
+                AppLogger.Info("EditorMetadataCache", $"Migrated legacy editor metadata cache from '{legacyCacheRoot}' to '{cacheRoot}'.");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("EditorMetadataCache", $"Legacy metadata cache migration skipped: {ex.Message}");
+            }
+        }
+
+        private static void CopyDirectory(string sourceDirectory, string destinationDirectory)
+        {
+            Directory.CreateDirectory(destinationDirectory);
+
+            foreach (var filePath in Directory.EnumerateFiles(sourceDirectory))
+            {
+                var destinationFilePath = Path.Combine(destinationDirectory, Path.GetFileName(filePath));
+                File.Copy(filePath, destinationFilePath, overwrite: false);
+            }
+
+            foreach (var childDirectoryPath in Directory.EnumerateDirectories(sourceDirectory))
+            {
+                var destinationChildDirectoryPath = Path.Combine(destinationDirectory, Path.GetFileName(childDirectoryPath));
+                CopyDirectory(childDirectoryPath, destinationChildDirectoryPath);
+            }
         }
 
         private static IReadOnlyList<(string CacheDirectory, bool IsLegacyPathCache)> GetCacheDirectoryCandidates(

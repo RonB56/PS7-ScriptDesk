@@ -366,7 +366,7 @@ namespace PowerShellStudio.PowerShell.Services
                 "param([string]$i)",
                 "$__i=Join-Path $global:__psstudioSnapshotRoot $i;",
                 "$__l=[System.IO.File]::ReadAllLines($__i,[System.Text.Encoding]::UTF8);",
-                "if ($__l.Length -lt 4) { throw 'PowerShellStudio dispatch instruction is incomplete.' }",
+                "if ($__l.Length -lt 4) { throw 'PS7 ScriptDesk dispatch instruction is incomplete.' }",
                 "$__p=$__l[0];",
                 "if (-not [System.IO.Path]::IsPathRooted($__p)) { $__p=Join-Path $global:__psstudioSnapshotRoot $__p }",
                 "$__s=$__l[1];",

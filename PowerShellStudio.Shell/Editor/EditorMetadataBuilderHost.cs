@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using PowerShellStudio.Application.Diagnostics;
+using PowerShellStudio.Application.Utilities;
 
 namespace PowerShellStudio.Shell.Editor
 {
@@ -189,7 +190,7 @@ namespace PowerShellStudio.Shell.Editor
                     Phase = EditorMetadataWarmupPhase.Canceled,
                     RuntimePath = normalizedRuntimePath,
                     Message = "Editor metadata loading was canceled.",
-                    DetailText = "A new runtime was selected or PowerShell Studio is shutting down.",
+                    DetailText = "A new runtime was selected or PS7 ScriptDesk is shutting down.",
                 });
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata build canceled after {totalStopwatch.ElapsedMilliseconds:N0} ms.");
                 AppLogger.Warning("EditorMetadataBuilder", $"Metadata build canceled for runtime '{normalizedRuntimePath}' after {totalStopwatch.ElapsedMilliseconds:N0} ms.");
@@ -1910,7 +1911,7 @@ try {
         $bucketPreviewNames = @($bucketRecords | ForEach-Object { [string]$_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 5)
         $bucketPreviewText = if ($bucketPreviewNames.Count -gt 0) { $bucketPreviewNames -join ', ' } else { '<none>' }
 
-        $job = Start-Job -Name ('PowerShellStudio.Metadata.{0:D2}' -f $workerNumber) -ScriptBlock $parameterWorkerScript -ArgumentList $workerNumber, $workerInputPath, $workerOutputPath, $performanceLogPath, $debugTraceEnabled, $backgroundHome, $backgroundUserProfile, $backgroundTemp, $backgroundTmp, $backgroundPsModulePath, $backgroundPsModuleAnalysisCachePath
+        $job = Start-Job -Name ('PS7ScriptDesk.Metadata.{0:D2}' -f $workerNumber) -ScriptBlock $parameterWorkerScript -ArgumentList $workerNumber, $workerInputPath, $workerOutputPath, $performanceLogPath, $debugTraceEnabled, $backgroundHome, $backgroundUserProfile, $backgroundTemp, $backgroundTmp, $backgroundPsModulePath, $backgroundPsModuleAnalysisCachePath
         [void]$metadataJobs.Add([PSCustomObject]@{
             Job = $job
             WorkerIndex = $workerNumber
@@ -2250,7 +2251,7 @@ catch {
         {
             var rootDirectory = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "PowerShellStudio",
+                ApplicationBranding.InternalName,
                 "MetadataWorker");
             Directory.CreateDirectory(rootDirectory);
 

@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using PowerShellStudio.Application.Diagnostics;
+using PowerShellStudio.Application.Utilities;
 using PowerShellStudio.Domain.Models;
 
 namespace PowerShellStudio.Shell.Editor
@@ -345,11 +346,11 @@ namespace PowerShellStudio.Shell.Editor
 
             var detailText = forceRebuild
                 ? loadedFromCache
-                    ? "PowerShell Studio is refreshing the saved full editor metadata snapshot in the background."
-                    : "PowerShell Studio is building a full editor metadata snapshot because no healthy cache is currently available."
+                    ? "PS7 ScriptDesk is refreshing the saved full editor metadata snapshot in the background."
+                    : "PS7 ScriptDesk is building a full editor metadata snapshot because no healthy cache is currently available."
                 : string.IsNullOrWhiteSpace(loadReason)
-                    ? "PowerShell Studio is building the first-run editor metadata cache in the background."
-                    : $"PowerShell Studio is rebuilding full editor metadata because the saved snapshot was missing, stale, or incomplete. {loadReason}";
+                    ? "PS7 ScriptDesk is building the first-run editor metadata cache in the background."
+                    : $"PS7 ScriptDesk is rebuilding full editor metadata because the saved snapshot was missing, stale, or incomplete. {loadReason}";
 
             RaiseMetadataWarmupStatus(
                 new EditorMetadataWarmupStatus(
@@ -767,13 +768,13 @@ namespace PowerShellStudio.Shell.Editor
             var currentExecutablePath = Environment.ProcessPath;
             if (string.IsNullOrWhiteSpace(currentExecutablePath) || !File.Exists(currentExecutablePath))
             {
-                MetadataPerformanceLog.AppendLine(performanceLogPath, "Metadata builder launch failed: PowerShell Studio could not locate its helper executable.");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, "Metadata builder launch failed: PS7 ScriptDesk could not locate its helper executable.");
                 RaiseMetadataWarmupStatus(
                     new EditorMetadataWarmupStatus(
                         EditorMetadataWarmupPhase.Failed,
                         "Editor metadata failed; see log",
                         normalizedRuntimePath,
-                        detailText: "PowerShell Studio could not locate its helper executable to build the metadata cache.",
+                        detailText: "PS7 ScriptDesk could not locate its helper executable to build the metadata cache.",
                         reason: warmupReason));
                 return;
             }
@@ -820,7 +821,7 @@ namespace PowerShellStudio.Shell.Editor
                         readyCacheAlreadyLoaded ? "Metadata refresh failed; cached metadata still in use." : "Editor metadata failed; see log",
                         normalizedRuntimePath,
                         detailText: readyCacheAlreadyLoaded
-                            ? $"PowerShell Studio kept using the last known-good metadata snapshot, but could not start the refresh helper: {ex.Message}"
+                            ? $"PS7 ScriptDesk kept using the last known-good metadata snapshot, but could not start the refresh helper: {ex.Message}"
                             : ex.Message,
                         commandCount: cachedHealth.CommandCount,
                         quickInfoCount: cachedHealth.QuickInfoCount,
@@ -975,7 +976,7 @@ namespace PowerShellStudio.Shell.Editor
                             message.ProcessedCount,
                             message.TotalCount,
                             hasReadyMetadata
-                                ? $"PowerShell Studio is using the saved editor metadata snapshot while a newer full snapshot is refreshed in the background. {message.DetailText}".Trim()
+                                ? $"PS7 ScriptDesk is using the saved editor metadata snapshot while a newer full snapshot is refreshed in the background. {message.DetailText}".Trim()
                                 : message.DetailText,
                             commandCount: metadataHealth.CommandCount,
                             quickInfoCount: metadataHealth.QuickInfoCount,
@@ -1058,7 +1059,7 @@ namespace PowerShellStudio.Shell.Editor
                         EditorMetadataWarmupPhase.Warning,
                         "Metadata refresh failed; cached metadata still in use.",
                         normalizedRuntimePath,
-                        detailText: $"PowerShell Studio is still using the last known-good metadata snapshot. Refresh error: {safeDetailText}",
+                        detailText: $"PS7 ScriptDesk is still using the last known-good metadata snapshot. Refresh error: {safeDetailText}",
                         commandCount: metadataHealth.CommandCount,
                         quickInfoCount: metadataHealth.QuickInfoCount,
                         parameterizedQuickInfoCount: metadataHealth.ParameterizedQuickInfoCount,
@@ -1391,7 +1392,7 @@ namespace PowerShellStudio.Shell.Editor
             var exitCodeText = TryGetExitCodeText(exitedProcess);
             AppLogger.Warning(
                 "EditorCompletion",
-                $"Completion PowerShell process exited unexpectedly. Runtime='{runtimePath ?? "(unknown)"}', {exitCodeText}, PendingRequest={request is not null}. PowerShell Studio will recreate the completion session on the next IntelliSense request.");
+                $"Completion PowerShell process exited unexpectedly. Runtime='{runtimePath ?? "(unknown)"}', {exitCodeText}, PendingRequest={request is not null}. PS7 ScriptDesk will recreate the completion session on the next IntelliSense request.");
 
             var requestErrorText = request?.ErrorCapture.ToString();
             if (!string.IsNullOrWhiteSpace(requestErrorText))

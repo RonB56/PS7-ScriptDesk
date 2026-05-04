@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using PowerShellStudio.Application.Diagnostics;
+using PowerShellStudio.Application.Utilities;
 
 namespace PowerShellStudio.Shell.Editor
 {
@@ -19,7 +20,7 @@ namespace PowerShellStudio.Shell.Editor
     /// </summary>
     internal static class PowerShellBackgroundProcessEnvironment
     {
-        private const string AppFolderName = "PowerShellStudio";
+        private const string AppFolderName = ApplicationBranding.InternalName;
         private const string BackgroundFolderName = "BackgroundPowerShell";
 
         public static bool Apply(ProcessStartInfo startInfo, string purpose, string? runtimePath = null)

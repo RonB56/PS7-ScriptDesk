@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PowerShellStudio.Application.Diagnostics;
+using PowerShellStudio.Application.Utilities;
 
 namespace PowerShellStudio.Shell.Help
 {
@@ -95,8 +96,8 @@ namespace PowerShellStudio.Shell.Help
             {
                 ["App.Overview"] = Topic(
                     "App.Overview",
-                    "PowerShellStudio help overview",
-                    "PowerShellStudio is a Windows-only WPF PowerShell editor and live ConPTY terminal host with workspace browsing, diagnostics, runtime discovery, metadata-backed IntelliSense, and breakpoint-driven debugging.",
+                    $"{ApplicationBranding.PublicName} help overview",
+                    $"{ApplicationBranding.PublicName} is a Windows-only WPF PowerShell editor and live ConPTY terminal host with workspace browsing, diagnostics, runtime discovery, metadata-backed IntelliSense, and breakpoint-driven debugging.",
                     "Use this overview when you want the current app-level workflow before drilling into a specific panel or command.",
                     "The app keeps one shared interactive PowerShell session for terminal work, Run, and Run Selection. Session state carries forward until you interrupt or reset that console.",
                     Section("Suggested first workflow", true,
@@ -647,7 +648,7 @@ namespace PowerShellStudio.Shell.Help
                     "Show in Explorer",
                     "Opens the current workspace or selected file in Windows Explorer.",
                     "Use it when you want the Windows shell view for copying, moving, or inspecting files outside the app.",
-                    "This opens Windows Explorer; it does not create a new tab in PowerShellStudio.",
+                    "This opens Windows Explorer; it does not create a new tab in PS7 ScriptDesk.",
                     related: new[] { "Explorer.WorkspaceTree", "Command.OpenFolder" }),
 
                 ["Explorer.WorkspaceTree"] = Topic(
@@ -799,7 +800,7 @@ namespace PowerShellStudio.Shell.Help
                 ["Editor.Metadata"] = Topic(
                     "Editor.Metadata",
                     "PowerShell editor metadata and IntelliSense cache",
-                    "PowerShellStudio loads command, parameter, syntax, and help metadata in the background for the selected runtime and saves reusable caches for later launches.",
+                    "PS7 ScriptDesk loads command, parameter, syntax, and help metadata in the background for the selected runtime and saves reusable caches for later launches.",
                     "Use this help when completion looks incomplete, the metadata badge is visible, or you are using the Run-menu metadata refresh and cache-delete commands.",
                     "Metadata problems reduce IntelliSense quality, but they do not stop the visible editor text from running. Missing or failed metadata states are logged so they can be diagnosed later.",
                     Section("Metadata states you can see", false,
@@ -860,7 +861,7 @@ namespace PowerShellStudio.Shell.Help
                 ["App.Settings"] = Topic(
                     "App.Settings",
                     "Persisted settings and layout state",
-                    "PowerShellStudio does not currently expose a dedicated Settings window. Instead, it persists core shell state automatically between sessions.",
+                    "PS7 ScriptDesk does not currently expose a dedicated Settings window. Instead, it persists core shell state automatically between sessions.",
                     "Use this topic when you want to know what the app remembers on exit and restores on the next launch.",
                     "Because there is no settings dialog today, changing these values happens through normal UI actions such as resizing panes, changing theme or zoom, choosing a runtime, and toggling context help.",
                     Section("What is persisted today", false,
@@ -879,7 +880,7 @@ namespace PowerShellStudio.Shell.Help
                     "Troubleshooting",
                     "Use these checks when help, completion, diagnostics, runtime discovery, file operations, or script execution do not behave as expected.",
                     "Open this topic when a feature seems idle, unavailable, or inconsistent with the current UI state.",
-                    "PowerShellStudio writes detailed diagnostics to the app log. Most help and metadata failures should remain visible and logged instead of failing silently.",
+                    "PS7 ScriptDesk writes detailed diagnostics to the app log. Most help and metadata failures should remain visible and logged instead of failing silently.",
                     Section("Metadata failed or completion is weak", true,
                         "Watch the metadata status badge or Run-menu metadata commands for the current runtime state.",
                         "If completion is sparse right after startup or a runtime switch, wait for the background metadata build to finish.",
@@ -1017,7 +1018,7 @@ namespace PowerShellStudio.Shell.Help
             return Topic(
                 "Help.MissingTopic",
                 "Help Topic Not Found",
-                $"PowerShellStudio could not find help content for '{normalizedKey}'.",
+                $"{ApplicationBranding.PublicName} could not find help content for '{normalizedKey}'.",
                 "Use this message to confirm that the help command is wired, but the requested topic key is missing, stale, or not yet cataloged.",
                 "The app keeps running. The missing key was written to the app log so the help mapping can be corrected.",
                 Section("Requested topic key", false, normalizedKey),

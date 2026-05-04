@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using PowerShellStudio.Application.Utilities;
 using PowerShellStudio.Application.Interfaces;
 using PowerShellStudio.Domain.Models;
 
@@ -49,7 +50,7 @@ namespace PowerShellStudio.PowerShell.Services
 
             var tempRoot = Path.Combine(
                 Path.GetTempPath(),
-                "PowerShellStudio",
+                ApplicationBranding.InternalName,
                 "ExeExport",
                 Guid.NewGuid().ToString("N"));
 
@@ -217,7 +218,7 @@ internal static class Program
                 ? ""exported-script.ps1""
                 : EmbeddedScriptFileName;
 
-            var tempDirectory = Path.Combine(Path.GetTempPath(), ""PowerShellStudio.ExportedScripts"", Guid.NewGuid().ToString(""N""));
+			var tempDirectory = Path.Combine(Path.GetTempPath(), ""PS7ScriptDesk.ExportedScripts"", Guid.NewGuid().ToString(""N""));
             Directory.CreateDirectory(tempDirectory);
             var tempScriptPath = Path.Combine(tempDirectory, scriptFileName);
             var scriptText = Encoding.UTF8.GetString(Convert.FromBase64String(EmbeddedScriptBase64));

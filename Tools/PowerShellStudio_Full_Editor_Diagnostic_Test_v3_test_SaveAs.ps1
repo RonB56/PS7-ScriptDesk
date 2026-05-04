@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    PowerShellStudio full editor, console, GUI, and PowerShell 7 diagnostic test v3.
+    PS7 ScriptDesk full editor, console, GUI, and PowerShell 7 diagnostic test v3.
 
 .DESCRIPTION
-    This script is intended as a standard regression test for PowerShellStudio.
+    This script is intended as a standard regression test for PS7 ScriptDesk.
     It deliberately uses PowerShell 7 features and is not Windows PowerShell 5.1 compatible.
 
-    Expected behavior in PowerShellStudio:
+    Expected behavior in PS7 ScriptDesk:
       - No editor diagnostic service timeout.
       - No false diagnostics on classes or valid paths.
       - Script output remains visible.
@@ -134,7 +134,7 @@ function Invoke-WinFormsGuiTest {
             [System.Windows.Forms.Application]::EnableVisualStyles()
 
             $form = [System.Windows.Forms.Form]::new()
-            $form.Text = 'PowerShellStudio WinForms GUI Test'
+            $form.Text = 'PS7 ScriptDesk WinForms GUI Test'
             $form.Width = 520
             $form.Height = 220
             $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
@@ -212,7 +212,7 @@ function Invoke-WpfGuiTest {
             Add-Type -AssemblyName WindowsBase
 
             $window = [System.Windows.Window]::new()
-            $window.Title = 'PowerShellStudio WPF GUI Test'
+            $window.Title = 'PS7 ScriptDesk WPF GUI Test'
             $window.Width = 540
             $window.Height = 230
             $window.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
@@ -291,7 +291,7 @@ class DiagnosticWidget {
     [string] GetStatus() { return "Widget '$($this.Name)' is running" }
 }
 
-Write-Section 'PowerShellStudio Full Editor Diagnostic Test v3 Started'
+Write-Section 'PS7 ScriptDesk Full Editor Diagnostic Test v3 Started'
 Write-Host "Started:                 $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')" -ForegroundColor Cyan
 Write-Host "PowerShell Version:      $($PSVersionTable.PSVersion)" -ForegroundColor Cyan
 Write-Host "PowerShell Edition:      $($PSVersionTable.PSEdition)" -ForegroundColor Cyan
@@ -322,14 +322,14 @@ if ($SkipProgress) {
 }
 else {
     for ($i = 1; $i -le 100; $i += 10) {
-        Write-Progress -Id 1 -Activity 'PowerShellStudio progress rendering test' -Status "Processing $i percent" -PercentComplete $i
+        Write-Progress -Id 1 -Activity 'PS7 ScriptDesk progress rendering test' -Status "Processing $i percent" -PercentComplete $i
         if ($i -ge 30 -and $i -le 70) {
             Write-Progress -Id 2 -ParentId 1 -Activity 'Nested progress test' -Status "Nested $i percent" -PercentComplete $i
         }
         Start-Sleep -Milliseconds $ProgressDelayMilliseconds
     }
     Write-Progress -Id 2 -Activity 'Nested progress test' -Completed
-    Write-Progress -Id 1 -Activity 'PowerShellStudio progress rendering test' -Completed
+    Write-Progress -Id 1 -Activity 'PS7 ScriptDesk progress rendering test' -Completed
     Add-TestPass 'Progress bars completed.'
 }
 
@@ -380,13 +380,13 @@ $validPaths = @(
     'C:\Program Files\PowerShell\7\pwsh.exe'
 )
 $validPaths | ForEach-Object { Write-Host "Path sample: $_" }
-$json = [pscustomobject]@{ App='PowerShellStudio'; Test='v3'; Paths=$validPaths; Time=(Get-Date).ToString('o') } | ConvertTo-Json -Depth 4
+$json = [pscustomobject]@{ App='PS7 ScriptDesk'; Test='v3'; Paths=$validPaths; Time=(Get-Date).ToString('o') } | ConvertTo-Json -Depth 4
 $roundTrip = $json | ConvertFrom-Json
-Test-Condition -Condition ($roundTrip.App -eq 'PowerShellStudio') -PassMessage 'JSON round-trip completed.' -FailMessage 'JSON round-trip failed.'
-[xml]$xml = '<PowerShellStudio><Test Name="XML" Enabled="true" /></PowerShellStudio>'
-Test-Condition -Condition ($xml.PowerShellStudio.Test.Name -eq 'XML') -PassMessage 'XML parsing completed.' -FailMessage 'XML parsing failed.'
+Test-Condition -Condition ($roundTrip.App -eq 'PS7 ScriptDesk') -PassMessage 'JSON round-trip completed.' -FailMessage 'JSON round-trip failed.'
+[xml]$xml = '<PS7ScriptDesk><Test Name="XML" Enabled="true" /></PS7ScriptDesk>'
+Test-Condition -Condition ($xml.PS7ScriptDesk.Test.Name -eq 'XML') -PassMessage 'XML parsing completed.' -FailMessage 'XML parsing failed.'
 
-$tempRoot = Join-Path $env:TEMP "PowerShellStudio Diagnostic Test O'Brien"
+$tempRoot = Join-Path $env:TEMP "PS7ScriptDesk Diagnostic Test O'Brien"
 $childScriptPath = Join-Path $tempRoot 'Child Script With Spaces.ps1'
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
@@ -482,7 +482,7 @@ Write-Host 'Expected normal prompt example: PS Z:\>' -ForegroundColor Yellow
 Write-Host 'Bad continuation prompt example: >>' -ForegroundColor Yellow
 Write-Host 'You should NOT have to press Enter to get the prompt back.' -ForegroundColor Yellow
 
-Write-Section 'PowerShellStudio Full Editor Diagnostic Test v3 Finished'
+Write-Section 'PS7 ScriptDesk Full Editor Diagnostic Test v3 Finished'
 Write-Host "Finished:                $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')" -ForegroundColor Cyan
 Write-Host "Passed checks:           $script:PassedCount" -ForegroundColor Green
 Write-Host "Warnings:                $script:WarningCount" -ForegroundColor Yellow

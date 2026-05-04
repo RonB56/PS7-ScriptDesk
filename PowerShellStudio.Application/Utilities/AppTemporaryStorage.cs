@@ -5,7 +5,7 @@ namespace PowerShellStudio.Application.Utilities
 {
     public static class AppTemporaryStorage
     {
-        private const string ApplicationFolderName = "PowerShellStudio";
+        private const string ApplicationFolderName = ApplicationBranding.InternalName;
         private const string TempFolderName = "Temp";
 
         public static bool TryGetManagedRootDirectory(string areaName, bool createIfMissing, out string rootDirectory, out string failureReason)

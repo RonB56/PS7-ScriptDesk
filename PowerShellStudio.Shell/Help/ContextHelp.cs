@@ -17,7 +17,7 @@ namespace PowerShellStudio.Shell.Help
 {
     public static class ContextHelp
     {
-        private const string HelpMenuItemTag = "PowerShellStudio.ContextHelpMenuItem";
+        private const string HelpMenuItemTag = "PS7ScriptDesk.ContextHelpMenuItem";
         private static readonly Dictionary<Window, ContextHelpWindow> OpenWindows = new();
         private static readonly Dictionary<Window, WeakReference<DependencyObject>> LastHelpTargets = new();
         private static bool _isEnabled = true;

@@ -7,7 +7,7 @@ namespace PowerShellStudio.Application.Utilities
     public static class StartupTimingLogger
     {
         private static readonly object SyncRoot = new();
-        private static readonly string LogDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PowerShellStudio");
+        private static readonly string LogDirectory = Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Logs");
         private static readonly string LogPath = Path.Combine(LogDirectory, "startup-timing.log");
         private static bool _sessionStarted;
 

@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using PowerShellStudio.Application.Utilities;
 
 namespace PowerShellStudio.Application.Diagnostics
 {
@@ -20,9 +21,9 @@ namespace PowerShellStudio.Application.Diagnostics
         private const long MaxLogFileBytes = 2 * 1024 * 1024;
         private const int MaxArchiveFiles = 5;
         private static readonly TimeSpan LogRetentionWindow = TimeSpan.FromHours(24);
-        private static readonly string RootDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PowerShellStudio");
+        private static readonly string RootDirectory = ApplicationBranding.LocalApplicationDataRoot;
         private static readonly string LogDirectory = Path.Combine(RootDirectory, "Logs");
-        private static readonly string LogPath = Path.Combine(LogDirectory, "powershellstudio.log");
+        private static readonly string LogPath = Path.Combine(LogDirectory, ApplicationBranding.LogFileName);
         private static readonly string DebugFlagPath = Path.Combine(RootDirectory, "logging.debug.enabled");
         private static readonly Channel<string> LogChannel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
         {

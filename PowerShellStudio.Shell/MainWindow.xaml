@@ -166,7 +166,7 @@
                 <MenuItem Header="Help _Enabled"
                           IsCheckable="True"
                           IsChecked="{Binding IsContextHelpEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
-                <MenuItem Header="PowerShellStudio _Help" Click="HelpOverview_Click" help:ContextHelp.Key="App.Overview" />
+                <MenuItem Header="PS7 ScriptDesk _Help" Click="HelpOverview_Click" help:ContextHelp.Key="App.Overview" />
                 <Separator />
                 <MenuItem Header="_About" Command="{Binding AboutCommand}" help:ContextHelp.Key="Help.About" />
             </MenuItem>
@@ -1393,7 +1393,7 @@
                                Margin="0,6,0,0"
                                TextWrapping="Wrap"
                                Foreground="{DynamicResource Theme.Text.Secondary}"
-                               Text="PowerShellStudio is loading command, parameter, syntax, and help metadata for this PowerShell runtime." />
+                               Text="PS7 ScriptDesk is loading command, parameter, syntax, and help metadata for this PowerShell runtime." />
 
                     <ProgressBar x:Name="MetadataToastProgressBar"
                                  Grid.Row="2"

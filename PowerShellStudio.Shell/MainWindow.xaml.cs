@@ -312,7 +312,7 @@ namespace PowerShellStudio.Shell
                 StartupTimingLogger.Log("MainWindow", $"Startup exception: {ex}");
                 System.Windows.MessageBox.Show(
                     this,
-                    $"PowerShellStudio failed during startup.\n\n{ex}",
+                    $"PS7 ScriptDesk failed during startup.\n\n{ex}",
                     "Startup Error",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
@@ -3474,7 +3474,7 @@ namespace PowerShellStudio.Shell
 
             var snapshotPath = Path.Combine(
                 debugSnapshotRoot,
-                $"PowerShellStudio_Debug_{safeName}_{Guid.NewGuid():N}.ps1");
+                $"PS7ScriptDesk_Debug_{safeName}_{Guid.NewGuid():N}.ps1");
 
             File.WriteAllText(snapshotPath, tab.Content ?? string.Empty);
             _activeDebugSnapshotPath = snapshotPath;
@@ -3958,7 +3958,7 @@ namespace PowerShellStudio.Shell
             _lastEditorMetadataWarmupPhase = status.Phase;
 
             var detailText = string.IsNullOrWhiteSpace(status.DetailText)
-                ? "PowerShell Studio is loading editor command metadata in the background."
+                ? "PS7 ScriptDesk is loading editor command metadata in the background."
                 : status.DetailText;
             var metadataSummary = status.CommandCount > 0 || status.QuickInfoCount > 0
                 ? $"{Environment.NewLine}Catalog={status.CommandCount:N0}, QuickInfo={status.QuickInfoCount:N0}, ParameterizedQuickInfos={status.ParameterizedQuickInfoCount:N0}, Get-ChildItemParameters={status.GetChildItemParameterCount:N0}"
@@ -4226,7 +4226,7 @@ namespace PowerShellStudio.Shell
         private (string Title, string Body, string PhaseText, string Glyph, bool ShowProgress, System.Windows.Media.Brush Background, System.Windows.Media.Brush Border, System.Windows.Media.Brush Foreground) BuildMetadataToastVisual(EditorMetadataWarmupStatus status)
         {
             var detailText = string.IsNullOrWhiteSpace(status.DetailText)
-                ? "PowerShellStudio is preparing editor metadata in the background."
+                ? "PS7 ScriptDesk is preparing editor metadata in the background."
                 : status.DetailText.Trim();
 
             var progressText = status.HasProgress
@@ -4237,7 +4237,7 @@ namespace PowerShellStudio.Shell
             {
                 return (
                     "Metadata refresh did not complete",
-                    "PowerShellStudio could not finish rebuilding editor metadata. The previous cached metadata is still being used. Details were written to the app log.",
+                    "PS7 ScriptDesk could not finish rebuilding editor metadata. The previous cached metadata is still being used. Details were written to the app log.",
                     detailText,
                     "!",
                     false,
@@ -4250,7 +4250,7 @@ namespace PowerShellStudio.Shell
             {
                 return (
                     "PowerShell editor metadata failed",
-                    "PowerShellStudio could not prepare editor metadata for this PowerShell runtime. Basic editor features may still work, but IntelliSense may be limited. Details were written to the app log.",
+                    "PS7 ScriptDesk could not prepare editor metadata for this PowerShell runtime. Basic editor features may still work, but IntelliSense may be limited. Details were written to the app log.",
                     detailText,
                     "!",
                     false,
@@ -4263,7 +4263,7 @@ namespace PowerShellStudio.Shell
             {
                 return (
                     "PowerShell editor metadata ready",
-                    "PowerShellStudio finished preparing full editor metadata for this PowerShell runtime. IntelliSense and autofill now have richer command, parameter, syntax, and help details.",
+                    "PS7 ScriptDesk finished preparing full editor metadata for this PowerShell runtime. IntelliSense and autofill now have richer command, parameter, syntax, and help details.",
                     detailText,
                     "✓",
                     false,
@@ -4276,7 +4276,7 @@ namespace PowerShellStudio.Shell
             {
                 return (
                     "Refreshing PowerShell editor metadata",
-                    "PowerShellStudio is rebuilding command, parameter, syntax, and help metadata for the selected PowerShell runtime.\n\nYou can keep using the editor. The existing metadata cache will remain available until the refresh completes successfully.",
+                    "PS7 ScriptDesk is rebuilding command, parameter, syntax, and help metadata for the selected PowerShell runtime.\n\nYou can keep using the editor. The existing metadata cache will remain available until the refresh completes successfully.",
                     $"{detailText} {progressText}".Trim(),
                     "↻",
                     true,
@@ -4286,8 +4286,8 @@ namespace PowerShellStudio.Shell
             }
 
             var body = status.Reason == EditorMetadataWarmupReason.CacheRebuild
-                ? "PowerShellStudio is rebuilding command, parameter, syntax, and help metadata for this PowerShell runtime because the saved metadata cache could not be reused.\n\nYou can keep using the editor while this runs. IntelliSense will improve when loading completes."
-                : "PowerShellStudio is loading command, parameter, syntax, and help metadata for this PowerShell runtime.\n\nThis can take a while the first time a PowerShell version is used. You can keep using the editor while this runs. IntelliSense will improve when loading completes.";
+                ? "PS7 ScriptDesk is rebuilding command, parameter, syntax, and help metadata for this PowerShell runtime because the saved metadata cache could not be reused.\n\nYou can keep using the editor while this runs. IntelliSense will improve when loading completes."
+                : "PS7 ScriptDesk is loading command, parameter, syntax, and help metadata for this PowerShell runtime.\n\nThis can take a while the first time a PowerShell version is used. You can keep using the editor while this runs. IntelliSense will improve when loading completes.";
 
             return (
                 "Preparing PowerShell editor metadata",
@@ -4456,7 +4456,7 @@ namespace PowerShellStudio.Shell
                 .Where(entry => MetadataCacheEntryMatchesRuntime(entry, runtimeInfo))
                 .ToList();
             var cacheSummary = matchingEntries.Count == 0
-                ? "No existing cache folder was found for this runtime. PowerShellStudio will still attempt a fresh rebuild if you continue."
+                ? "No existing cache folder was found for this runtime. PS7 ScriptDesk will still attempt a fresh rebuild if you continue."
                 : $"Cache folders found: {matchingEntries.Count:N0}\nApproximate size: {FormatByteSize(matchingEntries.Sum(entry => entry.SizeBytes))}";
 
             var message =
@@ -4466,7 +4466,7 @@ namespace PowerShellStudio.Shell
                 $"Edition: {runtimeInfo.Edition ?? "unknown"}\n" +
                 $"Architecture: {runtimeInfo.Architecture ?? "unknown"}\n\n" +
                 cacheSummary + "\n\n" +
-                "After deletion, PowerShellStudio will rebuild metadata for this runtime in the background.";
+                "After deletion, PS7 ScriptDesk will rebuild metadata for this runtime in the background.";
 
             var confirmation = System.Windows.MessageBox.Show(
                 this,
