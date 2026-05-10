@@ -1,4 +1,6 @@
-﻿using PowerShellStudio.Infrastructure.Services;
+﻿using System.Collections.Generic;
+using PowerShellStudio.Application.Diagnostics;
+using PowerShellStudio.Infrastructure.Services;
 using PowerShellStudio.PowerShell.Services;
 using PowerShellStudio.Shell.Services;
 using PowerShellStudio.UI.ViewModels;
@@ -18,6 +20,15 @@ namespace PowerShellStudio.Shell.Composition
             var exeExportService = new ExeExportService();
             var applicationSettingsService = new ApplicationSettingsService();
             var applicationSettings = applicationSettingsService.LoadSettings();
+            DeveloperDiagnostics.ConfigureFromSettings(applicationSettings, "AppBootstrapper loaded settings");
+            DeveloperDiagnostics.LogInfo(
+                "Startup",
+                "AppBootstrapper loaded application settings and is creating MainWindow.",
+                new Dictionary<string, object?>
+                {
+                    ["settingsPath"] = applicationSettingsService.SettingsFilePath,
+                    ["developerDiagnosticsEnabled"] = applicationSettings.IsDeveloperDiagnosticsEnabled
+                });
 
             var viewModel = new MainWindowViewModel(
                 workspaceService,
@@ -34,6 +45,7 @@ namespace PowerShellStudio.Shell.Composition
                 DataContext = viewModel
             };
 
+            DeveloperDiagnostics.LogInfo("Startup", "MainWindow instance created and DataContext assigned.");
             return window;
         }
     }

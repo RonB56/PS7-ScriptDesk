@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using PowerShellStudio.Application.Diagnostics;
 
@@ -24,6 +25,7 @@ namespace PowerShellStudio.Application.Utilities
             }
 
             AppLogger.Info("StartupTiming", $"Session start - {source}");
+            DeveloperDiagnostics.LogInfo("Startup", $"Startup timing session started: {source}.");
         }
 
         public static void Log(string source, string message)
@@ -44,6 +46,7 @@ namespace PowerShellStudio.Application.Utilities
             }
 
             AppLogger.Info(source, message);
+            DeveloperDiagnostics.LogInfo("Performance", message, new Dictionary<string, object?> { ["startupSource"] = source });
         }
     }
 }

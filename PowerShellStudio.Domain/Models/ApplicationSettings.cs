@@ -51,5 +51,25 @@ namespace PowerShellStudio.Domain.Models
 
         /// <summary>Whether contextual help UI is enabled across the shell. Defaults to true.</summary>
         public bool IsContextHelpEnabled { get; set; } = true;
+
+        public bool IsDeveloperDiagnosticsEnabled { get; set; }
+
+        public bool IsDeveloperDiagnosticsVerboseUiEnabled { get; set; } = true;
+
+        public bool IsDeveloperDiagnosticsVerboseDebuggerEnabled { get; set; } = true;
+
+        public bool IsDeveloperDiagnosticsVerboseTerminalEnabled { get; set; } = true;
+
+        public bool IsDeveloperDiagnosticsVerboseEditorEnabled { get; set; } = true;
+
+        public bool IsDeveloperDiagnosticsVerbosePowerShellExecutionEnabled { get; set; } = true;
+
+        public int DeveloperDiagnosticsPreviewCharacterLimit { get; set; } = 300;
+
+        public int DeveloperDiagnosticsRetentionHours { get; set; } = 72;
+
+        public bool DeveloperDiagnosticsWriteJsonLines { get; set; } = true;
+
+        public bool DeveloperDiagnosticsWriteReadableLog { get; set; } = true;
     }
 }

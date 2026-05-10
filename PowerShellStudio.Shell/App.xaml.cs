@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,12 +22,22 @@ namespace PowerShellStudio.Shell
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            DeveloperDiagnostics.TryPreconfigureFromPersistedSettings();
+            DeveloperDiagnostics.LogMethodEntry(
+                "Startup",
+                "App.OnStartup entered.",
+                new Dictionary<string, object?>
+                {
+                    ["args"] = e.Args is null ? Array.Empty<string>() : Array.ConvertAll(e.Args, arg => DeveloperDiagnostics.SanitizePreview(arg))
+                });
             AppLogger.Info("App", "Startup requested.");
             if (Editor.EditorMetadataBuilderHost.IsMetadataBuilderInvocation(e.Args))
             {
                 AppLogger.Info("App", "Launching metadata builder helper mode.");
+                DeveloperDiagnostics.LogDecision("Startup", "MetadataBuilderInvocation", "Launching metadata builder helper mode.", "MetadataBuilderMode");
                 var exitCode = Editor.EditorMetadataBuilderHost.RunFromArguments(e.Args);
                 AppLogger.Info("App", $"Metadata builder helper mode finished with exit code {exitCode}.");
+                DeveloperDiagnostics.LogMethodExit("Startup", $"Metadata builder helper mode finished with exit code {exitCode}.");
                 Shutdown(exitCode);
                 return;
             }
@@ -38,30 +49,44 @@ namespace PowerShellStudio.Shell
             if (SynchronizationContext.Current is null)
             {
                 SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher));
+                DeveloperDiagnostics.LogInfo("Startup", "Dispatcher synchronization context was initialized.");
             }
 
             AppLogger.Info("App", "Cleaning stale execution snapshots from previous sessions.");
+            DeveloperDiagnostics.LogInfo("Execution", "Cleaning stale execution snapshots from previous sessions.");
             LiveConsoleService.CleanupStaleExecutionSnapshots();
             ScriptExecutionService.CleanupStaleExecutionSnapshots();
 
             base.OnStartup(e);
             AppLogger.Info("App", "Base startup completed.");
+            DeveloperDiagnostics.LogInfo("Startup", "Base application startup completed.");
 
             if (ShouldLaunchConsolePrototype(e.Args))
             {
                 var prototypeWindow = new ConsolePrototypeWindow();
                 MainWindow = prototypeWindow;
                 AppLogger.Info("App", "Console prototype window created from command-line switch.");
+                DeveloperDiagnostics.LogInfo("Startup", "Console prototype window created from command-line switch.");
                 prototypeWindow.Show();
                 AppLogger.Info("App", "Console prototype window shown.");
+                DeveloperDiagnostics.LogMethodExit("Startup", "Console prototype window shown; OnStartup completed.");
                 return;
             }
 
             var shellWindow = AppBootstrapper.CreateMainWindow();
             MainWindow = shellWindow;
             AppLogger.Info("App", "Main window created.");
+            DeveloperDiagnostics.LogInfo("Startup", "Main window created by AppBootstrapper.");
             shellWindow.Show();
             AppLogger.Info("App", "Main window shown.");
+            DeveloperDiagnostics.LogMethodExit("Startup", "Main window shown; OnStartup completed.");
+        }
+
+        protected override void OnExit(ExitEventArgs e)
+        {
+            DeveloperDiagnostics.LogInfo("Startup", $"App.OnExit invoked with exit code {e.ApplicationExitCode}.");
+            DeveloperDiagnostics.Shutdown();
+            base.OnExit(e);
         }
 
         private static bool ShouldLaunchConsolePrototype(string[] args)
@@ -109,6 +134,7 @@ namespace PowerShellStudio.Shell
         private void ReportStartupException(string source, Exception exception)
         {
             AppLogger.Error("App", source, exception);
+            DeveloperDiagnostics.LogException("Startup", exception, source);
             try
             {
                 var folderPath = ApplicationBranding.LocalApplicationDataRoot;

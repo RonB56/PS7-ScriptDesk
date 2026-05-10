@@ -1,34 +1,32 @@
 using System;
-using System.IO;
-using System.Text;
-using System.Threading;
-using PowerShellStudio.Application.Utilities;
+using System.Collections.Generic;
+using PowerShellStudio.Application.Diagnostics;
 
 namespace PowerShellStudio.Shell.Debug
 {
     internal static class DebuggerTraceLogger
     {
-        private static readonly object SyncRoot = new();
-        private static readonly string LogDirectory = Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Logs");
-        private static readonly string LogPath = Path.Combine(LogDirectory, "PS7ScriptDesk_DebuggerTrace.log");
-
-        public static string CurrentPath => LogPath;
+        public static string CurrentPath => DeveloperDiagnostics.CurrentSessionDirectory ?? string.Empty;
 
         public static void Write(string source, string message)
         {
             try
             {
-                var timestamp = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz");
                 var safeSource = string.IsNullOrWhiteSpace(source) ? "Unknown" : source.Trim();
                 var safeMessage = string.IsNullOrWhiteSpace(message) ? string.Empty : message.Replace(Environment.NewLine, " | ", StringComparison.Ordinal).Trim();
-
-                var line = $"[{timestamp}] [pid:{Environment.ProcessId} tid:{Environment.CurrentManagedThreadId}] [{safeSource}] {safeMessage}";
-
-                lock (SyncRoot)
+                if (!DeveloperDiagnostics.IsEnabled || !DeveloperDiagnostics.IsVerboseDebuggerEnabled())
                 {
-                    Directory.CreateDirectory(LogDirectory);
-                    File.AppendAllText(LogPath, line + Environment.NewLine, Encoding.UTF8);
+                    return;
                 }
+
+                DeveloperDiagnostics.LogDebug(
+                    "Debugger",
+                    safeMessage,
+                    new Dictionary<string, object?>
+                    {
+                        ["traceSource"] = safeSource,
+                        ["legacyTraceLength"] = safeMessage.Length
+                    });
             }
             catch
             {

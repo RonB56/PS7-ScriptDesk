@@ -12,6 +12,7 @@
         MinWidth="800"
         WindowStartupLocation="CenterScreen"
         Loaded="Window_Loaded"
+        ContentRendered="Window_ContentRendered"
         Closing="Window_Closing"
         PreviewKeyDown="Window_PreviewKeyDown"
         AllowDrop="True">
@@ -159,6 +160,43 @@
                 <MenuItem x:Name="StepOutMenuItem"    Header="Step O_ut"     InputGestureText="Shift+F11" Click="StepOut_Click"    IsEnabled="False" help:ContextHelp.Key="Command.StepOut" />
                 <MenuItem x:Name="ContinueMenuItem"   Header="_Continue"     InputGestureText="F5"       Click="ContinueDebug_Click" IsEnabled="False" help:ContextHelp.Key="Command.ContinueDebug" />
                 <MenuItem x:Name="StopDebugMenuItem"  Header="Stop D_ebug"  InputGestureText="Shift+F5" Click="StopDebug_Click"  IsEnabled="False" help:ContextHelp.Key="Command.StopDebug" />
+            </MenuItem>
+
+            <MenuItem Header="_Tools">
+                <MenuItem Header="_Developer Diagnostics">
+                    <MenuItem x:Name="EnableDeveloperDiagnosticsMenuItem"
+                              Header="_Enable Developer Diagnostics"
+                              IsCheckable="True"
+                              Click="EnableDeveloperDiagnostics_Click" />
+                    <Separator />
+                    <MenuItem x:Name="VerboseUiLoggingMenuItem"
+                              Header="Verbose _UI Logging"
+                              IsCheckable="True"
+                              Click="VerboseUiLogging_Click" />
+                    <MenuItem x:Name="VerboseDebuggerLoggingMenuItem"
+                              Header="Verbose _Debugger Logging"
+                              IsCheckable="True"
+                              Click="VerboseDebuggerLogging_Click" />
+                    <MenuItem x:Name="VerboseTerminalLoggingMenuItem"
+                              Header="Verbose _Terminal Logging"
+                              IsCheckable="True"
+                              Click="VerboseTerminalLogging_Click" />
+                    <MenuItem x:Name="VerboseEditorLoggingMenuItem"
+                              Header="Verbose _Editor Logging"
+                              IsCheckable="True"
+                              Click="VerboseEditorLogging_Click" />
+                    <Separator />
+                    <MenuItem Header="_Open Developer Debugging Folder"
+                              Click="OpenDeveloperDebuggingFolder_Click" />
+                    <MenuItem Header="Open _Latest Diagnostic Session Folder"
+                              Click="OpenLatestDiagnosticSessionFolder_Click" />
+                    <MenuItem Header="_Copy Diagnostics Summary to Clipboard"
+                              Click="CopyDiagnosticsSummaryToClipboard_Click" />
+                    <MenuItem Header="_Package Developer Diagnostics for Support"
+                              Click="PackageDeveloperDiagnosticsForSupport_Click" />
+                    <MenuItem Header="_Clear Developer Diagnostics Logs"
+                              Click="ClearDeveloperDiagnosticsLogs_Click" />
+                </MenuItem>
             </MenuItem>
 
             <MenuItem Header="_Help" help:ContextHelp.Key="Help.Menu">

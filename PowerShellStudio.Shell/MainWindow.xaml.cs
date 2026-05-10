@@ -59,6 +59,44 @@ namespace PowerShellStudio.Shell
         private const int MetadataToastSuccessDismissMilliseconds = 2200;
         private const int MetadataToastWarningDismissMilliseconds = 6500;
         private const int MetadataToastFailureDismissMilliseconds = 9000;
+        private const int DebugOutputPreservationWindowMilliseconds = 2000;
+        private const int DebugVariableValueMaxLength = 160;
+        private const int DebugHoverValueMaxLength = 300;
+        private static readonly HashSet<string> HiddenDebugVariableNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "?",
+            "_",
+            "args",
+            "ConfirmPreference",
+            "DebugPreference",
+            "EnabledExperimentalFeatures",
+            "Error",
+            "ErrorActionPreference",
+            "ExecutionContext",
+            "false",
+            "HOME",
+            "Host",
+            "InformationPreference",
+            "input",
+            "MyInvocation",
+            "NestedPromptLevel",
+            "null",
+            "PID",
+            "ProgressPreference",
+            "PSBoundParameters",
+            "PSCommandPath",
+            "PSItem",
+            "PSScriptRoot",
+            "PSVersionTable",
+            "PWD",
+            "ShellId",
+            "StackTrace",
+            "this",
+            "true",
+            "VerbosePreference",
+            "WarningPreference",
+            "WhatIfPreference"
+        };
         private static readonly HashSet<string> KnownUnsupportedDroppedFileExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
             ".7z",
@@ -109,6 +147,7 @@ namespace PowerShellStudio.Shell
         private readonly Dictionary<TextEditor, int> _editorRegistrationVersions = new();
         private readonly Dictionary<TextEditor, FoldingManager> _foldingManagers = new();
         private readonly Dictionary<TextEditor, CancellationTokenSource> _foldingCancellationSources = new();
+        private readonly Dictionary<string, DebugVariableInfo> _liveDebugVariableCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly BraceFoldingStrategy _foldingStrategy = new();
         private readonly HashSet<TextEditor> _editorTextSynchronizationInProgress = new();
         private readonly IApplicationSettingsService _applicationSettingsService;
@@ -142,6 +181,7 @@ namespace PowerShellStudio.Shell
         private string? _activeDebugLaunchPath;
         private string? _activeDebugSnapshotPath;
         private int _debugPanelRefreshVersion;
+        private DateTimeOffset _lastDebugOutputWrittenAtUtc = DateTimeOffset.MinValue;
         private readonly Dictionary<TextEditor, BraceMatchingRenderer> _braceMatchingRenderers = new();
         private bool _terminalIsReady;
         private bool _terminalIsActive;
@@ -153,6 +193,16 @@ namespace PowerShellStudio.Shell
         private EditorMetadataWarmupStatus? _pendingMetadataToastStatus;
         private EditorMetadataWarmupStatus? _visibleMetadataToastStatus;
         private bool _metadataToastVisible;
+
+        private enum DebugTeardownReason
+        {
+            StartFailure,
+            PreparationFailure,
+            PreLaunchCleanup,
+            UserStop,
+            SessionEndedEvent,
+            SessionStoppedState
+        }
 
         public static readonly DependencyProperty IsContextHelpEnabledProperty = DependencyProperty.Register(
             nameof(IsContextHelpEnabled),
@@ -184,6 +234,7 @@ namespace PowerShellStudio.Shell
 
         public MainWindow(IApplicationSettingsService applicationSettingsService, ApplicationSettings loadedSettings)
         {
+            DeveloperDiagnostics.LogMethodEntry("UI", "MainWindow constructor entry.");
             _applicationSettingsService = applicationSettingsService;
             _loadedSettings = loadedSettings ?? new ApplicationSettings();
 
@@ -215,12 +266,33 @@ namespace PowerShellStudio.Shell
             _metadataToastAutoHideTimer.Tick += MetadataToastAutoHideTimer_Tick;
 
             IsContextHelpEnabled = _loadedSettings.IsContextHelpEnabled;
+            DeveloperDiagnostics.RegisterSummaryProvider(BuildDeveloperDiagnosticsSnapshot);
+            DeveloperDiagnostics.RegisterUiThreadChecker(() => Dispatcher?.CheckAccess());
+            UpdateDeveloperDiagnosticsMenuState();
+            DeveloperDiagnostics.LogMethodExit(
+                "UI",
+                "MainWindow constructor exit.",
+                new Dictionary<string, object?>
+                {
+                    ["developerDiagnosticsEnabled"] = _loadedSettings.IsDeveloperDiagnosticsEnabled,
+                    ["settingsPath"] = _applicationSettingsService.SettingsFilePath
+                });
         }
 
         private MainWindowViewModel? ViewModel => DataContext as MainWindowViewModel;
 
         private async void Window_Loaded(object sender, RoutedEventArgs e)
         {
+            using var startupScope = DeveloperDiagnostics.BeginTimedOperation(
+                "Startup",
+                "WindowLoaded",
+                "MainWindow.Window_Loaded executing.",
+                operationId: $"WindowLoaded-{Guid.NewGuid():N}");
+            DeveloperDiagnostics.LogEventHandlerEntry(
+                "UI",
+                "Window_Loaded",
+                "Window_Loaded entered.",
+                new Dictionary<string, object?> { ["windowTitle"] = Title });
             StartupTimingLogger.StartSession("MainWindow.Window_Loaded");
             var startupStopwatch = Stopwatch.StartNew();
 
@@ -230,6 +302,7 @@ namespace PowerShellStudio.Shell
                 // Apply saved theme (5B) and zoom (2B) before anything is shown.
                 _themeService.ApplyTheme(ViewModel?.CurrentThemeName ?? "Dark");
                 ApplyEditorHighlightSettingsToAllEditors();
+                DeveloperDiagnostics.LogInfo("Startup", "Shell layout, theme, and editor highlight settings applied.");
                 StartupTimingLogger.Log("MainWindow", $"Shell layout applied in {startupStopwatch.ElapsedMilliseconds} ms");
 
                 if (ViewModel is null)
@@ -241,6 +314,7 @@ namespace PowerShellStudio.Shell
                 ViewModel.BindToCurrentSynchronizationContext();
                 ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
                 ViewModel.PropertyChanged += ViewModel_PropertyChanged;
+                DeveloperDiagnostics.LogInfo("Startup", "ViewModel bound to synchronization context and PropertyChanged handler attached.");
                 ContextHelp.ValidateWindowTopics(this);
                 ApplyExplorerVisibilityLayout();
                 RefreshDebugCommandAvailability(false);
@@ -267,10 +341,19 @@ namespace PowerShellStudio.Shell
                 TerminalConsole.UserInput += async data =>
                 {
                     AppLogger.Debug("Terminal", $"MainWindow received terminal input for forwarding. Length={data.Length}, Data='{FormatTerminalTextForLog(data)}'.");
+                    DeveloperDiagnostics.LogUserAction(
+                        "Terminal",
+                        "TerminalInput",
+                        "Terminal input received for forwarding to the view model.",
+                        new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data))
+                        {
+                            ["focusedElement"] = DescribeFocusedElement()
+                        });
                     if (ViewModel is not null)
                     {
                         await ViewModel.WriteRawInputAsync(data).ConfigureAwait(false);
                         AppLogger.Debug("Terminal", "MainWindow forwarded terminal input to the view model.");
+                        DeveloperDiagnostics.LogInfo("Terminal", "Terminal input forwarded to view model.");
                     }
                 };
 
@@ -288,6 +371,7 @@ namespace PowerShellStudio.Shell
                 {
                     _terminalIsReady = true;
                     AppLogger.Debug("Terminal", "MainWindow received terminal-ready signal.");
+                    DeveloperDiagnostics.LogStateTransition("Terminal", "TerminalReady", "Initializing", "Ready", "Terminal ready signal received.");
                     // Apply the current app theme to the terminal colour scheme.
                     TerminalConsole.ApplyAppTheme(_themeService.CurrentTheme);
                     if (ViewModel is not null)
@@ -301,17 +385,25 @@ namespace PowerShellStudio.Shell
                 // Notify the service that a host is attached (triggers session bookkeeping).
                 var hostAttachStopwatch = Stopwatch.StartNew();
                 await ViewModel.InitializeTerminalHostAsync(IntPtr.Zero, 120, 30);
+                DeveloperDiagnostics.LogOperationStop(
+                    "Startup",
+                    "InitializeTerminalHost",
+                    "Terminal host initialization completed.",
+                    hostAttachStopwatch.ElapsedMilliseconds);
                 StartupTimingLogger.Log("MainWindow", $"Terminal host attached in {hostAttachStopwatch.ElapsedMilliseconds} ms");
 
                 _ = ViewModel.InitializeAsync();
+                DeveloperDiagnostics.LogAsyncBoundary("Startup", "InitializeAsync", "Deferred ViewModel initialization launched.", "AsyncStart");
                 StartupTimingLogger.Log("MainWindow", $"Deferred initialization launched at {startupStopwatch.ElapsedMilliseconds} ms");
 
                 TerminalConsole.FocusTerminal();
                 StartupTimingLogger.Log("MainWindow", $"Window_Loaded completed in {startupStopwatch.ElapsedMilliseconds} ms");
+                DeveloperDiagnostics.LogEventHandlerExit("UI", "Window_Loaded", "Window_Loaded completed successfully.");
             }
             catch (Exception ex)
             {
                 StartupTimingLogger.Log("MainWindow", $"Startup exception: {ex}");
+                DeveloperDiagnostics.LogException("Startup", ex, "MainWindow.Window_Loaded failed.");
                 System.Windows.MessageBox.Show(
                     this,
                     $"PS7 ScriptDesk failed during startup.\n\n{ex}",
@@ -321,12 +413,34 @@ namespace PowerShellStudio.Shell
             }
         }
 
+        private void Window_ContentRendered(object? sender, EventArgs e)
+        {
+            DeveloperDiagnostics.LogEventHandlerEntry("UI", "Window_ContentRendered", "Window content rendered.");
+            DeveloperDiagnostics.LogEventHandlerExit("UI", "Window_ContentRendered", "Window content rendered handler completed.");
+        }
+
 
         private async void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (ViewModel is null)
             {
                 return;
+            }
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseUiEnabled())
+            {
+                DeveloperDiagnostics.LogUserAction(
+                    "UI",
+                    "KeyboardShortcut",
+                    $"PreviewKeyDown received: {e.Key}.",
+                    new Dictionary<string, object?>
+                    {
+                        ["key"] = e.Key.ToString(),
+                        ["modifiers"] = Keyboard.Modifiers.ToString(),
+                        ["focusedElement"] = DescribeFocusedElement(),
+                        ["activeDocumentPath"] = ViewModel.SelectedTab?.FilePath,
+                        ["activeDocumentDirtyState"] = ViewModel.SelectedTab?.IsDirty
+                    });
             }
 
             var isCtrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
@@ -523,10 +637,12 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
+            DeveloperDiagnostics.LogUserAction("UI", "OpenFolderShortcut", "Open folder shortcut invoked.");
             var folderPath = _userPromptService.ShowOpenFolderDialog();
             if (!string.IsNullOrWhiteSpace(folderPath))
             {
                 await ViewModel.LoadWorkspaceFolderAsync(folderPath).ConfigureAwait(true);
+                DeveloperDiagnostics.LogInfo("UI", "Workspace folder loaded from shortcut.", new Dictionary<string, object?> { ["folderPath"] = folderPath });
             }
         }
 
@@ -583,6 +699,7 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
+            DeveloperDiagnostics.LogEventHandlerEntry("UI", "OpenFile_Click", "OpenFile menu/toolbar handler entered.");
             var dialog = new Microsoft.Win32.OpenFileDialog
             {
                 Title = "Open Script File",
@@ -592,8 +709,11 @@ namespace PowerShellStudio.Shell
             if (dialog.ShowDialog() == true)
             {
                 ViewModel.OpenFileFromPath(dialog.FileName);
+                DeveloperDiagnostics.LogUserAction("Editor", "DocumentOpenRequested", "Open file dialog selected a document.", new Dictionary<string, object?> { ["filePath"] = dialog.FileName });
                 FocusActiveEditorSoon();
             }
+
+            DeveloperDiagnostics.LogEventHandlerExit("UI", "OpenFile_Click", "OpenFile handler exited.");
         }
 
         private async void OpenFolder_Click(object sender, RoutedEventArgs e)
@@ -603,11 +723,15 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
+            DeveloperDiagnostics.LogEventHandlerEntry("UI", "OpenFolder_Click", "OpenFolder menu/toolbar handler entered.");
             var folderPath = _userPromptService.ShowOpenFolderDialog();
             if (!string.IsNullOrWhiteSpace(folderPath))
             {
                 await ViewModel.LoadWorkspaceFolderAsync(folderPath);
+                DeveloperDiagnostics.LogUserAction("UI", "WorkspaceOpenRequested", "Workspace folder selected from dialog.", new Dictionary<string, object?> { ["folderPath"] = folderPath });
             }
+
+            DeveloperDiagnostics.LogEventHandlerExit("UI", "OpenFolder_Click", "OpenFolder handler exited.");
         }
 
         private void SaveFile_Click(object sender, RoutedEventArgs e)
@@ -617,6 +741,15 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
+            DeveloperDiagnostics.LogUserAction(
+                "Editor",
+                "DocumentSaveRequested",
+                "Save file requested.",
+                new Dictionary<string, object?>
+                {
+                    ["filePath"] = ViewModel.SelectedTab.FilePath,
+                    ["isDirty"] = ViewModel.SelectedTab.IsDirty
+                });
             if (string.IsNullOrWhiteSpace(ViewModel.SelectedTab.FilePath))
             {
                 SaveFileAs_Click(sender, e);
@@ -633,6 +766,7 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
+            DeveloperDiagnostics.LogUserAction("Editor", "DocumentSaveAsRequested", "Save As requested.");
             var dialog = new Microsoft.Win32.SaveFileDialog
             {
                 Title = "Save Script File",
@@ -651,6 +785,7 @@ namespace PowerShellStudio.Shell
             if (dialog.ShowDialog() == true)
             {
                 ViewModel.SaveSelectedTabAs(dialog.FileName);
+                DeveloperDiagnostics.LogInfo("Editor", "Save As target selected.", new Dictionary<string, object?> { ["filePath"] = dialog.FileName });
                 FocusActiveEditorSoon();
             }
         }
@@ -1870,6 +2005,19 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Editor",
+                    $"Editor tab property changed: {e.PropertyName}.",
+                    new Dictionary<string, object?>
+                    {
+                        ["tabTitle"] = tab.Title,
+                        ["filePath"] = tab.FilePath,
+                        ["isDirty"] = tab.IsDirty
+                    });
+            }
+
             if (e.PropertyName == nameof(EditorTabViewModel.Content))
             {
                 SynchronizeEditorTextFromViewModel(editorTextEditor, tab.Content);
@@ -1916,6 +2064,20 @@ namespace PowerShellStudio.Shell
             var lineNumber = line.LineNumber;
             var column = (caretOffset - line.Offset) + 1;
             tab.UpdateCaretPosition(lineNumber, column, editorTextEditor.SelectionLength);
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Editor",
+                    "Editor caret metrics updated.",
+                    new Dictionary<string, object?>
+                    {
+                        ["filePath"] = tab.FilePath,
+                        ["lineNumber"] = lineNumber,
+                        ["column"] = column,
+                        ["selectionLength"] = editorTextEditor.SelectionLength
+                    });
+            }
         }
 
         private TextEditor? FindActiveEditor()
@@ -1954,6 +2116,15 @@ namespace PowerShellStudio.Shell
             AppLogger.Debug(
                 "Terminal",
                 $"Terminal activation routed to MainWindow. Source={source}, FocusedElement={DescribeFocusedElement()}.");
+            DeveloperDiagnostics.LogUserAction(
+                "Terminal",
+                "TerminalActivated",
+                "Terminal activation routed through MainWindow.",
+                new Dictionary<string, object?>
+                {
+                    ["source"] = source,
+                    ["focusedElement"] = DescribeFocusedElement()
+                });
         }
 
         private void OpenConsolePrototype_Click(object sender, RoutedEventArgs e)
@@ -2513,6 +2684,7 @@ namespace PowerShellStudio.Shell
         {
             if (ViewModel?.IsRunAvailable != true)
             {
+                DeveloperDiagnostics.LogDecision("Execution", "RunSelection", "Run Selection requested while execution was unavailable.", "Rejected");
                 return;
             }
 
@@ -2528,19 +2700,43 @@ namespace PowerShellStudio.Shell
                 selectedText = editorTextEditor.Document.GetText(caretLine.Offset, caretLine.Length);
             }
 
+            using var scope = DeveloperDiagnostics.BeginScope(operationId: $"RunSelection-{Guid.NewGuid():N}");
+            DeveloperDiagnostics.LogUserAction(
+                "Execution",
+                "RunSelectionRequested",
+                "Run Selection requested from the editor.",
+                new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(selectedText))
+                {
+                    ["filePath"] = (editorTextEditor.DataContext as EditorTabViewModel)?.FilePath,
+                    ["caretOffset"] = editorTextEditor.CaretOffset
+                });
             await ViewModel.RunSelectionAsync(selectedText).ConfigureAwait(true);
+            DeveloperDiagnostics.LogInfo("Execution", "Run Selection dispatched to ViewModel.");
         }
 
         private async Task RunScriptWithBreakpointAwarenessAsync()
         {
             if (ViewModel?.SelectedTab is null)
             {
+                DeveloperDiagnostics.LogDecision("Execution", "RunScript", "Run requested without a selected tab.", "Rejected");
                 return;
             }
 
+            using var scope = DeveloperDiagnostics.BeginScope(operationId: $"Execution-{Guid.NewGuid():N}");
+            DeveloperDiagnostics.LogUserAction(
+                "Execution",
+                "RunScriptRequested",
+                "Run Script requested.",
+                new Dictionary<string, object?>
+                {
+                    ["filePath"] = ViewModel.SelectedTab.FilePath,
+                    ["isDirty"] = ViewModel.SelectedTab.IsDirty,
+                    ["enabledBreakpointCount"] = ViewModel.SelectedTab.EnabledBreakpointCount
+                });
             if (ViewModel.SelectedTab.EnabledBreakpointCount > 0)
             {
                 ViewModel.StatusText = "Enabled breakpoints detected — starting a debug session instead of plain Run.";
+                DeveloperDiagnostics.LogDecision("Execution", "RunScript", "Enabled breakpoints redirected Run into Debug.", "RedirectToDebug");
                 StartDebug_Click(this, new RoutedEventArgs());
                 return;
             }
@@ -2548,6 +2744,7 @@ namespace PowerShellStudio.Shell
             if (ViewModel.RunCommand.CanExecute(null))
             {
                 ViewModel.RunCommand.Execute(null);
+                DeveloperDiagnostics.LogInfo("Execution", "Run command executed.");
             }
 
             await Task.CompletedTask;
@@ -2586,6 +2783,17 @@ namespace PowerShellStudio.Shell
             editorTextEditor.CaretOffset = documentLine.Offset;
 
             var breakpointAdded = tab.ToggleBreakpoint(lineNumber);
+            DeveloperDiagnostics.LogUserAction(
+                "Debugger",
+                "BreakpointChanged",
+                breakpointAdded ? "Breakpoint added." : "Breakpoint removed.",
+                new Dictionary<string, object?>
+                {
+                    ["filePath"] = tab.FilePath,
+                    ["lineNumber"] = lineNumber,
+                    ["enabled"] = breakpointAdded,
+                    ["totalBreakpoints"] = tab.EnabledBreakpointCount
+                });
             editorTextEditor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
             RefreshBreakpointGlyphMargin(editorTextEditor);
             RefreshBreakpointsList();
@@ -3229,10 +3437,17 @@ namespace PowerShellStudio.Shell
 
         private async void StartDebug_Click(object sender, RoutedEventArgs e)
         {
+            using var debugScope = DeveloperDiagnostics.BeginScope(operationId: $"DebugStart-{Guid.NewGuid():N}");
+            DeveloperDiagnostics.LogEventHandlerEntry(
+                "Debugger",
+                "StartDebug_Click",
+                "Start Debug requested.",
+                BuildDebugActionProperties(sender));
             TraceDebugShell("StartDebug_Click", $"Entry; senderType={sender?.GetType().Name ?? "(null)"}; {DescribeDebugUiState()}");
             if (ViewModel is null)
             {
                 TraceDebugShell("StartDebug_Click", "Aborted because ViewModel is null.");
+                DeveloperDiagnostics.LogDecision("Debugger", "StartDebug_Click", "Start Debug aborted because ViewModel was null.", "Rejected");
                 return;
             }
 
@@ -3242,11 +3457,13 @@ namespace PowerShellStudio.Shell
                 if (_debugSession.CurrentState == DebugSessionState.Paused)
                 {
                     TraceDebugShell("StartDebug_Click", "Existing paused session will route to Continue.");
+                    DeveloperDiagnostics.LogDecision("Debugger", "StartDebug_Click", "Existing paused session routed to Continue.", "ContinueExistingSession");
                     ContinueDebug_Click(sender, e);
                     return;
                 }
 
                 ViewModel.StatusText = "A debug session is already in progress — use Stop Debug to cancel it first";
+                DeveloperDiagnostics.LogDecision("Debugger", "StartDebug_Click", "A debug session was already active.", "Rejected");
                 return;
             }
 
@@ -3255,6 +3472,7 @@ namespace PowerShellStudio.Shell
                 ViewModel.StatusText = "Select a script before starting a debug session";
                 RefreshDebugCommandAvailability(false);
                 TraceDebugShell("StartDebug_Click", "Aborted because no selected tab exists.");
+                DeveloperDiagnostics.LogDecision("Debugger", "StartDebug_Click", "Start Debug aborted because no selected tab exists.", "Rejected");
                 return;
             }
 
@@ -3264,6 +3482,7 @@ namespace PowerShellStudio.Shell
                 ViewModel.StatusText = "Select a PowerShell runtime before debugging";
                 RefreshDebugCommandAvailability(false);
                 TraceDebugShell("StartDebug_Click", "Aborted because no runtime is selected.");
+                DeveloperDiagnostics.LogDecision("Debugger", "StartDebug_Click", "Start Debug aborted because no runtime is selected.", "Rejected");
                 return;
             }
 
@@ -3273,29 +3492,64 @@ namespace PowerShellStudio.Shell
                 ViewModel.StatusText = "The selected script is empty";
                 RefreshDebugCommandAvailability(false);
                 TraceDebugShell("StartDebug_Click", $"Aborted because selected tab '{selectedTab.Title}' is empty.");
+                DeveloperDiagnostics.LogDecision("Debugger", "StartDebug_Click", "Start Debug aborted because the selected script was empty.", "Rejected");
                 return;
             }
 
             try
             {
+                var requiresPreLaunchCleanup =
+                    _debugSession is not null ||
+                    _activeDebugTab is not null ||
+                    !string.IsNullOrWhiteSpace(_activeDebugLaunchPath) ||
+                    !string.IsNullOrWhiteSpace(_activeDebugSnapshotPath);
+                if (requiresPreLaunchCleanup)
+                {
+                    TraceDebugShell("StartDebug_Click", $"Cleaning up stale debug state before launch-plan creation; activeLaunchPathPresent={!string.IsNullOrWhiteSpace(_activeDebugLaunchPath)}; activeSnapshotPresent={!string.IsNullOrWhiteSpace(_activeDebugSnapshotPath)}; {DescribeDebugUiState()}");
+                    DeveloperDiagnostics.LogDecision(
+                        "Debugger",
+                        "StartDebug_Click",
+                        "Stale debug state was cleaned up before preparing a new debug launch plan.",
+                        "CleanupBeforeLaunchPlan",
+                        new Dictionary<string, object?>
+                        {
+                            ["activeLaunchPathPresent"] = !string.IsNullOrWhiteSpace(_activeDebugLaunchPath),
+                            ["activeSnapshotPresent"] = !string.IsNullOrWhiteSpace(_activeDebugSnapshotPath),
+                            ["activeTabPresent"] = _activeDebugTab is not null,
+                            ["activeSessionPresent"] = _debugSession is not null
+                        });
+                    TearDownDebugSession();
+                }
+
+                ClearLiveDebugVariableCache("Start Debug preparing new session");
+
                 if (!TryBuildDebugLaunchPlan(selectedTab, out var launchScriptPath))
                 {
                     ViewModel.StatusText = "Unable to prepare the script for debugging";
                     RefreshDebugCommandAvailability(false);
                     TraceDebugShell("StartDebug_Click", $"TryBuildDebugLaunchPlan returned false for tab '{selectedTab.Title}'.");
+                    DeveloperDiagnostics.LogDecision("Debugger", "StartDebug_Click", "Debug launch plan could not be prepared.", "Rejected");
                     return;
                 }
 
                 var breakpoints = CollectBreakpoints(launchScriptPath, selectedTab);
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Debug launch plan prepared.",
+                    new Dictionary<string, object?>
+                    {
+                        ["launchScriptPath"] = launchScriptPath,
+                        ["breakpointCount"] = breakpoints.Count,
+                        ["selectedTabPath"] = selectedTab.FilePath,
+                        ["selectedTabDirty"] = selectedTab.IsDirty
+                    });
                 TraceDebugShell("StartDebug_Click", $"Launch plan prepared; tab='{selectedTab.Title}'; launchPath='{Path.GetFileName(launchScriptPath)}'; breakpointCount={breakpoints.Count}; before session creation; {DescribeDebugUiState()}");
-
-                TearDownDebugSession();
-                TraceDebugShell("StartDebug_Click", "After TearDownDebugSession before creating new session.");
                 var debugSession = new PsesDebugSession();
                 _debugSession = debugSession;
                 _activeDebugTab = selectedTab;
                 _activeDebugLaunchPath = launchScriptPath;
                 TraceDebugShell("StartDebug_Click", $"Created PsesDebugSession; sessionHash={debugSession.GetHashCode()}; {DescribeDebugUiState()}");
+                DeveloperDiagnostics.LogInfo("Debugger", "PsesDebugSession object created.", new Dictionary<string, object?> { ["sessionHash"] = debugSession.GetHashCode() });
                 _debugSessionStateChangedHandler = state => Dispatcher.BeginInvoke(new Action(() =>
                 {
                     HandleDebugSessionStateChanged(debugSession, state);
@@ -3310,19 +3564,24 @@ namespace PowerShellStudio.Shell
                     }
 
                     TraceDebugShell("DebugSession.BreakpointHit", $"scriptPathPresent={!string.IsNullOrWhiteSpace(scriptPath)}; lineNumber={lineNumber}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
+                    DeveloperDiagnostics.LogStateTransition(
+                        "Debugger",
+                        "BreakpointHit",
+                        debugSession.CurrentState.ToString(),
+                        DebugSessionState.Paused.ToString(),
+                        "Breakpoint hit received from debug session.",
+                        new Dictionary<string, object?>
+                        {
+                            ["scriptPath"] = scriptPath,
+                            ["lineNumber"] = lineNumber
+                        });
                     ViewModel.StatusText = lineNumber > 0
                         ? $"Breakpoint hit — line {lineNumber}"
                         : "Breakpoint hit";
 
                     SetDebugCurrentLocation(scriptPath, lineNumber);
                     RefreshDebugCommandAvailability(true);
-                    // Do not automatically query variables/call stack here.  Those
-                    // requests are sent through the same hidden PowerShell debugger
-                    // prompt and can interfere with Step Over / Step Into by causing
-                    // helper scripts to be traced.  Keep the first pass focused on
-                    // reliable stepping and source-line highlighting.
-                    DebugVariablesGrid.ItemsSource = null;
-                    DebugCallStackGrid.ItemsSource = null;
+                    ScheduleDebugPanelRefresh("BreakpointHit");
                     RefreshBreakpointsList();
                 }));
 
@@ -3334,7 +3593,8 @@ namespace PowerShellStudio.Shell
                     }
 
                     TraceDebugShell("DebugSession.SessionEnded", $"SessionEnded fired; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
-                    TearDownDebugSession();
+                    DeveloperDiagnostics.LogInfo("Debugger", "Debug session ended event received.");
+                    TearDownDebugSession(DebugTeardownReason.SessionEndedEvent);
                     ViewModel.StatusText = "Debug session ended";
                 }));
 
@@ -3352,7 +3612,24 @@ namespace PowerShellStudio.Shell
                     TraceDebugShell(
                         "DebugSession.OutputReceived",
                         $"chunkLength={chunk?.Length ?? 0}; sessionState={debugSession.CurrentState}; containsPromptMarker={containsPromptMarker}; containsEndedMarker={containsEndedMarker}; containsBreakpointText={containsBreakpointText}; containsAtLine={containsAtLine}; {DescribeDebugUiState()}");
+                    if (DeveloperDiagnostics.IsVerboseDebuggerEnabled())
+                    {
+                        DeveloperDiagnostics.LogDebug(
+                            "Debugger",
+                            "Debug output chunk received.",
+                            new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(chunk))
+                            {
+                                ["containsPromptMarker"] = containsPromptMarker,
+                                ["containsEndedMarker"] = containsEndedMarker,
+                                ["containsBreakpointText"] = containsBreakpointText,
+                                ["containsAtLine"] = containsAtLine
+                            });
+                    }
                     ViewModel.AppendDebugOutput(chunk);
+                    if (!string.IsNullOrWhiteSpace(chunk))
+                    {
+                        _lastDebugOutputWrittenAtUtc = DateTimeOffset.UtcNow;
+                    }
 
                     var condensed = string.IsNullOrWhiteSpace(chunk)
                         ? string.Empty
@@ -3371,10 +3648,21 @@ namespace PowerShellStudio.Shell
                     SetDebugPanelVisible(true);
                     RefreshBreakpointsList();
                     ViewModel.StatusText = $"Starting debug session — {Path.GetFileName(selectedTab.FilePath ?? selectedTab.Title)}";
-                    TraceDebugShell("StartDebug_Click", $"Before StartAsync; sessionHash={debugSession.GetHashCode()}; launchPath='{Path.GetFileName(launchScriptPath)}'; breakpointCount={breakpoints.Count}; {DescribeDebugUiState()}");
+                    var launchScriptExists = File.Exists(launchScriptPath);
+                    TraceDebugShell("StartDebug_Click", $"Before StartAsync; sessionHash={debugSession.GetHashCode()}; launchPath='{Path.GetFileName(launchScriptPath)}'; launchScriptExists={launchScriptExists}; breakpointCount={breakpoints.Count}; {DescribeDebugUiState()}");
+                    DeveloperDiagnostics.LogInfo(
+                        "Debugger",
+                        "Verified debug launch script existence before StartAsync.",
+                        new Dictionary<string, object?>
+                        {
+                            ["launchScriptPath"] = launchScriptPath,
+                            ["launchScriptExists"] = launchScriptExists,
+                            ["sessionHash"] = debugSession.GetHashCode()
+                        });
 
                     await debugSession.StartAsync(runtime, launchScriptPath, breakpoints).ConfigureAwait(true);
                     TraceDebugShell("StartDebug_Click", $"After StartAsync; sessionHash={debugSession.GetHashCode()}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
+                    DeveloperDiagnostics.LogInfo("Debugger", "PsesDebugSession.StartAsync completed.", new Dictionary<string, object?> { ["sessionState"] = debugSession.CurrentState.ToString() });
 
                     if (!ReferenceEquals(_debugSession, debugSession))
                     {
@@ -3395,26 +3683,35 @@ namespace PowerShellStudio.Shell
                 catch (Exception ex)
                 {
                     TraceDebugShell("StartDebug_Click", $"StartAsync failed; exceptionType={ex.GetType().Name}; message={ex.Message}; {DescribeDebugUiState()}");
-                    TearDownDebugSession();
+                    DeveloperDiagnostics.LogException("Debugger", ex, "Debug session start failed.");
+                    TearDownDebugSession(DebugTeardownReason.StartFailure);
                     ViewModel.StatusText = $"Debug start failed: {ex.Message}";
                 }
             }
             catch (Exception ex)
             {
                 TraceDebugShell("StartDebug_Click", $"Preparation failed; exceptionType={ex.GetType().Name}; message={ex.Message}; {DescribeDebugUiState()}");
-                TearDownDebugSession();
+                DeveloperDiagnostics.LogException("Debugger", ex, "Debug preparation failed.");
+                TearDownDebugSession(DebugTeardownReason.PreparationFailure);
                 ViewModel.StatusText = $"Debug preparation failed: {ex.Message}";
+            }
+            finally
+            {
+                DeveloperDiagnostics.LogEventHandlerExit("Debugger", "StartDebug_Click", "Start Debug handler exited.", BuildDebugActionProperties(sender));
             }
         }
 
         private async void StepInto_Click(object sender, RoutedEventArgs e)
         {
+            using var scope = DeveloperDiagnostics.BeginScope(operationId: $"StepInto-{Guid.NewGuid():N}");
+            DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Step Into requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("StepInto_Click", $"Entry; {DescribeDebugUiState()}");
             if (_debugSession?.CurrentState == DebugSessionState.Paused)
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
-                Interlocked.Increment(ref _debugPanelRefreshVersion);
+                InvalidateDebugPanelRefresh("StepInto requested");
+                ClearLiveDebugVariableCache("StepInto requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping in...";
                 await ExecuteDebugControlAsync(_debugSession, session => session.StepIntoAsync(), "Step Into failed").ConfigureAwait(true);
             }
@@ -3422,12 +3719,15 @@ namespace PowerShellStudio.Shell
 
         private async void StepOver_Click(object sender, RoutedEventArgs e)
         {
+            using var scope = DeveloperDiagnostics.BeginScope(operationId: $"StepOver-{Guid.NewGuid():N}");
+            DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Step Over requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("StepOver_Click", $"Entry; {DescribeDebugUiState()}");
             if (_debugSession?.CurrentState == DebugSessionState.Paused)
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
-                Interlocked.Increment(ref _debugPanelRefreshVersion);
+                InvalidateDebugPanelRefresh("StepOver requested");
+                ClearLiveDebugVariableCache("StepOver requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping over...";
                 await ExecuteDebugControlAsync(_debugSession, session => session.StepOverAsync(), "Step Over failed").ConfigureAwait(true);
             }
@@ -3435,12 +3735,15 @@ namespace PowerShellStudio.Shell
 
         private async void StepOut_Click(object sender, RoutedEventArgs e)
         {
+            using var scope = DeveloperDiagnostics.BeginScope(operationId: $"StepOut-{Guid.NewGuid():N}");
+            DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Step Out requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("StepOut_Click", $"Entry; {DescribeDebugUiState()}");
             if (_debugSession?.CurrentState == DebugSessionState.Paused)
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
-                Interlocked.Increment(ref _debugPanelRefreshVersion);
+                InvalidateDebugPanelRefresh("StepOut requested");
+                ClearLiveDebugVariableCache("StepOut requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping out...";
                 await ExecuteDebugControlAsync(_debugSession, session => session.StepOutAsync(), "Step Out failed").ConfigureAwait(true);
             }
@@ -3448,12 +3751,15 @@ namespace PowerShellStudio.Shell
 
         private async void ContinueDebug_Click(object sender, RoutedEventArgs e)
         {
+            using var scope = DeveloperDiagnostics.BeginScope(operationId: $"Continue-{Guid.NewGuid():N}");
+            DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Continue requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("ContinueDebug_Click", $"Entry; {DescribeDebugUiState()}");
             if (_debugSession?.CurrentState == DebugSessionState.Paused)
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
-                Interlocked.Increment(ref _debugPanelRefreshVersion);
+                InvalidateDebugPanelRefresh("Continue requested");
+                ClearLiveDebugVariableCache("Continue requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Continuing...";
                 await ExecuteDebugControlAsync(_debugSession, session => session.ContinueAsync(), "Continue failed").ConfigureAwait(true);
             }
@@ -3461,6 +3767,8 @@ namespace PowerShellStudio.Shell
 
         private void StopDebug_Click(object sender, RoutedEventArgs e)
         {
+            using var scope = DeveloperDiagnostics.BeginScope(operationId: $"StopDebug-{Guid.NewGuid():N}");
+            DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Stop Debug requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("StopDebug_Click", $"Entry; {DescribeDebugUiState()}");
             if (ViewModel is null || _debugSession is null)
             {
@@ -3468,9 +3776,12 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
-            TearDownDebugSession();
+            InvalidateDebugPanelRefresh("Stop Debug requested");
+            ClearLiveDebugVariableCache("Stop Debug requested");
+            TearDownDebugSession(DebugTeardownReason.UserStop);
             ViewModel.StatusText = "Debug session stopped";
             TraceDebugShell("StopDebug_Click", $"Completed stop request; {DescribeDebugUiState()}");
+            DeveloperDiagnostics.LogInfo("Debugger", "Debug session stop request completed.");
         }
 
         private List<DebugBreakpointInfo> CollectBreakpoints(string launchScriptPath, EditorTabViewModel launchTab)
@@ -3518,6 +3829,15 @@ namespace PowerShellStudio.Shell
 
         private bool TryBuildDebugLaunchPlan(EditorTabViewModel tab, out string launchScriptPath)
         {
+            DeveloperDiagnostics.LogMethodEntry(
+                "Debugger",
+                "TryBuildDebugLaunchPlan entered.",
+                new Dictionary<string, object?>
+                {
+                    ["activeDocumentPath"] = tab.FilePath,
+                    ["isDocumentDirty"] = tab.IsDirty,
+                    ["isUnsaved"] = string.IsNullOrWhiteSpace(tab.FilePath)
+                });
             launchScriptPath = string.Empty;
 
             var existingSnapshot = _activeDebugSnapshotPath;
@@ -3531,6 +3851,7 @@ namespace PowerShellStudio.Shell
             if (TryPrepareSavedScriptPathForDebug(tab, out var savedScriptPath))
             {
                 launchScriptPath = savedScriptPath;
+                DeveloperDiagnostics.LogDecision("Debugger", "TryBuildDebugLaunchPlan", "Saved file path will be used for debug launch.", "UseSavedPath", new Dictionary<string, object?> { ["launchScriptPath"] = savedScriptPath });
                 return true;
             }
 
@@ -3552,6 +3873,13 @@ namespace PowerShellStudio.Shell
             File.WriteAllText(snapshotPath, tab.Content ?? string.Empty);
             _activeDebugSnapshotPath = snapshotPath;
             launchScriptPath = snapshotPath;
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Temporary debug snapshot created.",
+                new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(tab.Content))
+                {
+                    ["snapshotPath"] = snapshotPath
+                });
             return true;
         }
 
@@ -3644,11 +3972,13 @@ namespace PowerShellStudio.Shell
                 {
                     File.Delete(normalizedSnapshotPath);
                     AppLogger.Info("Debug", $"Deleted debug snapshot '{Path.GetFileName(normalizedSnapshotPath)}' from '{debugSnapshotRoot}'.");
+                    DeveloperDiagnostics.LogInfo("Debugger", "Temporary debug snapshot deleted.", new Dictionary<string, object?> { ["snapshotPath"] = normalizedSnapshotPath });
                 }
             }
             catch (Exception ex)
             {
                 AppLogger.Warning("Debug", $"Failed to delete debug snapshot '{normalizedSnapshotPath}'. {ex.Message}");
+                DeveloperDiagnostics.LogException("Debugger", ex, "Failed to delete temporary debug snapshot.", new Dictionary<string, object?> { ["snapshotPath"] = normalizedSnapshotPath });
             }
         }
 
@@ -3677,6 +4007,24 @@ namespace PowerShellStudio.Shell
             }
 
             TraceDebugShell("RefreshDebugCommandAvailability", $"pausedArgument={paused}; hasSession={hasSession}; canStart={canStart}; {DescribeDebugUiState()}");
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseUiEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "UI",
+                    "Debug command availability refreshed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["paused"] = paused,
+                        ["hasSession"] = hasSession,
+                        ["canStart"] = canStart,
+                        ["startEnabled"] = StartDebugMenuItem.IsEnabled,
+                        ["stepIntoEnabled"] = StepIntoMenuItem.IsEnabled,
+                        ["stepOverEnabled"] = StepOverMenuItem.IsEnabled,
+                        ["stepOutEnabled"] = StepOutMenuItem.IsEnabled,
+                        ["continueEnabled"] = ContinueMenuItem.IsEnabled,
+                        ["stopEnabled"] = StopDebugMenuItem.IsEnabled
+                    });
+            }
         }
 
         private void SetDebugControlsEnabled(bool paused)
@@ -3723,6 +4071,7 @@ namespace PowerShellStudio.Shell
         {
             var currentSessionState = _debugSession?.CurrentState.ToString() ?? "(null)";
             TraceDebugShell("HandleDebugSessionStateChanged", $"Received state change; incomingState={state}; sessionMatches={ReferenceEquals(_debugSession, debugSession)}; currentSessionState={currentSessionState}; {DescribeDebugUiState()}");
+            DeveloperDiagnostics.LogStateTransition("Debugger", "DebugSessionStateChanged", currentSessionState, state.ToString(), "Debug session state changed.");
             if (!ReferenceEquals(_debugSession, debugSession))
             {
                 return;
@@ -3730,7 +4079,7 @@ namespace PowerShellStudio.Shell
 
             if (state == DebugSessionState.Stopped)
             {
-                TearDownDebugSession();
+                TearDownDebugSession(DebugTeardownReason.SessionStoppedState);
                 if (ViewModel is not null)
                 {
                     ViewModel.StatusText = "Debug session ended";
@@ -3746,12 +4095,109 @@ namespace PowerShellStudio.Shell
             if (isPaused && ViewModel is not null)
             {
                 ViewModel.StatusText = "Debug session paused — choose Continue, Step Over, Step Into, Step Out, or Stop Debug";
+                ScheduleDebugPanelRefresh("StateChangedPaused");
+            }
+            else
+            {
+                ClearLiveDebugVariableCache($"Debug session state changed to {state}");
             }
         }
 
-        private void TearDownDebugSession()
+        private void TearDownDebugSession(DebugTeardownReason reason = DebugTeardownReason.PreLaunchCleanup)
         {
-            TraceDebugShell("TearDownDebugSession", $"Entry; {DescribeDebugUiState()}");
+            var nowUtc = DateTimeOffset.UtcNow;
+            var millisecondsSinceLastOutput = _lastDebugOutputWrittenAtUtc == DateTimeOffset.MinValue
+                ? (double?)null
+                : (nowUtc - _lastDebugOutputWrittenAtUtc).TotalMilliseconds;
+            var debugOutputRecentlyWritten =
+                millisecondsSinceLastOutput.HasValue &&
+                millisecondsSinceLastOutput.Value >= 0 &&
+                millisecondsSinceLastOutput.Value <= DebugOutputPreservationWindowMilliseconds;
+            var endedNaturally =
+                reason == DebugTeardownReason.SessionEndedEvent ||
+                reason == DebugTeardownReason.SessionStoppedState;
+            var shouldPreserveVisibleTranscript =
+                debugOutputRecentlyWritten &&
+                (endedNaturally || reason == DebugTeardownReason.UserStop);
+            var skipImmediateConsoleRestore = endedNaturally || reason == DebugTeardownReason.UserStop;
+            var skipImmediateTerminalFocus = endedNaturally || reason == DebugTeardownReason.UserStop;
+
+            TraceDebugShell(
+                "TearDownDebugSession",
+                $"Entry; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}; shouldPreserveVisibleTranscript={shouldPreserveVisibleTranscript}; millisecondsSinceLastOutput={(millisecondsSinceLastOutput?.ToString("F0", CultureInfo.InvariantCulture) ?? "(none)")}; skipImmediateConsoleRestore={skipImmediateConsoleRestore}; skipImmediateTerminalFocus={skipImmediateTerminalFocus}; {DescribeDebugUiState()}");
+            DeveloperDiagnostics.LogMethodEntry(
+                "Debugger",
+                "TearDownDebugSession entered.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason.ToString(),
+                    ["endedNaturally"] = endedNaturally,
+                    ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
+                    ["shouldPreserveVisibleTranscript"] = shouldPreserveVisibleTranscript,
+                    ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput,
+                    ["skipImmediateConsoleRestore"] = skipImmediateConsoleRestore,
+                    ["skipImmediateTerminalFocus"] = skipImmediateTerminalFocus
+                });
+
+            if (shouldPreserveVisibleTranscript)
+            {
+                TerminalConsole.PreserveVisibleTranscriptFor(
+                    TimeSpan.FromMilliseconds(DebugOutputPreservationWindowMilliseconds),
+                    $"Debug teardown reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}");
+                TraceDebugShell(
+                    "TearDownDebugSession",
+                    $"Activated terminal transcript preservation; durationMs={DebugOutputPreservationWindowMilliseconds}; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}; millisecondsSinceLastOutput={(millisecondsSinceLastOutput?.ToString("F0", CultureInfo.InvariantCulture) ?? "(none)")};");
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "TearDownDebugSession",
+                    "Terminal transcript preservation was activated before debug teardown completed.",
+                    "ActivateTranscriptPreservation",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason.ToString(),
+                        ["endedNaturally"] = endedNaturally,
+                        ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
+                        ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput,
+                        ["durationMs"] = DebugOutputPreservationWindowMilliseconds
+                    });
+
+                if (endedNaturally && ViewModel is not null)
+                {
+                    var promptText = BuildVisiblePromptTextForDebugCompletion();
+                    TerminalConsole.RestoreVisiblePromptAfterDebug(
+                        promptText,
+                        $"Debug teardown prompt restore; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}");
+                    TraceDebugShell(
+                        "TearDownDebugSession",
+                        $"Requested non-destructive visible prompt restore; promptPreview='{DeveloperDiagnostics.SanitizePreview(promptText)}'; reason={reason}; endedNaturally={endedNaturally};");
+                    DeveloperDiagnostics.LogDecision(
+                        "Debugger",
+                        "TearDownDebugSession",
+                        "Non-destructive visible prompt restoration was requested after natural debug completion.",
+                        "RequestVisiblePromptRestoreAfterDebug",
+                        new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(promptText))
+                        {
+                            ["reason"] = reason.ToString(),
+                            ["endedNaturally"] = endedNaturally,
+                            ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
+                            ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput
+                        });
+                }
+                else
+                {
+                    DeveloperDiagnostics.LogDecision(
+                        "Debugger",
+                        "TearDownDebugSession",
+                        "Visible prompt restoration was skipped because debug completion was not natural or the view model was unavailable.",
+                        "SkipVisiblePromptRestoreAfterDebug",
+                        new Dictionary<string, object?>
+                        {
+                            ["reason"] = reason.ToString(),
+                            ["endedNaturally"] = endedNaturally,
+                            ["viewModelAvailable"] = ViewModel is not null
+                        });
+                }
+            }
             if (_debugSession is not null && _debugSessionStateChangedHandler is not null)
             {
                 _debugSession.StateChanged -= _debugSessionStateChangedHandler;
@@ -3771,9 +4217,107 @@ namespace PowerShellStudio.Shell
             ClearDebugPanels();
             SetDebugPanelVisible(false);
             if (ViewModel is not null)
-                _ = ViewModel.EnsureConsoleRestoredAsync();
-            TerminalConsole.FocusTerminal();
-            TraceDebugShell("TearDownDebugSession", $"Completed; {DescribeDebugUiState()}");
+            {
+                if (skipImmediateConsoleRestore)
+                {
+                    TraceDebugShell(
+                        "TearDownDebugSession",
+                        $"Skipped EnsureConsoleRestoredAsync; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}; millisecondsSinceLastOutput={(millisecondsSinceLastOutput?.ToString("F0", CultureInfo.InvariantCulture) ?? "(none)")};");
+                    DeveloperDiagnostics.LogDecision(
+                        "Debugger",
+                        "TearDownDebugSession",
+                        "Immediate console restore was skipped to preserve visible debug transcript output.",
+                        "SkipImmediateConsoleRestore",
+                        new Dictionary<string, object?>
+                        {
+                            ["reason"] = reason.ToString(),
+                            ["endedNaturally"] = endedNaturally,
+                            ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
+                            ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput
+                        });
+                }
+                else
+                {
+                    _ = ViewModel.EnsureConsoleRestoredAsync();
+                    TraceDebugShell("TearDownDebugSession", $"Requested EnsureConsoleRestoredAsync; reason={reason}; debugOutputRecentlyWritten={debugOutputRecentlyWritten};");
+                    DeveloperDiagnostics.LogDecision(
+                        "Debugger",
+                        "TearDownDebugSession",
+                        "Immediate console restore was requested during debug teardown.",
+                        "RestoreConsoleImmediately",
+                        new Dictionary<string, object?>
+                        {
+                            ["reason"] = reason.ToString(),
+                            ["endedNaturally"] = endedNaturally,
+                            ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
+                            ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput
+                        });
+                }
+            }
+
+            if (skipImmediateTerminalFocus)
+            {
+                TraceDebugShell(
+                    "TearDownDebugSession",
+                    $"Skipped TerminalConsole.FocusTerminal; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}; millisecondsSinceLastOutput={(millisecondsSinceLastOutput?.ToString("F0", CultureInfo.InvariantCulture) ?? "(none)")};");
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "TearDownDebugSession",
+                    "Immediate terminal focus was skipped to avoid a prompt redraw overwriting recent debug output.",
+                    "SkipImmediateTerminalFocus",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason.ToString(),
+                        ["endedNaturally"] = endedNaturally,
+                        ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
+                        ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput
+                    });
+            }
+            else
+            {
+                TerminalConsole.FocusTerminal();
+                TraceDebugShell("TearDownDebugSession", $"Requested TerminalConsole.FocusTerminal; reason={reason}; debugOutputRecentlyWritten={debugOutputRecentlyWritten};");
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "TearDownDebugSession",
+                    "Immediate terminal focus was requested during debug teardown.",
+                    "FocusTerminalImmediately",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason.ToString(),
+                        ["endedNaturally"] = endedNaturally,
+                        ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
+                        ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput
+                    });
+            }
+
+            TraceDebugShell("TearDownDebugSession", $"Completed; reason={reason}; {DescribeDebugUiState()}");
+            DeveloperDiagnostics.LogMethodExit(
+                "Debugger",
+                "TearDownDebugSession completed.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason.ToString(),
+                    ["endedNaturally"] = endedNaturally,
+                    ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
+                    ["shouldPreserveVisibleTranscript"] = shouldPreserveVisibleTranscript,
+                    ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput,
+                    ["skipImmediateConsoleRestore"] = skipImmediateConsoleRestore,
+                    ["skipImmediateTerminalFocus"] = skipImmediateTerminalFocus
+                });
+        }
+
+        private string BuildVisiblePromptTextForDebugCompletion()
+        {
+            var promptText = ViewModel?.ConsolePromptText?.Trim();
+            if (string.IsNullOrWhiteSpace(promptText))
+            {
+                return "PS>";
+            }
+
+            return string.Equals(promptText, "PS >", StringComparison.Ordinal)
+                ? "PS>"
+                : promptText;
         }
 
         private void TraceDebugShell(string source, string message)
@@ -3969,6 +4513,7 @@ namespace PowerShellStudio.Shell
 
         private void Window_Closing(object? sender, CancelEventArgs e)
         {
+            DeveloperDiagnostics.LogEventHandlerEntry("UI", "Window_Closing", "Window_Closing entered.");
             if (ViewModel is not null)
             {
                 ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
@@ -3984,6 +4529,7 @@ namespace PowerShellStudio.Shell
                 _activeCompletionCts?.Dispose();
                 CancelActiveQuickInfoRequest();
                 CloseActiveEditorToolTip();
+                DeveloperDiagnostics.LogEventHandlerExit("UI", "Window_Closing", "Window_Closing exited on final close path.");
                 return;
             }
 
@@ -3994,6 +4540,7 @@ namespace PowerShellStudio.Shell
             }
 
             _allowWindowClose = true;
+            DeveloperDiagnostics.LogEventHandlerExit("UI", "Window_Closing", "Window_Closing prepared app for close.");
         }
 
         private bool TryPrepareForWindowClose()
@@ -4002,6 +4549,8 @@ namespace PowerShellStudio.Shell
             {
                 return true;
             }
+
+            DeveloperDiagnostics.LogInfo("Startup", "Preparing for window close.");
 
             if (!ViewModel.TryPrepareForApplicationClose())
             {
@@ -4023,6 +4572,7 @@ namespace PowerShellStudio.Shell
             catch
             {
                 // Best effort persistence only. The application should still be allowed to close.
+                DeveloperDiagnostics.LogWarning("Settings", "SaveApplicationSettings failed during window close.");
             }
 
             return true;
@@ -4088,12 +4638,22 @@ namespace PowerShellStudio.Shell
         {
             if (e.PropertyName == nameof(MainWindowViewModel.IsExplorerVisible))
             {
+                DeveloperDiagnostics.LogStateTransition("UI", "ExplorerVisibilityChanged", string.Empty, ViewModel?.IsExplorerVisible.ToString() ?? string.Empty, "Explorer visibility changed.");
                 Dispatcher.BeginInvoke(new Action(ApplyExplorerVisibilityLayout));
                 return;
             }
 
             if (e.PropertyName == nameof(MainWindowViewModel.SelectedTab))
             {
+                DeveloperDiagnostics.LogInfo(
+                    "Editor",
+                    "Selected tab changed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["selectedTabTitle"] = ViewModel?.SelectedTab?.Title,
+                        ["selectedTabPath"] = ViewModel?.SelectedTab?.FilePath,
+                        ["selectedTabDirty"] = ViewModel?.SelectedTab?.IsDirty
+                    });
                 FocusActiveEditorSoon();
                 RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
 
@@ -4107,6 +4667,14 @@ namespace PowerShellStudio.Shell
 
             if (e.PropertyName == nameof(MainWindowViewModel.EffectiveRuntimeItem))
             {
+                DeveloperDiagnostics.LogInfo(
+                    "Startup",
+                    "Effective runtime changed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtimeDisplayName"] = ViewModel?.EffectiveRuntimeInfo?.DisplayName,
+                        ["runtimePath"] = ViewModel?.EffectiveRuntimeInfo?.ExecutablePath
+                    });
                 RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
                 RescheduleDiagnosticsForAllEditors();
                 StartEditorMetadataWarmup();
@@ -4123,10 +4691,23 @@ namespace PowerShellStudio.Shell
             if (e.PropertyName == nameof(MainWindowViewModel.EditorZoomLevel))
             {
                 var zoomLevel = ViewModel?.EditorZoomLevel ?? 13.0;
+                DeveloperDiagnostics.LogInfo("Editor", $"Editor zoom level changed to {zoomLevel}.", new Dictionary<string, object?> { ["zoomLevel"] = zoomLevel });
                 foreach (var editor in _editorByTab.Values)
                 {
                     editor.FontSize = zoomLevel;
                 }
+            }
+
+            if (e.PropertyName == nameof(MainWindowViewModel.StatusText))
+            {
+                DeveloperDiagnostics.LogInfo(
+                    "UI",
+                    "Status text changed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["statusText"] = ViewModel?.StatusText,
+                        ["focusedElement"] = DescribeFocusedElement()
+                    });
             }
         }
 
@@ -4831,6 +5412,7 @@ namespace PowerShellStudio.Shell
             settings.StartMaximized = WindowState == WindowState.Maximized;
             settings.IsExplorerVisible = ViewModel?.IsExplorerVisible ?? settings.IsExplorerVisible;
             settings.IsContextHelpEnabled = IsContextHelpEnabled;
+            CopyDeveloperDiagnosticsSettings(_loadedSettings, settings);
 
             if (ViewModel?.IsExplorerVisible == true && ExplorerColumnDefinition.ActualWidth >= MinimumExplorerWidth)
             {
@@ -4855,6 +5437,234 @@ namespace PowerShellStudio.Shell
             }
 
             _applicationSettingsService.SaveSettings(settings);
+            DeveloperDiagnostics.LogInfo(
+                "Settings",
+                "SaveApplicationSettings completed from MainWindow.",
+                new Dictionary<string, object?>
+                {
+                    ["settingsPath"] = _applicationSettingsService.SettingsFilePath,
+                    ["developerDiagnosticsEnabled"] = settings.IsDeveloperDiagnosticsEnabled
+                });
+        }
+
+        private static void CopyDeveloperDiagnosticsSettings(ApplicationSettings source, ApplicationSettings destination)
+        {
+            destination.IsDeveloperDiagnosticsEnabled = source.IsDeveloperDiagnosticsEnabled;
+            destination.IsDeveloperDiagnosticsVerboseUiEnabled = source.IsDeveloperDiagnosticsVerboseUiEnabled;
+            destination.IsDeveloperDiagnosticsVerboseDebuggerEnabled = source.IsDeveloperDiagnosticsVerboseDebuggerEnabled;
+            destination.IsDeveloperDiagnosticsVerboseTerminalEnabled = source.IsDeveloperDiagnosticsVerboseTerminalEnabled;
+            destination.IsDeveloperDiagnosticsVerboseEditorEnabled = source.IsDeveloperDiagnosticsVerboseEditorEnabled;
+            destination.IsDeveloperDiagnosticsVerbosePowerShellExecutionEnabled = source.IsDeveloperDiagnosticsVerbosePowerShellExecutionEnabled;
+            destination.DeveloperDiagnosticsPreviewCharacterLimit = source.DeveloperDiagnosticsPreviewCharacterLimit;
+            destination.DeveloperDiagnosticsRetentionHours = source.DeveloperDiagnosticsRetentionHours;
+            destination.DeveloperDiagnosticsWriteJsonLines = source.DeveloperDiagnosticsWriteJsonLines;
+            destination.DeveloperDiagnosticsWriteReadableLog = source.DeveloperDiagnosticsWriteReadableLog;
+        }
+
+        private DeveloperDiagnosticsStateSnapshot BuildDeveloperDiagnosticsSnapshot()
+        {
+            var selectedTab = ViewModel?.SelectedTab;
+            var activeTabIndex = selectedTab is null || ViewModel is null ? (int?)null : ViewModel.OpenTabs.IndexOf(selectedTab);
+            return new DeveloperDiagnosticsStateSnapshot
+            {
+                ActiveDocumentPath = selectedTab?.FilePath,
+                ActiveDocumentDirtyState = selectedTab?.IsDirty,
+                ActiveTabIndex = activeTabIndex,
+                OpenTabCount = ViewModel?.OpenTabs.Count,
+                IsDebugSessionActive = ViewModel?.IsDebugSessionActive,
+                DebugSessionState = _debugSession?.CurrentState.ToString(),
+                TerminalState = _terminalIsReady
+                    ? (_terminalIsActive ? "ReadyActive" : "ReadyInactive")
+                    : "Initializing",
+                PowerShellExecutablePath = ViewModel?.EffectiveRuntimeInfo?.ExecutablePath,
+                SelectedRuntimeDisplayName = ViewModel?.EffectiveRuntimeInfo?.DisplayName
+            };
+        }
+
+        private Dictionary<string, object?> BuildDebugActionProperties(object? sender)
+        {
+            var selectedTab = ViewModel?.SelectedTab;
+            var activeEditor = FindActiveEditor();
+            return new Dictionary<string, object?>
+            {
+                ["senderType"] = sender?.GetType().FullName,
+                ["focusedElement"] = DescribeFocusedElement(),
+                ["activeTabTitle"] = selectedTab?.Title,
+                ["activeTabFilePath"] = selectedTab?.FilePath,
+                ["activeDocumentDirtyState"] = selectedTab?.IsDirty,
+                ["activeDocumentUntitled"] = string.IsNullOrWhiteSpace(selectedTab?.FilePath),
+                ["selectedTextLength"] = activeEditor?.SelectionLength ?? 0,
+                ["caretLine"] = selectedTab?.CaretLine,
+                ["caretColumn"] = selectedTab?.CaretColumn,
+                ["currentBreakpointCount"] = selectedTab?.EnabledBreakpointCount,
+                ["debugSessionState"] = _debugSession?.CurrentState.ToString()
+            };
+        }
+
+        private void UpdateDeveloperDiagnosticsMenuState()
+        {
+            EnableDeveloperDiagnosticsMenuItem.IsChecked = _loadedSettings.IsDeveloperDiagnosticsEnabled;
+            VerboseUiLoggingMenuItem.IsChecked = _loadedSettings.IsDeveloperDiagnosticsVerboseUiEnabled;
+            VerboseDebuggerLoggingMenuItem.IsChecked = _loadedSettings.IsDeveloperDiagnosticsVerboseDebuggerEnabled;
+            VerboseTerminalLoggingMenuItem.IsChecked = _loadedSettings.IsDeveloperDiagnosticsVerboseTerminalEnabled;
+            VerboseEditorLoggingMenuItem.IsChecked = _loadedSettings.IsDeveloperDiagnosticsVerboseEditorEnabled;
+
+            var enabled = _loadedSettings.IsDeveloperDiagnosticsEnabled;
+            VerboseUiLoggingMenuItem.IsEnabled = enabled;
+            VerboseDebuggerLoggingMenuItem.IsEnabled = enabled;
+            VerboseTerminalLoggingMenuItem.IsEnabled = enabled;
+            VerboseEditorLoggingMenuItem.IsEnabled = enabled;
+        }
+
+        private void PersistDeveloperDiagnosticsSettings(string statusText)
+        {
+            SaveApplicationSettings();
+            DeveloperDiagnostics.ConfigureFromSettings(_loadedSettings, "MainWindow updated developer diagnostics settings");
+            UpdateDeveloperDiagnosticsMenuState();
+            if (ViewModel is not null)
+            {
+                ViewModel.StatusText = statusText;
+            }
+
+            DeveloperDiagnostics.RefreshSummaryFile();
+        }
+
+        private void EnableDeveloperDiagnostics_Click(object sender, RoutedEventArgs e)
+        {
+            _loadedSettings.IsDeveloperDiagnosticsEnabled = !_loadedSettings.IsDeveloperDiagnosticsEnabled;
+            PersistDeveloperDiagnosticsSettings(_loadedSettings.IsDeveloperDiagnosticsEnabled
+                ? "Developer diagnostics enabled"
+                : "Developer diagnostics disabled");
+            DeveloperDiagnostics.LogUserAction("Settings", "DeveloperDiagnosticsToggle", _loadedSettings.IsDeveloperDiagnosticsEnabled ? "Developer diagnostics enabled in-app." : "Developer diagnostics disabled in-app.");
+        }
+
+        private void VerboseUiLogging_Click(object sender, RoutedEventArgs e)
+        {
+            _loadedSettings.IsDeveloperDiagnosticsVerboseUiEnabled = !_loadedSettings.IsDeveloperDiagnosticsVerboseUiEnabled;
+            PersistDeveloperDiagnosticsSettings($"Developer diagnostics UI verbosity: {_loadedSettings.IsDeveloperDiagnosticsVerboseUiEnabled}");
+        }
+
+        private void VerboseDebuggerLogging_Click(object sender, RoutedEventArgs e)
+        {
+            _loadedSettings.IsDeveloperDiagnosticsVerboseDebuggerEnabled = !_loadedSettings.IsDeveloperDiagnosticsVerboseDebuggerEnabled;
+            PersistDeveloperDiagnosticsSettings($"Developer diagnostics debugger verbosity: {_loadedSettings.IsDeveloperDiagnosticsVerboseDebuggerEnabled}");
+        }
+
+        private void VerboseTerminalLogging_Click(object sender, RoutedEventArgs e)
+        {
+            _loadedSettings.IsDeveloperDiagnosticsVerboseTerminalEnabled = !_loadedSettings.IsDeveloperDiagnosticsVerboseTerminalEnabled;
+            PersistDeveloperDiagnosticsSettings($"Developer diagnostics terminal verbosity: {_loadedSettings.IsDeveloperDiagnosticsVerboseTerminalEnabled}");
+        }
+
+        private void VerboseEditorLogging_Click(object sender, RoutedEventArgs e)
+        {
+            _loadedSettings.IsDeveloperDiagnosticsVerboseEditorEnabled = !_loadedSettings.IsDeveloperDiagnosticsVerboseEditorEnabled;
+            PersistDeveloperDiagnosticsSettings($"Developer diagnostics editor verbosity: {_loadedSettings.IsDeveloperDiagnosticsVerboseEditorEnabled}");
+        }
+
+        private void OpenDeveloperDebuggingFolder_Click(object sender, RoutedEventArgs e)
+        {
+            OpenFolderInExplorer(DeveloperDiagnostics.DeveloperDebuggingRootDirectory);
+        }
+
+        private void OpenLatestDiagnosticSessionFolder_Click(object sender, RoutedEventArgs e)
+        {
+            var target = DeveloperDiagnostics.CurrentSessionDirectory;
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                try
+                {
+                    target = File.Exists(DeveloperDiagnostics.LatestSessionPointerFilePath)
+                        ? File.ReadAllText(DeveloperDiagnostics.LatestSessionPointerFilePath).Trim()
+                        : null;
+                }
+                catch
+                {
+                    target = null;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                ViewModel!.StatusText = "No developer diagnostics session folder is available";
+                return;
+            }
+
+            OpenFolderInExplorer(target);
+        }
+
+        private void CopyDiagnosticsSummaryToClipboard_Click(object sender, RoutedEventArgs e)
+        {
+            var summary = DeveloperDiagnostics.BuildSummaryText();
+            System.Windows.Clipboard.SetText(summary);
+            DeveloperDiagnostics.RefreshSummaryFile();
+            ViewModel!.StatusText = "Developer diagnostics summary copied to clipboard";
+        }
+
+        private void PackageDeveloperDiagnosticsForSupport_Click(object sender, RoutedEventArgs e)
+        {
+            var packagePath = DeveloperDiagnostics.CreateSupportPackage();
+            System.Windows.Clipboard.SetText(packagePath);
+            ViewModel!.StatusText = $"Developer diagnostics package created: {packagePath}";
+            OpenFolderInExplorer(Path.GetDirectoryName(packagePath) ?? DeveloperDiagnostics.DeveloperDebuggingPackagesDirectory);
+        }
+
+        private void ClearDeveloperDiagnosticsLogs_Click(object sender, RoutedEventArgs e)
+        {
+            var decision = System.Windows.MessageBox.Show(
+                this,
+                "Delete all files under the Developer Debugging folder? This does not delete normal app logs.",
+                "Clear Developer Diagnostics Logs",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+            if (decision != MessageBoxResult.Yes)
+            {
+                return;
+            }
+
+            if (_loadedSettings.IsDeveloperDiagnosticsEnabled)
+            {
+                _loadedSettings.IsDeveloperDiagnosticsEnabled = false;
+                PersistDeveloperDiagnosticsSettings("Developer diagnostics disabled before clearing logs");
+            }
+
+            try
+            {
+                if (Directory.Exists(DeveloperDiagnostics.DeveloperDebuggingRootDirectory))
+                {
+                    Directory.Delete(DeveloperDiagnostics.DeveloperDebuggingRootDirectory, recursive: true);
+                }
+
+                ViewModel!.StatusText = "Developer diagnostics logs cleared";
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("Settings", ex, "Failed to clear developer diagnostics logs.");
+                ViewModel!.StatusText = $"Clear developer diagnostics logs failed: {ex.Message}";
+            }
+        }
+
+        private void OpenFolderInExplorer(string path)
+        {
+            try
+            {
+                Directory.CreateDirectory(path);
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"\"{path}\"",
+                    UseShellExecute = true
+                });
+                DeveloperDiagnostics.LogUserAction("UI", "OpenFolder", "Opened folder in Explorer.", new Dictionary<string, object?> { ["path"] = path });
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("UI", ex, "Failed to open folder in Explorer.", new Dictionary<string, object?> { ["path"] = path });
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = $"Open folder failed: {ex.Message}";
+                }
+            }
         }
 
         private static T? FindAncestor<T>(DependencyObject? current)
@@ -5239,6 +6049,11 @@ namespace PowerShellStudio.Shell
                 }
             }
 
+            if (TryShowLiveDebugVariableHover(textView, ownerEditor, offset))
+            {
+                return;
+            }
+
             var cts = BeginQuickInfoRequest();
             var cancellationToken = cts.Token;
 
@@ -5267,6 +6082,53 @@ namespace PowerShellStudio.Shell
             {
                 CompleteQuickInfoRequest(cts);
             }
+        }
+
+        private bool TryShowLiveDebugVariableHover(TextView textView, TextEditor ownerEditor, int offset)
+        {
+            var token = TryGetHoveredDebugVariableToken(ownerEditor, offset);
+            var paused = _debugSession?.CurrentState == DebugSessionState.Paused;
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Live debug hover requested.",
+                new Dictionary<string, object?>
+                {
+                    ["token"] = token ?? string.Empty,
+                    ["debuggerPaused"] = paused,
+                    ["cacheCount"] = _liveDebugVariableCache.Count
+                });
+
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                DeveloperDiagnostics.LogDecision("Debugger", "TryShowLiveDebugVariableHover", "Live debug hover fell back to static help because no simple variable token was detected.", "FallbackNoVariableToken", new Dictionary<string, object?> { ["debuggerPaused"] = paused });
+                return false;
+            }
+
+            var normalizedName = NormalizeDebugVariableName(token);
+            DeveloperDiagnostics.LogInfo("Debugger", "Live debug hover token detected.", new Dictionary<string, object?> { ["token"] = token, ["normalizedVariableName"] = normalizedName, ["debuggerPaused"] = paused });
+
+            if (!paused)
+            {
+                DeveloperDiagnostics.LogDecision("Debugger", "TryShowLiveDebugVariableHover", "Live debug hover fell back to static help because the debugger was not paused.", "FallbackDebuggerNotPaused", new Dictionary<string, object?> { ["variableName"] = normalizedName });
+                return false;
+            }
+
+            if (ownerEditor.DataContext is not EditorTabViewModel tab || tab.CurrentDebugLine <= 0)
+            {
+                DeveloperDiagnostics.LogDecision("Debugger", "TryShowLiveDebugVariableHover", "Live debug hover fell back to static help because the hovered editor is not the current paused debug location.", "FallbackNotCurrentDebugLocation", new Dictionary<string, object?> { ["variableName"] = normalizedName });
+                return false;
+            }
+
+            if (!_liveDebugVariableCache.TryGetValue(normalizedName, out var variable))
+            {
+                DeveloperDiagnostics.LogDecision("Debugger", "TryShowLiveDebugVariableHover", "Live debug hover cache miss; static help will be used.", "FallbackCacheMiss", new Dictionary<string, object?> { ["variableName"] = normalizedName, ["cacheCount"] = _liveDebugVariableCache.Count });
+                return false;
+            }
+
+            var tooltip = BuildLiveDebugVariableHoverText(token, variable);
+            ShowEditorToolTip(textView, tooltip);
+            DeveloperDiagnostics.LogDecision("Debugger", "TryShowLiveDebugVariableHover", "Live debug hover cache hit; live tooltip was shown.", "LiveHoverCacheHit", new Dictionary<string, object?> { ["variableName"] = normalizedName, ["type"] = variable.Type });
+            return true;
         }
 
         private void OnTextViewMouseHoverStopped(object sender, System.Windows.Input.MouseEventArgs e)
@@ -5370,81 +6232,494 @@ namespace PowerShellStudio.Shell
             SetDebugPanelVisible(ShowDebugPanelMenuItem.IsChecked);
         }
 
-        /// <summary>
-        /// Called when a breakpoint is hit — queries variables and call stack from the
-        /// live debug session and populates the Variables and Call Stack grids.
-        /// Must be called from the UI thread; internally marshals data queries off-thread.
-        /// </summary>
-        private async Task RefreshDebugPanelsAsync()
+        private void ScheduleDebugPanelRefresh(string reason)
         {
             var debugSession = _debugSession;
-            if (debugSession is null || debugSession.CurrentState != DebugSessionState.Paused)
+            if (debugSession is null)
             {
+                TraceDebugShell("ScheduleDebugPanelRefresh", $"Skipped because debug session is null; reason={reason}; {DescribeDebugUiState()}");
+                DeveloperDiagnostics.LogDecision("Debugger", "ScheduleDebugPanelRefresh", "Debug panel refresh was skipped because the debug session was null.", "SkippedNoSession", new Dictionary<string, object?> { ["reason"] = reason });
+                return;
+            }
+
+            if (debugSession.CurrentState != DebugSessionState.Paused)
+            {
+                TraceDebugShell("ScheduleDebugPanelRefresh", $"Skipped because session is not paused; reason={reason}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
+                DeveloperDiagnostics.LogDecision("Debugger", "ScheduleDebugPanelRefresh", "Debug panel refresh was skipped because the debug session was not paused.", "SkippedNotPaused", new Dictionary<string, object?> { ["reason"] = reason, ["sessionState"] = debugSession.CurrentState.ToString() });
                 return;
             }
 
             var refreshVersion = Interlocked.Increment(ref _debugPanelRefreshVersion);
+            TraceDebugShell("ScheduleDebugPanelRefresh", $"Scheduled; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Debug panel refresh scheduled.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["refreshVersion"] = refreshVersion,
+                    ["sessionState"] = debugSession.CurrentState.ToString(),
+                    ["hasCurrentDebugLocation"] = HasActiveDebugCurrentLocation()
+                });
+
+            _ = RefreshDebugPanelsAsync(debugSession, refreshVersion, reason).ContinueWith(
+                task =>
+                {
+                    if (task.Exception is not null)
+                    {
+                        TraceDebugShell("ScheduleDebugPanelRefresh", $"Unhandled failure; reason={reason}; refreshVersion={refreshVersion}; exceptionType={task.Exception.GetBaseException().GetType().Name}; message={task.Exception.GetBaseException().Message}; {DescribeDebugUiState()}");
+                        DeveloperDiagnostics.LogException("Debugger", task.Exception.GetBaseException(), "Scheduled debug panel refresh failed unexpectedly.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted,
+                TaskScheduler.Default);
+        }
+
+        private int InvalidateDebugPanelRefresh(string reason)
+        {
+            var refreshVersion = Interlocked.Increment(ref _debugPanelRefreshVersion);
+            TraceDebugShell("InvalidateDebugPanelRefresh", $"Invalidated; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
+            DeveloperDiagnostics.LogInfo("Debugger", "Debug panel refresh invalidated.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
+            return refreshVersion;
+        }
+
+        private sealed record DebugPanelRefreshSnapshot(
+            int CurrentVersion,
+            bool SessionMatches,
+            string SessionState,
+            bool HasCurrentDebugLocation,
+            bool WindowLoaded);
+
+        private bool HasActiveDebugCurrentLocation()
+        {
+            return ViewModel?.OpenTabs.Any(tab => tab.CurrentDebugLine > 0) == true;
+        }
+
+        private async Task<DebugPanelRefreshSnapshot?> GetDebugPanelRefreshSnapshotOnUiThreadAsync(
+            IDebugSession debugSession,
+            int refreshVersion,
+            string reason,
+            string stage)
+        {
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Debug panel refresh UI-thread snapshot requested.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["stage"] = stage,
+                    ["refreshVersion"] = refreshVersion
+                });
 
             try
             {
-                // A breakpoint/step pause is often followed immediately by another step request.
-                // Give the UI a short window to accept Continue/Step input before sending slower
-                // variable/call-stack requests through the debug process.  If the user steps
-                // again, the version changes and this refresh exits without blocking the command.
+                var snapshot = await Dispatcher.InvokeAsync(() =>
+                {
+                    var currentVersion = Volatile.Read(ref _debugPanelRefreshVersion);
+                    var sessionMatches = ReferenceEquals(_debugSession, debugSession);
+                    var sessionState = debugSession.CurrentState.ToString();
+                    var hasCurrentDebugLocation = HasActiveDebugCurrentLocation();
+                    var windowLoaded = IsLoaded;
+                    return new DebugPanelRefreshSnapshot(
+                        currentVersion,
+                        sessionMatches,
+                        sessionState,
+                        hasCurrentDebugLocation,
+                        windowLoaded);
+                });
+
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Debug panel refresh UI-thread snapshot succeeded.",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["stage"] = stage,
+                        ["refreshVersion"] = refreshVersion,
+                        ["currentVersion"] = snapshot.CurrentVersion,
+                        ["sessionMatches"] = snapshot.SessionMatches,
+                        ["sessionState"] = snapshot.SessionState,
+                        ["hasCurrentDebugLocation"] = snapshot.HasCurrentDebugLocation,
+                        ["windowLoaded"] = snapshot.WindowLoaded
+                    });
+                return snapshot;
+            }
+            catch (Exception ex)
+            {
+                TraceDebugShell("GetDebugPanelRefreshSnapshotOnUiThreadAsync", $"Failed; reason={reason}; stage={stage}; refreshVersion={refreshVersion}; exceptionType={ex.GetType().Name}; message={ex.Message}; {DescribeDebugUiState()}");
+                DeveloperDiagnostics.LogException(
+                    "Debugger",
+                    ex,
+                    "Debug panel refresh UI-thread snapshot failed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["stage"] = stage,
+                        ["refreshVersion"] = refreshVersion
+                    });
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Queries variables and call stack from the live debug session and populates
+        /// the Variables and Call Stack grids when the session remains paused.
+        /// </summary>
+        private async Task RefreshDebugPanelsAsync(IDebugSession debugSession, int refreshVersion, string reason)
+        {
+            try
+            {
                 await Task.Delay(250).ConfigureAwait(false);
 
-                if (refreshVersion != Volatile.Read(ref _debugPanelRefreshVersion) ||
-                    !ReferenceEquals(_debugSession, debugSession) ||
-                    debugSession.CurrentState != DebugSessionState.Paused)
+                var preQuerySnapshot = await GetDebugPanelRefreshSnapshotOnUiThreadAsync(debugSession, refreshVersion, reason, "AfterDelay").ConfigureAwait(false);
+                if (preQuerySnapshot is null)
                 {
-                    TraceDebugShell("RefreshDebugPanelsAsync", $"Skipped stale/delayed refresh; refreshVersion={refreshVersion}; currentVersion={Volatile.Read(ref _debugPanelRefreshVersion)}; {DescribeDebugUiState()}");
+                    DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was skipped because the UI-thread snapshot could not be captured.", "SkippedSnapshotFailure", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["stage"] = "AfterDelay" });
                     return;
                 }
 
-                // GetVariables/GetCallStack send stdin commands and wait briefly — run off UI thread.
-                var variables = await debugSession.GetVariablesAsync().ConfigureAwait(false);
-
-                if (refreshVersion != Volatile.Read(ref _debugPanelRefreshVersion) ||
-                    !ReferenceEquals(_debugSession, debugSession) ||
-                    debugSession.CurrentState != DebugSessionState.Paused)
+                if (!CanRefreshDebugPanels(preQuerySnapshot, refreshVersion, out var skipReason))
                 {
-                    TraceDebugShell("RefreshDebugPanelsAsync", $"Skipped stale refresh after variables; refreshVersion={refreshVersion}; currentVersion={Volatile.Read(ref _debugPanelRefreshVersion)}; {DescribeDebugUiState()}");
+                    TraceDebugShell("RefreshDebugPanelsAsync", $"Skipped after delay; reason={reason}; skipReason={skipReason}; refreshVersion={refreshVersion}; currentVersion={preQuerySnapshot.CurrentVersion}; {DescribeDebugUiState()}");
+                    DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was skipped after the debounce delay.", "SkippedAfterDelay", new Dictionary<string, object?> { ["reason"] = reason, ["skipReason"] = skipReason, ["refreshVersion"] = refreshVersion, ["currentVersion"] = preQuerySnapshot.CurrentVersion });
                     return;
                 }
 
-                var callStack = await debugSession.GetCallStackAsync().ConfigureAwait(false);
+                DeveloperDiagnostics.LogInfo("Debugger", "Debug variable query starting.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
+                TraceDebugShell("RefreshDebugPanelsAsync", $"Variables query starting; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
+                IReadOnlyList<DebugVariableInfo> variables;
+                try
+                {
+                    variables = await debugSession.GetVariablesAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    DeveloperDiagnostics.LogException("Debugger", ex, "Debug variable query failed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
+                    throw;
+                }
+                DeveloperDiagnostics.LogInfo("Debugger", "Debug variable query completed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["variableCount"] = variables.Count });
+                var filteredVariables = FilterDebugVariablesForDisplay(variables, reason, refreshVersion);
 
-                // Return to UI thread to update DataGrids.
+                var postVariablesSnapshot = await GetDebugPanelRefreshSnapshotOnUiThreadAsync(debugSession, refreshVersion, reason, "AfterVariables").ConfigureAwait(false);
+                if (postVariablesSnapshot is null)
+                {
+                    DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was skipped because the post-variables UI-thread snapshot could not be captured.", "SkippedSnapshotFailure", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["stage"] = "AfterVariables" });
+                    return;
+                }
+
+                if (!CanRefreshDebugPanels(postVariablesSnapshot, refreshVersion, out skipReason))
+                {
+                    TraceDebugShell("RefreshDebugPanelsAsync", $"Skipped after variables; reason={reason}; skipReason={skipReason}; refreshVersion={refreshVersion}; currentVersion={postVariablesSnapshot.CurrentVersion}; {DescribeDebugUiState()}");
+                    DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh became stale after the variables query.", "SkippedAfterVariables", new Dictionary<string, object?> { ["reason"] = reason, ["skipReason"] = skipReason, ["refreshVersion"] = refreshVersion, ["currentVersion"] = postVariablesSnapshot.CurrentVersion, ["variableCount"] = variables.Count });
+                    return;
+                }
+
+                DeveloperDiagnostics.LogInfo("Debugger", "Debug call stack query starting.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
+                TraceDebugShell("RefreshDebugPanelsAsync", $"Call stack query starting; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
+                IReadOnlyList<DebugCallStackFrame> callStack;
+                try
+                {
+                    callStack = await debugSession.GetCallStackAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    DeveloperDiagnostics.LogException("Debugger", ex, "Debug call stack query failed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
+                    throw;
+                }
+                DeveloperDiagnostics.LogInfo("Debugger", "Debug call stack query completed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["callStackCount"] = callStack.Count });
+
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    if (refreshVersion != Volatile.Read(ref _debugPanelRefreshVersion) ||
-                        !ReferenceEquals(_debugSession, debugSession) ||
-                        debugSession.CurrentState != DebugSessionState.Paused)
+                    DeveloperDiagnostics.LogInfo("Debugger", "Debug panel grid update starting.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["variableCount"] = filteredVariables.Count, ["callStackCount"] = callStack.Count });
+                    var uiSnapshot = new DebugPanelRefreshSnapshot(
+                        Volatile.Read(ref _debugPanelRefreshVersion),
+                        ReferenceEquals(_debugSession, debugSession),
+                        debugSession.CurrentState.ToString(),
+                        HasActiveDebugCurrentLocation(),
+                        IsLoaded);
+                    if (!CanRefreshDebugPanels(uiSnapshot, refreshVersion, out var uiSkipReason))
                     {
+                        TraceDebugShell("RefreshDebugPanelsAsync", $"Skipped UI update; reason={reason}; skipReason={uiSkipReason}; refreshVersion={refreshVersion}; currentVersion={uiSnapshot.CurrentVersion}; {DescribeDebugUiState()}");
+                        DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel UI update was skipped because the refresh became stale.", "SkippedUiUpdate", new Dictionary<string, object?> { ["reason"] = reason, ["skipReason"] = uiSkipReason, ["refreshVersion"] = refreshVersion, ["currentVersion"] = uiSnapshot.CurrentVersion, ["variableCount"] = filteredVariables.Count, ["callStackCount"] = callStack.Count });
                         return;
                     }
 
-                    DebugVariablesGrid.ItemsSource = variables;
+                    DebugVariablesGrid.ItemsSource = filteredVariables;
                     DebugCallStackGrid.ItemsSource = callStack;
+                    UpdateLiveDebugVariableCache(filteredVariables, reason, refreshVersion);
                     RefreshBreakpointsList();
+                    TraceDebugShell("RefreshDebugPanelsAsync", $"Updated UI grids; reason={reason}; refreshVersion={refreshVersion}; variableCount={filteredVariables.Count}; callStackCount={callStack.Count}; {DescribeDebugUiState()}");
+                    DeveloperDiagnostics.LogInfo("Debugger", "Debug panel UI grids updated.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["variableCount"] = filteredVariables.Count, ["callStackCount"] = callStack.Count });
                 });
             }
             catch (Exception ex)
             {
-                TraceDebugShell("RefreshDebugPanelsAsync", $"Failed; exceptionType={ex.GetType().Name}; message={ex.Message}; refreshVersion={refreshVersion}; currentVersion={Volatile.Read(ref _debugPanelRefreshVersion)}; {DescribeDebugUiState()}");
-                if (ViewModel is not null)
+                TraceDebugShell("RefreshDebugPanelsAsync", $"Failed; reason={reason}; exceptionType={ex.GetType().Name}; message={ex.Message}; refreshVersion={refreshVersion}; currentVersion={Volatile.Read(ref _debugPanelRefreshVersion)}; {DescribeDebugUiState()}");
+                DeveloperDiagnostics.LogException("Debugger", ex, "Debug panel refresh failed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
+                ClearLiveDebugVariableCache($"Debug panel refresh failed: {reason}");
+                await Dispatcher.InvokeAsync(() =>
                 {
-                    await Dispatcher.InvokeAsync(() =>
+                    if (ViewModel is not null && ReferenceEquals(_debugSession, debugSession))
                     {
-                        if (refreshVersion == Volatile.Read(ref _debugPanelRefreshVersion) &&
-                            ReferenceEquals(_debugSession, debugSession))
-                        {
-                            ViewModel.StatusText = $"Debug panel refresh failed: {ex.Message}";
-                            RefreshDebugCommandAvailability(debugSession.CurrentState == DebugSessionState.Paused);
-                        }
-                    });
-                }
+                        ViewModel.StatusText = $"Debug panel refresh failed: {ex.Message}";
+                        RefreshDebugCommandAvailability(debugSession.CurrentState == DebugSessionState.Paused);
+                    }
+                });
             }
+        }
+
+        private bool CanRefreshDebugPanels(DebugPanelRefreshSnapshot snapshot, int refreshVersion, out string reason)
+        {
+            if (refreshVersion != snapshot.CurrentVersion)
+            {
+                reason = $"Refresh version {refreshVersion} is stale; current version is {snapshot.CurrentVersion}.";
+                return false;
+            }
+
+            if (!snapshot.SessionMatches)
+            {
+                reason = "Active debug session changed.";
+                return false;
+            }
+
+            if (!string.Equals(snapshot.SessionState, DebugSessionState.Paused.ToString(), StringComparison.Ordinal))
+            {
+                reason = $"Debug session state is {snapshot.SessionState}, not Paused.";
+                return false;
+            }
+
+            if (!snapshot.WindowLoaded)
+            {
+                reason = "Window is not loaded.";
+                return false;
+            }
+
+            if (!snapshot.HasCurrentDebugLocation)
+            {
+                reason = "No active paused source location is available yet.";
+                return false;
+            }
+
+            reason = "Ready";
+            return true;
+        }
+
+        private IReadOnlyList<DebugVariableInfo> FilterDebugVariablesForDisplay(
+            IReadOnlyList<DebugVariableInfo> variables,
+            string reason,
+            int refreshVersion)
+        {
+            var filteredVariables = new List<DebugVariableInfo>(variables.Count);
+            var hiddenCount = 0;
+
+            foreach (var variable in variables)
+            {
+                if (ShouldHideDebugVariable(variable))
+                {
+                    hiddenCount++;
+                    continue;
+                }
+
+                filteredVariables.Add(new DebugVariableInfo(
+                    variable.Name,
+                    variable.Type,
+                    TruncateDebugVariableValue(variable.Value)));
+            }
+
+            filteredVariables.Sort(static (left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
+
+            var displayedNamePreview = filteredVariables.Count == 0
+                ? string.Empty
+                : DeveloperDiagnostics.SanitizePreview(string.Join(", ", filteredVariables.Take(12).Select(variable => variable.Name)));
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Debug variables filtered for display.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["refreshVersion"] = refreshVersion,
+                    ["rawVariableCount"] = variables.Count,
+                    ["filteredVariableCount"] = filteredVariables.Count,
+                    ["hiddenVariableCount"] = hiddenCount,
+                    ["displayedVariableNamePreview"] = displayedNamePreview
+                });
+
+            return filteredVariables;
+        }
+
+        private static bool ShouldHideDebugVariable(DebugVariableInfo variable)
+        {
+            if (string.IsNullOrWhiteSpace(variable.Name))
+            {
+                return true;
+            }
+
+            if (HiddenDebugVariableNames.Contains(variable.Name))
+            {
+                return true;
+            }
+
+            return variable.Name.StartsWith("__PSS", StringComparison.OrdinalIgnoreCase) ||
+                   variable.Name.StartsWith("__PS7", StringComparison.OrdinalIgnoreCase) ||
+                   variable.Name.StartsWith("PSScriptDesk", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string TruncateDebugVariableValue(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            var normalized = value
+                .Replace("\r\n", " ", StringComparison.Ordinal)
+                .Replace('\r', ' ')
+                .Replace('\n', ' ')
+                .Trim();
+
+            return normalized.Length <= DebugVariableValueMaxLength
+                ? normalized
+                : normalized[..DebugVariableValueMaxLength] + "...";
+        }
+
+        private void UpdateLiveDebugVariableCache(
+            IReadOnlyList<DebugVariableInfo> variables,
+            string reason,
+            int refreshVersion)
+        {
+            _liveDebugVariableCache.Clear();
+            foreach (var variable in variables)
+            {
+                var normalizedName = NormalizeDebugVariableName(variable.Name);
+                if (string.IsNullOrWhiteSpace(normalizedName))
+                {
+                    continue;
+                }
+
+                _liveDebugVariableCache[normalizedName] = variable;
+            }
+
+            var preview = _liveDebugVariableCache.Count == 0
+                ? string.Empty
+                : DeveloperDiagnostics.SanitizePreview(string.Join(", ", _liveDebugVariableCache.Keys.Take(12)));
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Live debug variable hover cache updated.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["refreshVersion"] = refreshVersion,
+                    ["cacheCount"] = _liveDebugVariableCache.Count,
+                    ["variableNamePreview"] = preview
+                });
+        }
+
+        private void ClearLiveDebugVariableCache(string reason)
+        {
+            var previousCount = _liveDebugVariableCache.Count;
+            _liveDebugVariableCache.Clear();
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Live debug variable hover cache cleared.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["previousCount"] = previousCount
+                });
+        }
+
+        private static string? TryGetHoveredDebugVariableToken(TextEditor editor, int offset)
+        {
+            var text = editor.Document?.Text;
+            if (string.IsNullOrEmpty(text) || offset < 0 || offset > text.Length)
+            {
+                return null;
+            }
+
+            var scanIndex = Math.Min(offset, text.Length - 1);
+            if (scanIndex < 0)
+            {
+                return null;
+            }
+
+            if (!IsDebugVariableTokenCharacter(text[scanIndex]) && scanIndex > 0)
+            {
+                scanIndex--;
+            }
+
+            if (scanIndex < 0 || !IsDebugVariableTokenCharacter(text[scanIndex]))
+            {
+                return null;
+            }
+
+            var start = scanIndex;
+            var end = scanIndex;
+            while (start > 0 && IsDebugVariableTokenCharacter(text[start - 1]))
+            {
+                start--;
+            }
+
+            while (end + 1 < text.Length && IsDebugVariableTokenCharacter(text[end + 1]))
+            {
+                end++;
+            }
+
+            var token = text.Substring(start, end - start + 1);
+            if (token.StartsWith("${", StringComparison.Ordinal) && token.EndsWith("}", StringComparison.Ordinal))
+            {
+                return token.Length > 3 ? token : null;
+            }
+
+            return token.Length > 1 && token[0] == '$' ? token : null;
+        }
+
+        private static bool IsDebugVariableTokenCharacter(char character)
+        {
+            return char.IsLetterOrDigit(character) ||
+                   character == '$' ||
+                   character == '_' ||
+                   character == '{' ||
+                   character == '}';
+        }
+
+        private static string NormalizeDebugVariableName(string variableName)
+        {
+            var normalized = variableName.Trim();
+            if (normalized.StartsWith("${", StringComparison.Ordinal) && normalized.EndsWith("}", StringComparison.Ordinal))
+            {
+                normalized = normalized[2..^1];
+            }
+            else if (normalized.StartsWith("$", StringComparison.Ordinal))
+            {
+                normalized = normalized[1..];
+            }
+
+            return normalized.Trim();
+        }
+
+        private static string BuildLiveDebugVariableHoverText(string token, DebugVariableInfo variable)
+        {
+            var valuePreview = SanitizeDebugHoverValue(variable.Value);
+            return $"{token}{Environment.NewLine}Type: {variable.Type}{Environment.NewLine}Value: {valuePreview}";
+        }
+
+        private static string SanitizeDebugHoverValue(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            var normalized = value
+                .Replace("\r\n", " ", StringComparison.Ordinal)
+                .Replace('\r', ' ')
+                .Replace('\n', ' ')
+                .Trim();
+
+            return normalized.Length <= DebugHoverValueMaxLength
+                ? normalized
+                : normalized[..DebugHoverValueMaxLength] + "...";
         }
 
         /// <summary>Rebuilds the Breakpoints DataGrid from every open tab's breakpoint set.</summary>
@@ -5473,6 +6748,7 @@ namespace PowerShellStudio.Shell
 
         private void ClearDebugPanels()
         {
+            ClearLiveDebugVariableCache("ClearDebugPanels");
             DebugVariablesGrid.ItemsSource  = null;
             DebugCallStackGrid.ItemsSource  = null;
         }

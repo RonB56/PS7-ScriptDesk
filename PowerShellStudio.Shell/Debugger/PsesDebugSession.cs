@@ -967,6 +967,7 @@ namespace PowerShellStudio.Shell.Debug
             var oldState = CurrentState;
             CurrentState = newState;
             AppLogger.Info("Debug", $"DebugStateChanged: {newState}");
+            DeveloperDiagnostics.LogStateTransition("Debugger", "DebugSessionStateChanged", oldState.ToString(), newState.ToString(), "PsesDebugSession state changed.", new Dictionary<string, object?> { ["processId"] = TryGetProcessId(_process) });
             Trace("SetCurrentState", $"Transition; oldState={oldState}; newState={newState}; processId={TryGetProcessId(_process)}; sessionEndedRaised={_sessionEndedRaised}");
             Trace("SetCurrentState", $"Raising StateChanged; newState={newState}; processId={TryGetProcessId(_process)}");
             StateChanged?.Invoke(newState);

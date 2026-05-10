@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using PowerShellStudio.Application.Diagnostics;
 
@@ -362,6 +364,24 @@ namespace PowerShellStudio.Shell.Controls
         private bool                   _firstOutputPostedLogged;
         private bool                   _firstInputReceivedLogged;
         private int                    _inputInfoLogCount;
+        private readonly DispatcherTimer _transcriptPreservationTimer;
+        private DateTimeOffset         _preserveTranscriptUntilUtc = DateTimeOffset.MinValue;
+        private string?                _transcriptPreservationReason;
+        private TranscriptPreservationMode _transcriptPreservationMode;
+        private bool                   _hasDeferredResize;
+        private int                    _deferredResizeCols;
+        private int                    _deferredResizeRows;
+        private string?                _pendingPromptRestoreText;
+        private string?                _pendingPromptRestoreReason;
+        private bool                   _lastVisibleOutputEndedWithLineBreak = true;
+        private static readonly Regex PromptRegex = new(@"PS\s+.+?>", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private enum TranscriptPreservationMode
+        {
+            None,
+            General,
+            DebugTranscript
+        }
 
         // ── Events ────────────────────────────────────────────────────────────────
 
@@ -382,6 +402,11 @@ namespace PowerShellStudio.Shell.Controls
         public TerminalControl()
         {
             InitializeComponent();
+            _transcriptPreservationTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromMilliseconds(250)
+            };
+            _transcriptPreservationTimer.Tick += TranscriptPreservationTimer_Tick;
             Loaded += OnLoaded;
             WebView.PreviewMouseDown += WebView_PreviewMouseDown;
             WebView.GotKeyboardFocus += WebView_GotKeyboardFocus;
@@ -483,6 +508,50 @@ namespace PowerShellStudio.Shell.Controls
                 return;
             }
 
+            if (ShouldSuppressPromptRedrawChunk(data, out var suppressionReason))
+            {
+                AppLogger.Info("Terminal", $"Suppressed terminal output chunk during transcript preservation. Reason={suppressionReason}, Preview='{FormatForLog(data)}'.");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "WriteRaw",
+                    "Terminal output chunk was suppressed during transcript preservation.",
+                    "SuppressPromptRedrawChunk",
+                    new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data))
+                    {
+                        ["reason"] = suppressionReason,
+                        ["preservationReason"] = _transcriptPreservationReason,
+                        ["preserveUntilUtc"] = _preserveTranscriptUntilUtc
+                    });
+                return;
+            }
+
+            if (IsTranscriptPreservationActive())
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "WriteRaw",
+                    "Terminal output chunk was allowed during transcript preservation.",
+                    "AllowOutputDuringPreservation",
+                    new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data))
+                    {
+                        ["reason"] = "Chunk did not match prompt-redraw suppression heuristics.",
+                        ["preservationReason"] = _transcriptPreservationReason,
+                        ["preserveUntilUtc"] = _preserveTranscriptUntilUtc
+                    });
+            }
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseTerminalEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Terminal",
+                    "Terminal output received for WebView dispatch.",
+                    new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data))
+                    {
+                        ["isReady"] = _isReady,
+                        ["queuedOutputCount"] = _outputQueue.Count
+                    });
+            }
+
             lock (_queueLock)
             {
                 if (!_isReady)
@@ -491,6 +560,7 @@ namespace PowerShellStudio.Shell.Controls
                     {
                         _firstOutputQueuedLogged = true;
                         AppLogger.Info("Terminal", $"Queued terminal output before xterm.js was ready. Length={data.Length}.");
+                        DeveloperDiagnostics.LogInfo("Terminal", "Terminal output queued before xterm.js was ready.", new Dictionary<string, object?> { ["length"] = data.Length });
                     }
 
                     _outputQueue.Add(data);
@@ -502,6 +572,7 @@ namespace PowerShellStudio.Shell.Controls
             {
                 _firstOutputPostedLogged = true;
                 AppLogger.Info("Terminal", $"Posting first terminal output chunk to xterm.js. Length={data.Length}.");
+                DeveloperDiagnostics.LogInfo("Terminal", "First terminal output chunk posted to xterm.js.", new Dictionary<string, object?> { ["length"] = data.Length });
             }
 
             EnqueueOutputForWebView(data);
@@ -520,6 +591,8 @@ namespace PowerShellStudio.Shell.Controls
         public void Clear()
         {
             if (!_webView2Available) return;
+            DeveloperDiagnostics.LogUserAction("Terminal", "TerminalClearRequested", "Terminal clear requested.");
+            _lastVisibleOutputEndedWithLineBreak = true;
             PostToWebView("clear", string.Empty);
         }
 
@@ -527,7 +600,106 @@ namespace PowerShellStudio.Shell.Controls
         public void FocusTerminal()
         {
             if (!_webView2Available) return;
+            DeveloperDiagnostics.LogUserAction("Terminal", "TerminalFocusRequested", "Terminal focus requested.");
             ActivateTerminalHost("FocusTerminal");
+        }
+
+        public void PreserveVisibleTranscriptFor(TimeSpan duration, string reason)
+        {
+            if (duration <= TimeSpan.Zero)
+            {
+                return;
+            }
+
+            void ActivatePreservation()
+            {
+                var nowUtc = DateTimeOffset.UtcNow;
+                var requestedUntilUtc = nowUtc + duration;
+                if (requestedUntilUtc > _preserveTranscriptUntilUtc)
+                {
+                    _preserveTranscriptUntilUtc = requestedUntilUtc;
+                }
+
+                _transcriptPreservationReason = reason;
+                _transcriptPreservationMode = DetermineTranscriptPreservationMode(reason);
+                _transcriptPreservationTimer.Interval = duration < TimeSpan.FromMilliseconds(250)
+                    ? duration
+                    : TimeSpan.FromMilliseconds(250);
+                if (!_transcriptPreservationTimer.IsEnabled)
+                {
+                    _transcriptPreservationTimer.Start();
+                }
+
+                AppLogger.Info("Terminal", $"Visible transcript preservation activated. DurationMs={duration.TotalMilliseconds:F0}, Reason={reason}, UntilUtc={_preserveTranscriptUntilUtc:O}.");
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "Visible transcript preservation activated.",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["mode"] = _transcriptPreservationMode.ToString(),
+                        ["durationMs"] = duration.TotalMilliseconds,
+                        ["preserveUntilUtc"] = _preserveTranscriptUntilUtc
+                    });
+            }
+
+            if (Dispatcher.CheckAccess())
+            {
+                ActivatePreservation();
+            }
+            else
+            {
+                Dispatcher.BeginInvoke((Action)ActivatePreservation);
+            }
+        }
+
+        public void RestoreVisiblePromptAfterDebug(string promptText, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(promptText) || !_webView2Available)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "RestoreVisiblePromptAfterDebug",
+                    "Visible prompt restore was skipped because prompt text was empty or WebView2 was unavailable.",
+                    "SkipVisiblePromptRestore",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["webViewAvailable"] = _webView2Available,
+                        ["promptTextEmpty"] = string.IsNullOrWhiteSpace(promptText)
+                    });
+                return;
+            }
+
+            void RequestPromptRestore()
+            {
+                var normalizedPromptText = promptText.Trim();
+                _pendingPromptRestoreText = normalizedPromptText;
+                _pendingPromptRestoreReason = reason;
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "Visible prompt restoration requested after debug completion.",
+                    new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(normalizedPromptText))
+                    {
+                        ["reason"] = reason,
+                        ["preservationActive"] = IsTranscriptPreservationActive(),
+                        ["preservationMode"] = _transcriptPreservationMode.ToString()
+                    });
+
+                if (!IsTranscriptPreservationActive())
+                {
+                    ShowPendingPromptRestore("Prompt restoration requested without an active preservation window.");
+                }
+            }
+
+            if (Dispatcher.CheckAccess())
+            {
+                RequestPromptRestore();
+            }
+            else
+            {
+                Dispatcher.BeginInvoke((Action)RequestPromptRestore);
+            }
         }
 
         /// <summary>Updates the xterm.js colour theme to match the active application theme.</summary>
@@ -544,6 +716,8 @@ namespace PowerShellStudio.Shell.Controls
             {
                 return;
             }
+
+            _lastVisibleOutputEndedWithLineBreak = data.EndsWith('\n') || data.EndsWith('\r');
 
             lock (_pendingOutputLock)
             {
@@ -591,6 +765,15 @@ namespace PowerShellStudio.Shell.Controls
                 if (WebView.CoreWebView2 is null) return;
                 try
                 {
+                    if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseTerminalEnabled())
+                    {
+                        DeveloperDiagnostics.LogDebug(
+                            "Terminal",
+                            $"Posting host message to terminal. Type={type}.",
+                            type == "output"
+                                ? new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data))
+                                : new Dictionary<string, object?> { ["type"] = type, ["data"] = DeveloperDiagnostics.SanitizePreview(data) });
+                    }
                     var msg = type switch
                     {
                         "output" => JsonSerializer.Serialize(new
@@ -607,6 +790,7 @@ namespace PowerShellStudio.Shell.Controls
                 {
                     System.Diagnostics.Debug.WriteLine(
                         $"[TerminalControl] PostWebMessageAsString failed: {ex.Message}");
+                    DeveloperDiagnostics.LogException("Terminal", ex, "Posting host message to WebView2 terminal failed.", new Dictionary<string, object?> { ["type"] = type });
                 }
             }
 
@@ -640,6 +824,20 @@ namespace PowerShellStudio.Shell.Controls
                         var readyClientHeight = root.TryGetProperty("clientHeight", out var readyClientHeightProp) ? readyClientHeightProp.GetInt32() : 0;
                         System.Diagnostics.Debug.WriteLine("[TerminalControl] Received 'ready' from xterm.js — flushing output queue");
                         AppLogger.Info("Terminal", $"xterm.js signaled ready. Source={readySource}, Cols={readyCols}, Rows={readyRows}, ClientWidth={readyClientWidth}, ClientHeight={readyClientHeight}.");
+                        DeveloperDiagnostics.LogStateTransition(
+                            "Terminal",
+                            "TerminalReady",
+                            "Initializing",
+                            "Ready",
+                            "xterm.js signaled ready.",
+                            new Dictionary<string, object?>
+                            {
+                                ["source"] = readySource,
+                                ["cols"] = readyCols,
+                                ["rows"] = readyRows,
+                                ["clientWidth"] = readyClientWidth,
+                                ["clientHeight"] = readyClientHeight
+                            });
                         FlushOutputQueue();
                         break;
 
@@ -647,12 +845,14 @@ namespace PowerShellStudio.Shell.Controls
                         var reason = root.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "unknown";
                         System.Diagnostics.Debug.WriteLine($"[TerminalControl] xterm.js init error: {reason}");
                         AppLogger.Error("Terminal", $"xterm.js initialization failed inside WebView2. Reason={reason}");
+                        DeveloperDiagnostics.LogError("Terminal", "xterm.js initialization failed inside WebView2.", new Dictionary<string, object?> { ["reason"] = reason });
                         break;
 
                     case "xterm_fit_error":
                         var fitReason = root.TryGetProperty("message", out var fitMsgProp) ? fitMsgProp.GetString() : "unknown";
                         var fitSource = root.TryGetProperty("source", out var fitSourceProp) ? fitSourceProp.GetString() : "unknown";
                         AppLogger.Error("Terminal", $"xterm.js fit failed inside WebView2. Source={fitSource}, Reason={fitReason}");
+                        DeveloperDiagnostics.LogError("Terminal", "xterm.js fit failed inside WebView2.", new Dictionary<string, object?> { ["source"] = fitSource, ["reason"] = fitReason });
                         break;
 
                     case "xterm_write_error":
@@ -660,6 +860,7 @@ namespace PowerShellStudio.Shell.Controls
                         {
                             var writeReason = root.TryGetProperty("message", out var writeMsgProp) ? writeMsgProp.GetString() : "unknown";
                             AppLogger.Error("Terminal", $"xterm.js message/write failed inside WebView2. Type={type}, Reason={writeReason}");
+                            DeveloperDiagnostics.LogError("Terminal", "xterm.js message/write failed inside WebView2.", new Dictionary<string, object?> { ["type"] = type, ["reason"] = writeReason });
                         }
                         break;
 
@@ -690,6 +891,7 @@ namespace PowerShellStudio.Shell.Controls
                                 ? activatedSourceProp.GetString()
                                 : "unknown";
                             AppLogger.Debug("Terminal", $"xterm activation message received. Source={source}, WebViewFocused={WebView.IsKeyboardFocusWithin}.");
+                            DeveloperDiagnostics.LogUserAction("Terminal", "TerminalActivated", "xterm activation message received.", new Dictionary<string, object?> { ["source"] = source });
                             RaiseTerminalActivated(source ?? "unknown");
                         }
                         break;
@@ -707,6 +909,10 @@ namespace PowerShellStudio.Shell.Controls
                             AppLogger.Debug(
                                 "Terminal",
                                 $"xterm focus reported. Source={source}, DocumentHasFocus={documentHasFocus}, ActiveElement={activeElement}, WebViewFocused={WebView.IsKeyboardFocusWithin}.");
+                            if (DeveloperDiagnostics.IsVerboseTerminalEnabled())
+                            {
+                                DeveloperDiagnostics.LogDebug("Terminal", "xterm focus reported.", new Dictionary<string, object?> { ["source"] = source, ["documentHasFocus"] = documentHasFocus, ["activeElement"] = activeElement });
+                            }
                             RaiseTerminalActivated(source ?? "unknown");
                         }
                         break;
@@ -744,6 +950,7 @@ namespace PowerShellStudio.Shell.Controls
                         // native textarea path so the clipboard payload is not injected twice.
                         {
                             AppLogger.Debug("Terminal", "Paste requested by xterm.js.");
+                            DeveloperDiagnostics.LogUserAction("Terminal", "PasteRequest", "Paste requested by xterm.js.");
                             string pasteText = string.Empty;
                             try
                             {
@@ -778,6 +985,11 @@ namespace PowerShellStudio.Shell.Controls
                                 }
 
                                 AppLogger.Debug("Terminal", $"xterm input received from WebView2. Length={data.Length}, Data='{FormatForLog(data)}'.");
+                                DeveloperDiagnostics.LogUserAction(
+                                    "Terminal",
+                                    "TerminalInput",
+                                    "xterm input received from WebView2.",
+                                    new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data)));
                                 RaiseTerminalActivated("xterm.onData");
                                 UserInput?.Invoke(data);
                             }
@@ -788,8 +1000,33 @@ namespace PowerShellStudio.Shell.Controls
                         if (root.TryGetProperty("cols", out var colsProp) &&
                             root.TryGetProperty("rows", out var rowsProp))
                         {
-                            AppLogger.Debug("Terminal", $"xterm resize reported. Cols={colsProp.GetInt32()}, Rows={rowsProp.GetInt32()}.");
-                            TerminalResized?.Invoke(colsProp.GetInt32(), rowsProp.GetInt32());
+                            var cols = colsProp.GetInt32();
+                            var rows = rowsProp.GetInt32();
+                            AppLogger.Debug("Terminal", $"xterm resize reported. Cols={cols}, Rows={rows}.");
+                            DeveloperDiagnostics.LogInfo("Terminal", "xterm resize reported.", new Dictionary<string, object?> { ["cols"] = cols, ["rows"] = rows });
+                            if (IsTranscriptPreservationActive())
+                            {
+                                _hasDeferredResize = true;
+                                _deferredResizeCols = cols;
+                                _deferredResizeRows = rows;
+                                AppLogger.Info("Terminal", $"Deferred xterm resize during transcript preservation. Cols={cols}, Rows={rows}, Reason={_transcriptPreservationReason}.");
+                                DeveloperDiagnostics.LogDecision(
+                                    "Terminal",
+                                    "OnWebMessageReceived",
+                                    "xterm resize was deferred during transcript preservation.",
+                                    "DeferResizeDuringTranscriptPreservation",
+                                    new Dictionary<string, object?>
+                                    {
+                                        ["cols"] = cols,
+                                        ["rows"] = rows,
+                                        ["preservationReason"] = _transcriptPreservationReason,
+                                        ["preserveUntilUtc"] = _preserveTranscriptUntilUtc
+                                    });
+                            }
+                            else
+                            {
+                                TerminalResized?.Invoke(cols, rows);
+                            }
                         }
                         break;
                 }
@@ -799,6 +1036,7 @@ namespace PowerShellStudio.Shell.Controls
                 System.Diagnostics.Debug.WriteLine(
                     $"[TerminalControl] WebMessage parse error: {ex.Message}");
                 AppLogger.Error("Terminal", "WebView2 terminal message parsing failed.", ex);
+                DeveloperDiagnostics.LogException("Terminal", ex, "WebView2 terminal message parsing failed.");
             }
         }
 
@@ -814,6 +1052,7 @@ namespace PowerShellStudio.Shell.Controls
             }
 
             AppLogger.Info("Terminal", $"Flushing queued terminal output to xterm.js. Chunks={toFlush.Count}.");
+            DeveloperDiagnostics.LogInfo("Terminal", "Flushing queued terminal output to xterm.js.", new Dictionary<string, object?> { ["chunkCount"] = toFlush.Count });
 
             if (toFlush.Count > 0)
             {
@@ -832,6 +1071,7 @@ namespace PowerShellStudio.Shell.Controls
         private void WebView_PreviewMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             AppLogger.Debug("Terminal", $"Terminal host received mouse activation. Button={e.ChangedButton}, WebViewFocused={WebView.IsKeyboardFocusWithin}.");
+            DeveloperDiagnostics.LogUserAction("Terminal", "TerminalMouseActivation", "Terminal host received mouse activation.", new Dictionary<string, object?> { ["button"] = e.ChangedButton.ToString() });
             RaiseTerminalActivated($"WebView.{e.ChangedButton}MouseDown");
             ActivateTerminalHost($"WebView.{e.ChangedButton}MouseDown");
         }
@@ -839,6 +1079,7 @@ namespace PowerShellStudio.Shell.Controls
         private void WebView_GotKeyboardFocus(object sender, System.Windows.Input.KeyboardFocusChangedEventArgs e)
         {
             AppLogger.Debug("Terminal", $"WebView2 host received keyboard focus. NewFocus={e.NewFocus?.GetType().Name ?? "(null)"}.");
+            DeveloperDiagnostics.LogUserAction("Terminal", "TerminalKeyboardFocus", "WebView2 host received keyboard focus.", new Dictionary<string, object?> { ["newFocus"] = e.NewFocus?.GetType().FullName });
             RaiseTerminalActivated("WebView.GotKeyboardFocus");
         }
 
@@ -865,13 +1106,259 @@ namespace PowerShellStudio.Shell.Controls
                 AppLogger.Debug(
                     "Terminal",
                     $"Terminal host focus requested. Source={source}, FocusResult={focusResult}, IsKeyboardFocused={WebView.IsKeyboardFocused}, IsKeyboardFocusWithin={WebView.IsKeyboardFocusWithin}, CoreReady={WebView.CoreWebView2 is not null}.");
+                DeveloperDiagnostics.LogUiThreadDispatch("Terminal", "TerminalFocusDispatch", "Terminal host focus requested.", Dispatcher.CheckAccess(), new Dictionary<string, object?> { ["source"] = source, ["focusResult"] = focusResult });
                 PostToWebView("focus", string.Empty);
             }), System.Windows.Threading.DispatcherPriority.Input);
         }
 
         private void RaiseTerminalActivated(string source)
         {
+            if (ShouldEndTranscriptPreservationForActivation(source))
+            {
+                EndTranscriptPreservation("User terminal interaction resumed normal behavior.", flushDeferredResize: true);
+            }
+
             TerminalActivated?.Invoke(source);
+        }
+
+        private void TranscriptPreservationTimer_Tick(object? sender, EventArgs e)
+        {
+            if (!IsTranscriptPreservationActive())
+            {
+                EndTranscriptPreservation("Transcript preservation timer expired.", flushDeferredResize: true);
+            }
+        }
+
+        private bool IsTranscriptPreservationActive()
+        {
+            return DateTimeOffset.UtcNow < _preserveTranscriptUntilUtc;
+        }
+
+        private bool ShouldSuppressPromptRedrawChunk(string data, out string reason)
+        {
+            reason = string.Empty;
+            if (!IsTranscriptPreservationActive())
+            {
+                return false;
+            }
+
+            var containsCursorHome = data.Contains("\x1b[H", StringComparison.Ordinal);
+            var eraseLineCount = CountOccurrences(data, "\x1b[K");
+            var hasPrompt = PromptRegex.IsMatch(data);
+            var hasCarriageReturn = data.Contains('\r');
+            var containsLineFeed = data.Contains('\n');
+
+            if (!containsCursorHome)
+            {
+                reason = "Allowed because no cursor-home escape sequence was present.";
+                return false;
+            }
+
+            if (eraseLineCount < 2)
+            {
+                reason = "Allowed because erase-line count was below the prompt-redraw threshold.";
+                return false;
+            }
+
+            if (!hasPrompt)
+            {
+                reason = "Allowed because no PowerShell prompt signature was present.";
+                return false;
+            }
+
+            reason = $"Suppressed prompt redraw chunk during transcript preservation. ContainsCursorHome={containsCursorHome}, EraseLineCount={eraseLineCount}, HasPrompt={hasPrompt}, HasCarriageReturn={hasCarriageReturn}, ContainsLineFeed={containsLineFeed}.";
+            return true;
+        }
+
+        private void EndTranscriptPreservation(string reason, bool flushDeferredResize)
+        {
+            var wasActive = _preserveTranscriptUntilUtc != DateTimeOffset.MinValue;
+            var previousReason = _transcriptPreservationReason;
+            var previousMode = _transcriptPreservationMode;
+            var previousUntilUtc = _preserveTranscriptUntilUtc;
+            _transcriptPreservationTimer.Stop();
+            _preserveTranscriptUntilUtc = DateTimeOffset.MinValue;
+            _transcriptPreservationReason = null;
+            _transcriptPreservationMode = TranscriptPreservationMode.None;
+
+            if (wasActive)
+            {
+                AppLogger.Info("Terminal", $"Visible transcript preservation ended. Reason={reason}, PreviousReason={previousReason}, PreviousMode={previousMode}, FlushDeferredResize={flushDeferredResize}, HadDeferredResize={_hasDeferredResize}.");
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "Visible transcript preservation ended.",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["previousReason"] = previousReason,
+                        ["previousMode"] = previousMode.ToString(),
+                        ["previousPreserveUntilUtc"] = previousUntilUtc,
+                        ["flushDeferredResize"] = flushDeferredResize,
+                        ["hadDeferredResize"] = _hasDeferredResize
+                    });
+            }
+
+            if (previousMode == TranscriptPreservationMode.DebugTranscript && _hasDeferredResize)
+            {
+                var discardedCols = _deferredResizeCols;
+                var discardedRows = _deferredResizeRows;
+                _hasDeferredResize = false;
+                _deferredResizeCols = 0;
+                _deferredResizeRows = 0;
+                AppLogger.Info("Terminal", $"Deferred resize discarded after debug transcript preservation to avoid prompt redraw wiping debug output. Cols={discardedCols}, Rows={discardedRows}, EndReason={reason}.");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "EndTranscriptPreservation",
+                    "Deferred resize was discarded after debug transcript preservation to avoid prompt redraw wiping visible debug output.",
+                    "DiscardDeferredResizeAfterDebugTranscriptPreservation",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["previousReason"] = previousReason,
+                        ["previousMode"] = previousMode.ToString(),
+                        ["cols"] = discardedCols,
+                        ["rows"] = discardedRows,
+                        ["flushDeferredResize"] = flushDeferredResize
+                    });
+            }
+            else if (flushDeferredResize && _hasDeferredResize)
+            {
+                var cols = _deferredResizeCols;
+                var rows = _deferredResizeRows;
+                _hasDeferredResize = false;
+                _deferredResizeCols = 0;
+                _deferredResizeRows = 0;
+                AppLogger.Info("Terminal", $"Applying deferred xterm resize after transcript preservation. Cols={cols}, Rows={rows}.");
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "Applying deferred xterm resize after transcript preservation.",
+                    new Dictionary<string, object?>
+                    {
+                        ["cols"] = cols,
+                        ["rows"] = rows,
+                        ["reason"] = reason
+                    });
+                TerminalResized?.Invoke(cols, rows);
+            }
+            else if (!flushDeferredResize)
+            {
+                var hadDeferredResize = _hasDeferredResize;
+                _hasDeferredResize = false;
+                _deferredResizeCols = 0;
+                _deferredResizeRows = 0;
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "EndTranscriptPreservation",
+                    "Deferred resize state was cleared because preservation ended without replaying deferred resize.",
+                    "ClearDeferredResizeWithoutReplay",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["previousReason"] = previousReason,
+                        ["previousMode"] = previousMode.ToString(),
+                        ["hadDeferredResize"] = hadDeferredResize
+                    });
+            }
+
+            if (previousMode == TranscriptPreservationMode.DebugTranscript)
+            {
+                ShowPendingPromptRestore(reason);
+            }
+        }
+
+        private static TranscriptPreservationMode DetermineTranscriptPreservationMode(string? reason)
+        {
+            if (!string.IsNullOrWhiteSpace(reason) &&
+                reason.Contains("Debug teardown", StringComparison.Ordinal))
+            {
+                return TranscriptPreservationMode.DebugTranscript;
+            }
+
+            return TranscriptPreservationMode.General;
+        }
+
+        private void ShowPendingPromptRestore(string triggerReason)
+        {
+            if (string.IsNullOrWhiteSpace(_pendingPromptRestoreText))
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "ShowPendingPromptRestore",
+                    "Visible prompt restoration was skipped because no pending prompt text was available.",
+                    "SkipPendingPromptRestore",
+                    new Dictionary<string, object?>
+                    {
+                        ["triggerReason"] = triggerReason,
+                        ["pendingReason"] = _pendingPromptRestoreReason
+                    });
+                return;
+            }
+
+            var promptText = _pendingPromptRestoreText;
+            var promptReason = _pendingPromptRestoreReason ?? triggerReason;
+            _pendingPromptRestoreText = null;
+            _pendingPromptRestoreReason = null;
+            ShowNonDestructivePrompt(promptText, promptReason, triggerReason);
+        }
+
+        private void ShowNonDestructivePrompt(string promptText, string reason, string triggerReason)
+        {
+            var output = (_lastVisibleOutputEndedWithLineBreak ? string.Empty : "\r\n") + "\x1b[?25h" + promptText;
+            _lastVisibleOutputEndedWithLineBreak = false;
+            AppLogger.Info("Terminal", $"Showing non-destructive visible prompt after debug completion. Prompt='{FormatForLog(promptText)}', Reason={reason}, TriggerReason={triggerReason}.");
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "ShowNonDestructivePrompt",
+                "Non-destructive visible prompt restoration was posted to xterm after debug completion.",
+                "ShowVisiblePromptAfterDebug",
+                new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(promptText))
+                {
+                    ["reason"] = reason,
+                    ["triggerReason"] = triggerReason,
+                    ["cursorShowRequested"] = true,
+                    ["prependedLineBreak"] = output.StartsWith("\r\n", StringComparison.Ordinal)
+                });
+            EnqueueOutputForWebView(output);
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "ShowNonDestructivePrompt",
+                "xterm cursor-show request was sent with the visible prompt restoration output.",
+                "ShowCursorWithVisiblePromptRestore",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["triggerReason"] = triggerReason
+                });
+            ActivateTerminalHost("ShowNonDestructivePrompt");
+        }
+
+        private static int CountOccurrences(string text, string value)
+        {
+            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(value))
+            {
+                return 0;
+            }
+
+            var count = 0;
+            var searchIndex = 0;
+            while (true)
+            {
+                var foundIndex = text.IndexOf(value, searchIndex, StringComparison.Ordinal);
+                if (foundIndex < 0)
+                {
+                    return count;
+                }
+
+                count++;
+                searchIndex = foundIndex + value.Length;
+            }
+        }
+
+        private static bool ShouldEndTranscriptPreservationForActivation(string source)
+        {
+            return source.StartsWith("WebView.", StringComparison.Ordinal) ||
+                   string.Equals(source, "xterm.onData", StringComparison.Ordinal) ||
+                   string.Equals(source, "terminal.click", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string FormatForLog(string? text, int maxLength = 80)
