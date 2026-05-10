@@ -137,9 +137,11 @@ namespace PowerShellStudio.Shell
         private bool _lastFindUseRegex;
         private readonly ThemeService _themeService = new();
         private IDebugSession? _debugSession;
+        private Action<DebugSessionState>? _debugSessionStateChangedHandler;
         private EditorTabViewModel? _activeDebugTab;
         private string? _activeDebugLaunchPath;
         private string? _activeDebugSnapshotPath;
+        private int _debugPanelRefreshVersion;
         private readonly Dictionary<TextEditor, BraceMatchingRenderer> _braceMatchingRenderers = new();
         private bool _terminalIsReady;
         private bool _terminalIsActive;
@@ -3227,15 +3229,19 @@ namespace PowerShellStudio.Shell
 
         private async void StartDebug_Click(object sender, RoutedEventArgs e)
         {
+            TraceDebugShell("StartDebug_Click", $"Entry; senderType={sender?.GetType().Name ?? "(null)"}; {DescribeDebugUiState()}");
             if (ViewModel is null)
             {
+                TraceDebugShell("StartDebug_Click", "Aborted because ViewModel is null.");
                 return;
             }
 
             if (_debugSession is not null)
             {
+                TraceDebugShell("StartDebug_Click", $"Existing session detected; currentState={_debugSession.CurrentState}; {DescribeDebugUiState()}");
                 if (_debugSession.CurrentState == DebugSessionState.Paused)
                 {
+                    TraceDebugShell("StartDebug_Click", "Existing paused session will route to Continue.");
                     ContinueDebug_Click(sender, e);
                     return;
                 }
@@ -3248,6 +3254,7 @@ namespace PowerShellStudio.Shell
             {
                 ViewModel.StatusText = "Select a script before starting a debug session";
                 RefreshDebugCommandAvailability(false);
+                TraceDebugShell("StartDebug_Click", "Aborted because no selected tab exists.");
                 return;
             }
 
@@ -3256,6 +3263,7 @@ namespace PowerShellStudio.Shell
             {
                 ViewModel.StatusText = "Select a PowerShell runtime before debugging";
                 RefreshDebugCommandAvailability(false);
+                TraceDebugShell("StartDebug_Click", "Aborted because no runtime is selected.");
                 return;
             }
 
@@ -3264,6 +3272,7 @@ namespace PowerShellStudio.Shell
             {
                 ViewModel.StatusText = "The selected script is empty";
                 RefreshDebugCommandAvailability(false);
+                TraceDebugShell("StartDebug_Click", $"Aborted because selected tab '{selectedTab.Title}' is empty.");
                 return;
             }
 
@@ -3273,16 +3282,25 @@ namespace PowerShellStudio.Shell
                 {
                     ViewModel.StatusText = "Unable to prepare the script for debugging";
                     RefreshDebugCommandAvailability(false);
+                    TraceDebugShell("StartDebug_Click", $"TryBuildDebugLaunchPlan returned false for tab '{selectedTab.Title}'.");
                     return;
                 }
 
                 var breakpoints = CollectBreakpoints(launchScriptPath, selectedTab);
+                TraceDebugShell("StartDebug_Click", $"Launch plan prepared; tab='{selectedTab.Title}'; launchPath='{Path.GetFileName(launchScriptPath)}'; breakpointCount={breakpoints.Count}; before session creation; {DescribeDebugUiState()}");
 
                 TearDownDebugSession();
+                TraceDebugShell("StartDebug_Click", "After TearDownDebugSession before creating new session.");
                 var debugSession = new PsesDebugSession();
                 _debugSession = debugSession;
                 _activeDebugTab = selectedTab;
                 _activeDebugLaunchPath = launchScriptPath;
+                TraceDebugShell("StartDebug_Click", $"Created PsesDebugSession; sessionHash={debugSession.GetHashCode()}; {DescribeDebugUiState()}");
+                _debugSessionStateChangedHandler = state => Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    HandleDebugSessionStateChanged(debugSession, state);
+                }));
+                debugSession.StateChanged += _debugSessionStateChangedHandler;
 
                 debugSession.BreakpointHit += (scriptPath, lineNumber) => Dispatcher.BeginInvoke(new Action(() =>
                 {
@@ -3291,13 +3309,21 @@ namespace PowerShellStudio.Shell
                         return;
                     }
 
+                    TraceDebugShell("DebugSession.BreakpointHit", $"scriptPathPresent={!string.IsNullOrWhiteSpace(scriptPath)}; lineNumber={lineNumber}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
                     ViewModel.StatusText = lineNumber > 0
                         ? $"Breakpoint hit — line {lineNumber}"
                         : "Breakpoint hit";
 
                     SetDebugCurrentLocation(scriptPath, lineNumber);
                     RefreshDebugCommandAvailability(true);
-                    _ = RefreshDebugPanelsAsync();
+                    // Do not automatically query variables/call stack here.  Those
+                    // requests are sent through the same hidden PowerShell debugger
+                    // prompt and can interfere with Step Over / Step Into by causing
+                    // helper scripts to be traced.  Keep the first pass focused on
+                    // reliable stepping and source-line highlighting.
+                    DebugVariablesGrid.ItemsSource = null;
+                    DebugCallStackGrid.ItemsSource = null;
+                    RefreshBreakpointsList();
                 }));
 
                 debugSession.SessionEnded += () => Dispatcher.BeginInvoke(new Action(() =>
@@ -3307,6 +3333,7 @@ namespace PowerShellStudio.Shell
                         return;
                     }
 
+                    TraceDebugShell("DebugSession.SessionEnded", $"SessionEnded fired; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
                     TearDownDebugSession();
                     ViewModel.StatusText = "Debug session ended";
                 }));
@@ -3318,6 +3345,13 @@ namespace PowerShellStudio.Shell
                         return;
                     }
 
+                    var containsPromptMarker = chunk?.Contains("__PSS_DEBUG_PROMPT__", StringComparison.Ordinal) == true;
+                    var containsEndedMarker = chunk?.Contains("__PSS_DEBUG_SESSION_ENDED__", StringComparison.Ordinal) == true;
+                    var containsBreakpointText = chunk?.Contains("breakpoint", StringComparison.OrdinalIgnoreCase) == true;
+                    var containsAtLine = chunk?.Contains(" line ", StringComparison.OrdinalIgnoreCase) == true;
+                    TraceDebugShell(
+                        "DebugSession.OutputReceived",
+                        $"chunkLength={chunk?.Length ?? 0}; sessionState={debugSession.CurrentState}; containsPromptMarker={containsPromptMarker}; containsEndedMarker={containsEndedMarker}; containsBreakpointText={containsBreakpointText}; containsAtLine={containsAtLine}; {DescribeDebugUiState()}");
                     ViewModel.AppendDebugOutput(chunk);
 
                     var condensed = string.IsNullOrWhiteSpace(chunk)
@@ -3329,6 +3363,7 @@ namespace PowerShellStudio.Shell
                         ViewModel.StatusText = condensed.Length > 120 ? condensed[..120] : condensed;
                     }
                 }));
+                TraceDebugShell("StartDebug_Click", $"Subscribed debug session events; sessionHash={debugSession.GetHashCode()}; {DescribeDebugUiState()}");
 
                 try
                 {
@@ -3336,80 +3371,106 @@ namespace PowerShellStudio.Shell
                     SetDebugPanelVisible(true);
                     RefreshBreakpointsList();
                     ViewModel.StatusText = $"Starting debug session — {Path.GetFileName(selectedTab.FilePath ?? selectedTab.Title)}";
+                    TraceDebugShell("StartDebug_Click", $"Before StartAsync; sessionHash={debugSession.GetHashCode()}; launchPath='{Path.GetFileName(launchScriptPath)}'; breakpointCount={breakpoints.Count}; {DescribeDebugUiState()}");
 
                     await debugSession.StartAsync(runtime, launchScriptPath, breakpoints).ConfigureAwait(true);
+                    TraceDebugShell("StartDebug_Click", $"After StartAsync; sessionHash={debugSession.GetHashCode()}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
 
-                    RefreshDebugCommandAvailability(false);
-                    ViewModel.StatusText = breakpoints.Count == 0
-                        ? $"Debug session started — {Path.GetFileName(selectedTab.FilePath ?? selectedTab.Title)} (no breakpoints set)"
-                        : $"Debug session started — {Path.GetFileName(selectedTab.FilePath ?? selectedTab.Title)}";
+                    if (!ReferenceEquals(_debugSession, debugSession))
+                    {
+                        TraceDebugShell("StartDebug_Click", $"Session reference changed after StartAsync; sessionHash={debugSession.GetHashCode()}.");
+                        return;
+                    }
+
+                    var isPaused = debugSession.CurrentState == DebugSessionState.Paused;
+                    RefreshDebugCommandAvailability(isPaused);
+                    TraceDebugShell("StartDebug_Click", $"Post-StartAsync refresh; isPaused={isPaused}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
+                    if (!isPaused)
+                    {
+                        ViewModel.StatusText = breakpoints.Count == 0
+                            ? $"Debug session started — {Path.GetFileName(selectedTab.FilePath ?? selectedTab.Title)} (no breakpoints set)"
+                            : $"Debug session started — {Path.GetFileName(selectedTab.FilePath ?? selectedTab.Title)}";
+                    }
                 }
                 catch (Exception ex)
                 {
+                    TraceDebugShell("StartDebug_Click", $"StartAsync failed; exceptionType={ex.GetType().Name}; message={ex.Message}; {DescribeDebugUiState()}");
                     TearDownDebugSession();
                     ViewModel.StatusText = $"Debug start failed: {ex.Message}";
                 }
             }
             catch (Exception ex)
             {
+                TraceDebugShell("StartDebug_Click", $"Preparation failed; exceptionType={ex.GetType().Name}; message={ex.Message}; {DescribeDebugUiState()}");
                 TearDownDebugSession();
                 ViewModel.StatusText = $"Debug preparation failed: {ex.Message}";
             }
         }
 
-        private void StepInto_Click(object sender, RoutedEventArgs e)
+        private async void StepInto_Click(object sender, RoutedEventArgs e)
         {
+            TraceDebugShell("StepInto_Click", $"Entry; {DescribeDebugUiState()}");
             if (_debugSession?.CurrentState == DebugSessionState.Paused)
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
-                _ = _debugSession.StepIntoAsync();
+                Interlocked.Increment(ref _debugPanelRefreshVersion);
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping in...";
+                await ExecuteDebugControlAsync(_debugSession, session => session.StepIntoAsync(), "Step Into failed").ConfigureAwait(true);
             }
         }
 
-        private void StepOver_Click(object sender, RoutedEventArgs e)
+        private async void StepOver_Click(object sender, RoutedEventArgs e)
         {
+            TraceDebugShell("StepOver_Click", $"Entry; {DescribeDebugUiState()}");
             if (_debugSession?.CurrentState == DebugSessionState.Paused)
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
-                _ = _debugSession.StepOverAsync();
+                Interlocked.Increment(ref _debugPanelRefreshVersion);
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping over...";
+                await ExecuteDebugControlAsync(_debugSession, session => session.StepOverAsync(), "Step Over failed").ConfigureAwait(true);
             }
         }
 
-        private void StepOut_Click(object sender, RoutedEventArgs e)
+        private async void StepOut_Click(object sender, RoutedEventArgs e)
         {
+            TraceDebugShell("StepOut_Click", $"Entry; {DescribeDebugUiState()}");
             if (_debugSession?.CurrentState == DebugSessionState.Paused)
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
-                _ = _debugSession.StepOutAsync();
+                Interlocked.Increment(ref _debugPanelRefreshVersion);
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping out...";
+                await ExecuteDebugControlAsync(_debugSession, session => session.StepOutAsync(), "Step Out failed").ConfigureAwait(true);
             }
         }
 
-        private void ContinueDebug_Click(object sender, RoutedEventArgs e)
+        private async void ContinueDebug_Click(object sender, RoutedEventArgs e)
         {
+            TraceDebugShell("ContinueDebug_Click", $"Entry; {DescribeDebugUiState()}");
             if (_debugSession?.CurrentState == DebugSessionState.Paused)
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
-                _ = _debugSession.ContinueAsync();
+                Interlocked.Increment(ref _debugPanelRefreshVersion);
                 if (ViewModel is not null) ViewModel.StatusText = "Continuing...";
+                await ExecuteDebugControlAsync(_debugSession, session => session.ContinueAsync(), "Continue failed").ConfigureAwait(true);
             }
         }
 
         private void StopDebug_Click(object sender, RoutedEventArgs e)
         {
+            TraceDebugShell("StopDebug_Click", $"Entry; {DescribeDebugUiState()}");
             if (ViewModel is null || _debugSession is null)
             {
+                TraceDebugShell("StopDebug_Click", "Ignored because ViewModel or debug session is null.");
                 return;
             }
 
             TearDownDebugSession();
             ViewModel.StatusText = "Debug session stopped";
+            TraceDebugShell("StopDebug_Click", $"Completed stop request; {DescribeDebugUiState()}");
         }
 
         private List<DebugBreakpointInfo> CollectBreakpoints(string launchScriptPath, EditorTabViewModel launchTab)
@@ -3593,7 +3654,7 @@ namespace PowerShellStudio.Shell
 
         private void RefreshDebugCommandAvailability(bool paused)
         {
-            var hasSession = _debugSession is not null;
+            var hasSession = _debugSession is not null && _debugSession.CurrentState != DebugSessionState.Stopped;
             var canStart = !hasSession && CanStartDebugSession();
 
             StartDebugMenuItem.IsEnabled  = canStart;
@@ -3614,6 +3675,8 @@ namespace PowerShellStudio.Shell
             {
                 ViewModel.IsDebugSessionActive = hasSession;
             }
+
+            TraceDebugShell("RefreshDebugCommandAvailability", $"pausedArgument={paused}; hasSession={hasSession}; canStart={canStart}; {DescribeDebugUiState()}");
         }
 
         private void SetDebugControlsEnabled(bool paused)
@@ -3621,8 +3684,81 @@ namespace PowerShellStudio.Shell
             RefreshDebugCommandAvailability(paused);
         }
 
+        private async Task ExecuteDebugControlAsync(
+            IDebugSession? debugSession,
+            Func<IDebugSession, Task> debugAction,
+            string failureStatusPrefix)
+        {
+            if (debugSession is null || !ReferenceEquals(_debugSession, debugSession))
+            {
+                TraceDebugShell("ExecuteDebugControlAsync", $"Skipped because session mismatch/null. activeMatches={ReferenceEquals(_debugSession, debugSession)}; {DescribeDebugUiState()}");
+                return;
+            }
+
+            try
+            {
+                TraceDebugShell("ExecuteDebugControlAsync", $"Dispatching control action; failureStatusPrefix='{failureStatusPrefix}'; sessionStateBefore={debugSession.CurrentState}; {DescribeDebugUiState()}");
+                await debugAction(debugSession).ConfigureAwait(true);
+                TraceDebugShell("ExecuteDebugControlAsync", $"Control action completed without exception; failureStatusPrefix='{failureStatusPrefix}'; sessionStateAfter={debugSession.CurrentState}; {DescribeDebugUiState()}");
+            }
+            catch (Exception ex)
+            {
+                if (!ReferenceEquals(_debugSession, debugSession))
+                {
+                    TraceDebugShell("ExecuteDebugControlAsync", $"Exception after session changed; exceptionType={ex.GetType().Name}; message={ex.Message}");
+                    return;
+                }
+
+                RefreshDebugCommandAvailability(debugSession.CurrentState == DebugSessionState.Paused);
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = $"{failureStatusPrefix}: {ex.Message}";
+                }
+
+                TraceDebugShell("ExecuteDebugControlAsync", $"Control action failed; failureStatusPrefix='{failureStatusPrefix}'; exceptionType={ex.GetType().Name}; message={ex.Message}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
+            }
+        }
+
+        private void HandleDebugSessionStateChanged(IDebugSession debugSession, DebugSessionState state)
+        {
+            var currentSessionState = _debugSession?.CurrentState.ToString() ?? "(null)";
+            TraceDebugShell("HandleDebugSessionStateChanged", $"Received state change; incomingState={state}; sessionMatches={ReferenceEquals(_debugSession, debugSession)}; currentSessionState={currentSessionState}; {DescribeDebugUiState()}");
+            if (!ReferenceEquals(_debugSession, debugSession))
+            {
+                return;
+            }
+
+            if (state == DebugSessionState.Stopped)
+            {
+                TearDownDebugSession();
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = "Debug session ended";
+                }
+
+                TraceDebugShell("HandleDebugSessionStateChanged", $"Handled stopped state; {DescribeDebugUiState()}");
+                return;
+            }
+
+            var isPaused = state == DebugSessionState.Paused;
+            RefreshDebugCommandAvailability(isPaused);
+
+            if (isPaused && ViewModel is not null)
+            {
+                ViewModel.StatusText = "Debug session paused — choose Continue, Step Over, Step Into, Step Out, or Stop Debug";
+            }
+        }
+
         private void TearDownDebugSession()
         {
+            TraceDebugShell("TearDownDebugSession", $"Entry; {DescribeDebugUiState()}");
+            if (_debugSession is not null && _debugSessionStateChangedHandler is not null)
+            {
+                _debugSession.StateChanged -= _debugSessionStateChangedHandler;
+            }
+
+            _debugSessionStateChangedHandler = null;
+            Interlocked.Increment(ref _debugPanelRefreshVersion);
             _debugSession?.Dispose();
             _debugSession = null;
             _activeDebugTab = null;
@@ -3637,6 +3773,43 @@ namespace PowerShellStudio.Shell
             if (ViewModel is not null)
                 _ = ViewModel.EnsureConsoleRestoredAsync();
             TerminalConsole.FocusTerminal();
+            TraceDebugShell("TearDownDebugSession", $"Completed; {DescribeDebugUiState()}");
+        }
+
+        private void TraceDebugShell(string source, string message)
+        {
+            DebuggerTraceLogger.Write($"MainWindow.{source}", message);
+        }
+
+        private string DescribeDebugUiState()
+        {
+            var sessionState = _debugSession?.CurrentState.ToString() ?? "(null)";
+
+            if (!Dispatcher.CheckAccess())
+            {
+                return
+                    $"debugSessionNull={(_debugSession is null)}; " +
+                    $"debugSessionState={sessionState}; " +
+                    "uiThreadAccess=False";
+            }
+
+            var isDebugSessionActive = ViewModel?.IsDebugSessionActive.ToString() ?? "(null)";
+
+            return
+                $"debugSessionNull={(_debugSession is null)}; " +
+                $"debugSessionState={sessionState}; " +
+                $"isDebugSessionActive={isDebugSessionActive}; " +
+                $"startDebugMenuEnabled={StartDebugMenuItem.IsEnabled}; " +
+                $"stopDebugMenuEnabled={StopDebugMenuItem.IsEnabled}; " +
+                $"continueMenuEnabled={ContinueMenuItem.IsEnabled}; " +
+                $"stepOverMenuEnabled={StepOverMenuItem.IsEnabled}; " +
+                $"stepIntoMenuEnabled={StepIntoMenuItem.IsEnabled}; " +
+                $"stepOutMenuEnabled={StepOutMenuItem.IsEnabled}; " +
+                $"debugToggleEnabled={DebugToggleButton.IsEnabled}; " +
+                $"continueButtonEnabled={ContinueButton.IsEnabled}; " +
+                $"stepOverButtonEnabled={StepOverButton.IsEnabled}; " +
+                $"stepIntoButtonEnabled={StepIntoButton.IsEnabled}; " +
+                $"stepOutButtonEnabled={StepOutButton.IsEnabled}";
         }
 
         private void OpenFindReplaceWindow(bool showReplace)
@@ -3833,6 +4006,14 @@ namespace PowerShellStudio.Shell
             if (!ViewModel.TryPrepareForApplicationClose())
             {
                 return false;
+            }
+
+            // Ensure an owned debug PowerShell process cannot continue after a
+            // normal user-initiated app close.  This deliberately runs only after
+            // unsaved-work prompts have allowed the close to proceed.
+            if (_debugSession is not null)
+            {
+                TearDownDebugSession();
             }
 
             try
@@ -5196,22 +5377,74 @@ namespace PowerShellStudio.Shell
         /// </summary>
         private async Task RefreshDebugPanelsAsync()
         {
-            if (_debugSession is null)
+            var debugSession = _debugSession;
+            if (debugSession is null || debugSession.CurrentState != DebugSessionState.Paused)
             {
                 return;
             }
 
-            // GetVariables/GetCallStack send stdin commands and wait briefly — run off UI thread.
-            var variables = await _debugSession.GetVariablesAsync().ConfigureAwait(false);
-            var callStack = await _debugSession.GetCallStackAsync().ConfigureAwait(false);
+            var refreshVersion = Interlocked.Increment(ref _debugPanelRefreshVersion);
 
-            // Return to UI thread to update DataGrids.
-            await Dispatcher.InvokeAsync(() =>
+            try
             {
-                DebugVariablesGrid.ItemsSource = variables;
-                DebugCallStackGrid.ItemsSource = callStack;
-                RefreshBreakpointsList();
-            });
+                // A breakpoint/step pause is often followed immediately by another step request.
+                // Give the UI a short window to accept Continue/Step input before sending slower
+                // variable/call-stack requests through the debug process.  If the user steps
+                // again, the version changes and this refresh exits without blocking the command.
+                await Task.Delay(250).ConfigureAwait(false);
+
+                if (refreshVersion != Volatile.Read(ref _debugPanelRefreshVersion) ||
+                    !ReferenceEquals(_debugSession, debugSession) ||
+                    debugSession.CurrentState != DebugSessionState.Paused)
+                {
+                    TraceDebugShell("RefreshDebugPanelsAsync", $"Skipped stale/delayed refresh; refreshVersion={refreshVersion}; currentVersion={Volatile.Read(ref _debugPanelRefreshVersion)}; {DescribeDebugUiState()}");
+                    return;
+                }
+
+                // GetVariables/GetCallStack send stdin commands and wait briefly — run off UI thread.
+                var variables = await debugSession.GetVariablesAsync().ConfigureAwait(false);
+
+                if (refreshVersion != Volatile.Read(ref _debugPanelRefreshVersion) ||
+                    !ReferenceEquals(_debugSession, debugSession) ||
+                    debugSession.CurrentState != DebugSessionState.Paused)
+                {
+                    TraceDebugShell("RefreshDebugPanelsAsync", $"Skipped stale refresh after variables; refreshVersion={refreshVersion}; currentVersion={Volatile.Read(ref _debugPanelRefreshVersion)}; {DescribeDebugUiState()}");
+                    return;
+                }
+
+                var callStack = await debugSession.GetCallStackAsync().ConfigureAwait(false);
+
+                // Return to UI thread to update DataGrids.
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (refreshVersion != Volatile.Read(ref _debugPanelRefreshVersion) ||
+                        !ReferenceEquals(_debugSession, debugSession) ||
+                        debugSession.CurrentState != DebugSessionState.Paused)
+                    {
+                        return;
+                    }
+
+                    DebugVariablesGrid.ItemsSource = variables;
+                    DebugCallStackGrid.ItemsSource = callStack;
+                    RefreshBreakpointsList();
+                });
+            }
+            catch (Exception ex)
+            {
+                TraceDebugShell("RefreshDebugPanelsAsync", $"Failed; exceptionType={ex.GetType().Name}; message={ex.Message}; refreshVersion={refreshVersion}; currentVersion={Volatile.Read(ref _debugPanelRefreshVersion)}; {DescribeDebugUiState()}");
+                if (ViewModel is not null)
+                {
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        if (refreshVersion == Volatile.Read(ref _debugPanelRefreshVersion) &&
+                            ReferenceEquals(_debugSession, debugSession))
+                        {
+                            ViewModel.StatusText = $"Debug panel refresh failed: {ex.Message}";
+                            RefreshDebugCommandAvailability(debugSession.CurrentState == DebugSessionState.Paused);
+                        }
+                    });
+                }
+            }
         }
 
         /// <summary>Rebuilds the Breakpoints DataGrid from every open tab's breakpoint set.</summary>

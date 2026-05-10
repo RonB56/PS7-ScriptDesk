@@ -6,6 +6,7 @@ using WpfMouseButtonEventArgs = System.Windows.Input.MouseButtonEventArgs;
 using WpfMouseButtonState = System.Windows.Input.MouseButtonState;
 using WpfMouseEventArgs = System.Windows.Input.MouseEventArgs;
 using ICSharpCode.AvalonEdit.Editing;
+using ICSharpCode.AvalonEdit.Rendering;
 using PowerShellStudio.UI.ViewModels;
 using WpfBrush = System.Windows.Media.Brush;
 using WpfDrawingContext = System.Windows.Media.DrawingContext;
@@ -106,7 +107,7 @@ namespace PowerShellStudio.Shell.Editor
                     continue;
                 }
 
-                var y = visualLine.VisualTop - TextView.ScrollOffset.Y;
+                var y = GetVisualLineTopInMarginCoordinates(visualLine, TextView);
                 var center = new WpfPoint(ActualWidth / 2.0, y + (visualLine.Height / 2.0));
                 var radius = Math.Max(4.5, Math.Min(6.0, (visualLine.Height - 4.0) / 2.0));
 
@@ -211,12 +212,11 @@ namespace PowerShellStudio.Shell.Editor
                 return false;
             }
 
-            var y = point.Y + TextView.ScrollOffset.Y;
             foreach (var visualLine in TextView.VisualLines)
             {
-                var lineTop = visualLine.VisualTop;
+                var lineTop = GetVisualLineTopInMarginCoordinates(visualLine, TextView);
                 var lineBottom = lineTop + visualLine.Height;
-                if (y >= lineTop && y <= lineBottom)
+                if (point.Y >= lineTop && point.Y <= lineBottom)
                 {
                     lineNumber = visualLine.FirstDocumentLine.LineNumber;
                     return lineNumber > 0;
@@ -224,6 +224,40 @@ namespace PowerShellStudio.Shell.Editor
             }
 
             return false;
+        }
+
+        protected override void OnTextViewChanged(TextView oldTextView, TextView newTextView)
+        {
+            if (oldTextView is not null)
+            {
+                oldTextView.VisualLinesChanged -= TextView_VisualLayoutChanged;
+                oldTextView.ScrollOffsetChanged -= TextView_VisualLayoutChanged;
+            }
+
+            base.OnTextViewChanged(oldTextView, newTextView);
+
+            if (newTextView is not null)
+            {
+                newTextView.VisualLinesChanged += TextView_VisualLayoutChanged;
+                newTextView.ScrollOffsetChanged += TextView_VisualLayoutChanged;
+            }
+
+            InvalidateVisual();
+        }
+
+        private void TextView_VisualLayoutChanged(object? sender, EventArgs e)
+        {
+            InvalidateVisual();
+        }
+
+        private static double GetVisualLineTopInMarginCoordinates(VisualLine visualLine, TextView textView)
+        {
+            if (visualLine.TextLines.Count > 0)
+            {
+                return visualLine.GetTextLineVisualYPosition(visualLine.TextLines[0], VisualYPosition.TextTop) - textView.VerticalOffset;
+            }
+
+            return visualLine.VisualTop - textView.ScrollOffset.Y;
         }
 
         private void CancelPendingClick()
