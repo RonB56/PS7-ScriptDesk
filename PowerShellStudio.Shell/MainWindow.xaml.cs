@@ -1,4 +1,5 @@
 using System;
+using System.Collections.ObjectModel;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -62,6 +63,8 @@ namespace PowerShellStudio.Shell
         private const int DebugOutputPreservationWindowMilliseconds = 2000;
         private const int DebugVariableValueMaxLength = 160;
         private const int DebugHoverValueMaxLength = 300;
+        private const double DefaultDebugPaneWindowWidth = 420;
+        private const double DefaultDebugPaneWindowHeight = 480;
         private static readonly HashSet<string> HiddenDebugVariableNames = new(StringComparer.OrdinalIgnoreCase)
         {
             "?",
@@ -181,6 +184,13 @@ namespace PowerShellStudio.Shell
         private string? _activeDebugLaunchPath;
         private string? _activeDebugSnapshotPath;
         private int _debugPanelRefreshVersion;
+        private DebugPaneWindow? _debugPaneWindow;
+        private IReadOnlyList<DebugVariableInfo>? _currentDebugVariables;
+        private IReadOnlyList<DebugCallStackFrame>? _currentDebugCallStack;
+        private ObservableCollection<BreakpointRow>? _currentBreakpointRows;
+        private int _selectedDebugTabIndex;
+        private bool _isSynchronizingDebugTabSelection;
+        private Rect? _lastDebugPaneWindowBounds;
         private DateTimeOffset _lastDebugOutputWrittenAtUtc = DateTimeOffset.MinValue;
         private readonly Dictionary<TextEditor, BraceMatchingRenderer> _braceMatchingRenderers = new();
         private bool _terminalIsReady;
@@ -4523,6 +4533,7 @@ namespace PowerShellStudio.Shell
 
             if (_allowWindowClose)
             {
+                _debugPaneWindow?.CloseForOwnerShutdown();
                 _diagnosticsService.Dispose();
                 _intelliSenseService.Dispose();
                 _activeCompletionCts?.Cancel();
@@ -4623,6 +4634,18 @@ namespace PowerShellStudio.Shell
             if (IsUsableLength(_loadedSettings.OpenTabsSectionHeight, MinimumExplorerSectionHeight))
             {
                 OpenTabsRowDefinition.Height = new GridLength(_loadedSettings.OpenTabsSectionHeight!.Value, GridUnitType.Pixel);
+            }
+
+            if (IsFiniteCoordinate(_loadedSettings.DebugPaneWindowLeft) &&
+                IsFiniteCoordinate(_loadedSettings.DebugPaneWindowTop) &&
+                IsUsableLength(_loadedSettings.DebugPaneWindowWidth, 240) &&
+                IsUsableLength(_loadedSettings.DebugPaneWindowHeight, 180))
+            {
+                _lastDebugPaneWindowBounds = new Rect(
+                    _loadedSettings.DebugPaneWindowLeft!.Value,
+                    _loadedSettings.DebugPaneWindowTop!.Value,
+                    _loadedSettings.DebugPaneWindowWidth!.Value,
+                    _loadedSettings.DebugPaneWindowHeight!.Value);
             }
 
             ApplyExplorerVisibilityLayout();
@@ -5388,6 +5411,7 @@ namespace PowerShellStudio.Shell
         {
             var settings = ViewModel?.CreateApplicationSettingsSnapshot() ?? new ApplicationSettings();
             var restoreBounds = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
+            CaptureDebugPaneWindowBounds();
 
             if (IsUsableLength(restoreBounds.Width, MinWidth))
             {
@@ -5434,6 +5458,25 @@ namespace PowerShellStudio.Shell
             if (OpenTabsRowDefinition.ActualHeight >= MinimumExplorerSectionHeight)
             {
                 settings.OpenTabsSectionHeight = OpenTabsRowDefinition.ActualHeight;
+            }
+
+            if (_lastDebugPaneWindowBounds is Rect debugPaneBounds)
+            {
+                settings.DebugPaneWindowWidth = debugPaneBounds.Width;
+                settings.DebugPaneWindowHeight = debugPaneBounds.Height;
+                settings.DebugPaneWindowLeft = debugPaneBounds.Left;
+                settings.DebugPaneWindowTop = debugPaneBounds.Top;
+
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Debug pane window size and position saved.",
+                    new Dictionary<string, object?>
+                    {
+                        ["left"] = debugPaneBounds.Left,
+                        ["top"] = debugPaneBounds.Top,
+                        ["width"] = debugPaneBounds.Width,
+                        ["height"] = debugPaneBounds.Height
+                    });
             }
 
             _applicationSettingsService.SaveSettings(settings);
@@ -6203,6 +6246,8 @@ namespace PowerShellStudio.Shell
         // -------------------------------------------------------------------------
 
         private const double DebugPanelWidth = 290;
+        private const double MinimumSavedDebugPaneWindowWidth = 240;
+        private const double MinimumSavedDebugPaneWindowHeight = 180;
 
         /// <summary>Shows or hides the right-side debug panel column.</summary>
         private void SetDebugPanelVisible(bool visible)
@@ -6225,11 +6270,352 @@ namespace PowerShellStudio.Shell
             }
 
             ShowDebugPanelMenuItem.IsChecked = visible;
+            ApplyDebugPanePresentationState();
         }
 
         private void ShowDebugPanel_Click(object sender, RoutedEventArgs e)
         {
             SetDebugPanelVisible(ShowDebugPanelMenuItem.IsChecked);
+        }
+
+        private void PopOutDebugPaneButton_Click(object sender, RoutedEventArgs e)
+        {
+            PopOutDebugPane("HeaderButton");
+        }
+
+        private void PopOutDebugPaneMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            PopOutDebugPane("ViewMenu");
+        }
+
+        private void DockDebugPaneButton_Click(object sender, RoutedEventArgs e)
+        {
+            DockDebugPane("PlaceholderButton");
+        }
+
+        private void DockDebugPaneMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            DockDebugPane("ViewMenu");
+        }
+
+        private void DebugPaneTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!ReferenceEquals(e.Source, DebugPaneTabControl))
+            {
+                return;
+            }
+
+            SyncDebugPaneTabSelection(DebugPaneTabControl.SelectedIndex, "DockedTabControl");
+        }
+
+        private void PopOutDebugPane(string reason)
+        {
+            DeveloperDiagnostics.LogUserAction(
+                "Debugger",
+                "DebugPanePopOutRequested",
+                "Debug pane pop-out requested.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["alreadyPoppedOut"] = _debugPaneWindow is not null,
+                    ["selectedTabIndex"] = _selectedDebugTabIndex
+                });
+
+            SetDebugPanelVisible(true);
+
+            if (_debugPaneWindow is not null)
+            {
+                _debugPaneWindow.Activate();
+                DeveloperDiagnostics.LogDecision("Debugger", "PopOutDebugPane", "Debug pane pop-out request reused the existing floating window.", "AlreadyPoppedOut", new Dictionary<string, object?> { ["reason"] = reason });
+                return;
+            }
+
+            var debugPaneWindow = new DebugPaneWindow
+            {
+                Owner = this
+            };
+
+            _debugPaneWindow = debugPaneWindow;
+            debugPaneWindow.DockBackRequested += DebugPaneWindow_DockBackRequested;
+            debugPaneWindow.SelectedTabIndexChanged += DebugPaneWindow_SelectedTabIndexChanged;
+            debugPaneWindow.RemoveSelectedBreakpointRequested += DebugPaneWindow_RemoveSelectedBreakpointRequested;
+            debugPaneWindow.Closed += DebugPaneWindow_Closed;
+            debugPaneWindow.LocationChanged += DebugPaneWindow_LocationChanged;
+            debugPaneWindow.SizeChanged += DebugPaneWindow_SizeChanged;
+
+            RestoreDebugPaneWindowBounds(debugPaneWindow);
+            ApplyDebugPaneItemsSources("PopOutCreated");
+            RefreshBreakpointsList();
+            SyncDebugPaneTabSelection(_selectedDebugTabIndex, "PopOutCreated");
+            ApplyDebugPanePresentationState();
+
+            DeveloperDiagnostics.LogInfo("Debugger", "Floating Debug pane window created.", new Dictionary<string, object?> { ["reason"] = reason });
+            debugPaneWindow.Show();
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Floating Debug pane window shown.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["selectedTabIndex"] = _selectedDebugTabIndex
+                });
+        }
+
+        private void DockDebugPane(string reason)
+        {
+            DeveloperDiagnostics.LogUserAction(
+                "Debugger",
+                "DebugPaneDockBackRequested",
+                "Debug pane dock-back requested.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["wasPoppedOut"] = _debugPaneWindow is not null
+                });
+
+            var debugPaneWindow = _debugPaneWindow;
+            if (debugPaneWindow is null)
+            {
+                DeveloperDiagnostics.LogDecision("Debugger", "DockDebugPane", "Debug pane dock-back was skipped because no floating window was open.", "SkippedNoFloatingWindow", new Dictionary<string, object?> { ["reason"] = reason });
+                return;
+            }
+
+            CaptureDebugPaneWindowBounds(debugPaneWindow);
+            SyncDebugPaneTabSelection(debugPaneWindow.SelectedTabIndex, "DockBack");
+            _debugPaneWindow = null;
+            ApplyDebugPanePresentationState();
+            ApplyDebugPaneItemsSources("DockBack");
+            debugPaneWindow.CloseForDockBack();
+        }
+
+        private void DebugPaneWindow_DockBackRequested(object? sender, EventArgs e)
+        {
+            DockDebugPane("FloatingWindowRequest");
+        }
+
+        private void DebugPaneWindow_SelectedTabIndexChanged(object? sender, DebugPaneTabChangedEventArgs e)
+        {
+            SyncDebugPaneTabSelection(e.SelectedIndex, "FloatingWindowTabControl");
+        }
+
+        private void DebugPaneWindow_RemoveSelectedBreakpointRequested(object? sender, EventArgs e)
+        {
+            if (sender is DebugPaneWindow debugPaneWindow)
+            {
+                RemoveSelectedBreakpoint(debugPaneWindow.SelectedBreakpointItem);
+            }
+        }
+
+        private void DebugPaneWindow_Closed(object? sender, EventArgs e)
+        {
+            if (sender is not DebugPaneWindow debugPaneWindow)
+            {
+                return;
+            }
+
+            CaptureDebugPaneWindowBounds(debugPaneWindow);
+
+            if (ReferenceEquals(_debugPaneWindow, debugPaneWindow))
+            {
+                _debugPaneWindow = null;
+                ApplyDebugPanePresentationState();
+                ApplyDebugPaneItemsSources("FloatingWindowClosed");
+            }
+
+            DeveloperDiagnostics.LogInfo("Debugger", "Floating Debug pane window closed.", new Dictionary<string, object?> { ["selectedTabIndex"] = _selectedDebugTabIndex });
+        }
+
+        private void DebugPaneWindow_LocationChanged(object? sender, EventArgs e)
+        {
+            if (sender is DebugPaneWindow debugPaneWindow)
+            {
+                CaptureDebugPaneWindowBounds(debugPaneWindow);
+            }
+        }
+
+        private void DebugPaneWindow_SizeChanged(object? sender, SizeChangedEventArgs e)
+        {
+            if (sender is DebugPaneWindow debugPaneWindow)
+            {
+                CaptureDebugPaneWindowBounds(debugPaneWindow);
+            }
+        }
+
+        private void ApplyDebugPanePresentationState()
+        {
+            var isPoppedOut = _debugPaneWindow is not null;
+            DebugPaneTabControl.Visibility = isPoppedOut ? Visibility.Collapsed : Visibility.Visible;
+            DebugPanePoppedOutPlaceholder.Visibility = isPoppedOut ? Visibility.Visible : Visibility.Collapsed;
+            PopOutDebugPaneButton.Visibility = isPoppedOut ? Visibility.Collapsed : Visibility.Visible;
+            PopOutDebugPaneMenuItem.Visibility = isPoppedOut ? Visibility.Collapsed : Visibility.Visible;
+            DockDebugPaneMenuItem.Visibility = isPoppedOut ? Visibility.Visible : Visibility.Collapsed;
+
+            if (isPoppedOut)
+            {
+                DeveloperDiagnostics.LogInfo("Debugger", "Docked Debug pane placeholder shown because the pane is popped out.", new Dictionary<string, object?> { ["selectedTabIndex"] = _selectedDebugTabIndex });
+            }
+        }
+
+        private void SyncDebugPaneTabSelection(int selectedTabIndex, string reason)
+        {
+            if (selectedTabIndex < 0 || _isSynchronizingDebugTabSelection)
+            {
+                return;
+            }
+
+            var previousIndex = _selectedDebugTabIndex;
+            _selectedDebugTabIndex = selectedTabIndex;
+            _isSynchronizingDebugTabSelection = true;
+            try
+            {
+                if (DebugPaneTabControl.SelectedIndex != selectedTabIndex)
+                {
+                    DebugPaneTabControl.SelectedIndex = selectedTabIndex;
+                }
+
+                _debugPaneWindow?.SetSelectedTabIndex(selectedTabIndex);
+            }
+            finally
+            {
+                _isSynchronizingDebugTabSelection = false;
+            }
+
+            if (previousIndex != selectedTabIndex)
+            {
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Selected debug tab changed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["previousIndex"] = previousIndex,
+                        ["selectedTabIndex"] = selectedTabIndex
+                    });
+            }
+        }
+
+        private void RestoreDebugPaneWindowBounds(DebugPaneWindow debugPaneWindow)
+        {
+            var bounds = _lastDebugPaneWindowBounds;
+            if (bounds is not Rect restoredBounds)
+            {
+                restoredBounds = new Rect(
+                    Left + 40,
+                    Top + 40,
+                    DefaultDebugPaneWindowWidth,
+                    DefaultDebugPaneWindowHeight);
+            }
+
+            debugPaneWindow.Left = restoredBounds.Left;
+            debugPaneWindow.Top = restoredBounds.Top;
+            debugPaneWindow.Width = restoredBounds.Width;
+            debugPaneWindow.Height = restoredBounds.Height;
+
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Debug pane window size and position restored.",
+                new Dictionary<string, object?>
+                {
+                    ["left"] = restoredBounds.Left,
+                    ["top"] = restoredBounds.Top,
+                    ["width"] = restoredBounds.Width,
+                    ["height"] = restoredBounds.Height
+                });
+        }
+
+        private void CaptureDebugPaneWindowBounds()
+        {
+            if (_debugPaneWindow is not null)
+            {
+                CaptureDebugPaneWindowBounds(_debugPaneWindow);
+            }
+        }
+
+        private void CaptureDebugPaneWindowBounds(DebugPaneWindow debugPaneWindow)
+        {
+            if (debugPaneWindow.WindowState != WindowState.Normal)
+            {
+                return;
+            }
+
+            if (!IsFiniteCoordinate(debugPaneWindow.Left) ||
+                !IsFiniteCoordinate(debugPaneWindow.Top) ||
+                !IsUsableLength(debugPaneWindow.Width, MinimumSavedDebugPaneWindowWidth) ||
+                !IsUsableLength(debugPaneWindow.Height, MinimumSavedDebugPaneWindowHeight))
+            {
+                return;
+            }
+
+            _lastDebugPaneWindowBounds = new Rect(debugPaneWindow.Left, debugPaneWindow.Top, debugPaneWindow.Width, debugPaneWindow.Height);
+        }
+
+        private void ApplyDebugPaneItemsSources(string reason)
+        {
+            ApplyDebugVariablesItemsSource(_currentDebugVariables, reason, null);
+            ApplyDebugCallStackItemsSource(_currentDebugCallStack, reason, null);
+            ApplyDebugBreakpointsItemsSource(_currentBreakpointRows, reason);
+        }
+
+        private void ApplyDebugVariablesItemsSource(IReadOnlyList<DebugVariableInfo>? variables, string reason, int? refreshVersion)
+        {
+            _currentDebugVariables = variables;
+            DebugVariablesGrid.ItemsSource = variables;
+
+            if (_debugPaneWindow is not null)
+            {
+                _debugPaneWindow.DebugVariablesGrid.ItemsSource = variables;
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Debug Variables synchronized to floating window.",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["refreshVersion"] = refreshVersion,
+                        ["variableCount"] = variables?.Count ?? 0,
+                        ["variableNamePreview"] = variables is null
+                            ? string.Empty
+                            : DeveloperDiagnostics.SanitizePreview(string.Join(", ", variables.Take(12).Select(variable => variable.Name)))
+                    });
+            }
+        }
+
+        private void ApplyDebugCallStackItemsSource(IReadOnlyList<DebugCallStackFrame>? callStack, string reason, int? refreshVersion)
+        {
+            _currentDebugCallStack = callStack;
+            DebugCallStackGrid.ItemsSource = callStack;
+
+            if (_debugPaneWindow is not null)
+            {
+                _debugPaneWindow.DebugCallStackGrid.ItemsSource = callStack;
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Debug Call Stack synchronized to floating window.",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["refreshVersion"] = refreshVersion,
+                        ["callStackCount"] = callStack?.Count ?? 0
+                    });
+            }
+        }
+
+        private void ApplyDebugBreakpointsItemsSource(ObservableCollection<BreakpointRow>? breakpoints, string reason)
+        {
+            _currentBreakpointRows = breakpoints;
+            DebugBreakpointsGrid.ItemsSource = breakpoints;
+
+            if (_debugPaneWindow is not null)
+            {
+                _debugPaneWindow.DebugBreakpointsGrid.ItemsSource = breakpoints;
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Debug Breakpoints synchronized to floating window.",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["breakpointCount"] = breakpoints?.Count ?? 0
+                    });
+            }
         }
 
         private void ScheduleDebugPanelRefresh(string reason)
@@ -6445,8 +6831,8 @@ namespace PowerShellStudio.Shell
                         return;
                     }
 
-                    DebugVariablesGrid.ItemsSource = filteredVariables;
-                    DebugCallStackGrid.ItemsSource = callStack;
+                    ApplyDebugVariablesItemsSource(filteredVariables, reason, refreshVersion);
+                    ApplyDebugCallStackItemsSource(callStack, reason, refreshVersion);
                     UpdateLiveDebugVariableCache(filteredVariables, reason, refreshVersion);
                     RefreshBreakpointsList();
                     TraceDebugShell("RefreshDebugPanelsAsync", $"Updated UI grids; reason={reason}; refreshVersion={refreshVersion}; variableCount={filteredVariables.Count}; callStackCount={callStack.Count}; {DescribeDebugUiState()}");
@@ -6730,7 +7116,7 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
-            var rows = new System.Collections.ObjectModel.ObservableCollection<BreakpointRow>();
+            var rows = new ObservableCollection<BreakpointRow>();
             foreach (var tab in ViewModel.OpenTabs)
             {
                 var fileName = string.IsNullOrWhiteSpace(tab.FilePath)
@@ -6743,14 +7129,14 @@ namespace PowerShellStudio.Shell
                 }
             }
 
-            DebugBreakpointsGrid.ItemsSource = rows;
+            ApplyDebugBreakpointsItemsSource(rows, "RefreshBreakpointsList");
         }
 
         private void ClearDebugPanels()
         {
             ClearLiveDebugVariableCache("ClearDebugPanels");
-            DebugVariablesGrid.ItemsSource  = null;
-            DebugCallStackGrid.ItemsSource  = null;
+            ApplyDebugVariablesItemsSource(null, "ClearDebugPanels", null);
+            ApplyDebugCallStackItemsSource(null, "ClearDebugPanels", null);
         }
 
         /// <summary>
@@ -6830,7 +7216,12 @@ namespace PowerShellStudio.Shell
 
         private void DebugBreakpointRemove_Click(object sender, RoutedEventArgs e)
         {
-            if (DebugBreakpointsGrid.SelectedItem is not BreakpointRow row)
+            RemoveSelectedBreakpoint(DebugBreakpointsGrid.SelectedItem);
+        }
+
+        private void RemoveSelectedBreakpoint(object? selectedItem)
+        {
+            if (selectedItem is not BreakpointRow row)
             {
                 return;
             }

@@ -85,6 +85,13 @@
                           IsCheckable="True"
                           IsChecked="False"
                           Click="ShowDebugPanel_Click" />
+                <MenuItem x:Name="PopOutDebugPaneMenuItem"
+                          Header="Debug Pane Pop _Out"
+                          Click="PopOutDebugPaneMenuItem_Click" />
+                <MenuItem x:Name="DockDebugPaneMenuItem"
+                          Header="Debug Pane _Dock Back"
+                          Click="DockDebugPaneMenuItem_Click"
+                          Visibility="Collapsed" />
                 <Separator />
                 <MenuItem Header="Zoom _In"  InputGestureText="Ctrl+=" Command="{Binding ZoomInCommand}" help:ContextHelp.Key="View.Zoom" />
                 <MenuItem Header="Zoom _Out" InputGestureText="Ctrl+-" Command="{Binding ZoomOutCommand}" help:ContextHelp.Key="View.Zoom" />
@@ -1280,6 +1287,12 @@
                         <TextBlock Text="Debug"
                                    Style="{StaticResource SectionHeaderTextStyle}"
                                    help:ContextHelp.Key="Debug.Area" />
+                        <Button x:Name="PopOutDebugPaneButton"
+                                DockPanel.Dock="Right"
+                                Content="Pop Out"
+                                Padding="10,4"
+                                Margin="8,0,0,0"
+                                Click="PopOutDebugPaneButton_Click" />
                         <Button Style="{StaticResource InlineAreaHelpButtonStyle}"
                                 DockPanel.Dock="Right"
                                 Content="?"
@@ -1288,61 +1301,17 @@
                                 help:ContextHelp.Key="Debug.Area" />
                     </DockPanel>
 
-                    <TabControl Grid.Row="1" help:ContextHelp.Key="Debug.Area">
+                    <Grid Grid.Row="1">
+                        <TabControl x:Name="DebugPaneTabControl"
+                                    help:ContextHelp.Key="Debug.Area"
+                                    SelectionChanged="DebugPaneTabControl_SelectionChanged">
 
-                        <!-- Variables tab -->
-                        <TabItem Header="Variables" help:ContextHelp.Key="Debug.Variables">
-                            <DataGrid x:Name="DebugVariablesGrid"
-                                      help:ContextHelp.Key="Debug.Variables"
-                                      AutoGenerateColumns="False"
-                                      IsReadOnly="True"
-                                      CanUserAddRows="False"
-                                      CanUserDeleteRows="False"
-                                      SelectionMode="Single"
-                                      GridLinesVisibility="Horizontal"
-                                      FontFamily="Consolas"
-                                      FontSize="12">
-                                <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Name"  Binding="{Binding Name}"  Width="80" />
-                                    <DataGridTextColumn Header="Type"  Binding="{Binding Type}"  Width="70" />
-                                    <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*" />
-                                </DataGrid.Columns>
-                            </DataGrid>
-                        </TabItem>
-
-                        <!-- Call Stack tab -->
-                        <TabItem Header="Call Stack" help:ContextHelp.Key="Debug.CallStack">
-                            <DataGrid x:Name="DebugCallStackGrid"
-                                      help:ContextHelp.Key="Debug.CallStack"
-                                      AutoGenerateColumns="False"
-                                      IsReadOnly="True"
-                                      CanUserAddRows="False"
-                                      CanUserDeleteRows="False"
-                                      SelectionMode="Single"
-                                      GridLinesVisibility="Horizontal"
-                                      FontFamily="Consolas"
-                                      FontSize="12">
-                                <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Function" Binding="{Binding FunctionName}" Width="100" />
-                                    <DataGridTextColumn Header="Script"   Binding="{Binding ScriptName}"   Width="*" />
-                                    <DataGridTextColumn Header="Line"     Binding="{Binding LineNumber}"   Width="45" />
-                                </DataGrid.Columns>
-                            </DataGrid>
-                        </TabItem>
-
-                        <!-- Breakpoints tab -->
-                        <TabItem Header="Breakpoints" help:ContextHelp.Key="Debug.Breakpoints">
-                            <Grid>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="*" />
-                                    <RowDefinition Height="Auto" />
-                                </Grid.RowDefinitions>
-
-                                <DataGrid x:Name="DebugBreakpointsGrid"
-                                          help:ContextHelp.Key="Debug.Breakpoints"
-                                          Grid.Row="0"
+                            <!-- Variables tab -->
+                            <TabItem Header="Variables" help:ContextHelp.Key="Debug.Variables">
+                                <DataGrid x:Name="DebugVariablesGrid"
+                                          help:ContextHelp.Key="Debug.Variables"
                                           AutoGenerateColumns="False"
-                                          IsReadOnly="False"
+                                          IsReadOnly="True"
                                           CanUserAddRows="False"
                                           CanUserDeleteRows="False"
                                           SelectionMode="Single"
@@ -1350,23 +1319,93 @@
                                           FontFamily="Consolas"
                                           FontSize="12">
                                     <DataGrid.Columns>
-                                        <DataGridCheckBoxColumn Header="On"   Binding="{Binding IsEnabled, UpdateSourceTrigger=PropertyChanged}" Width="30" />
-                                        <DataGridTextColumn    Header="File"  Binding="{Binding FileName}"  Width="*" IsReadOnly="True" />
-                                        <DataGridTextColumn    Header="Line"  Binding="{Binding LineNumber}" Width="45" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Name"  Binding="{Binding Name}"  Width="80" />
+                                        <DataGridTextColumn Header="Type"  Binding="{Binding Type}"  Width="70" />
+                                        <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*" />
                                     </DataGrid.Columns>
                                 </DataGrid>
+                            </TabItem>
 
-                                <Button Grid.Row="1"
-                                        help:ContextHelp.Key="Debug.RemoveBreakpoint"
-                                        Content="Remove Selected"
-                                        Margin="0,6,0,0"
+                            <!-- Call Stack tab -->
+                            <TabItem Header="Call Stack" help:ContextHelp.Key="Debug.CallStack">
+                                <DataGrid x:Name="DebugCallStackGrid"
+                                          help:ContextHelp.Key="Debug.CallStack"
+                                          AutoGenerateColumns="False"
+                                          IsReadOnly="True"
+                                          CanUserAddRows="False"
+                                          CanUserDeleteRows="False"
+                                          SelectionMode="Single"
+                                          GridLinesVisibility="Horizontal"
+                                          FontFamily="Consolas"
+                                          FontSize="12">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Function" Binding="{Binding FunctionName}" Width="100" />
+                                        <DataGridTextColumn Header="Script"   Binding="{Binding ScriptName}"   Width="*" />
+                                        <DataGridTextColumn Header="Line"     Binding="{Binding LineNumber}"   Width="45" />
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </TabItem>
+
+                            <!-- Breakpoints tab -->
+                            <TabItem Header="Breakpoints" help:ContextHelp.Key="Debug.Breakpoints">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <DataGrid x:Name="DebugBreakpointsGrid"
+                                              help:ContextHelp.Key="Debug.Breakpoints"
+                                              Grid.Row="0"
+                                              AutoGenerateColumns="False"
+                                              IsReadOnly="False"
+                                              CanUserAddRows="False"
+                                              CanUserDeleteRows="False"
+                                              SelectionMode="Single"
+                                              GridLinesVisibility="Horizontal"
+                                              FontFamily="Consolas"
+                                              FontSize="12">
+                                        <DataGrid.Columns>
+                                            <DataGridCheckBoxColumn Header="On"   Binding="{Binding IsEnabled, UpdateSourceTrigger=PropertyChanged}" Width="30" />
+                                            <DataGridTextColumn    Header="File"  Binding="{Binding FileName}"  Width="*" IsReadOnly="True" />
+                                            <DataGridTextColumn    Header="Line"  Binding="{Binding LineNumber}" Width="45" IsReadOnly="True" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+
+                                    <Button Grid.Row="1"
+                                            help:ContextHelp.Key="Debug.RemoveBreakpoint"
+                                            Content="Remove Selected"
+                                            Margin="0,6,0,0"
+                                            Padding="10,4"
+                                            HorizontalAlignment="Right"
+                                            Click="DebugBreakpointRemove_Click" />
+                                </Grid>
+                            </TabItem>
+
+                        </TabControl>
+
+                        <Border x:Name="DebugPanePoppedOutPlaceholder"
+                                Visibility="Collapsed"
+                                BorderBrush="{DynamicResource Theme.Border.Subtle}"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Background="{DynamicResource Theme.Panel.Subtle}"
+                                Padding="14">
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Debug pane is popped out."
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,0,6" />
+                                <TextBlock Text="Variables, Call Stack, and Breakpoints are showing in a separate window."
+                                           TextWrapping="Wrap"
+                                           Margin="0,0,0,10" />
+                                <Button x:Name="DockBackDebugPaneButton"
+                                        Content="Dock Back"
                                         Padding="10,4"
-                                        HorizontalAlignment="Right"
-                                        Click="DebugBreakpointRemove_Click" />
-                            </Grid>
-                        </TabItem>
-
-                    </TabControl>
+                                        HorizontalAlignment="Left"
+                                        Click="DockDebugPaneButton_Click" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
                 </Grid>
             </Border>
         </Grid>

@@ -24,6 +24,14 @@ namespace PowerShellStudio.Domain.Models
 
         public double? OpenTabsSectionHeight { get; set; }
 
+        public double? DebugPaneWindowWidth { get; set; }
+
+        public double? DebugPaneWindowHeight { get; set; }
+
+        public double? DebugPaneWindowLeft { get; set; }
+
+        public double? DebugPaneWindowTop { get; set; }
+
         public string? LastWorkspaceFolderPath { get; set; }
 
         public string? SelectedRuntimeExecutablePath { get; set; }
