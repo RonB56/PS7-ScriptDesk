@@ -64,9 +64,9 @@ namespace PowerShellStudio.Shell.Editor
         private const string PerformanceLogSwitch = "--performance-log";
         private const string TracePrefix = "PSSTUDIO_METADATA_TRACE:";
 
-        public static bool IsMetadataBuilderInvocation(string[] args)
+        public static bool IsMetadataBuilderInvocation(string[]? args)
         {
-            return args.Any(argument => string.Equals(argument, BuilderSwitch, StringComparison.OrdinalIgnoreCase));
+            return args?.Any(argument => string.Equals(argument, BuilderSwitch, StringComparison.OrdinalIgnoreCase)) == true;
         }
 
         public static int RunFromArguments(string[] args)

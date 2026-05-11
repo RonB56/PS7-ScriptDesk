@@ -128,8 +128,9 @@ namespace PowerShellStudio.Shell.Debug
             lock (_syncRoot)
             {
                 _process = process;
-                _stdin = process.StandardInput;
-                _stdin.NewLine = "\n";
+                var standardInput = process.StandardInput;
+                standardInput.NewLine = "\n";
+                _stdin = standardInput;
                 _lifetimeCancellationTokenSource = lifetimeCancellationTokenSource;
                 _readyCompletionSource = readyCompletionSource;
                 _sessionEndedRaised = false;

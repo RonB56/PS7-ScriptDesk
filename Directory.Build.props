@@ -2,5 +2,7 @@
   <PropertyGroup>
     <NuGetAudit>false</NuGetAudit>
     <RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
+    <!-- Ensures package restores generate net10.0/win-x64 assets for referenced projects. -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
   </PropertyGroup>
 </Project>

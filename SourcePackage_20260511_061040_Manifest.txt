@@ -1,17 +1,17 @@
 Repository Source Package Manifest
-Created: 2026-05-10 07:53:06
+Created: 2026-05-11 06:10:44
 
 Repository root:
   C:\Users\rbarn\source\repos\PowerShellStudio
 
 Output ZIP:
-  C:\Users\rbarn\source\repos\PowerShellStudio\SourcePackage_20260510_075303.zip
+  C:\Users\rbarn\source\repos\PowerShellStudio\SourcePackage_20260511_061040.zip
 
 ZIP size:
-  4.23 MB
+  4.25 MB
 
 SHA256:
-  0E2DB5F32FD1D1DD6AA93319D19060B011C1C5F29918CD2CD2A9532B51050C09
+  D770BA41BBD591BCF730F1CD1B65EBE2C7E76EF9E209FBBF29D3484FFF189264
 
 Include .git folder:
   False
@@ -20,10 +20,10 @@ Include hidden files:
   True
 
 Included file count:
-  225
+  227
 
 Excluded file count:
-  3273
+  4007
 
 Excluded directory names:
   bin
@@ -48,12 +48,12 @@ Included files:
   .gitignore
   AGENTS.md
   Create_ChatGPT_Package.ps1
+  Directory.Build.props
   How to create app packages.txt
   NuGet.config
   PackageRestore_Rebuild_Log.txt
   Power Shell Studio Sdk Upgrade Checklist.docx
   PowerShellStudio_User_Guide.docx
-  PowerShellStudio.slnx
   PSS_MainUI.png
   TestScript.ps1
   docs\BUILD_AND_PACKAGING.md
@@ -194,6 +194,8 @@ Included files:
   PowerShellStudio.Shell\Composition\AppBootstrapper.cs
   PowerShellStudio.Shell\Controls\TerminalControl.xaml
   PowerShellStudio.Shell\Controls\TerminalControl.xaml.cs
+  PowerShellStudio.Shell\Debug\DebugPaneWindow.xaml
+  PowerShellStudio.Shell\Debug\DebugPaneWindow.xaml.cs
   PowerShellStudio.Shell\Debugger\DebugBreakpointInfo.cs
   PowerShellStudio.Shell\Debugger\DebugCallStackFrame.cs
   PowerShellStudio.Shell\Debugger\DebuggerTraceLogger.cs
@@ -299,6 +301,7 @@ Excluded files:
   DIR  | .git\logs\refs\heads\main
   DIR  | .git\logs\refs\remotes\origin\HEAD
   DIR  | .git\logs\refs\remotes\origin\main
+  DIR  | .git\objects\00\71373a143c15ea8bad33b02d7caf06e23c9056
   DIR  | .git\objects\00\af9b093f7ab5ec71290ffd99a86efe65461cd4
   DIR  | .git\objects\01\d221280a224c8814ae35dfe0f9eff4a8747701
   DIR  | .git\objects\02\3e7f1feda78d5100569825acedfd213a0d84e9
@@ -313,6 +316,7 @@ Excluded files:
   DIR  | .git\objects\04\fc1fc7f861e4d47248a04631301edcd7ae6e87
   DIR  | .git\objects\05\09edefea9bea564b018ad7ec6d604dbc29cc0b
   DIR  | .git\objects\05\9747acd73bc8af5ab8d379f702f4ea52a58e6c
+  DIR  | .git\objects\05\cc59fa819ba1e18be0c83a1125021b1c0aa87a
   DIR  | .git\objects\05\ec7eeb7c3258fb87bd0e5f0cf05a4069ecd016
   DIR  | .git\objects\06\2e1264a0643e9999ce3f2d15ae32af101c8449
   DIR  | .git\objects\06\78b4ab59898c949eb683b369c0cc470db1ce40
@@ -328,6 +332,7 @@ Excluded files:
   DIR  | .git\objects\0d\b7cf99e63b00997afbd63c03d0b4eeeff9dc58
   DIR  | .git\objects\0e\79713f1940774bf1e561111c81c4edd9efc94f
   DIR  | .git\objects\0f\01b0c22fdfe2b3816c9021ba27cd3112f00189
+  DIR  | .git\objects\0f\823eb37cb729587bf6bc3c529d1cb97b3dd70e
   DIR  | .git\objects\10\e975b0f61fb072508fc654db2e7837893bdbcf
   DIR  | .git\objects\11\6590fd0205e5a2bc18249a70a0f3d73798bb63
   DIR  | .git\objects\11\8ea952802cc607149d97431f714fdbe4018d4d
@@ -347,7 +352,9 @@ Excluded files:
   DIR  | .git\objects\1b\77a3242bd50b2127e3dcd64bc241523cbe83c2
   DIR  | .git\objects\1c\c5b73d016071fed3ef88496e5fdb2663090423
   DIR  | .git\objects\1d\06728bcc840e329ca373faf8b29f56dfcb6164
+  DIR  | .git\objects\20\3cc82c4f86bc235a1eb34a803608ebad69e6e0
   DIR  | .git\objects\20\65d975128301932ef48896da67a15e3ac25d18
+  DIR  | .git\objects\21\68ee00879014df2a9586d135cf731d16883e5e
   DIR  | .git\objects\21\6d7df5376f91e73f6f6bffaed1ab1e2e00227c
   DIR  | .git\objects\21\f44533d457e4e75cfa650394717906637bcd85
   DIR  | .git\objects\23\069415012e0010f3da5349e9f2f650190953a5
@@ -368,6 +375,8 @@ Excluded files:
   DIR  | .git\objects\2c\6cf8c9ce1353d8d8edaaff16aa9c5556b49488
   DIR  | .git\objects\2c\af6b5b15338fa9133b5d9dab7f0426ad0f1e67
   DIR  | .git\objects\2d\08030ea84c079cec46bcb0897dd3e1055827b4
+  DIR  | .git\objects\2d\1007eec292de3bd5cf856b698312fd7d4bc0d8
+  DIR  | .git\objects\2d\b87e1a458e87d84118c822643c1629fd81db0c
   DIR  | .git\objects\2e\2230884f00a9d8cfda0a4b1afd52d48862ec95
   DIR  | .git\objects\2e\629b97c264d0fcb4010ff2753e23b17a48b173
   DIR  | .git\objects\2e\f76195848bc606346ecef62ab8f625e90fea33
@@ -391,6 +400,8 @@ Excluded files:
   DIR  | .git\objects\3d\0cf1da75a3cb9268831d9212b9d07efa758aaa
   DIR  | .git\objects\3d\13aab7d94e037483bdd58dfbbf1abbd1112280
   DIR  | .git\objects\3e\44dfe591390603af61bb3c3afdc747e1ce029e
+  DIR  | .git\objects\3e\87accf4d0b194e02bf983d7dbbd2d439497ef7
+  DIR  | .git\objects\3f\301092610c8747b4d8a7404a6b49b688359d5c
   DIR  | .git\objects\3f\557c16505ba7a59182ed15050ea158f99d6f5e
   DIR  | .git\objects\40\0e8be7730e95c2d16bfedc1a05d1fa8ffffdf8
   DIR  | .git\objects\40\a3761a676a303b8ca761adc6de75f3f3f60d76
@@ -406,14 +417,17 @@ Excluded files:
   DIR  | .git\objects\44\b43666713d768df850db183c49e1a35485bd2c
   DIR  | .git\objects\45\69c22cce6c9933f3fc68f8e92a027371a5a6f2
   DIR  | .git\objects\45\ad4ea504fe5a837324022e0275b1d0ace284c2
+  DIR  | .git\objects\45\b231be010548ad64b759e80a9cc487bb3357c7
   DIR  | .git\objects\46\160c583b49f8d21d096d893b961b48882935d5
   DIR  | .git\objects\46\22502cf4c7fea386a7fc9526a46ec2ed614a69
   DIR  | .git\objects\46\27695eadd1d4655d89f5c71bb774103a26f803
+  DIR  | .git\objects\46\3916ea9b4ef6db6bf607593cc70c3655578325
   DIR  | .git\objects\47\eb8a800a47fb5a9a3ec75e44e6d16ef60c43b3
   DIR  | .git\objects\48\884a4edad299d50f35aed2e0ad14e4f0731595
   DIR  | .git\objects\48\fbb582cf145d34364710169acd20e9f0b17389
   DIR  | .git\objects\4b\df5cd4ca46158cbe28c7dc42b1eddca09dfbea
   DIR  | .git\objects\4b\f3dc8965533a66fc7f1ba7e35075a721cd0314
+  DIR  | .git\objects\4c\321031c294b5cec9cc1ca9426772102f08180a
   DIR  | .git\objects\4c\4a749382649a7422f7cfed8b9bf82e00edd771
   DIR  | .git\objects\4c\583ac27eaa663d11f42314280a8a2dfe257ee4
   DIR  | .git\objects\4c\8ebf294002748f58ce649294f148011ca01c34
@@ -431,6 +445,7 @@ Excluded files:
   DIR  | .git\objects\51\dd642629cb106359f4132555d963e3c7c2ad4a
   DIR  | .git\objects\52\14cfcc8ecebc6dd6852404360020b0fdc70fd2
   DIR  | .git\objects\52\25d0edca496f47c2a301890e63ee9fe6452310
+  DIR  | .git\objects\52\923adf6c0c6c1d2cd7f455ec6f95d96426f1b6
   DIR  | .git\objects\52\f43e4eb11b970d186cd79504aac9b3d7c3e587
   DIR  | .git\objects\53\01e397ba7e2fb18ef74e8c838b5825d67dc432
   DIR  | .git\objects\53\d519a1802582ed9fb52b0634df1bfffaad5728
@@ -444,6 +459,7 @@ Excluded files:
   DIR  | .git\objects\58\4bc1d515396cc2c5553105bc657cbd8b230fe9
   DIR  | .git\objects\58\8aa2734f988a1724195ef2f2f33de53f5ffa4e
   DIR  | .git\objects\59\57a3c07297a7724cc78d8e41d8e9dbe157e59c
+  DIR  | .git\objects\59\716c2000df7fc70672ab2e15ea8cc818dbd794
   DIR  | .git\objects\59\fd5606571bafc51ea9405093a91e2484a7a2c0
   DIR  | .git\objects\5a\f4faec99a21743fcae309e37a2d120a11a6b62
   DIR  | .git\objects\5b\2918dfd942fbd3c5b511d7ac29ee420824b19a
@@ -451,6 +467,7 @@ Excluded files:
   DIR  | .git\objects\5c\4ef4da6ba7fe13d95e9143dde69296104cd903
   DIR  | .git\objects\5c\921f064acf112525c421338cedf52936c9317a
   DIR  | .git\objects\5d\28d88b0b3601a02c2ebdb01db4ceb13383bdae
+  DIR  | .git\objects\5d\8e56918ec232edda56b7fb084814f912157a8d
   DIR  | .git\objects\5e\348dcc76003a9b79d8c9b6da5c0663d522fdd3
   DIR  | .git\objects\5f\5bb6506cb1c325c051bbbf964f7b5b0903ec4e
   DIR  | .git\objects\60\3fd6614330a184542233470801f4e29686dcf4
@@ -458,6 +475,7 @@ Excluded files:
   DIR  | .git\objects\60\de4dca379b9aefcea20e38c22e982bd95653f0
   DIR  | .git\objects\60\e5abf5e695616bafcccd9283b18ac7808ba8b5
   DIR  | .git\objects\62\2206e93e1511205fedbc15e3adce783dac2088
+  DIR  | .git\objects\62\8e3252182944767bbf3e196943ce074680102e
   DIR  | .git\objects\62\9002491372caa750aed9011195d0df5b70cd36
   DIR  | .git\objects\62\f206481d5e09ba2f480344a4086c2ec59e2059
   DIR  | .git\objects\62\f3d57538cb1f59a67810ed96306a7ea5c87152
@@ -471,6 +489,7 @@ Excluded files:
   DIR  | .git\objects\68\cabee4a73da4cc45f9b3be52d3c9ea6d5f6533
   DIR  | .git\objects\69\d9658b5507964262d7be042122b8360e8fc7f7
   DIR  | .git\objects\69\e9afcfd28c95e6ad648262ed55e5d972e28b79
+  DIR  | .git\objects\6a\4768e3949784b55e4516b6cc76c34fb11e732d
   DIR  | .git\objects\6b\ef2a53b2dd81edd6c397491e151a3c3c4908ad
   DIR  | .git\objects\6c\906feedd7d67b16fe51fde7b9ed6392971e281
   DIR  | .git\objects\6d\576cef799299cb93ca9bc665739f07c91b4058
@@ -484,6 +503,7 @@ Excluded files:
   DIR  | .git\objects\73\84f1046683ebcb6db5003192dd0914d18d8aba
   DIR  | .git\objects\73\85b56c0e4d3c6b0efe3324aa1194157d837826
   DIR  | .git\objects\73\f0ad671539d6d1bdc5d9c13050110ea93c8b52
+  DIR  | .git\objects\74\00639f2feabb25946f806990cbfd69e30bf3dd
   DIR  | .git\objects\74\2c4521d64e99c854b12acabffbab0d20b61226
   DIR  | .git\objects\74\acc26708829de31d158bf08ce690d811590b8e
   DIR  | .git\objects\74\c1c8ed1e048b7e0ef68eadd7e223f4dea0a690
@@ -491,6 +511,7 @@ Excluded files:
   DIR  | .git\objects\75\cbafd2777a35e8f13473ec577f994b8ce232c1
   DIR  | .git\objects\75\d6b80526c33867e018c9bc6ef78652addb1f5a
   DIR  | .git\objects\75\e44c4712e8c445245b5cb2a5549da99e87b0f8
+  DIR  | .git\objects\75\e5cb3b96230490ad5b6c3943e5d39f1e8b7210
   DIR  | .git\objects\77\206cd6cc3c6dda48062326fce2a381422ae0e8
   DIR  | .git\objects\77\27aaf9a8a2d28476c4301633b7730aaa9da173
   DIR  | .git\objects\77\a79cb776f38585572ada0adaa5fa04da64002c
@@ -504,8 +525,10 @@ Excluded files:
   DIR  | .git\objects\7a\7d158399dd80a91ae608bf4f10228ec09a9a87
   DIR  | .git\objects\7a\b4e9dd4b639f2cadc09da3214dbafd429927c5
   DIR  | .git\objects\7b\43f95fe24baa0d2294cf69bd53cbd40d76a0e4
+  DIR  | .git\objects\7d\76616769c288f7c8c58b238e6c97897469239f
   DIR  | .git\objects\7e\0eef461eb4fa75f2b1aedbd7a5f0028fe23463
   DIR  | .git\objects\7e\37d637a91b6cd692ba3c4e0af7907e4b0b64ec
+  DIR  | .git\objects\7f\f875067f922b8f80499ea084dec6cf55bf9bbf
   DIR  | .git\objects\80\1506e00e499b73b4a5652429d34951fa894d25
   DIR  | .git\objects\80\96c38ad22b9d94b6de807f27a0846c73ad6f7a
   DIR  | .git\objects\81\e61fb5d74545e58162b7656e904d183a09252d
@@ -515,17 +538,21 @@ Excluded files:
   DIR  | .git\objects\84\621b62db41260cf12a6902da69b67a29b18f55
   DIR  | .git\objects\84\80fefebf735920414568bac1855e6e328dc874
   DIR  | .git\objects\84\8af5de52144cdff4e23b0e44f20c5be1d2c96e
+  DIR  | .git\objects\84\ed78d3c01d2de75b18ad8ca0158c51bb2cdd28
   DIR  | .git\objects\86\a4fe71e5231995907b2b062660e5f1bdf1b50f
   DIR  | .git\objects\86\d9a52ee6acf888a610e250cb24e99cdf267276
   DIR  | .git\objects\86\e5bcf61cd85ee99551476966240d0d45ffc683
   DIR  | .git\objects\87\4c524318e124759323416835474c07e9cac973
+  DIR  | .git\objects\87\8f5d94fafb610c3e2bc71bdd50c06b835b443f
   DIR  | .git\objects\88\1e36dd71981efd751acef5cbeb58404440de2e
   DIR  | .git\objects\88\de87ba3347bf9fed7b8bd53e3d9404ddd52dc0
   DIR  | .git\objects\89\105c938761230471f4d80873a854cb55fc257c
+  DIR  | .git\objects\89\67fddf8489e865e52f1329882021f31f73f505
   DIR  | .git\objects\89\8422cf1390e8c4c397ca48d490951b72157068
   DIR  | .git\objects\89\c556b2857f84cacd720754769acab5bb3d7050
   DIR  | .git\objects\89\cc15fcfdce5b4c017c65e34288da3bd49aeb54
   DIR  | .git\objects\8a\22bb1304fd58cc1ab03a9832ae888fb8e520d0
+  DIR  | .git\objects\8a\89e030ee70cb2a7a75287d60eb0ad23e857fe9
   DIR  | .git\objects\8b\6f9d5f0fb5c8382e92fe16457701dd4d22ace8
   DIR  | .git\objects\8b\e514daf1b758f870443715118f762a0e0ae54b
   DIR  | .git\objects\8c\1ede377b21dde6a9be1b32322e5925e1fa8965
@@ -533,13 +560,16 @@ Excluded files:
   DIR  | .git\objects\8d\2170f8b2091410fa941758d71388ea83dc7ddb
   DIR  | .git\objects\8e\9c6fb8e16616ec16e0c8e16935ac1e3807f434
   DIR  | .git\objects\8e\e0c87af21c6471f8fc3ffe0676e7dd0a29b456
+  DIR  | .git\objects\90\9096362ae8d960355ee764516931c334fb690f
   DIR  | .git\objects\90\9df44ec1b30494ec891754308195a9b8a509e4
+  DIR  | .git\objects\91\6b61b535f860ed4f28c6a7ae9167bc0a7672ac
   DIR  | .git\objects\91\7ec79063c2fa981fa38206f7a33f2abb651b9b
   DIR  | .git\objects\91\f3787ef3528587544d74b232370fe3585334ce
   DIR  | .git\objects\92\aa3d4d2da5084c1d2573e6cd5c901e1bc236e9
   DIR  | .git\objects\94\39d32520f052ebca5398fa74e6baeb56b08dac
   DIR  | .git\objects\94\c7ff0f8fb124c8f319b701a78e52ebdce9cf23
   DIR  | .git\objects\95\380fb70137969a1016acc9988c0783fcc0860f
+  DIR  | .git\objects\95\5a8fb6afebedbdc1aa3ba867ef43dd9bb0df3f
   DIR  | .git\objects\95\a2f1d455e558d111f4cc9827e9c503ae049435
   DIR  | .git\objects\95\a7f6bcf8e33e666fa74f4c8b62c505d0add682
   DIR  | .git\objects\95\e4ec3e870660a7c7c28e06b14c6c5aae41ba13
@@ -550,6 +580,9 @@ Excluded files:
   DIR  | .git\objects\98\872811be26189247996af552cb9bd80ea69ea1
   DIR  | .git\objects\98\b6220427512f0c3c163010154749df999a3dc1
   DIR  | .git\objects\99\4c68a96debb88ccb04ced139a5cd86c74bd1eb
+  DIR  | .git\objects\9a\36ee13ac4dcbe06a35933ca5a42add9fa71516
+  DIR  | .git\objects\9b\39484e4318574bb905b39841d8073d86f51bd7
+  DIR  | .git\objects\9c\6b1cbe1bb40b3c5c25f922fdca02914890aa78
   DIR  | .git\objects\9d\4159b236e8418d82a45a4b18688a63b95eccf3
   DIR  | .git\objects\9d\835ca8ef2b937a7dcdcf3a9936ea3aa6e0a2e3
   DIR  | .git\objects\9d\c37fbda2f00cd92a2e56d43d878a7f36626ca4
@@ -563,6 +596,7 @@ Excluded files:
   DIR  | .git\objects\9f\d6d1929357f76c10c857c3bdbb6f2ce62f8e76
   DIR  | .git\objects\a0\92c789517a011afa5ae765a1cb2b1d445c0e7e
   DIR  | .git\objects\a0\cdf566ce353aac642aefa6e251bf8182bf2003
+  DIR  | .git\objects\a1\c356b76e781754ef97b91f832ed16321f6e2d4
   DIR  | .git\objects\a1\ea413185ca23ccdbf0aee8cb30e8e07344d0b5
   DIR  | .git\objects\a1\f48063b053caef3da96526a11dec187581e011
   DIR  | .git\objects\a2\8a97bf0785694c6cc05660c3126c67e79f6ff8
@@ -574,6 +608,7 @@ Excluded files:
   DIR  | .git\objects\a8\434cd07adbcad3ea70fe30932fc0c2a64bcacc
   DIR  | .git\objects\a8\d64de1059b3e4cab36dcc17c3642a58b6886cc
   DIR  | .git\objects\a8\e2c117930507e7cc19b30aa3dd9d442f7ae9bb
+  DIR  | .git\objects\aa\1f5d5dfa0a1a6155faf04cc74c583a315f1069
   DIR  | .git\objects\aa\73408b39bdb16de1f6a889a45000fa3f5f9563
   DIR  | .git\objects\aa\85cc8c64fb881358569e296e93f923e303b665
   DIR  | .git\objects\ab\479466bfd85762a69b2172611459b38c2493be
@@ -589,9 +624,11 @@ Excluded files:
   DIR  | .git\objects\af\6aef53de1387cb81f6e769436d103902ac24b5
   DIR  | .git\objects\af\8b7c81b8829e77f18ed83969c7d8fd3a548c41
   DIR  | .git\objects\af\e487b800e13f23e974cb43298aa6a4ab421f8a
+  DIR  | .git\objects\b0\0990214247b3e28e435611a85db28952bb5c34
   DIR  | .git\objects\b0\8aad5fef2463d26b70b3520808e48f166c7b93
   DIR  | .git\objects\b0\be77740367b465d1c6c79259aca3dd35877b4d
   DIR  | .git\objects\b0\ec827578bab22ee9959849b4a2e11ecfc228c0
+  DIR  | .git\objects\b1\998f5eb2698d67733898cebfae00f551b4f75f
   DIR  | .git\objects\b2\40f8cd3628141913bcf6d61076c7365aba4415
   DIR  | .git\objects\b2\757110d644678878bcf67ae2d9cc5cb8306858
   DIR  | .git\objects\b3\8cc17b50c8a491bf7697135f0ecbe750084f4f
@@ -608,6 +645,7 @@ Excluded files:
   DIR  | .git\objects\b8\06a58a1c5035f1241d8cf68c16387478054699
   DIR  | .git\objects\b8\830452676e7fa00a33f07e33049bad0b2d22d4
   DIR  | .git\objects\b8\b27012e61a4d6196bf98e5f2f019157edbc7ff
+  DIR  | .git\objects\b9\8a0d0fb1629ba4837ae1f7dd7c2f4c1d51a476
   DIR  | .git\objects\ba\2101ba530c1f521b0cf4e3250e317496210049
   DIR  | .git\objects\ba\bdb45164989aacac1a85cc7d1a20e5d57c559f
   DIR  | .git\objects\ba\d2a741cf7e4a3cf03d9a51cf5a267aeec181fc
@@ -615,6 +653,7 @@ Excluded files:
   DIR  | .git\objects\bc\f53b0df7ff035657623478023c4d959ce2c79b
   DIR  | .git\objects\bd\e533f730a5665840de207097bfdad75f036905
   DIR  | .git\objects\be\782cad590eac918e2309a9004f88ae75e55aa4
+  DIR  | .git\objects\bf\7f0c5d73e9c7cbe068367a39b84893ccb07a7a
   DIR  | .git\objects\bf\9300d3f3791c876c3b01bdbc2c7cfef29efe78
   DIR  | .git\objects\bf\f93f7cbfe5fb69377b41a4191a85bf8366227f
   DIR  | .git\objects\c0\d361a7fa707f9853a89fb9449b32801599a002
@@ -632,21 +671,26 @@ Excluded files:
   DIR  | .git\objects\c8\9863f551093c1004ba35f1bc4d09ee4f8a5915
   DIR  | .git\objects\c9\2134ef6165f42cda7e0a302d0cb93e84bac64e
   DIR  | .git\objects\c9\8d452213dce34d27612c7e16274f576067a676
+  DIR  | .git\objects\c9\ed8f3d5630c23f02ee945983c4833617346504
   DIR  | .git\objects\ca\830d5f2e663e968e9efc0f5ae025a3135036ed
+  DIR  | .git\objects\cb\3e50ac424fd35a4247ddb5c168265e7cd5538c
   DIR  | .git\objects\cb\54f00cfab69ff4af70eb127487218a83b7e55a
   DIR  | .git\objects\cb\d91cb448bc9b87a0a74a990c7c30ec7dfba7d3
   DIR  | .git\objects\cc\88533a35d9bc93dbbeadfe6cde1545986bbee1
   DIR  | .git\objects\cc\c71b8c83e3b0784056964a2d6b2ceba0edb5cd
+  DIR  | .git\objects\cd\1fdf6793c00cd929309b1d7bcd198f1404c57f
   DIR  | .git\objects\cd\b008a66542a72df58d7430ab66155d24d33dbe
   DIR  | .git\objects\ce\342a2ec8a61291ba76c54604aea7e9d20af11b
   DIR  | .git\objects\cf\33b725ee7849d603d0e71261fc115f18c3e84d
   DIR  | .git\objects\cf\61e901385594d53a8ecb40b621cbe4f1953d58
   DIR  | .git\objects\d0\436b94be4b8615eb7f29e29afb06b1afa03f23
   DIR  | .git\objects\d0\69ea1a2f589a97955046333411e35f448c50fd
+  DIR  | .git\objects\d1\7965594ecac1506bcf393da94b461684f928b2
   DIR  | .git\objects\d1\8872b4aff2f9e0d064d2d6563ca357815ac2dd
   DIR  | .git\objects\d1\94f59e370b006602ef4462a6a6f11cd4bd9858
   DIR  | .git\objects\d2\04020d5a1c7260888d78cc9be7f221a5f44f92
   DIR  | .git\objects\d3\f2812ae8a76af2ff2ea4a98368ca4afc8c288f
+  DIR  | .git\objects\d5\76aeb2dd3157bbea5ce82bb160d7d609d9ff74
   DIR  | .git\objects\d5\b950f876839ad75aa088219ec19f2470dbb3e1
   DIR  | .git\objects\d6\48c62fe22f77cff0ca50a81ceca5e0601af945
   DIR  | .git\objects\d7\3efeedd3a32611fa32649aea4c1de231372d9c
@@ -659,9 +703,11 @@ Excluded files:
   DIR  | .git\objects\db\1be7dda5e90d372625a31592b32cca1ada195b
   DIR  | .git\objects\db\9ab58e6431b600db2df63badc081255c500363
   DIR  | .git\objects\dc\0af0f929be21fc8f326cfe74795607955c155c
+  DIR  | .git\objects\dc\c596a7097b0e16ada7e033c07dc0614a572d9c
   DIR  | .git\objects\dd\340b11833ad99d8c67c47f5e3f9f2de1fb9a21
   DIR  | .git\objects\dd\5daebde7e79555d757736f64c6bda96a44e809
   DIR  | .git\objects\dd\7cf77061978cf03438069bb7c2d3567f57b8cd
+  DIR  | .git\objects\dd\a8ed4ff2ed83f3429bbb430962a4050f09f368
   DIR  | .git\objects\dd\de77909f0bc71d7b8d7e1aeb3f58cc563d936d
   DIR  | .git\objects\df\6e546e486a8070b949b97230faee3968487a05
   DIR  | .git\objects\df\6e81169677dff85766b1708a12b3fdf5da2f2e
@@ -683,6 +729,7 @@ Excluded files:
   DIR  | .git\objects\e4\b49aaba3ad36de64a9a90adb5ed023877f6f24
   DIR  | .git\objects\e6\9de29bb2d1d6434b8b29ae775ad8c2e48c5391
   DIR  | .git\objects\e6\a3b506d6b34f29e40eb2dc5d321b314152778d
+  DIR  | .git\objects\e6\ae85884aaee30a5ad0b020e73c7ec2ab707dbf
   DIR  | .git\objects\e7\012ad52804983b53b45941770b5ec3f22b21dd
   DIR  | .git\objects\e8\3da935d187fe79c0508cdded70fed8c360ef76
   DIR  | .git\objects\e8\c600909de27ca574b9c9ff3f7526f9ee72129a
@@ -691,7 +738,10 @@ Excluded files:
   DIR  | .git\objects\ed\547615e8a02ef799b9632432f7cfab9c1c4894
   DIR  | .git\objects\ee\8fa54adad8be411b44969c802f3eb820dc7c4b
   DIR  | .git\objects\ee\a64b9748b81d59f99b22ff3bbc1e4ca53f6198
+  DIR  | .git\objects\f0\135b879079aeedf5de15059f4af4b144475b72
   DIR  | .git\objects\f0\17363b547f9fc12042a5010a1f92d1451aa567
+  DIR  | .git\objects\f0\67531fb8b68b0168b77792b81a3ea0801db13a
+  DIR  | .git\objects\f1\c8b3432be0718738058bdce14fff47898e4858
   DIR  | .git\objects\f2\7b1d474a4314bb0ffe3d6d55aab19de52abf5b
   DIR  | .git\objects\f2\eed311d20f40c55ec6b716e3832da4d8a6c3dc
   DIR  | .git\objects\f3\7a1b9c6e7d17f13e3025136df3d8a368e6f18c
@@ -705,6 +755,7 @@ Excluded files:
   DIR  | .git\objects\f6\77a402da40b4c79cf4a09f657f08da27d3c479
   DIR  | .git\objects\f6\c02ce97e0a802b85f6021e822c89f8bf57d5cd
   DIR  | .git\objects\f7\6e15c8a7ec0bfa1c55ad7c66ad2affdff6da95
+  DIR  | .git\objects\f7\f235a018003cba5bcaea784ca79cf4fc901825
   DIR  | .git\objects\f8\94d0e774b1ec780d8e3e7cbd751c931dad1d62
   DIR  | .git\objects\f9\321d2d3853e98fe0b95bb8fae059f4a1be920a
   DIR  | .git\objects\f9\d9241f0896f01790024fba2c42ce048d5b65ac
@@ -714,8 +765,10 @@ Excluded files:
   DIR  | .git\objects\fb\5c066ddacc94888238a1800d3ef87ab60576e7
   DIR  | .git\objects\fb\8c987a7b0369eff15f7aee2cd23f44620eb99b
   DIR  | .git\objects\fb\a80945a090299627fface96a59a38408e5a512
+  DIR  | .git\objects\fb\a8291bde0a08c2240b923038d93ad8a13c0937
   DIR  | .git\objects\fc\2c580d543ac57c13e1daa0db393b07854b1244
   DIR  | .git\objects\fc\88efcb8848b49bbd2db368c14101e3ccc2e346
+  DIR  | .git\objects\fe\2f0d7eaecfc0469c09bc4971cb446a72823ad2
   DIR  | .git\objects\fe\a112d262d2687e178a8fb332467db0f5c2f838
   DIR  | .git\objects\fe\caf09016480a61a1706793bc05284588f4a7d2
   DIR  | .git\objects\ff\1414083f4b2c565b4cf812d74c602abf85374c
@@ -727,12 +780,16 @@ Excluded files:
   DIR  | .vs\PowerShellStudio\CopilotIndices\18.5.39162.45114\CodeChunks.db
   DIR  | .vs\PowerShellStudio\CopilotIndices\18.5.39162.45114\SemanticSymbols.db
   DIR  | .vs\PowerShellStudio\CopilotIndices\18.5.39187.10602\CodeChunks.db
+  DIR  | .vs\PowerShellStudio\CopilotIndices\18.5.39187.10602\CodeChunks.db-shm
+  DIR  | .vs\PowerShellStudio\CopilotIndices\18.5.39187.10602\CodeChunks.db-wal
   DIR  | .vs\PowerShellStudio\CopilotIndices\18.5.39187.10602\SemanticSymbols.db
+  DIR  | .vs\PowerShellStudio\CopilotIndices\18.5.39187.10602\SemanticSymbols.db-shm
+  DIR  | .vs\PowerShellStudio\CopilotIndices\18.5.39187.10602\SemanticSymbols.db-wal
   DIR  | .vs\PowerShellStudio.slnx\DesignTimeBuild\.dtbcache.v2
-  DIR  | .vs\PowerShellStudio.slnx\FileContentIndex\1d7be961-422b-4052-9a03-1a2633cca415.vsidx
-  DIR  | .vs\PowerShellStudio.slnx\FileContentIndex\1fe36354-178d-414f-a948-a55dd65db743.vsidx
+  DIR  | .vs\PowerShellStudio.slnx\FileContentIndex\4f96938e-a741-4b17-ab24-3638657d508b.vsidx
+  DIR  | .vs\PowerShellStudio.slnx\FileContentIndex\654cbced-569a-4439-afc2-680abac6f0da.vsidx
   DIR  | .vs\PowerShellStudio.slnx\FileContentIndex\95c820e0-6917-4931-b7af-94e36deeb63b.vsidx
-  DIR  | .vs\PowerShellStudio.slnx\FileContentIndex\b73961a7-a684-4245-b175-7730f8b5ad95.vsidx
+  DIR  | .vs\PowerShellStudio.slnx\FileContentIndex\b433472e-070b-4395-a85e-1d0009d0f218.vsidx
   DIR  | .vs\PowerShellStudio.slnx\FileContentIndex\e6cccc58-efa3-45fd-a267-bfe5ce237a37.vsidx
   DIR  | .vs\PowerShellStudio.slnx\v18\.futdcache.v2
   DIR  | .vs\PowerShellStudio.slnx\v18\.suo
@@ -1085,6 +1142,33 @@ Excluded files:
   DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.37.0_Test\TelemetryDependencies\Microsoft.VisualStudio.Utilities.Internal.dll
   DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.37.0_Test\TelemetryDependencies\Newtonsoft.Json.dll
   DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.37.0_Test\TelemetryDependencies\System.Runtime.CompilerServices.Unsafe.dll
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.ps1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Install.ps1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\PowerShellStudio.Package_1.0.38.0_x64.appxsym
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\PowerShellStudio.Package_1.0.38.0_x64.cer
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\PowerShellStudio.Package_1.0.38.0_x64.msixbundle
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\cs-CZ\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\de-DE\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\en-US\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\es-ES\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\fr-FR\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\it-IT\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\ja-JP\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\ko-KR\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\pl-PL\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\pt-BR\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\ru-RU\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\tr-TR\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\zh-CN\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\Add-AppDevPackage.resources\zh-TW\Add-AppDevPackage.psd1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\TelemetryDependencies\LogSideloadingTelemetry.ps1
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\TelemetryDependencies\Microsoft.Diagnostics.Tracing.EventSource.dll
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\TelemetryDependencies\Microsoft.VisualStudio.RemoteControl.dll
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\TelemetryDependencies\Microsoft.VisualStudio.Telemetry.dll
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\TelemetryDependencies\Microsoft.VisualStudio.Utilities.Internal.dll
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\TelemetryDependencies\Newtonsoft.Json.dll
+  DIR  | PowerShellStudio.Package\AppPackages\PowerShellStudio.Package_1.0.38.0_Test\TelemetryDependencies\System.Runtime.CompilerServices.Unsafe.dll
   DIR  | PowerShellStudio.Package\bin\x64\Release\AppxManifest.xml
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.36.0_scale-100.msix
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.36.0_scale-125.msix
@@ -1096,13 +1180,46 @@ Excluded files:
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.37.0_scale-150.msix
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.37.0_scale-400.msix
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.37.0_x64.msix
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.38.0_scale-100.msix
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.38.0_scale-125.msix
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.38.0_scale-150.msix
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.38.0_scale-400.msix
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.38.0_x64.msix
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package.build.appxrecipe
   DIR  | PowerShellStudio.Package\bin\x64\Release\resources.pri
   DIR  | PowerShellStudio.Package\bin\x64\Release\ForBundle\AppxManifest.xml
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Accessibility.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\clretwrc.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\clrgc.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\clrgcexp.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\clrjit.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\coreclr.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\createdump.exe
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\D3DCompiler_47_cor3.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\DirectWriteForwarder.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\hostfxr.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\hostpolicy.dll
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ICSharpCode.AvalonEdit.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.CSharp.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.DiaSymReader.Native.amd64.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.VisualBasic.Core.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.VisualBasic.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.VisualBasic.Forms.dll
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.Web.WebView2.Core.dll
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.Web.WebView2.WinForms.dll
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.Web.WebView2.Wpf.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.Win32.Primitives.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.Win32.Registry.AccessControl.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.Win32.Registry.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\Microsoft.Win32.SystemEvents.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\mscordaccore_amd64_amd64_10.0.726.21808.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\mscordaccore.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\mscordbi.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\mscorlib.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\mscorrc.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\msquic.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\netstandard.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PenImc_cor3.dll
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PowerShellStudio.Application.dll
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PowerShellStudio.Application.pdb
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PowerShellStudio.Domain.dll
@@ -1120,13 +1237,452 @@ Excluded files:
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PowerShellStudio.Shell.runtimeconfig.json
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PowerShellStudio.UI.dll
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PowerShellStudio.UI.pdb
-  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\runtimes\win-arm64\native\WebView2Loader.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationCore.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework-SystemCore.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework-SystemData.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework-SystemDrawing.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework-SystemXml.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework-SystemXmlLinq.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework.Aero.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework.Aero2.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework.AeroLite.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework.Classic.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework.Fluent.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework.Luna.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationFramework.Royale.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationNative_cor3.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\PresentationUI.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ReachFramework.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.AppContext.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Buffers.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.CodeDom.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Collections.Concurrent.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Collections.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Collections.Immutable.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Collections.NonGeneric.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Collections.Specialized.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.ComponentModel.Annotations.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.ComponentModel.DataAnnotations.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.ComponentModel.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.ComponentModel.EventBasedAsync.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.ComponentModel.Primitives.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.ComponentModel.TypeConverter.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Configuration.ConfigurationManager.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Configuration.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Console.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Core.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Data.Common.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Data.DataSetExtensions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Data.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Design.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.Contracts.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.Debug.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.DiagnosticSource.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.EventLog.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.EventLog.Messages.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.FileVersionInfo.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.PerformanceCounter.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.Process.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.StackTrace.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.TextWriterTraceListener.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.Tools.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.TraceSource.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Diagnostics.Tracing.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.DirectoryServices.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Drawing.Common.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Drawing.Design.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Drawing.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Drawing.Primitives.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Dynamic.Runtime.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Formats.Asn1.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Formats.Nrbf.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Formats.Tar.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Globalization.Calendars.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Globalization.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Globalization.Extensions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.Compression.Brotli.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.Compression.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.Compression.FileSystem.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.Compression.Native.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.Compression.ZipFile.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.FileSystem.AccessControl.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.FileSystem.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.FileSystem.DriveInfo.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.FileSystem.Primitives.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.FileSystem.Watcher.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.IsolatedStorage.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.MemoryMappedFiles.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.Packaging.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.Pipelines.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.Pipes.AccessControl.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.Pipes.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.IO.UnmanagedMemoryStream.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Linq.AsyncEnumerable.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Linq.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Linq.Expressions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Linq.Parallel.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Linq.Queryable.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Memory.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.Http.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.Http.Json.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.HttpListener.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.Mail.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.NameResolution.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.NetworkInformation.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.Ping.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.Primitives.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.Quic.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.Requests.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.Security.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.ServerSentEvents.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.ServicePoint.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.Sockets.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.WebClient.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.WebHeaderCollection.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.WebProxy.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.WebSockets.Client.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Net.WebSockets.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Numerics.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Numerics.Vectors.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.ObjectModel.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Printing.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Private.CoreLib.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Private.DataContractSerialization.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Private.Uri.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Private.Windows.Core.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Private.Windows.GdiPlus.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Private.Xml.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Private.Xml.Linq.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Reflection.DispatchProxy.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Reflection.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Reflection.Emit.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Reflection.Emit.ILGeneration.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Reflection.Emit.Lightweight.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Reflection.Extensions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Reflection.Metadata.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Reflection.Primitives.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Reflection.TypeExtensions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Resources.Extensions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Resources.Reader.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Resources.ResourceManager.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Resources.Writer.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.CompilerServices.Unsafe.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.CompilerServices.VisualC.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.Extensions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.Handles.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.InteropServices.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.InteropServices.JavaScript.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.InteropServices.RuntimeInformation.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.Intrinsics.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.Loader.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.Numerics.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.Serialization.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.Serialization.Formatters.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.Serialization.Json.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.Serialization.Primitives.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Runtime.Serialization.Xml.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.AccessControl.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Claims.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.Algorithms.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.Cng.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.Csp.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.Encoding.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.OpenSsl.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.Pkcs.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.Primitives.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.ProtectedData.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.X509Certificates.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Cryptography.Xml.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Permissions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Principal.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.Principal.Windows.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Security.SecureString.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.ServiceModel.Web.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.ServiceProcess.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Text.Encoding.CodePages.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Text.Encoding.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Text.Encoding.Extensions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Text.Encodings.Web.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Text.Json.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Text.RegularExpressions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.AccessControl.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.Channels.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.Overlapped.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.Tasks.Dataflow.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.Tasks.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.Tasks.Extensions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.Tasks.Parallel.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.Thread.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.ThreadPool.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Threading.Timer.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Transactions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Transactions.Local.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.ValueTuple.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Web.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Web.HttpUtility.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Windows.Controls.Ribbon.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Windows.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Windows.Extensions.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Windows.Forms.Design.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Windows.Forms.Design.Editors.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Windows.Forms.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Windows.Forms.Primitives.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Windows.Input.Manipulations.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Windows.Presentation.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Windows.Primitives.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Xaml.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Xml.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Xml.Linq.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Xml.ReaderWriter.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Xml.Serialization.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Xml.XDocument.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Xml.XmlDocument.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Xml.XmlSerializer.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Xml.XPath.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\System.Xml.XPath.XDocument.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\UIAutomationClient.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\UIAutomationClientSideProviders.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\UIAutomationProvider.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\UIAutomationTypes.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\vcruntime140_cor3.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\WebView2Loader.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\WindowsBase.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\WindowsFormsIntegration.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\wpfgfx_cor3.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\cs\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\de\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\es\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\fr\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\it\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ja\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ko\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pl\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\pt-BR\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\ru\WindowsFormsIntegration.resources.dll
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\runtimes\win-x64\native\WebView2Loader.dll
-  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\runtimes\win-x86\native\WebView2Loader.dll
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\terminal\xterm-addon-fit.min.js
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\terminal\xterm-addon-web-links.min.js
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\terminal\xterm.css
   DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\terminal\xterm.min.js
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\tr\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hans\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\Microsoft.VisualBasic.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\PresentationCore.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\PresentationFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\PresentationUI.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\ReachFramework.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\System.Windows.Controls.Ribbon.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\System.Windows.Forms.Design.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\System.Windows.Forms.Primitives.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\System.Windows.Forms.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\System.Windows.Input.Manipulations.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\System.Xaml.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\UIAutomationClient.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\UIAutomationClientSideProviders.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\UIAutomationProvider.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\UIAutomationTypes.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\WindowsBase.resources.dll
+  DIR  | PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Shell\zh-Hant\WindowsFormsIntegration.resources.dll
   DIR  | PowerShellStudio.Package\obj\PowerShellStudio.Package.wapproj.nuget.dgspec.json
   DIR  | PowerShellStudio.Package\obj\PowerShellStudio.Package.wapproj.nuget.g.props
   DIR  | PowerShellStudio.Package\obj\PowerShellStudio.Package.wapproj.nuget.g.targets
@@ -1739,12 +2295,18 @@ Excluded files:
   DIR  | PowerShellStudio.Package\obj\x64\Release\PowerShellStudio.Package_1.0.37.0_Bundle\PowerShellStudio.Package_1.0.37.0_scale-150.msix
   DIR  | PowerShellStudio.Package\obj\x64\Release\PowerShellStudio.Package_1.0.37.0_Bundle\PowerShellStudio.Package_1.0.37.0_scale-400.msix
   DIR  | PowerShellStudio.Package\obj\x64\Release\PowerShellStudio.Package_1.0.37.0_Bundle\PowerShellStudio.Package_1.0.37.0_x64.msix
+  DIR  | PowerShellStudio.Package\obj\x64\Release\PowerShellStudio.Package_1.0.38.0_Bundle\PowerShellStudio.Package_1.0.38.0_scale-100.msix
+  DIR  | PowerShellStudio.Package\obj\x64\Release\PowerShellStudio.Package_1.0.38.0_Bundle\PowerShellStudio.Package_1.0.38.0_scale-125.msix
+  DIR  | PowerShellStudio.Package\obj\x64\Release\PowerShellStudio.Package_1.0.38.0_Bundle\PowerShellStudio.Package_1.0.38.0_scale-150.msix
+  DIR  | PowerShellStudio.Package\obj\x64\Release\PowerShellStudio.Package_1.0.38.0_Bundle\PowerShellStudio.Package_1.0.38.0_scale-400.msix
+  DIR  | PowerShellStudio.Package\obj\x64\Release\PowerShellStudio.Package_1.0.38.0_Bundle\PowerShellStudio.Package_1.0.38.0_x64.msix
   DIR  | PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Application.pdb
   DIR  | PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Domain.pdb
   DIR  | PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Editor.pdb
   DIR  | PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Infrastructure.pdb
   DIR  | PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Package_1.0.36.0_x64.appxsym
   DIR  | PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Package_1.0.37.0_x64.appxsym
+  DIR  | PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Package_1.0.38.0_x64.appxsym
   DIR  | PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.PowerShell.pdb
   DIR  | PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Shell.pdb
   DIR  | PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.UI.pdb
@@ -1824,7 +2386,6 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\bin\Release\net10.0-windows\PowerShellStudio.Shell.runtimeconfig.json
   DIR  | PowerShellStudio.Shell\bin\Release\net10.0-windows\PowerShellStudio.UI.dll
   DIR  | PowerShellStudio.Shell\bin\Release\net10.0-windows\PowerShellStudio.UI.pdb
-  DIR  | PowerShellStudio.Shell\bin\Release\net10.0-windows\PowerShellStudio.Shell.exe.WebView2\EBWebView\BrowserMetrics-spare.pma
   DIR  | PowerShellStudio.Shell\bin\Release\net10.0-windows\PowerShellStudio.Shell.exe.WebView2\EBWebView\Last Version
   DIR  | PowerShellStudio.Shell\bin\Release\net10.0-windows\PowerShellStudio.Shell.exe.WebView2\EBWebView\Local State
   DIR  | PowerShellStudio.Shell\bin\Release\net10.0-windows\PowerShellStudio.Shell.exe.WebView2\EBWebView\Variations
@@ -3106,6 +3667,12 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\bin\x64\Release\net10.0-windows\win-x64\zh-Hant\UIAutomationTypes.resources.dll
   DIR  | PowerShellStudio.Shell\bin\x64\Release\net10.0-windows\win-x64\zh-Hant\WindowsBase.resources.dll
   DIR  | PowerShellStudio.Shell\bin\x64\Release\net10.0-windows\win-x64\zh-Hant\WindowsFormsIntegration.resources.dll
+  DIR  | PowerShellStudio.Shell\obj\PowerShellStudio.Shell_3qgppwwk_wpftmp.csproj.nuget.dgspec.json
+  DIR  | PowerShellStudio.Shell\obj\PowerShellStudio.Shell_3qgppwwk_wpftmp.csproj.nuget.g.props
+  DIR  | PowerShellStudio.Shell\obj\PowerShellStudio.Shell_3qgppwwk_wpftmp.csproj.nuget.g.targets
+  DIR  | PowerShellStudio.Shell\obj\PowerShellStudio.Shell_3vkpoddh_wpftmp.csproj.nuget.dgspec.json
+  DIR  | PowerShellStudio.Shell\obj\PowerShellStudio.Shell_3vkpoddh_wpftmp.csproj.nuget.g.props
+  DIR  | PowerShellStudio.Shell\obj\PowerShellStudio.Shell_3vkpoddh_wpftmp.csproj.nuget.g.targets
   DIR  | PowerShellStudio.Shell\obj\PowerShellStudio.Shell.csproj.nuget.dgspec.json
   DIR  | PowerShellStudio.Shell\obj\PowerShellStudio.Shell.csproj.nuget.g.props
   DIR  | PowerShellStudio.Shell\obj\PowerShellStudio.Shell.csproj.nuget.g.targets
@@ -3131,6 +3698,12 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\MainWindow.g.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\MainWindow.g.i.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShe.9B0B33BC.Up2Date
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_0re5vedm_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_0re5vedm_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_0re5vedm_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_0re5vedm_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_0re5vedm_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_0re5vedm_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_1y0xlf3w_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_1y0xlf3w_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_1y0xlf3w_wpftmp.assets.cache
@@ -3149,6 +3722,44 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3dgypf03_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3dgypf03_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3dgypf03_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3immtmsf_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3immtmsf_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3immtmsf_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3immtmsf_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3immtmsf_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3immtmsf_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qgppwwk_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qgppwwk_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qgppwwk_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qgppwwk_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qgppwwk_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qgppwwk_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qxz1uga_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qxz1uga_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qxz1uga_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qxz1uga_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qxz1uga_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3qxz1uga_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3vkpoddh_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3vkpoddh_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3vkpoddh_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3vkpoddh_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3vkpoddh_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_3vkpoddh_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_4vssh0ev_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_4vssh0ev_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_4vssh0ev_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_4vssh0ev_wpftmp.csproj.BuildWithSkipAnalyzers
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_4vssh0ev_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_4vssh0ev_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_4vssh0ev_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_5enftr3z_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_5enftr3z_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_5enftr3z_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_5enftr3z_wpftmp.csproj.BuildWithSkipAnalyzers
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_5enftr3z_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_5enftr3z_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_5enftr3z_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_5fnvspxc_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_5fnvspxc_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_5fnvspxc_wpftmp.assets.cache
@@ -3174,6 +3785,13 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_aznd3jcm_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_aznd3jcm_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_aznd3jcm_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_btmn21fj_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_btmn21fj_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_btmn21fj_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_btmn21fj_wpftmp.csproj.BuildWithSkipAnalyzers
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_btmn21fj_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_btmn21fj_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_btmn21fj_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_c0iqipk5_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_c0iqipk5_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_c0iqipk5_wpftmp.assets.cache
@@ -3189,6 +3807,24 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_fbt4sxsr_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_fbt4sxsr_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_fbt4sxsr_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_fmpn2r21_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_fmpn2r21_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_fmpn2r21_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_fmpn2r21_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_fmpn2r21_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_fmpn2r21_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_g53f43xq_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_g53f43xq_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_g53f43xq_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_g53f43xq_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_g53f43xq_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_g53f43xq_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_h3ab32pb_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_h3ab32pb_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_h3ab32pb_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_h3ab32pb_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_h3ab32pb_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_h3ab32pb_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jcnnb5d3_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jcnnb5d3_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jcnnb5d3_wpftmp.assets.cache
@@ -3202,6 +3838,19 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jkmygyxz_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jkmygyxz_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jkmygyxz_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jxcj0qon_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jxcj0qon_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jxcj0qon_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jxcj0qon_wpftmp.csproj.BuildWithSkipAnalyzers
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jxcj0qon_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jxcj0qon_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_jxcj0qon_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_k25qjm01_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_k25qjm01_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_k25qjm01_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_k25qjm01_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_k25qjm01_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_k25qjm01_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_kn5fxc1y_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_kn5fxc1y_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_kn5fxc1y_wpftmp.assets.cache
@@ -3225,7 +3874,6 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_lobfgzot_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_MarkupCompile.cache
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_MarkupCompile.i.cache
-  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_MarkupCompile.i.lref
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_MarkupCompile.lref
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_mm3m5131_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_mm3m5131_wpftmp.AssemblyInfoInputs.cache
@@ -3240,6 +3888,18 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nbd21sav_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nbd21sav_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nbd21sav_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nmanrqv4_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nmanrqv4_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nmanrqv4_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nmanrqv4_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nmanrqv4_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nmanrqv4_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nrtjya2w_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nrtjya2w_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nrtjya2w_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nrtjya2w_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nrtjya2w_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_nrtjya2w_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_opjbfn2c_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_opjbfn2c_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_opjbfn2c_wpftmp.assets.cache
@@ -3252,6 +3912,12 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_tpptm0pk_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_tpptm0pk_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_tpptm0pk_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_um0ypuji_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_um0ypuji_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_um0ypuji_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_um0ypuji_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_um0ypuji_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_um0ypuji_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_vigzvyx5_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_vigzvyx5_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\PowerShellStudio.Shell_vigzvyx5_wpftmp.assets.cache
@@ -3295,6 +3961,9 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\Controls\TerminalControl.baml
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\Controls\TerminalControl.g.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\Controls\TerminalControl.g.i.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\Debug\DebugPaneWindow.baml
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\Debug\DebugPaneWindow.g.cs
+  DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\Debug\DebugPaneWindow.g.i.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\Editor\GoToLineDialog.baml
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\Editor\GoToLineDialog.g.cs
   DIR  | PowerShellStudio.Shell\obj\Release\net10.0-windows\Editor\GoToLineDialog.g.i.cs
@@ -3343,6 +4012,12 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell_woxe3lpi_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell_woxe3lpi_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell_woxe3lpi_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell_ygapns03_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell_ygapns03_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell_ygapns03_wpftmp.assets.cache
+  DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell_ygapns03_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell_ygapns03_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell_ygapns03_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell.AssemblyInfo.cs
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PowerShellStudio.Shell.assets.cache
@@ -3359,6 +4034,8 @@ Excluded files:
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\PublishOutputs.4a58f32b5a.txt
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\Controls\TerminalControl.baml
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\Controls\TerminalControl.g.cs
+  DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\Debug\DebugPaneWindow.baml
+  DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\Debug\DebugPaneWindow.g.cs
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\Editor\GoToLineDialog.baml
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\Editor\GoToLineDialog.g.cs
   DIR  | PowerShellStudio.Shell\obj\x64\Release\net10.0-windows\win-x64\Help\ContextHelpWindow.baml
@@ -3403,12 +4080,24 @@ Excluded files:
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_03vhc3zw_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_03vhc3zw_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_03vhc3zw_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_03x12bej_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_03x12bej_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_03x12bej_wpftmp.assets.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_03x12bej_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_03x12bej_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_03x12bej_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_2wenfw0m_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_2wenfw0m_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_2wenfw0m_wpftmp.assets.cache
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_2wenfw0m_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_2wenfw0m_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_2wenfw0m_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_4z02122x_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_4z02122x_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_4z02122x_wpftmp.assets.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_4z02122x_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_4z02122x_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_4z02122x_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_5mih3osu_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_5mih3osu_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_5mih3osu_wpftmp.assets.cache
@@ -3421,12 +4110,24 @@ Excluded files:
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_5wjnioef_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_5wjnioef_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_5wjnioef_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_ajcubnnb_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_ajcubnnb_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_ajcubnnb_wpftmp.assets.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_ajcubnnb_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_ajcubnnb_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_ajcubnnb_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_asqmlvhb_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_asqmlvhb_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_asqmlvhb_wpftmp.assets.cache
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_asqmlvhb_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_asqmlvhb_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_asqmlvhb_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_b2uhuatf_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_b2uhuatf_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_b2uhuatf_wpftmp.assets.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_b2uhuatf_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_b2uhuatf_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_b2uhuatf_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_Content.g.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_Content.g.i.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_cvao4jy1_wpftmp.AssemblyInfo.cs
@@ -3435,12 +4136,24 @@ Excluded files:
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_cvao4jy1_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_cvao4jy1_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_cvao4jy1_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_dvvpztms_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_dvvpztms_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_dvvpztms_wpftmp.assets.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_dvvpztms_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_dvvpztms_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_dvvpztms_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_fog4uyim_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_fog4uyim_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_fog4uyim_wpftmp.assets.cache
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_fog4uyim_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_fog4uyim_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_fog4uyim_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_g3aoewah_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_g3aoewah_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_g3aoewah_wpftmp.assets.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_g3aoewah_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_g3aoewah_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_g3aoewah_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_gk4y0ndv_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_gk4y0ndv_wpftmp.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_gk4y0ndv_wpftmp.assets.cache
@@ -3455,7 +4168,6 @@ Excluded files:
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_hiylstax_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_MarkupCompile.cache
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_MarkupCompile.i.cache
-  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_MarkupCompile.i.lref
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_MarkupCompile.lref
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_mpilr1e0_wpftmp.AssemblyInfo.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_mpilr1e0_wpftmp.AssemblyInfoInputs.cache
@@ -3469,6 +4181,30 @@ Excluded files:
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_nlhumi2d_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_nlhumi2d_wpftmp.GlobalUsings.g.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_nlhumi2d_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_quc512vb_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_quc512vb_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_quc512vb_wpftmp.assets.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_quc512vb_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_quc512vb_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_quc512vb_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_tcb5tyvp_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_tcb5tyvp_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_tcb5tyvp_wpftmp.assets.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_tcb5tyvp_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_tcb5tyvp_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_tcb5tyvp_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_yd13amsi_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_yd13amsi_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_yd13amsi_wpftmp.assets.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_yd13amsi_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_yd13amsi_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_yd13amsi_wpftmp.sourcelink.json
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_zggibyxl_wpftmp.AssemblyInfo.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_zggibyxl_wpftmp.AssemblyInfoInputs.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_zggibyxl_wpftmp.assets.cache
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_zggibyxl_wpftmp.GeneratedMSBuildEditorConfig.editorconfig
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_zggibyxl_wpftmp.GlobalUsings.g.cs
+  DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike_zggibyxl_wpftmp.sourcelink.json
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike.AssemblyInfo.cs
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike.AssemblyInfoInputs.cache
   DIR  | PowerShellStudio.TerminalSpike\obj\Release\net10.0-windows\PowerShellStudio.TerminalSpike.assets.cache

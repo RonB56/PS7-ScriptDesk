@@ -3635,7 +3635,7 @@ namespace PowerShellStudio.Shell
                                 ["containsAtLine"] = containsAtLine
                             });
                     }
-                    ViewModel.AppendDebugOutput(chunk);
+                    ViewModel.AppendDebugOutput(chunk ?? string.Empty);
                     if (!string.IsNullOrWhiteSpace(chunk))
                     {
                         _lastDebugOutputWrittenAtUtc = DateTimeOffset.UtcNow;
@@ -3759,7 +3759,7 @@ namespace PowerShellStudio.Shell
             }
         }
 
-        private async void ContinueDebug_Click(object sender, RoutedEventArgs e)
+        private async void ContinueDebug_Click(object? sender, RoutedEventArgs e)
         {
             using var scope = DeveloperDiagnostics.BeginScope(operationId: $"Continue-{Guid.NewGuid():N}");
             DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Continue requested.", BuildDebugActionProperties(sender));

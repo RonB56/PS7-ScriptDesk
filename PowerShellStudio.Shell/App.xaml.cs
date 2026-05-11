@@ -22,20 +22,22 @@ namespace PowerShellStudio.Shell
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            var startupArgs = e.Args ?? Array.Empty<string>();
+
             DeveloperDiagnostics.TryPreconfigureFromPersistedSettings();
             DeveloperDiagnostics.LogMethodEntry(
                 "Startup",
                 "App.OnStartup entered.",
                 new Dictionary<string, object?>
                 {
-                    ["args"] = e.Args is null ? Array.Empty<string>() : Array.ConvertAll(e.Args, arg => DeveloperDiagnostics.SanitizePreview(arg))
+                    ["args"] = Array.ConvertAll(startupArgs, arg => DeveloperDiagnostics.SanitizePreview(arg))
                 });
             AppLogger.Info("App", "Startup requested.");
-            if (Editor.EditorMetadataBuilderHost.IsMetadataBuilderInvocation(e.Args))
+            if (Editor.EditorMetadataBuilderHost.IsMetadataBuilderInvocation(startupArgs))
             {
                 AppLogger.Info("App", "Launching metadata builder helper mode.");
                 DeveloperDiagnostics.LogDecision("Startup", "MetadataBuilderInvocation", "Launching metadata builder helper mode.", "MetadataBuilderMode");
-                var exitCode = Editor.EditorMetadataBuilderHost.RunFromArguments(e.Args);
+                var exitCode = Editor.EditorMetadataBuilderHost.RunFromArguments(startupArgs);
                 AppLogger.Info("App", $"Metadata builder helper mode finished with exit code {exitCode}.");
                 DeveloperDiagnostics.LogMethodExit("Startup", $"Metadata builder helper mode finished with exit code {exitCode}.");
                 Shutdown(exitCode);
@@ -61,7 +63,7 @@ namespace PowerShellStudio.Shell
             AppLogger.Info("App", "Base startup completed.");
             DeveloperDiagnostics.LogInfo("Startup", "Base application startup completed.");
 
-            if (ShouldLaunchConsolePrototype(e.Args))
+            if (ShouldLaunchConsolePrototype(startupArgs))
             {
                 var prototypeWindow = new ConsolePrototypeWindow();
                 MainWindow = prototypeWindow;

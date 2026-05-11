@@ -9,7 +9,7 @@
   <Identity
     Name="b2425902-9934-472a-93bf-9393a49edb57"
     Publisher="CN=PowerShellStudio"
-    Version="1.0.38.0" />
+    Version="1.0.39.0" />
 
   <Properties>
     <DisplayName>PS7 ScriptDesk</DisplayName>
