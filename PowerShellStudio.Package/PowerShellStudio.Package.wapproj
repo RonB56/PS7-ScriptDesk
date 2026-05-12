@@ -64,7 +64,7 @@
     <AppxBundlePlatforms>x64</AppxBundlePlatforms>
     <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
     <GenerateAppInstallerFile>False</GenerateAppInstallerFile>
-    <PackageCertificateThumbprint>DA27561B78D5FA758A941E2A50986522E89E15F2</PackageCertificateThumbprint>
+    <PackageCertificateThumbprint>5974F24B10652096AC4CF7354CABB20AD717D1F2</PackageCertificateThumbprint>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <AppxBundle>Always</AppxBundle>
@@ -178,15 +178,7 @@
         <Destination>%(RootDir)%(Directory)Install.cmd</Destination>
       </GeneratedInstallCmdCopies>
     </ItemGroup>
-    <Copy
-      SourceFiles="@(GeneratedInstallPs1Copies->'%(Source)')"
-      DestinationFiles="@(GeneratedInstallPs1Copies->'%(Destination)')"
-      SkipUnchangedFiles="true"
-      Condition="'@(GeneratedInstallerRoots)' != ''" />
-    <Copy
-      SourceFiles="@(GeneratedInstallCmdCopies->'%(Source)')"
-      DestinationFiles="@(GeneratedInstallCmdCopies->'%(Destination)')"
-      SkipUnchangedFiles="true"
-      Condition="'@(GeneratedInstallerRoots)' != ''" />
+    <Copy SourceFiles="@(GeneratedInstallPs1Copies->'%(Source)')" DestinationFiles="@(GeneratedInstallPs1Copies->'%(Destination)')" SkipUnchangedFiles="true" Condition="'@(GeneratedInstallerRoots)' != ''" />
+    <Copy SourceFiles="@(GeneratedInstallCmdCopies->'%(Source)')" DestinationFiles="@(GeneratedInstallCmdCopies->'%(Destination)')" SkipUnchangedFiles="true" Condition="'@(GeneratedInstallerRoots)' != ''" />
   </Target>
 </Project>
