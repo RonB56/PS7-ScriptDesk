@@ -51,6 +51,7 @@ namespace PowerShellStudio.Shell.Editor
         private Task? _metadataBuilderStdoutReaderTask;
         private Task? _metadataBuilderStderrReaderTask;
         private string? _metadataBuilderRuntimePath;
+        private MetadataInitialLoadDiagnostics? _activeMetadataInitialLoadDiagnostics;
         private string? _loadedMetadataRuntimePath;
         private EditorMetadataSnapshotHealth _loadedMetadataHealth = EditorMetadataSnapshotHealth.Empty;
         private bool _loadedPersistedMetadataForRuntime;
@@ -245,8 +246,47 @@ namespace PowerShellStudio.Shell.Editor
                 return;
             }
 
+            if (!runtimeInfo.IsPowerShell7OrLater || !runtimeInfo.IsValidated)
+            {
+                var invalidRuntimeDetail = "PowerShell 7 was not found or could not be launched. Install PowerShell 7 or configure the pwsh.exe path.";
+                var invalidRuntimeDiagnostics = !forceRebuild && !isUserInitiated
+                    ? MetadataInitialLoadDiagnostics.TryCreate(runtimeInfo)
+                    : null;
+                invalidRuntimeDiagnostics?.RecordWarmupRequested(runtimeInfo);
+                invalidRuntimeDiagnostics?.RecordFailure("Startup metadata warmup requested", invalidRuntimeDetail);
+                invalidRuntimeDiagnostics?.FinalizeFailure("Startup metadata warmup requested", invalidRuntimeDetail);
+                RaiseMetadataWarmupStatus(
+                    new EditorMetadataWarmupStatus(
+                        EditorMetadataWarmupPhase.Failed,
+                        "Editor metadata failed; see log",
+                        NormalizePath(runtimeInfo.ExecutablePath),
+                        detailText: invalidRuntimeDiagnostics is null
+                            ? invalidRuntimeDetail
+                            : AppendMetadataLogSupportHint(invalidRuntimeDetail, invalidRuntimeDiagnostics.LogPath),
+                        reason: forceRebuild
+                            ? EditorMetadataWarmupReason.ManualRefresh
+                            : EditorMetadataWarmupReason.FirstRunBuild));
+                AppLogger.Warning(
+                    "EditorMetadata",
+                    $"Metadata warmup rejected runtime '{runtimeInfo.ExecutablePath}'. Version={runtimeInfo.VersionText}, Edition={runtimeInfo.Edition}, " +
+                    $"Validated={runtimeInfo.IsValidated}, IsPowerShell7OrLater={runtimeInfo.IsPowerShell7OrLater}.");
+                return;
+            }
+
             var normalizedRuntimePath = NormalizePath(runtimeInfo.ExecutablePath);
-            var performanceLogPath = MetadataPerformanceLog.CreateLogFile(
+            var startupDiagnostics = !forceRebuild && !isUserInitiated
+                ? MetadataInitialLoadDiagnostics.TryCreate(runtimeInfo)
+                : null;
+            startupDiagnostics?.RecordWarmupRequested(runtimeInfo);
+            if (startupDiagnostics is not null)
+            {
+                lock (_syncRoot)
+                {
+                    _activeMetadataInitialLoadDiagnostics = startupDiagnostics;
+                }
+            }
+
+            var performanceLogPath = startupDiagnostics?.LogPath ?? MetadataPerformanceLog.CreateLogFile(
                 normalizedRuntimePath,
                 forceRebuild ? "Manual metadata refresh" : "Metadata warmup");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Request received. ForceRebuild={forceRebuild}, UserInitiated={isUserInitiated}.");
@@ -273,6 +313,9 @@ namespace PowerShellStudio.Shell.Editor
                     MetadataPerformanceLog.AppendLine(performanceLogPath, "Cache hit decision: healthy full cache is already loaded in memory; metadata rebuild skipped.");
                     MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata refresh finished UTC: {DateTime.UtcNow:O}");
                     MetadataPerformanceLog.AppendLine(performanceLogPath, $"Output path for this performance log: {performanceLogPath}");
+                    startupDiagnostics?.RecordSuccess("Success", "AlreadyLoadedInMemory");
+                    startupDiagnostics?.FinalizeSuccess("Success");
+                    ClearActiveMetadataInitialLoadDiagnostics(startupDiagnostics);
                     return;
                 }
 
@@ -284,6 +327,9 @@ namespace PowerShellStudio.Shell.Editor
                     MetadataPerformanceLog.AppendLine(performanceLogPath, "Metadata builder launch skipped because a builder process is already running for this runtime.");
                     MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata refresh finished UTC: {DateTime.UtcNow:O}");
                     MetadataPerformanceLog.AppendLine(performanceLogPath, $"Output path for this performance log: {performanceLogPath}");
+                    startupDiagnostics?.RecordSuccess("PartialSuccess", "BuilderAlreadyRunning");
+                    startupDiagnostics?.FinalizeSuccess("PartialSuccess");
+                    ClearActiveMetadataInitialLoadDiagnostics(startupDiagnostics);
                     return;
                 }
             }
@@ -302,7 +348,7 @@ namespace PowerShellStudio.Shell.Editor
                         reason: EditorMetadataWarmupReason.CachedLoad));
             }
 
-            var loadedFromCache = TryLoadPersistedMetadataSnapshot(runtimeInfo, out var snapshot, out var manifest, out var loadReason, performanceLogPath);
+            var loadedFromCache = TryLoadPersistedMetadataSnapshot(runtimeInfo, out var snapshot, out var manifest, out var loadReason, performanceLogPath, startupDiagnostics);
             AppLogger.Info("EditorMetadata", loadReason);
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache decision: {(loadedFromCache ? "hit" : "miss/rebuild required")}. Reason: {loadReason}");
 
@@ -331,6 +377,10 @@ namespace PowerShellStudio.Shell.Editor
                     MetadataPerformanceLog.AppendLine(performanceLogPath, "Metadata load result: cache load only; full rebuild was not started.");
                     MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata refresh finished UTC: {DateTime.UtcNow:O}");
                     MetadataPerformanceLog.AppendLine(performanceLogPath, $"Output path for this performance log: {performanceLogPath}");
+                    startupDiagnostics?.RecordSnapshotCounts(snapshot);
+                    startupDiagnostics?.RecordSuccess("Success", "LoadedFromCache");
+                    startupDiagnostics?.FinalizeSuccess("Success");
+                    ClearActiveMetadataInitialLoadDiagnostics(startupDiagnostics);
                     return;
                 }
             }
@@ -375,7 +425,7 @@ namespace PowerShellStudio.Shell.Editor
             }
 
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Full rebuild/cache refresh starting. WarmupReason={warmupReason}, LoadedFromCacheBeforeRefresh={loadedFromCache}.");
-            LaunchMetadataBuilderProcess(runtimeInfo, loadedFromCache, warmupReason, performanceLogPath);
+            LaunchMetadataBuilderProcess(runtimeInfo, loadedFromCache, warmupReason, performanceLogPath, startupDiagnostics);
         }
 
         public void Dispose()
@@ -395,6 +445,7 @@ namespace PowerShellStudio.Shell.Editor
 
         private void RaiseMetadataWarmupStatus(EditorMetadataWarmupStatus status)
         {
+            _activeMetadataInitialLoadDiagnostics?.RecordUiStatus(status);
             var handler = MetadataWarmupStatusChanged;
             if (handler is null || status is null)
             {
@@ -557,7 +608,8 @@ namespace PowerShellStudio.Shell.Editor
             out EditorMetadataCacheSnapshot? snapshot,
             out EditorMetadataCacheManifest? manifest,
             out string reason,
-            string? performanceLogPath = null)
+            string? performanceLogPath = null,
+            MetadataInitialLoadDiagnostics? startupDiagnostics = null)
         {
             snapshot = null;
             manifest = null;
@@ -565,7 +617,16 @@ namespace PowerShellStudio.Shell.Editor
             var normalizedRuntimePath = NormalizePath(runtimeInfo.ExecutablePath);
             var stopwatch = Stopwatch.StartNew();
             MetadataPerformanceLog.AppendSection(performanceLogPath, "Cache load decision");
-            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache load started for runtime '{normalizedRuntimePath}'.");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase started: Cache probe. StartUtc={DateTime.UtcNow:O}. Runtime='{normalizedRuntimePath}'.");
+            foreach (var candidate in EditorMetadataCacheStore.GetCacheProbeCandidates(
+                         normalizedRuntimePath,
+                         runtimeInfo.VersionText ?? string.Empty,
+                         runtimeInfo.Edition ?? string.Empty,
+                         runtimeInfo.Architecture ?? string.Empty))
+            {
+                startupDiagnostics?.RecordCacheProbeCandidate(candidate);
+            }
+
             if (!EditorMetadataCacheStore.TryLoadSnapshot(
                     normalizedRuntimePath,
                     runtimeInfo.VersionText ?? string.Empty,
@@ -587,9 +648,12 @@ namespace PowerShellStudio.Shell.Editor
                 reason = $"No cached metadata snapshot could be loaded for runtime '{normalizedRuntimePath}' after {stopwatch.ElapsedMilliseconds:N0} ms.";
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache read time: {stopwatch.ElapsedMilliseconds:N0} ms.");
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache hit/miss reason: {reason}");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Cache probe. Result=Missing. DurationMs={stopwatch.ElapsedMilliseconds:N0}. EndUtc={DateTime.UtcNow:O}");
+                startupDiagnostics?.RecordCacheDecision(false, "MissingOrUnreadable", reason);
                 return false;
             }
 
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase started: Snapshot validation. StartUtc={DateTime.UtcNow:O}");
             var validation = EditorMetadataSnapshotValidator.Validate(loadedSnapshot);
             if (!validation.IsHealthy)
             {
@@ -597,9 +661,12 @@ namespace PowerShellStudio.Shell.Editor
                 reason = $"Saved metadata snapshot for runtime '{normalizedRuntimePath}' is incomplete or corrupt. {validation.Message} {EditorMetadataSnapshotValidator.Describe(validation.Health)}";
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache read time: {stopwatch.ElapsedMilliseconds:N0} ms.");
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache hit/miss reason: {reason}");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Snapshot validation. Result=Rejected. EndUtc={DateTime.UtcNow:O}");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Cache probe. Result=RejectedByValidator. DurationMs={stopwatch.ElapsedMilliseconds:N0}. EndUtc={DateTime.UtcNow:O}");
                 AppLogger.Warning("EditorMetadata", reason);
                 EditorMetadataCacheStore.QuarantineSnapshotDirectory(loadedCacheDirectory, "invalid-full-metadata", out _);
                 ResetLoadedMetadataState(normalizedRuntimePath);
+                startupDiagnostics?.RecordCacheDecision(false, "RejectedByValidator", reason, loadedSnapshot);
                 return false;
             }
 
@@ -609,9 +676,12 @@ namespace PowerShellStudio.Shell.Editor
                 reason = $"Saved metadata snapshot for runtime '{normalizedRuntimePath}' is stale. {manifestReason}";
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache read time: {stopwatch.ElapsedMilliseconds:N0} ms.");
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache hit/miss reason: {reason}");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Snapshot validation. Result=Stale. EndUtc={DateTime.UtcNow:O}");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Cache probe. Result=Stale. DurationMs={stopwatch.ElapsedMilliseconds:N0}. EndUtc={DateTime.UtcNow:O}");
                 AppLogger.Warning("EditorMetadata", reason);
                 AppLogger.Info("EditorMetadata", $"Preserving stale metadata cache for possible future runtime switching. Runtime='{normalizedRuntimePath}', CacheDirectory='{loadedCacheDirectory}'.");
                 ResetLoadedMetadataState(normalizedRuntimePath);
+                startupDiagnostics?.RecordCacheDecision(false, "Stale", reason, loadedSnapshot);
                 return false;
             }
 
@@ -627,6 +697,8 @@ namespace PowerShellStudio.Shell.Editor
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cached command count: {metadataHealth.CommandCount:N0}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cached quick-info count: {metadataHealth.QuickInfoCount:N0}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cached parameterized command count: {metadataHealth.ParameterizedQuickInfoCount:N0}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Snapshot validation. Result=Accepted. EndUtc={DateTime.UtcNow:O}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Cache probe. Result=LoadedFromCache. DurationMs={stopwatch.ElapsedMilliseconds:N0}. EndUtc={DateTime.UtcNow:O}");
             AppLogger.Info("EditorMetadata", $"Loaded cached metadata snapshot for runtime '{normalizedRuntimePath}' in {stopwatch.ElapsedMilliseconds:N0} ms. CacheDirectory='{loadedCacheDirectory}', LegacyPathCache={loadedFromLegacyPathCache}. {EditorMetadataSnapshotValidator.Describe(metadataHealth)}.");
 
             lock (_syncRoot)
@@ -637,6 +709,7 @@ namespace PowerShellStudio.Shell.Editor
             }
 
             reason = $"Loaded cached full editor metadata snapshot for runtime '{normalizedRuntimePath}' in {stopwatch.ElapsedMilliseconds:N0} ms. CacheDirectory='{loadedCacheDirectory}', LegacyPathCache={loadedFromLegacyPathCache}. {EditorMetadataSnapshotValidator.Describe(metadataHealth)}.";
+            startupDiagnostics?.RecordCacheDecision(true, loadedFromLegacyPathCache ? "LoadedFromLegacyCache" : "LoadedFromCache", reason, loadedSnapshot);
             return true;
         }
 
@@ -762,19 +835,24 @@ namespace PowerShellStudio.Shell.Editor
             }
         }
 
-        private void LaunchMetadataBuilderProcess(PowerShellRuntimeInfo runtimeInfo, bool readyCacheAlreadyLoaded, EditorMetadataWarmupReason warmupReason, string performanceLogPath)
+        private void LaunchMetadataBuilderProcess(PowerShellRuntimeInfo runtimeInfo, bool readyCacheAlreadyLoaded, EditorMetadataWarmupReason warmupReason, string performanceLogPath, MetadataInitialLoadDiagnostics? startupDiagnostics)
         {
             var normalizedRuntimePath = NormalizePath(runtimeInfo.ExecutablePath);
             var currentExecutablePath = Environment.ProcessPath;
+            startupDiagnostics?.RecordBackgroundRefreshStarted();
+            MetadataPerformanceLog.AppendSection(performanceLogPath, "Background process launch requested");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background process launch requested UTC: {DateTime.UtcNow:O}");
             if (string.IsNullOrWhiteSpace(currentExecutablePath) || !File.Exists(currentExecutablePath))
             {
                 MetadataPerformanceLog.AppendLine(performanceLogPath, "Metadata builder launch failed: PS7 ScriptDesk could not locate its helper executable.");
+                startupDiagnostics?.RecordFailure("Background process launch requested", "PS7 ScriptDesk could not locate its helper executable to build the metadata cache.");
+                startupDiagnostics?.FinalizeFailure("Background process launch requested", "PS7 ScriptDesk could not locate its helper executable to build the metadata cache.");
                 RaiseMetadataWarmupStatus(
                     new EditorMetadataWarmupStatus(
                         EditorMetadataWarmupPhase.Failed,
                         "Editor metadata failed; see log",
                         normalizedRuntimePath,
-                        detailText: "PS7 ScriptDesk could not locate its helper executable to build the metadata cache.",
+                        detailText: AppendMetadataLogSupportHint("PS7 ScriptDesk could not locate its helper executable to build the metadata cache.", performanceLogPath),
                         reason: warmupReason));
                 return;
             }
@@ -807,6 +885,7 @@ namespace PowerShellStudio.Shell.Editor
                 builderStartStopwatch.Stop();
                 TryLowerChildProcessPriority(process);
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Builder helper process Start() elapsed: {builderStartStopwatch.ElapsedMilliseconds:N0} ms. ProcessId={process.Id}.");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Background process launch requested. Result=Started. DurationMs={builderStartStopwatch.ElapsedMilliseconds:N0}. EndUtc={DateTime.UtcNow:O}");
                 AppLogger.Info("EditorMetadata", $"Started metadata builder helper process {process.Id} for runtime '{normalizedRuntimePath}'. CachedReady={readyCacheAlreadyLoaded}. PerformanceLog='{performanceLogPath}'.");
             }
             catch (Exception ex)
@@ -814,6 +893,7 @@ namespace PowerShellStudio.Shell.Editor
                 builderCancellationTokenSource.Dispose();
                 process.Dispose();
                 var cachedHealth = readyCacheAlreadyLoaded ? GetLoadedMetadataHealth(normalizedRuntimePath) : EditorMetadataSnapshotHealth.Empty;
+                startupDiagnostics?.RecordException("Background process launch requested", ex);
 
                 RaiseMetadataWarmupStatus(
                     new EditorMetadataWarmupStatus(
@@ -821,8 +901,8 @@ namespace PowerShellStudio.Shell.Editor
                         readyCacheAlreadyLoaded ? "Metadata refresh failed; cached metadata still in use." : "Editor metadata failed; see log",
                         normalizedRuntimePath,
                         detailText: readyCacheAlreadyLoaded
-                            ? $"PS7 ScriptDesk kept using the last known-good metadata snapshot, but could not start the refresh helper: {ex.Message}"
-                            : ex.Message,
+                            ? AppendMetadataLogSupportHint($"PS7 ScriptDesk kept using the last known-good metadata snapshot, but could not start the refresh helper: {ex.Message}", performanceLogPath)
+                            : AppendMetadataLogSupportHint(ex.Message, performanceLogPath),
                         commandCount: cachedHealth.CommandCount,
                         quickInfoCount: cachedHealth.QuickInfoCount,
                         parameterizedQuickInfoCount: cachedHealth.ParameterizedQuickInfoCount,
@@ -831,6 +911,7 @@ namespace PowerShellStudio.Shell.Editor
                         reason: warmupReason));
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata builder launch failed: {ex}");
                 AppLogger.Error("EditorMetadata", $"Failed to start metadata builder helper for runtime '{normalizedRuntimePath}'.", ex);
+                startupDiagnostics?.FinalizeFailure("Background process launch requested", ex.Message);
                 return;
             }
 
@@ -839,8 +920,9 @@ namespace PowerShellStudio.Shell.Editor
                 _metadataBuilderProcess = process;
                 _metadataBuilderCancellationTokenSource = builderCancellationTokenSource;
                 _metadataBuilderRuntimePath = normalizedRuntimePath;
-                _metadataBuilderStdoutReaderTask = MonitorMetadataBuilderProcessAsync(process, runtimeInfo, readyCacheAlreadyLoaded, warmupReason, performanceLogPath, builderCancellationTokenSource);
-                _metadataBuilderStderrReaderTask = DrainMetadataBuilderErrorsAsync(process, builderCancellationTokenSource);
+                _activeMetadataInitialLoadDiagnostics = startupDiagnostics;
+                _metadataBuilderStdoutReaderTask = MonitorMetadataBuilderProcessAsync(process, runtimeInfo, readyCacheAlreadyLoaded, warmupReason, performanceLogPath, builderCancellationTokenSource, startupDiagnostics);
+                _metadataBuilderStderrReaderTask = DrainMetadataBuilderErrorsAsync(process, builderCancellationTokenSource, performanceLogPath);
             }
         }
 
@@ -850,10 +932,13 @@ namespace PowerShellStudio.Shell.Editor
             bool readyCacheAlreadyLoaded,
             EditorMetadataWarmupReason warmupReason,
             string? performanceLogPath,
-            CancellationTokenSource builderCancellationTokenSource)
+            CancellationTokenSource builderCancellationTokenSource,
+            MetadataInitialLoadDiagnostics? startupDiagnostics)
         {
             var normalizedRuntimePath = NormalizePath(runtimeInfo.ExecutablePath);
             var cancellationToken = builderCancellationTokenSource.Token;
+            var processStartUtc = DateTimeOffset.UtcNow;
+            var receivedTerminalStatus = false;
             try
             {
                 while (!cancellationToken.IsCancellationRequested)
@@ -867,6 +952,13 @@ namespace PowerShellStudio.Shell.Editor
                     if (!EditorMetadataBuilderProtocol.TryParseStatusLine(line, out var message) || message is null)
                     {
                         continue;
+                    }
+
+                    if (message.Phase == EditorMetadataWarmupPhase.Completed ||
+                        message.Phase == EditorMetadataWarmupPhase.Failed ||
+                        message.Phase == EditorMetadataWarmupPhase.Canceled)
+                    {
+                        receivedTerminalStatus = true;
                     }
 
                     HandleMetadataBuilderStatus(runtimeInfo, readyCacheAlreadyLoaded, warmupReason, performanceLogPath, message);
@@ -885,6 +977,8 @@ namespace PowerShellStudio.Shell.Editor
                 {
                     AppLogger.Warning("EditorMetadata", $"Metadata builder helper for runtime '{normalizedRuntimePath}' exited with code {process.ExitCode}.");
                     MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata builder helper exited with code {process.ExitCode}.");
+                    MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata builder helper start UTC: {processStartUtc:O}");
+                    MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata builder helper exit UTC: {DateTime.UtcNow:O}");
                     ReportMetadataBuilderFailure(
                         normalizedRuntimePath,
                         readyCacheAlreadyLoaded,
@@ -892,15 +986,28 @@ namespace PowerShellStudio.Shell.Editor
                         $"The metadata helper exited with code {process.ExitCode}.",
                         performanceLogPath);
                 }
+                else if (!cancellationToken.IsCancellationRequested && process.ExitCode == 0 && !receivedTerminalStatus)
+                {
+                    MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata builder helper exited without a terminal status message. StartUtc={processStartUtc:O}, ExitUtc={DateTime.UtcNow:O}");
+                    ReportMetadataBuilderFailure(
+                        normalizedRuntimePath,
+                        readyCacheAlreadyLoaded,
+                        warmupReason,
+                        "The metadata helper exited successfully but did not report a terminal metadata status.",
+                        performanceLogPath);
+                }
             }
             catch (OperationCanceledException)
             {
+                startupDiagnostics?.RecordFailure("Background process cancelled", "Metadata initial-load helper was canceled.");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata builder helper canceled UTC: {DateTime.UtcNow:O}");
                 // Ignore cancellation during shutdown/runtime change.
             }
             catch (Exception ex)
             {
                 AppLogger.Error("EditorMetadata", $"Metadata builder monitor failed for runtime '{normalizedRuntimePath}'.", ex);
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata builder monitor failed: {ex}");
+                startupDiagnostics?.RecordException("Background process monitor", ex);
                 ReportMetadataBuilderFailure(normalizedRuntimePath, readyCacheAlreadyLoaded, warmupReason, ex.Message, performanceLogPath);
             }
             finally
@@ -917,13 +1024,18 @@ namespace PowerShellStudio.Shell.Editor
                     {
                         _metadataBuilderCancellationTokenSource = null;
                     }
+
+                    if (ReferenceEquals(_activeMetadataInitialLoadDiagnostics, startupDiagnostics))
+                    {
+                        _activeMetadataInitialLoadDiagnostics = null;
+                    }
                 }
 
                 try { process.Dispose(); } catch { }
             }
         }
 
-        private async Task DrainMetadataBuilderErrorsAsync(Process process, CancellationTokenSource builderCancellationTokenSource)
+        private async Task DrainMetadataBuilderErrorsAsync(Process process, CancellationTokenSource builderCancellationTokenSource, string? performanceLogPath)
         {
             var cancellationToken = builderCancellationTokenSource.Token;
             try
@@ -940,6 +1052,7 @@ namespace PowerShellStudio.Shell.Editor
                     {
                         System.Diagnostics.Debug.WriteLine($"[PowerShellCompletionService] Metadata builder: {line}");
                         AppLogger.Debug("EditorMetadata", $"Metadata helper stderr: {line.Trim()}");
+                        MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata helper stderr: {line.Trim()}");
                     }
                 }
             }
@@ -987,14 +1100,17 @@ namespace PowerShellStudio.Shell.Editor
                     break;
 
                 case EditorMetadataWarmupPhase.Completed:
-                    if (TryLoadPersistedMetadataSnapshot(runtimeInfo, out var snapshot, out var manifest, out var loadReason, performanceLogPath) && snapshot is not null && manifest is not null)
+                    if (TryLoadPersistedMetadataSnapshot(runtimeInfo, out var snapshot, out var manifest, out var loadReason, performanceLogPath, _activeMetadataInitialLoadDiagnostics) && snapshot is not null && manifest is not null)
                     {
                         var completedMetadataHealth = BuildMetadataCacheHealth(snapshot);
                         MetadataPerformanceLog.AppendSection(performanceLogPath, "Main process completion");
                         MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata refresh completed and validated in main process. {EditorMetadataSnapshotValidator.Describe(completedMetadataHealth)}");
+                        MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Metadata ready full. Result=Success. EndUtc={DateTime.UtcNow:O}");
                         MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata refresh finished UTC: {DateTime.UtcNow:O}");
                         MetadataPerformanceLog.AppendLine(performanceLogPath, $"Output path for this performance log: {performanceLogPath}");
                         AppLogger.Info("EditorMetadata", $"Metadata refresh completed for runtime '{normalizedRuntimePath}'. {EditorMetadataSnapshotValidator.Describe(completedMetadataHealth)}.");
+                        _activeMetadataInitialLoadDiagnostics?.RecordSnapshotCounts(snapshot);
+                        _activeMetadataInitialLoadDiagnostics?.RecordSuccess("Success", "RebuiltInBackground");
                         RaiseMetadataWarmupStatus(
                             new EditorMetadataWarmupStatus(
                                 EditorMetadataWarmupPhase.Completed,
@@ -1008,6 +1124,7 @@ namespace PowerShellStudio.Shell.Editor
                                 parameterizedQuickInfoCount: completedMetadataHealth.ParameterizedQuickInfoCount,
                                 getChildItemParameterCount: completedMetadataHealth.GetChildItemParameterCount,
                                 reason: warmupReason));
+                        _activeMetadataInitialLoadDiagnostics?.FinalizeSuccess("Success");
                     }
                     else
                     {
@@ -1046,7 +1163,9 @@ namespace PowerShellStudio.Shell.Editor
             var safeDetailText = string.IsNullOrWhiteSpace(detailText)
                 ? "The background metadata builder did not complete successfully."
                 : detailText.Trim();
+            _activeMetadataInitialLoadDiagnostics?.RecordBackgroundRefreshFailure("Metadata failed", safeDetailText);
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata builder reported failure. HasReadyMetadata={hasReadyMetadata}. Detail={safeDetailText}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Metadata failed. Result=Failure. EndUtc={DateTime.UtcNow:O}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata refresh finished UTC: {DateTime.UtcNow:O}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Output path for this performance log: {performanceLogPath}");
             AppLogger.Warning("EditorMetadata", $"Metadata builder reported failure for runtime '{normalizedRuntimePath}'. HasReadyMetadata={hasReadyMetadata}. Detail={safeDetailText}");
@@ -1059,13 +1178,14 @@ namespace PowerShellStudio.Shell.Editor
                         EditorMetadataWarmupPhase.Warning,
                         "Metadata refresh failed; cached metadata still in use.",
                         normalizedRuntimePath,
-                        detailText: $"PS7 ScriptDesk is still using the last known-good metadata snapshot. Refresh error: {safeDetailText}",
+                        detailText: AppendMetadataLogSupportHint($"PS7 ScriptDesk is still using the last known-good metadata snapshot. Refresh error: {safeDetailText}", performanceLogPath),
                         commandCount: metadataHealth.CommandCount,
                         quickInfoCount: metadataHealth.QuickInfoCount,
                         parameterizedQuickInfoCount: metadataHealth.ParameterizedQuickInfoCount,
                         getChildItemParameterCount: metadataHealth.GetChildItemParameterCount,
                         isLoadedFromCache: true,
                         reason: warmupReason));
+                _activeMetadataInitialLoadDiagnostics?.FinalizeFailure("Metadata ready partial", safeDetailText);
                 return;
             }
 
@@ -1074,8 +1194,23 @@ namespace PowerShellStudio.Shell.Editor
                     EditorMetadataWarmupPhase.Failed,
                     "Editor metadata failed; see log",
                     normalizedRuntimePath,
-                    detailText: safeDetailText,
+                    detailText: AppendMetadataLogSupportHint(safeDetailText, performanceLogPath),
                     reason: warmupReason));
+            _activeMetadataInitialLoadDiagnostics?.FinalizeFailure("Metadata failed", safeDetailText);
+        }
+
+        private static string AppendMetadataLogSupportHint(string detailText, string? performanceLogPath)
+        {
+            var safeDetailText = string.IsNullOrWhiteSpace(detailText)
+                ? "Metadata failed."
+                : detailText.Trim();
+
+            if (string.IsNullOrWhiteSpace(performanceLogPath))
+            {
+                return safeDetailText;
+            }
+
+            return $"{safeDetailText}{Environment.NewLine}Metadata diagnostic log:{Environment.NewLine}{performanceLogPath}";
         }
 
         private bool RuntimeHasReadyMetadataSnapshot(string normalizedRuntimePath)
@@ -1087,25 +1222,45 @@ namespace PowerShellStudio.Shell.Editor
             }
         }
 
+        private void ClearActiveMetadataInitialLoadDiagnostics(MetadataInitialLoadDiagnostics? diagnostics)
+        {
+            if (diagnostics is null)
+            {
+                return;
+            }
+
+            lock (_syncRoot)
+            {
+                if (ReferenceEquals(_activeMetadataInitialLoadDiagnostics, diagnostics))
+                {
+                    _activeMetadataInitialLoadDiagnostics = null;
+                }
+            }
+        }
+
         private void StopMetadataBuilderProcess()
         {
             Process? processToStop = null;
             CancellationTokenSource? cancellationToStop = null;
+            MetadataInitialLoadDiagnostics? diagnosticsToFinalize = null;
 
             lock (_syncRoot)
             {
                 processToStop = _metadataBuilderProcess;
                 cancellationToStop = _metadataBuilderCancellationTokenSource;
+                diagnosticsToFinalize = _activeMetadataInitialLoadDiagnostics;
                 _metadataBuilderProcess = null;
                 _metadataBuilderCancellationTokenSource = null;
                 _metadataBuilderStdoutReaderTask = null;
                 _metadataBuilderStderrReaderTask = null;
+                _activeMetadataInitialLoadDiagnostics = null;
             }
 
             try { cancellationToStop?.Cancel(); } catch { }
             if (processToStop is not null)
             {
                 AppLogger.Info("EditorMetadata", $"Stopping metadata builder helper process {processToStop.Id}.");
+                diagnosticsToFinalize?.FinalizeFailure("Background process cancelled", $"Metadata builder helper process {processToStop.Id} was stopped before completion.");
             }
             try
             {

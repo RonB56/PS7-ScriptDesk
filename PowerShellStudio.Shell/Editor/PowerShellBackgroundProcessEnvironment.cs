@@ -18,6 +18,59 @@ namespace PowerShellStudio.Shell.Editor
     /// app's LocalAppData folder so Windows Controlled Folder Access does not block pwsh.exe while
     /// metadata refresh is running.
     /// </summary>
+    internal sealed class PowerShellBackgroundProcessEnvironmentInfo
+    {
+        public PowerShellBackgroundProcessEnvironmentInfo(
+            string purpose,
+            string localAppData,
+            string backgroundRoot,
+            string homePath,
+            string userProfilePath,
+            string moduleRoot,
+            string tempPath,
+            string tmpPath,
+            string psModuleAnalysisCachePath,
+            string psModulePath,
+            IReadOnlyList<string> modulePathEntries,
+            bool modulePathContainsUserDocumentsPowerShell,
+            string powerShellTelemetryOptOut,
+            string powerShellCliTelemetryOptOut,
+            string powerShellUpdateCheck)
+        {
+            Purpose = purpose;
+            LocalAppData = localAppData;
+            BackgroundRoot = backgroundRoot;
+            HomePath = homePath;
+            UserProfilePath = userProfilePath;
+            ModuleRoot = moduleRoot;
+            TempPath = tempPath;
+            TmpPath = tmpPath;
+            PsModuleAnalysisCachePath = psModuleAnalysisCachePath;
+            PsModulePath = psModulePath;
+            ModulePathEntries = modulePathEntries;
+            ModulePathContainsUserDocumentsPowerShell = modulePathContainsUserDocumentsPowerShell;
+            PowerShellTelemetryOptOut = powerShellTelemetryOptOut;
+            PowerShellCliTelemetryOptOut = powerShellCliTelemetryOptOut;
+            PowerShellUpdateCheck = powerShellUpdateCheck;
+        }
+
+        public string Purpose { get; }
+        public string LocalAppData { get; }
+        public string BackgroundRoot { get; }
+        public string HomePath { get; }
+        public string UserProfilePath { get; }
+        public string ModuleRoot { get; }
+        public string TempPath { get; }
+        public string TmpPath { get; }
+        public string PsModuleAnalysisCachePath { get; }
+        public string PsModulePath { get; }
+        public IReadOnlyList<string> ModulePathEntries { get; }
+        public bool ModulePathContainsUserDocumentsPowerShell { get; }
+        public string PowerShellTelemetryOptOut { get; }
+        public string PowerShellCliTelemetryOptOut { get; }
+        public string PowerShellUpdateCheck { get; }
+    }
+
     internal static class PowerShellBackgroundProcessEnvironment
     {
         private const string AppFolderName = ApplicationBranding.InternalName;
@@ -30,12 +83,66 @@ namespace PowerShellStudio.Shell.Editor
                 return false;
             }
 
+            if (!TryBuildEnvironmentInfo(purpose, runtimePath, createDirectories: true, out var environmentInfo, out var failureReason))
+            {
+                AppLogger.Warning(
+                    "PowerShellBackgroundEnvironment",
+                    $"Failed to configure isolated PowerShell environment for purpose '{purpose}': {failureReason}");
+                return false;
+            }
+
+            startInfo.Environment["HOME"] = environmentInfo.HomePath;
+            startInfo.Environment["USERPROFILE"] = environmentInfo.UserProfilePath;
+            startInfo.Environment["PSModuleAnalysisCachePath"] = environmentInfo.PsModuleAnalysisCachePath;
+            startInfo.Environment["POWERSHELL_UPDATECHECK"] = environmentInfo.PowerShellUpdateCheck;
+            startInfo.Environment["POWERSHELL_TELEMETRY_OPTOUT"] = environmentInfo.PowerShellTelemetryOptOut;
+            startInfo.Environment["POWERSHELL_CLI_TELEMETRY_OPTOUT"] = environmentInfo.PowerShellCliTelemetryOptOut;
+            startInfo.Environment["TEMP"] = environmentInfo.TempPath;
+            startInfo.Environment["TMP"] = environmentInfo.TmpPath;
+
+            if (!string.IsNullOrWhiteSpace(environmentInfo.PsModulePath))
+            {
+                startInfo.Environment["PSModulePath"] = environmentInfo.PsModulePath;
+            }
+
+            AppLogger.Debug(
+                "PowerShellBackgroundEnvironment",
+                $"Configured background PowerShell environment. Purpose='{environmentInfo.Purpose}', Home='{environmentInfo.HomePath}', UserProfile='{environmentInfo.UserProfilePath}', Temp='{environmentInfo.TempPath}', Runtime='{runtimePath ?? string.Empty}'.");
+            return true;
+        }
+
+        public static bool TryBuildEnvironmentInfo(
+            string purpose,
+            string? runtimePath,
+            bool createDirectories,
+            out PowerShellBackgroundProcessEnvironmentInfo environmentInfo,
+            out string failureReason)
+        {
+            environmentInfo = new PowerShellBackgroundProcessEnvironmentInfo(
+                purpose: string.Empty,
+                localAppData: string.Empty,
+                backgroundRoot: string.Empty,
+                homePath: string.Empty,
+                userProfilePath: string.Empty,
+                moduleRoot: string.Empty,
+                tempPath: string.Empty,
+                tmpPath: string.Empty,
+                psModuleAnalysisCachePath: string.Empty,
+                psModulePath: string.Empty,
+                modulePathEntries: Array.Empty<string>(),
+                modulePathContainsUserDocumentsPowerShell: false,
+                powerShellTelemetryOptOut: string.Empty,
+                powerShellCliTelemetryOptOut: string.Empty,
+                powerShellUpdateCheck: string.Empty);
+            failureReason = string.Empty;
+
             try
             {
                 var normalizedPurpose = SanitizePathSegment(purpose);
                 var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                 if (string.IsNullOrWhiteSpace(localAppData))
                 {
+                    failureReason = "LocalAppData could not be resolved.";
                     return false;
                 }
 
@@ -45,41 +152,41 @@ namespace PowerShellStudio.Shell.Editor
                 var moduleRoot = Path.Combine(backgroundRoot, "Modules");
                 var cacheRoot = Path.Combine(backgroundRoot, "Cache", normalizedPurpose);
                 var tempRoot = Path.Combine(backgroundRoot, "Temp", normalizedPurpose);
-
-                Directory.CreateDirectory(homeRoot);
-                Directory.CreateDirectory(userProfileRoot);
-                Directory.CreateDirectory(moduleRoot);
-                Directory.CreateDirectory(cacheRoot);
-                Directory.CreateDirectory(tempRoot);
-
-                startInfo.Environment["HOME"] = homeRoot;
-                startInfo.Environment["USERPROFILE"] = userProfileRoot;
-                startInfo.Environment["PSModuleAnalysisCachePath"] = Path.Combine(cacheRoot, "ModuleAnalysisCache");
-                startInfo.Environment["POWERSHELL_UPDATECHECK"] = "Off";
-                startInfo.Environment["POWERSHELL_TELEMETRY_OPTOUT"] = "1";
-                startInfo.Environment["POWERSHELL_CLI_TELEMETRY_OPTOUT"] = "1";
-                startInfo.Environment["TEMP"] = tempRoot;
-                startInfo.Environment["TMP"] = tempRoot;
-
+                var moduleAnalysisCachePath = Path.Combine(cacheRoot, "ModuleAnalysisCache");
                 var safeModulePath = BuildSafeModulePath(runtimePath, moduleRoot);
-                if (!string.IsNullOrWhiteSpace(safeModulePath))
+
+                if (createDirectories)
                 {
-                    startInfo.Environment["PSModulePath"] = safeModulePath;
+                    Directory.CreateDirectory(homeRoot);
+                    Directory.CreateDirectory(userProfileRoot);
+                    Directory.CreateDirectory(moduleRoot);
+                    Directory.CreateDirectory(cacheRoot);
+                    Directory.CreateDirectory(tempRoot);
                 }
 
-                AppLogger.Debug(
-                    "PowerShellBackgroundEnvironment",
-                    $"Configured background PowerShell environment. Purpose='{normalizedPurpose}', Home='{homeRoot}', UserProfile='{userProfileRoot}', Temp='{tempRoot}', Runtime='{runtimePath ?? string.Empty}'.");
+                environmentInfo = new PowerShellBackgroundProcessEnvironmentInfo(
+                    purpose: normalizedPurpose,
+                    localAppData: localAppData,
+                    backgroundRoot: backgroundRoot,
+                    homePath: homeRoot,
+                    userProfilePath: userProfileRoot,
+                    moduleRoot: moduleRoot,
+                    tempPath: tempRoot,
+                    tmpPath: tempRoot,
+                    psModuleAnalysisCachePath: moduleAnalysisCachePath,
+                    psModulePath: safeModulePath,
+                    modulePathEntries: string.IsNullOrWhiteSpace(safeModulePath)
+                        ? Array.Empty<string>()
+                        : safeModulePath.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                    modulePathContainsUserDocumentsPowerShell: ModulePathContainsUserDocumentsPowerShell(safeModulePath),
+                    powerShellTelemetryOptOut: "1",
+                    powerShellCliTelemetryOptOut: "1",
+                    powerShellUpdateCheck: "Off");
                 return true;
             }
             catch (Exception ex)
             {
-                // Background environment isolation is a hardening/performance feature. If it fails,
-                // do not prevent metadata/diagnostics from starting; log and let the caller proceed
-                // with the normal process environment.
-                AppLogger.Warning(
-                    "PowerShellBackgroundEnvironment",
-                    $"Failed to configure isolated PowerShell environment for purpose '{purpose}': {ex.Message}");
+                failureReason = ex.Message;
                 return false;
             }
         }

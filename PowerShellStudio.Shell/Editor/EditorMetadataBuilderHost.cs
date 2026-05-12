@@ -64,6 +64,42 @@ namespace PowerShellStudio.Shell.Editor
         private const string PerformanceLogSwitch = "--performance-log";
         private const string TracePrefix = "PSSTUDIO_METADATA_TRACE:";
 
+        public static string GetMetadataWorkerRootDirectory()
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                ApplicationBranding.InternalName,
+                "MetadataWorker");
+        }
+
+        private static void CleanupOldWorkerArtifactDirectories(string rootDirectory)
+        {
+            try
+            {
+                if (!Directory.Exists(rootDirectory))
+                {
+                    return;
+                }
+
+                var cutoffUtc = DateTime.UtcNow.Subtract(TimeSpan.FromDays(14));
+                foreach (var directory in new DirectoryInfo(rootDirectory).EnumerateDirectories().Where(item => item.LastWriteTimeUtc < cutoffUtc))
+                {
+                    try
+                    {
+                        directory.Delete(recursive: true);
+                    }
+                    catch
+                    {
+                        // Best effort only.
+                    }
+                }
+            }
+            catch
+            {
+                // Best effort only.
+            }
+        }
+
         public static bool IsMetadataBuilderInvocation(string[]? args)
         {
             return args?.Any(argument => string.Equals(argument, BuilderSwitch, StringComparison.OrdinalIgnoreCase)) == true;
@@ -110,6 +146,8 @@ namespace PowerShellStudio.Shell.Editor
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Metadata refresh started UTC: {DateTime.UtcNow:O}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"PowerShell path used: {normalizedRuntimePath}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Helper process path: {Environment.ProcessPath ?? string.Empty}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, "Phase started: Command catalog load.");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, "Phase started: Parameter metadata load.");
 
             try
             {
@@ -144,6 +182,7 @@ namespace PowerShellStudio.Shell.Editor
 
                 var saveStopwatch = Stopwatch.StartNew();
                 var moduleFingerprintHash = EditorMetadataCacheStore.ComputeModuleFingerprintHash(snapshotResult.ModuleFingerprint);
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase started: Snapshot persisted. StartUtc={DateTime.UtcNow:O}");
                 EditorMetadataCacheStore.SaveSnapshot(
                     normalizedRuntimePath,
                     snapshot,
@@ -158,6 +197,7 @@ namespace PowerShellStudio.Shell.Editor
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache write command count: {snapshotResult.Catalog.Commands.Count:N0}.");
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache write quick-info count: {snapshotResult.QuickInfos.Count:N0}.");
                 MetadataPerformanceLog.AppendLine(performanceLogPath, $"Cache write parameter count: {savedParameterCount:N0}.");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase completed: Snapshot persisted. Result=Success. DurationMs={saveStopwatch.ElapsedMilliseconds:N0}. EndUtc={DateTime.UtcNow:O}");
 
                 WriteStatus(new EditorMetadataBuilderStatusMessage
                 {
@@ -227,7 +267,7 @@ namespace PowerShellStudio.Shell.Editor
             }
             finally
             {
-                CleanupWorkerArtifacts(workerArtifacts, succeeded);
+                CleanupWorkerArtifacts(workerArtifacts, succeeded, performanceLogPath);
             }
         }
 
@@ -267,28 +307,42 @@ namespace PowerShellStudio.Shell.Editor
             var configuredModulePath = GetEnvironmentValue(process.StartInfo, "PSModulePath");
 
             MetadataPerformanceLog.AppendSection(performanceLogPath, "External PowerShell worker process");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background process launch requested UTC: {DateTime.UtcNow:O}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background worker executable path: {runtimePath}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background worker arguments: -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{workerArtifacts.ScriptPath}\"");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Worker script path: {workerArtifacts.ScriptPath}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Worker snapshot output path: {workerArtifacts.OutputPath}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Worker stderr capture path: {workerArtifacts.StandardErrorPath}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Worker stdout capture path: {workerArtifacts.StandardOutputPath}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Worker working directory: {workerArtifacts.WorkingDirectory}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"PowerShellBackgroundProcessEnvironment applied: {backgroundEnvironmentApplied}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment HOME: {GetEnvironmentValue(process.StartInfo, "HOME")}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment USERPROFILE: {GetEnvironmentValue(process.StartInfo, "USERPROFILE")}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment TEMP: {GetEnvironmentValue(process.StartInfo, "TEMP")}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment TMP: {GetEnvironmentValue(process.StartInfo, "TMP")}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment LOCALAPPDATA: {GetEnvironmentValue(process.StartInfo, "LOCALAPPDATA")}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment PSModuleAnalysisCachePath: {GetEnvironmentValue(process.StartInfo, "PSModuleAnalysisCachePath")}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment POWERSHELL_TELEMETRY_OPTOUT: {GetEnvironmentValue(process.StartInfo, "POWERSHELL_TELEMETRY_OPTOUT")}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment POWERSHELL_CLI_TELEMETRY_OPTOUT: {GetEnvironmentValue(process.StartInfo, "POWERSHELL_CLI_TELEMETRY_OPTOUT")}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Environment POWERSHELL_UPDATECHECK: {GetEnvironmentValue(process.StartInfo, "POWERSHELL_UPDATECHECK")}");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"PSModulePath contains Documents\\PowerShell: {PowerShellBackgroundProcessEnvironment.ModulePathContainsUserDocumentsPowerShell(configuredModulePath)}");
             WriteModulePathEntries(performanceLogPath, configuredModulePath);
+            MetadataPerformanceLog.AppendLine(performanceLogPath, "Background worker stdout captured: True");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, "Background worker stderr captured: True");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, "Background worker timeout: None. Cancellation is driven by runtime switches/app shutdown.");
 
             AppLogger.Info("EditorMetadataBuilder", $"Starting external PowerShell metadata scan using '{runtimePath}'. ScriptPath='{workerArtifacts.ScriptPath}', OutputPath='{workerArtifacts.OutputPath}'.");
             var processStartStopwatch = Stopwatch.StartNew();
+            var processStartUtc = DateTimeOffset.UtcNow;
             process.Start();
             processStartStopwatch.Stop();
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"PowerShell process Start() elapsed: {processStartStopwatch.ElapsedMilliseconds:N0} ms. ProcessId={process.Id}.");
 
             var standardErrorBuffer = new StringBuilder();
+            var standardOutputBuffer = new StringBuilder();
             var firstOutputStopwatch = Stopwatch.StartNew();
-            var stdoutTask = ForwardStatusOutputAsync(process.StandardOutput, runtimePath, performanceLogPath, firstOutputStopwatch, cancellationToken);
-            var stderrTask = DrainStandardErrorAsync(process.StandardError, standardErrorBuffer, cancellationToken);
+            var stdoutTask = ForwardStatusOutputAsync(process.StandardOutput, runtimePath, performanceLogPath, firstOutputStopwatch, standardOutputBuffer, cancellationToken);
+            var stderrTask = DrainStandardErrorAsync(process.StandardError, standardErrorBuffer, performanceLogPath, cancellationToken);
 
             try
             {
@@ -298,6 +352,8 @@ namespace PowerShellStudio.Shell.Editor
             }
             catch (OperationCanceledException)
             {
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background worker canceled UTC: {DateTime.UtcNow:O}. ProcessId={process.Id}.");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, "Background worker was killed due to cancellation before completion.");
                 TryKillProcess(process);
                 throw;
             }
@@ -307,9 +363,19 @@ namespace PowerShellStudio.Shell.Editor
                 await File.WriteAllTextAsync(workerArtifacts.StandardErrorPath, standardErrorBuffer.ToString(), new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             }
 
+            if (standardOutputBuffer.Length > 0)
+            {
+                await File.WriteAllTextAsync(workerArtifacts.StandardOutputPath, standardOutputBuffer.ToString(), new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
+            }
+
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background worker exited UTC: {DateTime.UtcNow:O}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background worker exit code: {process.ExitCode}");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background worker start UTC: {processStartUtc:O}");
+
             if (process.ExitCode != 0)
             {
                 var errorText = standardErrorBuffer.ToString().Trim();
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background worker failure stderr tail: {GetTail(errorText, 30)}");
                 throw new InvalidOperationException(string.IsNullOrWhiteSpace(errorText)
                     ? $"PowerShell metadata worker exited with code {process.ExitCode}."
                     : $"PowerShell metadata worker exited with code {process.ExitCode}: {errorText}");
@@ -318,6 +384,7 @@ namespace PowerShellStudio.Shell.Editor
             if (!File.Exists(workerArtifacts.OutputPath))
             {
                 var errorText = standardErrorBuffer.ToString().Trim();
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background worker missing output stderr tail: {GetTail(errorText, 30)}");
                 throw new InvalidOperationException(string.IsNullOrWhiteSpace(errorText)
                     ? "PowerShell metadata worker did not produce a metadata snapshot file."
                     : $"PowerShell metadata worker did not produce a metadata snapshot file. {errorText}");
@@ -337,11 +404,13 @@ namespace PowerShellStudio.Shell.Editor
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Total quick-info count: {result.QuickInfos.Count:N0}.");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Total parameter count: {totalParameterCount:N0}.");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"External worker total elapsed: {workerStopwatch.ElapsedMilliseconds:N0} ms.");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, "Phase completed: Command catalog load completed.");
+            MetadataPerformanceLog.AppendLine(performanceLogPath, "Phase completed: Parameter metadata load completed.");
             AppLogger.Info("EditorMetadataBuilder", $"Parsed metadata snapshot file in {parseStopwatch.ElapsedMilliseconds:N0} ms. OutputPath='{workerArtifacts.OutputPath}', OutputBytes={outputFileLength:N0}, Catalog={result.Catalog.Commands.Count:N0}, QuickInfo={result.QuickInfos.Count:N0}, Parameters={totalParameterCount:N0}, WorkerTotal={workerStopwatch.ElapsedMilliseconds:N0} ms.");
             return result;
         }
 
-        private static async Task ForwardStatusOutputAsync(StreamReader reader, string runtimePath, string? performanceLogPath, Stopwatch firstOutputStopwatch, CancellationToken cancellationToken)
+        private static async Task ForwardStatusOutputAsync(StreamReader reader, string runtimePath, string? performanceLogPath, Stopwatch firstOutputStopwatch, StringBuilder rawOutputBuffer, CancellationToken cancellationToken)
         {
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -356,6 +425,8 @@ namespace PowerShellStudio.Shell.Editor
                     firstOutputStopwatch.Stop();
                     MetadataPerformanceLog.AppendLine(performanceLogPath, $"Time to first worker stdout/status line: {firstOutputStopwatch.ElapsedMilliseconds:N0} ms.");
                 }
+
+                rawOutputBuffer.AppendLine(line);
 
                 if (EditorMetadataBuilderProtocol.TryParseStatusLine(line, out var message) && message is not null)
                 {
@@ -401,7 +472,7 @@ namespace PowerShellStudio.Shell.Editor
             }
         }
 
-        private static async Task DrainStandardErrorAsync(StreamReader reader, StringBuilder buffer, CancellationToken cancellationToken)
+        private static async Task DrainStandardErrorAsync(StreamReader reader, StringBuilder buffer, string? performanceLogPath, CancellationToken cancellationToken)
         {
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -418,6 +489,7 @@ namespace PowerShellStudio.Shell.Editor
 
                 buffer.AppendLine(line);
                 AppLogger.Debug("EditorMetadataBuilder", $"Worker stderr: {line.Trim()}");
+                MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background worker stderr: {line.Trim()}");
             }
         }
 
@@ -2249,11 +2321,9 @@ catch {
 
         private static MetadataWorkerArtifacts CreateWorkerArtifacts()
         {
-            var rootDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                ApplicationBranding.InternalName,
-                "MetadataWorker");
+            var rootDirectory = GetMetadataWorkerRootDirectory();
             Directory.CreateDirectory(rootDirectory);
+            CleanupOldWorkerArtifactDirectories(rootDirectory);
 
             var workingDirectory = Path.Combine(rootDirectory, Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(workingDirectory);
@@ -2262,21 +2332,22 @@ catch {
                 workingDirectory,
                 Path.Combine(workingDirectory, "worker.ps1"),
                 Path.Combine(workingDirectory, "snapshot.json"),
-                Path.Combine(workingDirectory, "stderr.log"));
+                Path.Combine(workingDirectory, "stderr.log"),
+                Path.Combine(workingDirectory, "stdout.log"));
         }
 
-        private static void CleanupWorkerArtifacts(MetadataWorkerArtifacts workerArtifacts, bool succeeded)
+        private static void CleanupWorkerArtifacts(MetadataWorkerArtifacts workerArtifacts, bool succeeded, string? performanceLogPath)
         {
             if (workerArtifacts is null)
             {
                 return;
             }
 
-            if (!succeeded && AppLogger.IsDebugEnabled)
+            if (!succeeded && ShouldPreserveFailedArtifacts(performanceLogPath))
             {
                 AppLogger.Info(
                     "EditorMetadataBuilder",
-                    $"Preserving failed metadata worker artifacts at '{workerArtifacts.WorkingDirectory}' because debug logging is enabled.");
+                    $"Preserving failed metadata worker artifacts at '{workerArtifacts.WorkingDirectory}' for diagnostics.");
                 return;
             }
 
@@ -2293,6 +2364,22 @@ catch {
             }
         }
 
+        private static bool ShouldPreserveFailedArtifacts(string? performanceLogPath)
+        {
+            if (AppLogger.IsDebugEnabled)
+            {
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(performanceLogPath))
+            {
+                return false;
+            }
+
+            var fileName = Path.GetFileName(performanceLogPath);
+            return fileName.StartsWith("metadata-initial-load-", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static void TryKillProcess(Process process)
         {
             try
@@ -2306,6 +2393,20 @@ catch {
             {
                 // Best effort only.
             }
+        }
+
+        private static string GetTail(string text, int maxLines)
+        {
+            if (string.IsNullOrWhiteSpace(text) || maxLines <= 0)
+            {
+                return string.Empty;
+            }
+
+            var lines = text
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .TakeLast(maxLines)
+                .ToArray();
+            return string.Join(" | ", lines);
         }
 
         private sealed class FullSnapshotBuildResult
@@ -2336,18 +2437,20 @@ catch {
 
         private sealed class MetadataWorkerArtifacts
         {
-            public MetadataWorkerArtifacts(string workingDirectory, string scriptPath, string outputPath, string standardErrorPath)
+            public MetadataWorkerArtifacts(string workingDirectory, string scriptPath, string outputPath, string standardErrorPath, string standardOutputPath)
             {
                 WorkingDirectory = workingDirectory;
                 ScriptPath = scriptPath;
                 OutputPath = outputPath;
                 StandardErrorPath = standardErrorPath;
+                StandardOutputPath = standardOutputPath;
             }
 
             public string WorkingDirectory { get; }
             public string ScriptPath { get; }
             public string OutputPath { get; }
             public string StandardErrorPath { get; }
+            public string StandardOutputPath { get; }
         }
     }
 }

@@ -14,7 +14,12 @@ namespace PowerShellStudio.Domain.Models
             string discoverySource,
             bool isPowerShell7OrLater,
             bool isWindowsPowerShell,
-            bool isPreferred)
+            bool isPreferred,
+            bool isValidated = false,
+            bool isWindowsAppsAlias = false,
+            string? resolvedExecutablePath = null,
+            string? psHome = null,
+            string? validationMessage = null)
         {
             DisplayName = displayName;
             Edition = edition;
@@ -26,6 +31,11 @@ namespace PowerShellStudio.Domain.Models
             IsPowerShell7OrLater = isPowerShell7OrLater;
             IsWindowsPowerShell = isWindowsPowerShell;
             IsPreferred = isPreferred;
+            IsValidated = isValidated;
+            IsWindowsAppsAlias = isWindowsAppsAlias;
+            ResolvedExecutablePath = resolvedExecutablePath ?? string.Empty;
+            PsHome = psHome ?? string.Empty;
+            ValidationMessage = validationMessage ?? string.Empty;
         }
 
         public string DisplayName { get; }
@@ -47,5 +57,15 @@ namespace PowerShellStudio.Domain.Models
         public bool IsWindowsPowerShell { get; }
 
         public bool IsPreferred { get; }
+
+        public bool IsValidated { get; }
+
+        public bool IsWindowsAppsAlias { get; }
+
+        public string ResolvedExecutablePath { get; }
+
+        public string PsHome { get; }
+
+        public string ValidationMessage { get; }
     }
 }

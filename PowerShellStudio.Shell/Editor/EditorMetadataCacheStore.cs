@@ -49,6 +49,50 @@ namespace PowerShellStudio.Shell.Editor
         public bool IsLegacyPathCache { get; }
     }
 
+    internal sealed class EditorMetadataCacheProbeCandidateInfo
+    {
+        public EditorMetadataCacheProbeCandidateInfo(
+            string cacheDirectory,
+            string manifestPath,
+            string snapshotPath,
+            bool isLegacyPathCache,
+            bool directoryExists,
+            bool manifestExists,
+            long manifestSizeBytes,
+            DateTime? manifestLastWriteUtc,
+            bool snapshotExists,
+            long snapshotSizeBytes,
+            DateTime? snapshotLastWriteUtc,
+            EditorMetadataCacheManifest? manifest)
+        {
+            CacheDirectory = cacheDirectory ?? string.Empty;
+            ManifestPath = manifestPath ?? string.Empty;
+            SnapshotPath = snapshotPath ?? string.Empty;
+            IsLegacyPathCache = isLegacyPathCache;
+            DirectoryExists = directoryExists;
+            ManifestExists = manifestExists;
+            ManifestSizeBytes = Math.Max(0, manifestSizeBytes);
+            ManifestLastWriteUtc = manifestLastWriteUtc;
+            SnapshotExists = snapshotExists;
+            SnapshotSizeBytes = Math.Max(0, snapshotSizeBytes);
+            SnapshotLastWriteUtc = snapshotLastWriteUtc;
+            Manifest = manifest;
+        }
+
+        public string CacheDirectory { get; }
+        public string ManifestPath { get; }
+        public string SnapshotPath { get; }
+        public bool IsLegacyPathCache { get; }
+        public bool DirectoryExists { get; }
+        public bool ManifestExists { get; }
+        public long ManifestSizeBytes { get; }
+        public DateTime? ManifestLastWriteUtc { get; }
+        public bool SnapshotExists { get; }
+        public long SnapshotSizeBytes { get; }
+        public DateTime? SnapshotLastWriteUtc { get; }
+        public EditorMetadataCacheManifest? Manifest { get; }
+    }
+
     internal sealed class EditorMetadataCacheSnapshot
     {
         public EditorMetadataCacheSnapshot(
@@ -468,6 +512,60 @@ namespace PowerShellStudio.Shell.Editor
                 .OrderByDescending(entry => entry.Manifest?.CreatedUtcTicks ?? entry.Manifest?.BuiltUtcTicks ?? 0)
                 .ThenBy(entry => entry.CacheDirectory, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+        }
+
+        public static IReadOnlyList<EditorMetadataCacheProbeCandidateInfo> GetCacheProbeCandidates(
+            string runtimePath,
+            string runtimeVersion,
+            string powerShellEdition,
+            string runtimeArchitecture)
+        {
+            if (string.IsNullOrWhiteSpace(runtimePath))
+            {
+                return Array.Empty<EditorMetadataCacheProbeCandidateInfo>();
+            }
+
+            var normalizedRuntimePath = NormalizeRuntimePath(runtimePath);
+            var candidates = GetCacheDirectoryCandidates(normalizedRuntimePath, runtimeVersion, powerShellEdition, runtimeArchitecture);
+            var results = new List<EditorMetadataCacheProbeCandidateInfo>(candidates.Count);
+
+            foreach (var candidate in candidates)
+            {
+                var manifestPath = Path.Combine(candidate.CacheDirectory, ManifestFileName);
+                var snapshotPath = Path.Combine(candidate.CacheDirectory, SnapshotFileName);
+                var manifestInfo = SafeGetFileInfo(manifestPath);
+                var snapshotInfo = SafeGetFileInfo(snapshotPath);
+                EditorMetadataCacheManifest? manifest = null;
+
+                try
+                {
+                    if (manifestInfo is not null)
+                    {
+                        var manifestJson = File.ReadAllText(manifestPath, Encoding.UTF8);
+                        manifest = JsonSerializer.Deserialize<EditorMetadataCacheManifest>(manifestJson, ManifestSerializerOptions);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Warning("EditorMetadataCache", $"Could not inspect metadata cache probe candidate manifest '{manifestPath}'. {ex.Message}");
+                }
+
+                results.Add(new EditorMetadataCacheProbeCandidateInfo(
+                    candidate.CacheDirectory,
+                    manifestPath,
+                    snapshotPath,
+                    candidate.IsLegacyPathCache,
+                    Directory.Exists(candidate.CacheDirectory),
+                    manifestInfo is not null,
+                    manifestInfo?.Length ?? 0,
+                    manifestInfo?.LastWriteTimeUtc,
+                    snapshotInfo is not null,
+                    snapshotInfo?.Length ?? 0,
+                    snapshotInfo?.LastWriteTimeUtc,
+                    manifest));
+            }
+
+            return results;
         }
 
         public static bool DeleteCacheForRuntime(

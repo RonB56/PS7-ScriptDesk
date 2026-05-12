@@ -417,6 +417,45 @@
             </Setter>
         </Style>
 
+        <Style x:Key="MenuPopupSeparatorStyle" TargetType="Separator">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Separator">
+                        <Border Height="1"
+                                Margin="8,4"
+                                Background="{DynamicResource Theme.Border.Subtle}"
+                                SnapsToDevicePixels="True" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="MenuPopupContextMenuStyle" TargetType="ContextMenu">
+            <Setter Property="Background" Value="{DynamicResource Theme.Menu.Background}" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Menu.Foreground}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Strong}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="HasDropShadow" Value="True" />
+            <Setter Property="Padding" Value="4" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ContextMenu">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="{StaticResource Radius.Small}">
+                            <StackPanel IsItemsHost="True"
+                                        KeyboardNavigation.DirectionalNavigation="Cycle" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Resources>
+                <Style TargetType="Separator" BasedOn="{StaticResource MenuPopupSeparatorStyle}" />
+            </Style.Resources>
+        </Style>
+
         <Style TargetType="Menu">
             <Setter Property="Background" Value="{DynamicResource Theme.Menu.Background}" />
             <Setter Property="Foreground" Value="{DynamicResource Theme.Menu.Foreground}" />
@@ -427,6 +466,119 @@
             <Setter Property="Padding" Value="10,6" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="Foreground" Value="{DynamicResource Theme.Menu.Foreground}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="MenuItem">
+                        <Grid SnapsToDevicePixels="True">
+                            <Border x:Name="RootBorder"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="{StaticResource Radius.Small}" />
+                            <Grid x:Name="TopLevelHeaderGrid" Margin="{TemplateBinding Padding}">
+                                <ContentPresenter ContentSource="Header"
+                                                  RecognizesAccessKey="True" />
+                            </Grid>
+                            <Grid x:Name="PopupItemGrid" Visibility="Collapsed" Margin="{TemplateBinding Padding}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="18" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="14" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="CheckGlyph"
+                                           Grid.Column="0"
+                                           Margin="0,0,8,0"
+                                           VerticalAlignment="Center"
+                                           Foreground="{TemplateBinding Foreground}"
+                                           Text="✓"
+                                           Visibility="Collapsed" />
+                                <ContentPresenter Grid.Column="1"
+                                                  VerticalAlignment="Center"
+                                                  ContentSource="Header"
+                                                  RecognizesAccessKey="True" />
+                                <TextBlock x:Name="GestureText"
+                                           Grid.Column="2"
+                                           Margin="18,0,0,0"
+                                           VerticalAlignment="Center"
+                                           Foreground="{TemplateBinding Foreground}"
+                                           Opacity="0.85"
+                                           Text="{TemplateBinding InputGestureText}" />
+                                <Path x:Name="SubmenuArrow"
+                                      Grid.Column="3"
+                                      Margin="10,0,0,0"
+                                      Width="8"
+                                      Height="8"
+                                      VerticalAlignment="Center"
+                                      HorizontalAlignment="Center"
+                                      Fill="{TemplateBinding Foreground}"
+                                      Stretch="Uniform"
+                                      Data="M 0 0 L 4 4 L 0 8 Z"
+                                      Visibility="Collapsed" />
+                            </Grid>
+                            <Popup x:Name="PART_Popup"
+                                   Placement="Bottom"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                                   PopupAnimation="Fade">
+                                <Border x:Name="PopupBorder"
+                                        Margin="0,2,0,0"
+                                        Background="{DynamicResource Theme.Menu.Background}"
+                                        BorderBrush="{DynamicResource Theme.Border.Strong}"
+                                        BorderThickness="1"
+                                        CornerRadius="{StaticResource Radius.Small}">
+                                    <StackPanel IsItemsHost="True"
+                                                Margin="4"
+                                                KeyboardNavigation.DirectionalNavigation="Cycle" />
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Role" Value="TopLevelHeader">
+                                <Setter TargetName="TopLevelHeaderGrid" Property="Visibility" Value="Visible" />
+                                <Setter TargetName="PopupItemGrid" Property="Visibility" Value="Collapsed" />
+                                <Setter TargetName="PART_Popup" Property="Placement" Value="Bottom" />
+                            </Trigger>
+                            <Trigger Property="Role" Value="TopLevelItem">
+                                <Setter TargetName="TopLevelHeaderGrid" Property="Visibility" Value="Visible" />
+                                <Setter TargetName="PopupItemGrid" Property="Visibility" Value="Collapsed" />
+                            </Trigger>
+                            <Trigger Property="Role" Value="SubmenuHeader">
+                                <Setter TargetName="TopLevelHeaderGrid" Property="Visibility" Value="Collapsed" />
+                                <Setter TargetName="PopupItemGrid" Property="Visibility" Value="Visible" />
+                                <Setter TargetName="SubmenuArrow" Property="Visibility" Value="Visible" />
+                                <Setter TargetName="PART_Popup" Property="Placement" Value="Right" />
+                            </Trigger>
+                            <Trigger Property="Role" Value="SubmenuItem">
+                                <Setter TargetName="TopLevelHeaderGrid" Property="Visibility" Value="Collapsed" />
+                                <Setter TargetName="PopupItemGrid" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Hover}" />
+                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsSubmenuOpen" Value="True">
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Hover}" />
+                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="CheckGlyph" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+                                <Setter TargetName="RootBorder" Property="Opacity" Value="0.72" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Resources>
+                <Style TargetType="ContextMenu" BasedOn="{StaticResource MenuPopupContextMenuStyle}" />
+                <Style TargetType="Separator" BasedOn="{StaticResource MenuPopupSeparatorStyle}" />
+            </Style.Resources>
         </Style>
 
         <Style TargetType="ToolBarTray">

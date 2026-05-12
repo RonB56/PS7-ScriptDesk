@@ -52,11 +52,22 @@
         <DockPanel>
 
         <Menu DockPanel.Dock="Top" help:ContextHelp.Key="App.Overview">
-            <MenuItem Header="_File" help:ContextHelp.Key="Menu.File">
+            <MenuItem x:Name="FileMenuItem"
+                      Header="_File"
+                      SubmenuOpened="FileMenuItem_SubmenuOpened"
+                      help:ContextHelp.Key="Menu.File">
                 <MenuItem Header="_New Script" InputGestureText="Ctrl+N" Command="{Binding NewScriptCommand}" help:ContextHelp.Key="Command.NewScript" />
                 <MenuItem Header="_Close Tab" InputGestureText="Ctrl+W" Command="{Binding CloseTabCommand}" help:ContextHelp.Key="Command.CloseTab" />
                 <MenuItem Header="_Open..." InputGestureText="Ctrl+O" Click="OpenFile_Click" help:ContextHelp.Key="Command.OpenFile" />
                 <MenuItem Header="Open _Folder..." InputGestureText="Ctrl+Shift+O" Command="{Binding OpenWorkspaceFolderCommand}" help:ContextHelp.Key="Command.OpenFolder" />
+                <Separator x:Name="RecentScriptsSectionTopSeparator" />
+                <MenuItem x:Name="RecentScriptsSectionHeaderMenuItem"
+                          Header="Recent _Scripts"
+                          IsEnabled="False" />
+                <MenuItem x:Name="RecentScriptsEmptyMenuItem"
+                          Header="No recent scripts"
+                          IsEnabled="False" />
+                <Separator x:Name="RecentScriptsSectionBottomSeparator" />
                 <Separator />
                 <MenuItem Header="_Save" InputGestureText="Ctrl+S" Click="SaveFile_Click" help:ContextHelp.Key="Command.Save" />
                 <MenuItem Header="Save _As..." InputGestureText="Ctrl+Shift+S" Click="SaveFileAs_Click" help:ContextHelp.Key="Command.SaveAs" />
@@ -204,6 +215,9 @@
                     <MenuItem Header="_Clear Developer Diagnostics Logs"
                               Click="ClearDeveloperDiagnosticsLogs_Click" />
                 </MenuItem>
+                <Separator />
+                <MenuItem Header="Open _Logs Folder"
+                          Click="OpenLogsFolder_Click" />
             </MenuItem>
 
             <MenuItem Header="_Help" help:ContextHelp.Key="Help.Menu">

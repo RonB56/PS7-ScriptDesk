@@ -12,7 +12,6 @@ namespace PowerShellStudio.Shell.Composition
         public static MainWindow CreateMainWindow()
         {
             var workspaceService = new WorkspaceService();
-            var runtimeService = new RuntimeService();
             var fileDocumentService = new FileDocumentService();
             var workspaceFolderService = new WorkspaceFolderService();
             var userPromptService = new UserPromptService();
@@ -20,6 +19,7 @@ namespace PowerShellStudio.Shell.Composition
             var exeExportService = new ExeExportService();
             var applicationSettingsService = new ApplicationSettingsService();
             var applicationSettings = applicationSettingsService.LoadSettings();
+            var runtimeService = new RuntimeService(applicationSettings.SelectedRuntimeExecutablePath);
             DeveloperDiagnostics.ConfigureFromSettings(applicationSettings, "AppBootstrapper loaded settings");
             DeveloperDiagnostics.LogInfo(
                 "Startup",

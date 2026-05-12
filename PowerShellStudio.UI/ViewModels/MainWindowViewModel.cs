@@ -21,6 +21,7 @@ namespace PowerShellStudio.UI.ViewModels
 {
     public class MainWindowViewModel : INotifyPropertyChanged
     {
+        private const int MaximumRecentFiles = 10;
         private readonly IFileDocumentService _fileDocumentService;
         private readonly IRuntimeService _runtimeService;
         private readonly ILiveConsoleService _liveConsoleService;
@@ -836,6 +837,22 @@ namespace PowerShellStudio.UI.ViewModels
             return TryOpenFileFromPathCore(filePath, addToRecentFiles: true, logOperation: true, out failureReason);
         }
 
+        public IReadOnlyList<string> GetRecentFilePathsSnapshot()
+        {
+            return _recentFilePaths.ToList();
+        }
+
+        public bool RemoveRecentFilePath(string filePath)
+        {
+            var normalizedPath = NormalizeStoredPath(filePath);
+            if (normalizedPath is null)
+            {
+                return false;
+            }
+
+            return _recentFilePaths.RemoveAll(existingPath => string.Equals(existingPath, normalizedPath, StringComparison.OrdinalIgnoreCase)) > 0;
+        }
+
         public bool SaveSelectedTab()
         {
             if (SelectedTab is null)
@@ -1332,10 +1349,9 @@ namespace PowerShellStudio.UI.ViewModels
             _recentFilePaths.RemoveAll(existingPath => string.Equals(existingPath, normalizedPath, StringComparison.OrdinalIgnoreCase));
             _recentFilePaths.Insert(0, normalizedPath);
 
-            const int maximumRecentFiles = 15;
-            if (_recentFilePaths.Count > maximumRecentFiles)
+            if (_recentFilePaths.Count > MaximumRecentFiles)
             {
-                _recentFilePaths.RemoveRange(maximumRecentFiles, _recentFilePaths.Count - maximumRecentFiles);
+                _recentFilePaths.RemoveRange(MaximumRecentFiles, _recentFilePaths.Count - MaximumRecentFiles);
             }
         }
 
@@ -2250,7 +2266,7 @@ namespace PowerShellStudio.UI.ViewModels
                         }
                     }
 
-                    SelectedRuntimeItem = runtimeToSelect ?? _preferredRuntimeItem ?? (DetectedRuntimes.Count > 0 ? DetectedRuntimes[0] : null);
+                    SelectedRuntimeItem = runtimeToSelect ?? _preferredRuntimeItem;
                     RuntimeText = discoveryResult.SummaryText;
 
                     OnPropertyChanged(nameof(RuntimeCountText));
@@ -2263,7 +2279,7 @@ namespace PowerShellStudio.UI.ViewModels
 
                         if (_preferredRuntimeItem is null)
                         {
-                            AppendOutputLine("No PowerShell runtime was detected.");
+                            AppendOutputLine("PowerShell 7 was not found or could not be launched.");
                         }
                         else
                         {
@@ -2279,12 +2295,12 @@ namespace PowerShellStudio.UI.ViewModels
                     if (updateStatusText)
                     {
                         StatusText = _preferredRuntimeItem is null
-                            ? "Runtime discovery refreshed - none detected"
+                            ? "PowerShell 7 was not found or could not be launched"
                             : $"Runtime discovery refreshed - {_preferredRuntimeItem.DisplayName} preferred";
                     }
                     else if (_preferredRuntimeItem is null)
                     {
-                        StatusText = "Runtime discovery completed - no runtime detected";
+                        StatusText = "PowerShell 7 was not found or could not be launched";
                     }
                     else
                     {

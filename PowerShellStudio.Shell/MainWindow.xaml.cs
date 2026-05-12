@@ -63,6 +63,7 @@ namespace PowerShellStudio.Shell
         private const int DebugOutputPreservationWindowMilliseconds = 2000;
         private const int DebugVariableValueMaxLength = 160;
         private const int DebugHoverValueMaxLength = 300;
+        private const string RecentScriptMenuItemTagPrefix = "RecentScript:";
         private const double DefaultDebugPaneWindowWidth = 420;
         private const double DefaultDebugPaneWindowHeight = 480;
         private static readonly HashSet<string> HiddenDebugVariableNames = new(StringComparer.OrdinalIgnoreCase)
@@ -724,6 +725,134 @@ namespace PowerShellStudio.Shell
             }
 
             DeveloperDiagnostics.LogEventHandlerExit("UI", "OpenFile_Click", "OpenFile handler exited.");
+        }
+
+        private void FileMenuItem_SubmenuOpened(object sender, RoutedEventArgs e)
+        {
+            PopulateRecentScriptsSection();
+        }
+
+        private void PopulateRecentScriptsSection()
+        {
+            if (FileMenuItem is null ||
+                RecentScriptsSectionHeaderMenuItem is null ||
+                RecentScriptsEmptyMenuItem is null ||
+                RecentScriptsSectionTopSeparator is null ||
+                RecentScriptsSectionBottomSeparator is null)
+            {
+                return;
+            }
+
+            for (var index = FileMenuItem.Items.Count - 1; index >= 0; index--)
+            {
+                if (FileMenuItem.Items[index] is WpfMenuItem existingMenuItem &&
+                    existingMenuItem.Tag is string tag &&
+                    tag.StartsWith(RecentScriptMenuItemTagPrefix, StringComparison.Ordinal))
+                {
+                    existingMenuItem.Click -= RecentScriptMenuItem_Click;
+                    FileMenuItem.Items.RemoveAt(index);
+                }
+            }
+
+            var recentPaths = ViewModel?.GetRecentFilePathsSnapshot() ?? Array.Empty<string>();
+            var hasRecentPaths = recentPaths.Count > 0;
+            RecentScriptsSectionTopSeparator.Visibility = Visibility.Visible;
+            RecentScriptsSectionHeaderMenuItem.Visibility = Visibility.Visible;
+            RecentScriptsSectionBottomSeparator.Visibility = Visibility.Visible;
+            RecentScriptsEmptyMenuItem.Visibility = hasRecentPaths ? Visibility.Collapsed : Visibility.Visible;
+
+            if (!hasRecentPaths)
+            {
+                return;
+            }
+
+            var insertIndex = FileMenuItem.Items.IndexOf(RecentScriptsEmptyMenuItem);
+            if (insertIndex < 0)
+            {
+                return;
+            }
+
+            for (var index = 0; index < recentPaths.Count; index++)
+            {
+                var recentPath = recentPaths[index];
+                var menuItem = new WpfMenuItem
+                {
+                    Header = $"{index + 1}  {EscapeMenuItemHeader(recentPath)}",
+                    ToolTip = recentPath,
+                    Tag = $"{RecentScriptMenuItemTagPrefix}{recentPath}"
+                };
+                menuItem.Click += RecentScriptMenuItem_Click;
+                FileMenuItem.Items.Insert(insertIndex + index, menuItem);
+            }
+        }
+
+        private void RecentScriptMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel is null ||
+                sender is not WpfMenuItem menuItem ||
+                menuItem.Tag is not string taggedPath ||
+                !taggedPath.StartsWith(RecentScriptMenuItemTagPrefix, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var recentPath = taggedPath.Substring(RecentScriptMenuItemTagPrefix.Length);
+
+            DeveloperDiagnostics.LogUserAction(
+                "Editor",
+                "RecentScriptOpenRequested",
+                "Recent script menu item selected.",
+                new Dictionary<string, object?>
+                {
+                    ["filePath"] = recentPath
+                });
+
+            if (ViewModel.TryOpenFileFromPath(recentPath, out var failureReason))
+            {
+                FocusActiveEditorSoon();
+                return;
+            }
+
+            var message = string.IsNullOrWhiteSpace(failureReason)
+                ? "The recent script could not be opened."
+                : failureReason!;
+            var removedMissingPath = false;
+
+            if (!File.Exists(recentPath))
+            {
+                removedMissingPath = ViewModel.RemoveRecentFilePath(recentPath);
+                PopulateRecentScriptsSection();
+            }
+
+            if (removedMissingPath)
+            {
+                AppLogger.Warning("RecentScripts", $"Removed unavailable recent script '{recentPath}'. Reason={message}");
+                DeveloperDiagnostics.LogDecision(
+                    "Editor",
+                    "RecentScriptRemoved",
+                    "Recent script path was removed after open failed.",
+                    "RemoveMissingRecentScript",
+                    new Dictionary<string, object?>
+                    {
+                        ["filePath"] = recentPath,
+                        ["failureReason"] = message
+                    });
+            }
+
+            ViewModel.StatusText = $"Recent script open failed: {message}";
+            System.Windows.MessageBox.Show(
+                this,
+                $"{message}{Environment.NewLine}{Environment.NewLine}{recentPath}",
+                "Recent Script",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+
+        private static string EscapeMenuItemHeader(string text)
+        {
+            return string.IsNullOrEmpty(text)
+                ? string.Empty
+                : text.Replace("_", "__", StringComparison.Ordinal);
         }
 
         private async void OpenFolder_Click(object sender, RoutedEventArgs e)
@@ -5166,6 +5295,15 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
+            if (!runtimeInfo.IsPowerShell7OrLater || !runtimeInfo.IsValidated)
+            {
+                AppLogger.Warning(
+                    "MainWindow",
+                    $"Editor metadata warmup will report failure because the selected runtime is not a validated PowerShell 7 runtime. Path='{runtimeInfo.ExecutablePath}', " +
+                    $"Version='{runtimeInfo.VersionText}', Edition='{runtimeInfo.Edition}', Validated={runtimeInfo.IsValidated}.");
+                StartupTimingLogger.Log("MainWindow", $"Editor metadata warmup scheduled for invalid runtime '{runtimeInfo.ExecutablePath}' so diagnostics can capture the failure.");
+            }
+
             var runtimeIdentity = BuildRuntimeIdentityKey(runtimeInfo);
             if (string.Equals(_pendingEditorMetadataWarmupIdentity, runtimeIdentity, StringComparison.OrdinalIgnoreCase))
             {
@@ -5608,6 +5746,21 @@ namespace PowerShellStudio.Shell
         private void OpenDeveloperDebuggingFolder_Click(object sender, RoutedEventArgs e)
         {
             OpenFolderInExplorer(DeveloperDiagnostics.DeveloperDebuggingRootDirectory);
+        }
+
+        private void OpenLogsFolder_Click(object sender, RoutedEventArgs e)
+        {
+            var target = AppLogger.CurrentLogDirectory;
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                target = Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Logs");
+            }
+
+            OpenFolderInExplorer(target);
+            if (ViewModel is not null)
+            {
+                ViewModel.StatusText = $"Opened logs folder: {target}";
+            }
         }
 
         private void OpenLatestDiagnosticSessionFolder_Click(object sender, RoutedEventArgs e)

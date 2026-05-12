@@ -3,9 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using Microsoft.Win32;
-using System.Security;
 using System.Runtime.Versioning;
+using System.Security;
+using Microsoft.Win32;
 using PowerShellStudio.Application.Interfaces;
 using PowerShellStudio.Application.Utilities;
 using PowerShellStudio.Domain.Models;
@@ -14,51 +14,58 @@ namespace PowerShellStudio.PowerShell.Services
 {
     public class RuntimeService : IRuntimeService
     {
-        private const int ProbeTimeoutMilliseconds = 8000;
-        private const int AliasProbeTimeoutMilliseconds = 1500;
+        private const int ProbeTimeoutMilliseconds = 4000;
+        private const int AliasProbeTimeoutMilliseconds = 2500;
+        private const int MaxProbePreviewLength = 300;
         private static readonly string[] RegistryRootsToInspect =
         {
             @"SOFTWARE\Microsoft\PowerShellCore\InstalledVersions",
             @"SOFTWARE\WOW6432Node\Microsoft\PowerShellCore\InstalledVersions"
         };
 
+        private readonly string? _configuredRuntimePath;
+
+        public RuntimeService(string? configuredRuntimePath = null)
+        {
+            _configuredRuntimePath = NormalizeExecutablePath(configuredRuntimePath);
+        }
+
         public RuntimeDiscoveryResult DiscoverRuntimes()
         {
             var discoveryStopwatch = Stopwatch.StartNew();
             StartupTimingLogger.Log("RuntimeService", "DiscoverRuntimes started.");
+
+            var candidateResults = new List<RuntimeDiscoveryCandidateInfo>();
             var detectedRuntimes = new List<PowerShellRuntimeInfo>();
 
             foreach (var candidate in EnumerateCandidateExecutablePaths())
             {
-                var runtime = TryResolveRuntimeCandidate(
-                    candidate.Path,
-                    candidate.Source,
-                    allowProcessProbe: ShouldProbeRuntimeCandidate(candidate.Path));
+                var probeResult = ProbeRuntimeCandidate(candidate.Path, candidate.Source);
+                candidateResults.Add(probeResult.CandidateInfo);
 
-                if (runtime is null)
+                if (probeResult.RuntimeInfo is null)
                 {
                     continue;
                 }
 
-                if (runtime.IsWindowsPowerShell && runtime.Version.Major != 5)
+                if (probeResult.RuntimeInfo.IsWindowsPowerShell && probeResult.RuntimeInfo.Version.Major != 5)
                 {
-                    StartupTimingLogger.Log("RuntimeService", $"Ignored suspicious Windows PowerShell runtime '{runtime.DisplayName}' from {runtime.ExecutablePath}.");
+                    StartupTimingLogger.Log("RuntimeService", $"Ignored suspicious Windows PowerShell runtime '{probeResult.RuntimeInfo.DisplayName}' from {probeResult.RuntimeInfo.ExecutablePath}.");
                     continue;
                 }
 
-                detectedRuntimes.Add(runtime);
+                detectedRuntimes.Add(probeResult.RuntimeInfo);
             }
 
             var consolidatedRuntimes = ConsolidateDuplicateRuntimes(detectedRuntimes);
-
             var orderedRuntimes = consolidatedRuntimes
                 .OrderByDescending(GetRuntimePriority)
+                .ThenByDescending(runtime => runtime.IsValidated)
                 .ThenByDescending(runtime => runtime.Version)
                 .ThenBy(runtime => runtime.DisplayName, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            var preferredRuntime = orderedRuntimes.FirstOrDefault();
-
+            var preferredRuntime = orderedRuntimes.FirstOrDefault(runtime => runtime.IsPowerShell7OrLater && runtime.IsValidated);
             var finalizedRuntimes = orderedRuntimes
                 .Select(runtime => new PowerShellRuntimeInfo(
                     runtime.DisplayName,
@@ -71,14 +78,19 @@ namespace PowerShellStudio.PowerShell.Services
                     runtime.IsPowerShell7OrLater,
                     runtime.IsWindowsPowerShell,
                     isPreferred: preferredRuntime is not null &&
-                                 string.Equals(runtime.ExecutablePath, preferredRuntime.ExecutablePath, StringComparison.OrdinalIgnoreCase)))
+                                 string.Equals(runtime.ExecutablePath, preferredRuntime.ExecutablePath, StringComparison.OrdinalIgnoreCase),
+                    runtime.IsValidated,
+                    runtime.IsWindowsAppsAlias,
+                    runtime.ResolvedExecutablePath,
+                    runtime.PsHome,
+                    runtime.ValidationMessage))
                 .ToList();
 
             var finalizedPreferredRuntime = finalizedRuntimes.FirstOrDefault(runtime => runtime.IsPreferred);
             var summaryText = BuildSummaryText(finalizedRuntimes, finalizedPreferredRuntime);
 
-            StartupTimingLogger.Log("RuntimeService", $"DiscoverRuntimes completed in {discoveryStopwatch.ElapsedMilliseconds} ms with {finalizedRuntimes.Count} finalized runtime(s).");
-            return new RuntimeDiscoveryResult(finalizedRuntimes, finalizedPreferredRuntime, summaryText);
+            StartupTimingLogger.Log("RuntimeService", $"DiscoverRuntimes completed in {discoveryStopwatch.ElapsedMilliseconds} ms with {finalizedRuntimes.Count} validated runtime(s).");
+            return new RuntimeDiscoveryResult(finalizedRuntimes, finalizedPreferredRuntime, summaryText, candidateResults);
         }
 
         public PowerShellRuntimeInfo? TryResolveRuntimeIdentity(string executablePath)
@@ -90,30 +102,35 @@ namespace PowerShellStudio.PowerShell.Services
 
             var normalizedRuntimePath = NormalizeExecutablePath(executablePath);
             var stopwatch = Stopwatch.StartNew();
-            var runtime = TryResolveRuntimeCandidate(
-                normalizedRuntimePath,
-                "Persisted runtime selection",
-                allowProcessProbe: ShouldProbeRuntimeCandidate(normalizedRuntimePath));
+            var probeResult = ProbeRuntimeCandidate(normalizedRuntimePath, "Persisted runtime selection");
             stopwatch.Stop();
 
-            if (runtime is null)
+            if (probeResult.RuntimeInfo is null)
             {
-                StartupTimingLogger.Log("RuntimeService", $"Persisted runtime identity could not be resolved for '{normalizedRuntimePath}' after {stopwatch.ElapsedMilliseconds} ms.");
+                StartupTimingLogger.Log(
+                    "RuntimeService",
+                    $"Persisted runtime identity could not be resolved for '{normalizedRuntimePath}' after {stopwatch.ElapsedMilliseconds} ms. " +
+                    $"Reason={probeResult.CandidateInfo.FailureReason}");
                 return null;
             }
 
-            StartupTimingLogger.Log("RuntimeService", $"Persisted runtime identity resolved in {stopwatch.ElapsedMilliseconds} ms: {runtime.DisplayName} ({normalizedRuntimePath})");
+            StartupTimingLogger.Log("RuntimeService", $"Persisted runtime identity resolved in {stopwatch.ElapsedMilliseconds} ms: {probeResult.RuntimeInfo.DisplayName} ({normalizedRuntimePath})");
             return new PowerShellRuntimeInfo(
-                runtime.DisplayName,
-                runtime.Edition,
-                runtime.VersionText,
-                runtime.Version,
-                runtime.Architecture,
-                runtime.ExecutablePath,
-                runtime.DiscoverySource,
-                runtime.IsPowerShell7OrLater,
-                runtime.IsWindowsPowerShell,
-                isPreferred: true);
+                probeResult.RuntimeInfo.DisplayName,
+                probeResult.RuntimeInfo.Edition,
+                probeResult.RuntimeInfo.VersionText,
+                probeResult.RuntimeInfo.Version,
+                probeResult.RuntimeInfo.Architecture,
+                probeResult.RuntimeInfo.ExecutablePath,
+                probeResult.RuntimeInfo.DiscoverySource,
+                probeResult.RuntimeInfo.IsPowerShell7OrLater,
+                probeResult.RuntimeInfo.IsWindowsPowerShell,
+                isPreferred: probeResult.RuntimeInfo.IsPowerShell7OrLater && probeResult.RuntimeInfo.IsValidated,
+                probeResult.RuntimeInfo.IsValidated,
+                probeResult.RuntimeInfo.IsWindowsAppsAlias,
+                probeResult.RuntimeInfo.ResolvedExecutablePath,
+                probeResult.RuntimeInfo.PsHome,
+                probeResult.RuntimeInfo.ValidationMessage);
         }
 
         private static IReadOnlyList<PowerShellRuntimeInfo> ConsolidateDuplicateRuntimes(IReadOnlyList<PowerShellRuntimeInfo> detectedRuntimes)
@@ -122,9 +139,7 @@ namespace PowerShellStudio.PowerShell.Services
 
             foreach (var runtime in detectedRuntimes)
             {
-                var key = runtime.IsWindowsPowerShell
-                    ? $"winps|{runtime.Edition}|{runtime.VersionText}"
-                    : runtime.ExecutablePath;
+                var key = BuildRuntimeDeduplicationKey(runtime);
 
                 if (!consolidated.TryGetValue(key, out var existingRuntime))
                 {
@@ -132,19 +147,59 @@ namespace PowerShellStudio.PowerShell.Services
                     continue;
                 }
 
-                consolidated[key] = ChoosePreferredDuplicate(existingRuntime, runtime);
+                var preferredRuntime = ChoosePreferredDuplicate(existingRuntime, runtime);
+                consolidated[key] = preferredRuntime;
+                StartupTimingLogger.Log(
+                    "RuntimeService",
+                    $"Removed duplicate runtime candidate during consolidation. Key='{key}', Kept='{preferredRuntime.ExecutablePath}', " +
+                    $"Discarded='{(ReferenceEquals(preferredRuntime, existingRuntime) ? runtime.ExecutablePath : existingRuntime.ExecutablePath)}'.");
             }
 
             return consolidated.Values.ToList();
         }
 
+        private static string BuildRuntimeDeduplicationKey(PowerShellRuntimeInfo runtime)
+        {
+            if (runtime.IsWindowsPowerShell)
+            {
+                return string.Join(
+                    "|",
+                    "winps",
+                    NormalizeDisplayToken(runtime.VersionText),
+                    NormalizeDisplayToken(runtime.Edition));
+            }
+
+            var resolvedPath = NormalizeComparablePath(runtime.ResolvedExecutablePath);
+            var executablePath = NormalizeComparablePath(runtime.ExecutablePath);
+
+            return string.Join(
+                "|",
+                NormalizeDisplayToken(runtime.Edition),
+                NormalizeDisplayToken(runtime.VersionText),
+                !string.IsNullOrWhiteSpace(resolvedPath) ? resolvedPath : executablePath,
+                NormalizeDisplayToken(runtime.Architecture));
+        }
+
         private static PowerShellRuntimeInfo ChoosePreferredDuplicate(PowerShellRuntimeInfo first, PowerShellRuntimeInfo second)
         {
+            if (first.IsValidated != second.IsValidated)
+            {
+                return second.IsValidated ? second : first;
+            }
+
+            if (first.IsWindowsAppsAlias != second.IsWindowsAppsAlias)
+            {
+                return first.IsWindowsAppsAlias ? second : first;
+            }
+
             if (first.IsWindowsPowerShell && second.IsWindowsPowerShell)
             {
                 var firstScore = GetWindowsPowerShellPathPreference(first.ExecutablePath);
                 var secondScore = GetWindowsPowerShellPathPreference(second.ExecutablePath);
-                return secondScore > firstScore ? second : first;
+                if (secondScore != firstScore)
+                {
+                    return secondScore > firstScore ? second : first;
+                }
             }
 
             return second.Version > first.Version ? second : first;
@@ -165,11 +220,16 @@ namespace PowerShellStudio.PowerShell.Services
             return 0;
         }
 
-        private static IEnumerable<(string Path, string Source)> EnumerateCandidateExecutablePaths()
+        private IEnumerable<(string Path, string Source)> EnumerateCandidateExecutablePaths()
         {
             var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var candidate in GetKnownPowerShellCoreCandidates())
+            if (!string.IsNullOrWhiteSpace(_configuredRuntimePath) && seenPaths.Add(_configuredRuntimePath))
+            {
+                yield return (_configuredRuntimePath, "Configured path");
+            }
+
+            foreach (var candidate in GetKnownPowerShellCoreCandidates(includeWindowsAppsAlias: false))
             {
                 if (seenPaths.Add(candidate.Path))
                 {
@@ -196,14 +256,19 @@ namespace PowerShellStudio.PowerShell.Services
                 }
             }
 
-            if (seenPaths.Count == 0)
+            foreach (var candidate in GetWindowsAppsAliasCandidates())
             {
-                foreach (var candidate in GetWhereCommandCandidates())
+                if (seenPaths.Add(candidate.Path))
                 {
-                    if (seenPaths.Add(candidate.Path))
-                    {
-                        yield return candidate;
-                    }
+                    yield return candidate;
+                }
+            }
+
+            foreach (var candidate in GetWhereCommandCandidates())
+            {
+                if (seenPaths.Add(candidate.Path))
+                {
+                    yield return candidate;
                 }
             }
 
@@ -216,7 +281,7 @@ namespace PowerShellStudio.PowerShell.Services
             }
         }
 
-        private static IEnumerable<(string Path, string Source)> GetKnownPowerShellCoreCandidates()
+        private static IEnumerable<(string Path, string Source)> GetKnownPowerShellCoreCandidates(bool includeWindowsAppsAlias)
         {
             var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -253,6 +318,19 @@ namespace PowerShellStudio.PowerShell.Services
                 }
             }
 
+            if (!includeWindowsAppsAlias)
+            {
+                yield break;
+            }
+
+            foreach (var candidate in GetWindowsAppsAliasCandidates())
+            {
+                yield return candidate;
+            }
+        }
+
+        private static IEnumerable<(string Path, string Source)> GetWindowsAppsAliasCandidates()
+        {
             var localWindowsApps = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "Microsoft",
@@ -480,57 +558,30 @@ namespace PowerShellStudio.PowerShell.Services
             }
         }
 
-        private static PowerShellRuntimeInfo? TryResolveRuntimeCandidate(string executablePath, string discoverySource, bool allowProcessProbe)
+        private static RuntimeProbeResult ProbeRuntimeCandidate(string executablePath, string discoverySource)
         {
-            if (string.IsNullOrWhiteSpace(executablePath))
-            {
-                return null;
-            }
-
             var normalizedRuntimePath = NormalizeExecutablePath(executablePath);
-            var metadataStopwatch = Stopwatch.StartNew();
-            var metadataRuntime = TryBuildRuntimeFromFileMetadata(normalizedRuntimePath, discoverySource, "startup file metadata");
-            metadataStopwatch.Stop();
-            if (metadataRuntime is not null)
+            var isWindowsAppsAlias = IsWindowsAppsAliasPath(normalizedRuntimePath);
+            var exists = !string.IsNullOrWhiteSpace(normalizedRuntimePath) && File.Exists(normalizedRuntimePath);
+            var fileVersion = string.Empty;
+            var productVersion = string.Empty;
+
+            TryReadVersionInfo(normalizedRuntimePath, out fileVersion, out productVersion);
+
+            if (!exists)
             {
-                StartupTimingLogger.Log("RuntimeService", $"Resolved runtime from file metadata in {metadataStopwatch.ElapsedMilliseconds} ms: {metadataRuntime.DisplayName} ({normalizedRuntimePath})");
-                return metadataRuntime;
+                StartupTimingLogger.Log("RuntimeService", $"Skipped missing candidate: {normalizedRuntimePath}");
+                return RuntimeProbeResult.Failure(
+                    normalizedRuntimePath,
+                    discoverySource,
+                    exists,
+                    isWindowsAppsAlias,
+                    fileVersion,
+                    productVersion,
+                    "Candidate path did not exist.");
             }
 
-            if (!allowProcessProbe)
-            {
-                StartupTimingLogger.Log("RuntimeService", $"Skipping process probe for candidate without usable metadata: {normalizedRuntimePath}");
-                return null;
-            }
-
-            return TryProbeRuntime(
-                normalizedRuntimePath,
-                discoverySource,
-                normalizedRuntimePath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase)
-                    ? AliasProbeTimeoutMilliseconds
-                    : ProbeTimeoutMilliseconds);
-        }
-
-        private static bool ShouldProbeRuntimeCandidate(string executablePath)
-        {
-            if (string.IsNullOrWhiteSpace(executablePath))
-            {
-                return false;
-            }
-
-            return executablePath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
-                   (string.Equals(Path.GetFileName(executablePath), "powershell.exe", StringComparison.OrdinalIgnoreCase) &&
-                    executablePath.Contains("WindowsPowerShell", StringComparison.OrdinalIgnoreCase));
-        }
-
-        private static PowerShellRuntimeInfo? TryProbeRuntime(string executablePath, string discoverySource, int timeoutMilliseconds)
-        {
-            if (!File.Exists(executablePath))
-            {
-                StartupTimingLogger.Log("RuntimeService", $"Skipped missing candidate: {executablePath}");
-                return null;
-            }
-
+            var timeoutMilliseconds = isWindowsAppsAlias ? AliasProbeTimeoutMilliseconds : ProbeTimeoutMilliseconds;
             var probeStopwatch = Stopwatch.StartNew();
 
             try
@@ -539,8 +590,8 @@ namespace PowerShellStudio.PowerShell.Services
                 {
                     StartInfo = new ProcessStartInfo
                     {
-                        FileName = executablePath,
-                        Arguments = "-NoLogo -NoProfile -NonInteractive -Command \"$v = $PSVersionTable.PSVersion; $edition = $PSVersionTable.PSEdition; $arch = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture; [Console]::Out.WriteLine($edition + '|' + $v.ToString() + '|' + $v.Major + '|' + $v.Minor + '|' + $v.Build + '|' + $v.Revision + '|' + $arch.ToString())\"",
+                        FileName = normalizedRuntimePath,
+                        Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$v=$PSVersionTable.PSVersion; $edition=$PSVersionTable.PSEdition; $arch=[System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture; $psHome=$PSHOME; try { $processPath=[System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { $processPath='' }; [Console]::Out.WriteLine($edition + '|' + $v.ToString() + '|' + $v.Major + '|' + $v.Minor + '|' + $v.Build + '|' + $v.Revision + '|' + $arch.ToString() + '|' + $psHome + '|' + $processPath)\"",
                         UseShellExecute = false,
                         RedirectStandardOutput = true,
                         RedirectStandardError = true,
@@ -552,76 +603,160 @@ namespace PowerShellStudio.PowerShell.Services
 
                 if (!process.WaitForExit(timeoutMilliseconds))
                 {
-                    StartupTimingLogger.Log("RuntimeService", $"Probe timed out after {probeStopwatch.ElapsedMilliseconds} ms: {executablePath}");
+                    StartupTimingLogger.Log("RuntimeService", $"Probe timed out after {probeStopwatch.ElapsedMilliseconds} ms: {normalizedRuntimePath}");
                     TryKillProcess(process);
-                    return TryBuildRuntimeFromFileMetadata(executablePath, discoverySource, "probe timeout fallback");
+                    return RuntimeProbeResult.Failure(
+                        normalizedRuntimePath,
+                        discoverySource,
+                        exists,
+                        isWindowsAppsAlias,
+                        fileVersion,
+                        productVersion,
+                        $"Launch timed out after {timeoutMilliseconds} ms.",
+                        launchSucceeded: true,
+                        timedOut: true);
                 }
 
                 var standardOutput = process.StandardOutput.ReadToEnd().Trim();
                 var standardError = process.StandardError.ReadToEnd().Trim();
+                var outputSummary = SummarizeText(standardOutput);
+                var errorSummary = SummarizeText(standardError);
 
-                if (!string.IsNullOrWhiteSpace(standardOutput) && process.ExitCode == 0)
+                if (process.ExitCode != 0)
                 {
-                    var parsedRuntime = TryParseRuntimeProbe(executablePath, discoverySource, standardOutput);
-                    if (parsedRuntime is not null)
-                    {
-                        StartupTimingLogger.Log("RuntimeService", $"Probe succeeded in {probeStopwatch.ElapsedMilliseconds} ms: {parsedRuntime.DisplayName} ({executablePath})");
-                        return parsedRuntime;
-                    }
+                    StartupTimingLogger.Log("RuntimeService", $"Probe exited with code {process.ExitCode} after {probeStopwatch.ElapsedMilliseconds} ms: {normalizedRuntimePath}");
+                    return RuntimeProbeResult.Failure(
+                        normalizedRuntimePath,
+                        discoverySource,
+                        exists,
+                        isWindowsAppsAlias,
+                        fileVersion,
+                        productVersion,
+                        $"Launch exited with code {process.ExitCode}.",
+                        launchSucceeded: true,
+                        exitCode: process.ExitCode,
+                        stdoutSummary: outputSummary,
+                        stderrSummary: errorSummary);
                 }
 
-                if (!string.IsNullOrWhiteSpace(standardError))
+                if (string.IsNullOrWhiteSpace(standardOutput))
                 {
-                    StartupTimingLogger.Log("RuntimeService", $"Probe returned stderr after {probeStopwatch.ElapsedMilliseconds} ms: {executablePath} -> {standardError}");
-                }
-                else
-                {
-                    StartupTimingLogger.Log("RuntimeService", $"Probe returned no usable output after {probeStopwatch.ElapsedMilliseconds} ms: {executablePath}");
+                    StartupTimingLogger.Log("RuntimeService", $"Probe returned no output after {probeStopwatch.ElapsedMilliseconds} ms: {normalizedRuntimePath}");
+                    return RuntimeProbeResult.Failure(
+                        normalizedRuntimePath,
+                        discoverySource,
+                        exists,
+                        isWindowsAppsAlias,
+                        fileVersion,
+                        productVersion,
+                        "Launch succeeded but returned no version output.",
+                        launchSucceeded: true,
+                        exitCode: process.ExitCode,
+                        stdoutSummary: outputSummary,
+                        stderrSummary: errorSummary);
                 }
 
-                return TryBuildRuntimeFromFileMetadata(executablePath, discoverySource, "file metadata fallback");
+                if (!TryParseRuntimeProbe(
+                        normalizedRuntimePath,
+                        discoverySource,
+                        standardOutput,
+                        out var runtimeInfo,
+                        out var failureReason,
+                        out var resolvedExecutablePath,
+                        out var psHome,
+                        out var edition,
+                        out var versionText,
+                        out var architecture))
+                {
+                    StartupTimingLogger.Log("RuntimeService", $"Probe returned unusable output after {probeStopwatch.ElapsedMilliseconds} ms: {normalizedRuntimePath}. Reason={failureReason}");
+                    return RuntimeProbeResult.Failure(
+                        normalizedRuntimePath,
+                        discoverySource,
+                        exists,
+                        isWindowsAppsAlias,
+                        fileVersion,
+                        productVersion,
+                        failureReason,
+                        launchSucceeded: true,
+                        exitCode: process.ExitCode,
+                        stdoutSummary: outputSummary,
+                        stderrSummary: errorSummary,
+                        edition: edition,
+                        versionText: versionText,
+                        architecture: architecture,
+                        resolvedExecutablePath: resolvedExecutablePath,
+                        psHome: psHome);
+                }
+
+                StartupTimingLogger.Log("RuntimeService", $"Probe succeeded in {probeStopwatch.ElapsedMilliseconds} ms: {runtimeInfo!.DisplayName} ({normalizedRuntimePath})");
+                return RuntimeProbeResult.Success(
+                    runtimeInfo,
+                    normalizedRuntimePath,
+                    discoverySource,
+                    exists,
+                    isWindowsAppsAlias,
+                    fileVersion,
+                    productVersion,
+                    process.ExitCode,
+                    outputSummary,
+                    errorSummary);
             }
             catch (Exception ex)
             {
-                StartupTimingLogger.Log("RuntimeService", $"Probe failed after {probeStopwatch.ElapsedMilliseconds} ms: {executablePath} -> {ex.GetType().Name}: {ex.Message}");
-                return TryBuildRuntimeFromFileMetadata(executablePath, discoverySource, "exception fallback");
+                StartupTimingLogger.Log("RuntimeService", $"Probe failed after {probeStopwatch.ElapsedMilliseconds} ms: {normalizedRuntimePath} -> {ex.GetType().Name}: {ex.Message}");
+                return RuntimeProbeResult.Failure(
+                    normalizedRuntimePath,
+                    discoverySource,
+                    exists,
+                    isWindowsAppsAlias,
+                    fileVersion,
+                    productVersion,
+                    $"{ex.GetType().Name}: {ex.Message}");
             }
         }
 
-        private static void TryKillProcess(Process process)
+        private static bool TryParseRuntimeProbe(
+            string executablePath,
+            string discoverySource,
+            string output,
+            out PowerShellRuntimeInfo? runtimeInfo,
+            out string failureReason,
+            out string resolvedExecutablePath,
+            out string psHome,
+            out string edition,
+            out string versionText,
+            out string architecture)
         {
-            try
-            {
-                if (!process.HasExited)
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-            }
-            catch
-            {
-                // Best effort cleanup only.
-            }
-        }
+            runtimeInfo = null;
+            failureReason = string.Empty;
+            resolvedExecutablePath = string.Empty;
+            psHome = string.Empty;
+            edition = string.Empty;
+            versionText = string.Empty;
+            architecture = string.Empty;
 
-        private static PowerShellRuntimeInfo? TryParseRuntimeProbe(string executablePath, string discoverySource, string output)
-        {
             var line = output
                 .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
                 .LastOrDefault();
 
             if (string.IsNullOrWhiteSpace(line))
             {
-                return null;
+                failureReason = "Validation returned an empty output line.";
+                return false;
             }
 
             var parts = line.Split('|');
-            if (parts.Length < 6)
+            if (parts.Length < 9)
             {
-                return null;
+                failureReason = "Validation output was missing required fields.";
+                return false;
             }
 
-            var edition = string.IsNullOrWhiteSpace(parts[0]) ? "Unknown" : parts[0].Trim();
-            var versionText = string.IsNullOrWhiteSpace(parts[1]) ? "Unknown" : parts[1].Trim();
+            edition = parts[0].Trim();
+            versionText = parts[1].Trim();
+            resolvedExecutablePath = parts[8].Trim();
+            psHome = parts[7].Trim();
+            architecture = parts[6].Trim();
 
             if (!int.TryParse(parts[2], out var major))
             {
@@ -643,107 +778,109 @@ namespace PowerShellStudio.PowerShell.Services
                 revision = -1;
             }
 
-            var architecture = parts.Length >= 7 && !string.IsNullOrWhiteSpace(parts[6])
-                ? parts[6].Trim()
-                : string.Empty;
+            var isWindowsPowerShellCandidate = string.Equals(Path.GetFileName(executablePath), "powershell.exe", StringComparison.OrdinalIgnoreCase) &&
+                                               executablePath.Contains("WindowsPowerShell", StringComparison.OrdinalIgnoreCase);
 
-            if (string.Equals(Path.GetFileName(executablePath), "powershell.exe", StringComparison.OrdinalIgnoreCase) &&
-                executablePath.Contains("WindowsPowerShell", StringComparison.OrdinalIgnoreCase) &&
-                major != 5)
+            if (isWindowsPowerShellCandidate && major != 5)
             {
-                StartupTimingLogger.Log("RuntimeService", $"Ignored suspicious Windows PowerShell version '{versionText}' from {executablePath}.");
-                return null;
+                failureReason = $"Windows PowerShell candidate returned unsupported version {versionText}.";
+                return false;
             }
 
-            return CreateRuntimeInfo(executablePath, discoverySource, edition, versionText, architecture, major, minor, build, revision);
+            if (!isWindowsPowerShellCandidate)
+            {
+                if (!string.Equals(edition, "Core", StringComparison.OrdinalIgnoreCase))
+                {
+                    failureReason = $"Candidate returned PowerShell edition '{edition}', not PowerShell Core.";
+                    return false;
+                }
+
+                if (major < 7)
+                {
+                    failureReason = $"Candidate returned PowerShell version {versionText}; PS7 or later is required.";
+                    return false;
+                }
+            }
+
+            runtimeInfo = CreateRuntimeInfo(
+                executablePath,
+                discoverySource,
+                edition,
+                versionText,
+                architecture,
+                major,
+                minor,
+                build,
+                revision,
+                isValidated: true,
+                resolvedExecutablePath: resolvedExecutablePath,
+                psHome: psHome,
+                validationMessage: "Launch probe succeeded.");
+            return true;
         }
 
-        private static PowerShellRuntimeInfo? TryBuildRuntimeFromFileMetadata(string executablePath, string discoverySource, string fallbackReason)
+        private static void TryReadVersionInfo(string executablePath, out string fileVersion, out string productVersion)
         {
-            if (!ShouldAllowMetadataFallback(executablePath))
-            {
-                StartupTimingLogger.Log("RuntimeService", $"Skipped file metadata fallback for {executablePath}.");
-                return null;
-            }
+            fileVersion = string.Empty;
+            productVersion = string.Empty;
 
             try
             {
-                var fileInfo = FileVersionInfo.GetVersionInfo(executablePath);
-                if (!LooksLikePowerShellBinary(fileInfo))
+                if (string.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath))
                 {
-                    StartupTimingLogger.Log("RuntimeService", $"Skipped file metadata fallback because metadata did not look like PowerShell: {executablePath}");
-                    return null;
-                }
-                var parsedVersionText = ParseVersionText(fileInfo.ProductVersion) ?? ParseVersionText(fileInfo.FileVersion);
-
-                var major = fileInfo.ProductMajorPart > 0 ? fileInfo.ProductMajorPart : fileInfo.FileMajorPart;
-                var minor = fileInfo.ProductMinorPart >= 0 ? fileInfo.ProductMinorPart : fileInfo.FileMinorPart;
-                var build = fileInfo.ProductBuildPart >= 0 ? fileInfo.ProductBuildPart : fileInfo.FileBuildPart;
-                var revision = fileInfo.ProductPrivatePart >= 0 ? fileInfo.ProductPrivatePart : fileInfo.FilePrivatePart;
-
-                if (major <= 0 && !TrySplitVersionText(parsedVersionText, out major, out minor, out build, out revision))
-                {
-                    return null;
+                    return;
                 }
 
-                if (major <= 0)
-                {
-                    return null;
-                }
-
-                var isWindowsPowerShellCandidate = string.Equals(Path.GetFileName(executablePath), "powershell.exe", StringComparison.OrdinalIgnoreCase)
-                    && executablePath.Contains("WindowsPowerShell", StringComparison.OrdinalIgnoreCase);
-
-                if (isWindowsPowerShellCandidate && major != 5)
-                {
-                    StartupTimingLogger.Log("RuntimeService", $"Skipped Windows PowerShell metadata fallback because it produced suspicious version '{parsedVersionText ?? BuildVersionText(major, minor, build, revision)}' for {executablePath}.");
-                    return null;
-                }
-
-                var edition = string.Equals(Path.GetFileName(executablePath), "pwsh.exe", StringComparison.OrdinalIgnoreCase)
-                    ? "Core"
-                    : "Desktop";
-                var architecture = TryDetectExecutableArchitecture(executablePath);
-
-                var versionText = !string.IsNullOrWhiteSpace(parsedVersionText)
-                    ? parsedVersionText!
-                    : BuildVersionText(major, minor, build, revision);
-
-                var runtime = CreateRuntimeInfo(executablePath, $"{discoverySource} ({fallbackReason})", edition, versionText, architecture, major, minor, build, revision);
-                StartupTimingLogger.Log("RuntimeService", $"Runtime built from file metadata: {runtime.DisplayName} ({executablePath})");
-                return runtime;
+                var versionInfo = FileVersionInfo.GetVersionInfo(executablePath);
+                fileVersion = versionInfo.FileVersion ?? string.Empty;
+                productVersion = versionInfo.ProductVersion ?? string.Empty;
             }
-            catch (Exception ex)
+            catch
             {
-                StartupTimingLogger.Log("RuntimeService", $"File metadata fallback failed for {executablePath}: {ex.Message}");
-                return null;
+                // Best-effort metadata only.
             }
         }
 
-        private static bool ShouldAllowMetadataFallback(string executablePath)
+        private static void TryKillProcess(Process process)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // Best effort cleanup only.
+            }
+        }
+
+        private static bool IsWindowsAppsAliasPath(string executablePath)
+        {
+            return executablePath.Contains(@"\AppData\Local\Microsoft\WindowsApps\pwsh.exe", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string SummarizeText(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            var normalized = text.Trim().Replace(Environment.NewLine, " ").Replace('\n', ' ').Replace('\r', ' ');
+            return normalized.Length <= MaxProbePreviewLength
+                ? normalized
+                : normalized.Substring(0, MaxProbePreviewLength) + "...";
+        }
+
+        private static string NormalizeExecutablePath(string? executablePath)
         {
             if (string.IsNullOrWhiteSpace(executablePath))
             {
-                return false;
+                return string.Empty;
             }
 
-            if (executablePath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-
-            var fileName = Path.GetFileName(executablePath);
-            if (string.Equals(fileName, "pwsh.exe", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            return string.Equals(fileName, "powershell.exe", StringComparison.OrdinalIgnoreCase)
-                && executablePath.Contains("WindowsPowerShell", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static string NormalizeExecutablePath(string executablePath)
-        {
             try
             {
                 return Path.GetFullPath(executablePath).Trim();
@@ -754,16 +891,16 @@ namespace PowerShellStudio.PowerShell.Services
             }
         }
 
-        private static bool LooksLikePowerShellBinary(FileVersionInfo fileInfo)
+        private static string NormalizeComparablePath(string? path)
         {
-            var productName = fileInfo.ProductName ?? string.Empty;
-            var fileDescription = fileInfo.FileDescription ?? string.Empty;
-            var originalFilename = fileInfo.OriginalFilename ?? string.Empty;
+            return NormalizeExecutablePath(path).Trim();
+        }
 
-            return productName.Contains("PowerShell", StringComparison.OrdinalIgnoreCase)
-                || fileDescription.Contains("PowerShell", StringComparison.OrdinalIgnoreCase)
-                || originalFilename.Contains("pwsh", StringComparison.OrdinalIgnoreCase)
-                || originalFilename.Contains("powershell", StringComparison.OrdinalIgnoreCase);
+        private static string NormalizeDisplayToken(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value)
+                ? string.Empty
+                : value.Trim();
         }
 
         private static PowerShellRuntimeInfo CreateRuntimeInfo(
@@ -775,14 +912,16 @@ namespace PowerShellStudio.PowerShell.Services
             int major,
             int minor,
             int build,
-            int revision)
+            int revision,
+            bool isValidated,
+            string resolvedExecutablePath,
+            string psHome,
+            string validationMessage)
         {
             var normalizedVersion = CreateVersion(major, minor, build, revision);
-            var isPowerShell7OrLater = string.Equals(Path.GetFileName(executablePath), "pwsh.exe", StringComparison.OrdinalIgnoreCase)
-                                        && major >= 7;
+            var isPowerShell7OrLater = string.Equals(edition, "Core", StringComparison.OrdinalIgnoreCase) && major >= 7;
             var isWindowsPowerShell = string.Equals(Path.GetFileName(executablePath), "powershell.exe", StringComparison.OrdinalIgnoreCase)
                                       && executablePath.Contains("WindowsPowerShell", StringComparison.OrdinalIgnoreCase);
-
             var displayName = BuildDisplayName(edition, versionText, isPowerShell7OrLater, isWindowsPowerShell);
 
             return new PowerShellRuntimeInfo(
@@ -795,42 +934,12 @@ namespace PowerShellStudio.PowerShell.Services
                 discoverySource,
                 isPowerShell7OrLater,
                 isWindowsPowerShell,
-                isPreferred: false);
-        }
-
-        private static string TryDetectExecutableArchitecture(string executablePath)
-        {
-            try
-            {
-                using var stream = new FileStream(executablePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var reader = new BinaryReader(stream);
-                if (stream.Length < 0x40)
-                {
-                    return string.Empty;
-                }
-
-                stream.Seek(0x3C, SeekOrigin.Begin);
-                var peHeaderOffset = reader.ReadInt32();
-                if (peHeaderOffset <= 0 || peHeaderOffset + 6 > stream.Length)
-                {
-                    return string.Empty;
-                }
-
-                stream.Seek(peHeaderOffset + 4, SeekOrigin.Begin);
-                var machine = reader.ReadUInt16();
-                return machine switch
-                {
-                    0x014c => "X86",
-                    0x8664 => "X64",
-                    0x01c4 => "Arm",
-                    0xAA64 => "Arm64",
-                    _ => string.Empty,
-                };
-            }
-            catch
-            {
-                return string.Empty;
-            }
+                isPreferred: false,
+                isValidated,
+                IsWindowsAppsAliasPath(executablePath),
+                resolvedExecutablePath,
+                psHome,
+                validationMessage);
         }
 
         private static Version CreateVersion(int major, int minor, int build, int revision)
@@ -867,6 +976,16 @@ namespace PowerShellStudio.PowerShell.Services
 
         private static int GetRuntimePriority(PowerShellRuntimeInfo runtime)
         {
+            if (runtime.IsPowerShell7OrLater && runtime.IsValidated && !runtime.IsWindowsAppsAlias)
+            {
+                return 400;
+            }
+
+            if (runtime.IsPowerShell7OrLater && runtime.IsValidated)
+            {
+                return 350;
+            }
+
             if (runtime.IsPowerShell7OrLater)
             {
                 return 300;
@@ -887,92 +1006,109 @@ namespace PowerShellStudio.PowerShell.Services
 
         private static string BuildSummaryText(IReadOnlyList<PowerShellRuntimeInfo> detectedRuntimes, PowerShellRuntimeInfo? preferredRuntime)
         {
-            if (preferredRuntime is null)
+            if (preferredRuntime is not null)
             {
-                return "Runtime: No PowerShell runtime detected";
+                return $"Runtime: {preferredRuntime.DisplayName} preferred ({detectedRuntimes.Count} validated)";
             }
 
-            return $"Runtime: {preferredRuntime.DisplayName} preferred ({detectedRuntimes.Count} detected)";
+            if (detectedRuntimes.Any(runtime => runtime.IsWindowsPowerShell))
+            {
+                return "Runtime: PowerShell 7 was not found or could not be launched. Install PowerShell 7 or configure the pwsh.exe path.";
+            }
+
+            return "Runtime: PowerShell 7 was not found or could not be launched. Install PowerShell 7 or configure the pwsh.exe path.";
         }
 
-        private static string? ParseVersionText(string? rawVersionText)
+        private sealed class RuntimeProbeResult
         {
-            if (string.IsNullOrWhiteSpace(rawVersionText))
+            private RuntimeProbeResult(PowerShellRuntimeInfo? runtimeInfo, RuntimeDiscoveryCandidateInfo candidateInfo)
             {
-                return null;
+                RuntimeInfo = runtimeInfo;
+                CandidateInfo = candidateInfo;
             }
 
-            var trimmed = rawVersionText.Trim();
-            var numericChars = new List<char>();
+            public PowerShellRuntimeInfo? RuntimeInfo { get; }
 
-            foreach (var character in trimmed)
+            public RuntimeDiscoveryCandidateInfo CandidateInfo { get; }
+
+            public static RuntimeProbeResult Success(
+                PowerShellRuntimeInfo runtimeInfo,
+                string candidatePath,
+                string source,
+                bool exists,
+                bool isWindowsAppsAlias,
+                string fileVersion,
+                string productVersion,
+                int? exitCode,
+                string stdoutSummary,
+                string stderrSummary)
             {
-                if (char.IsDigit(character) || character == '.')
-                {
-                    numericChars.Add(character);
-                    continue;
-                }
-
-                if (numericChars.Count > 0)
-                {
-                    break;
-                }
+                return new RuntimeProbeResult(
+                    runtimeInfo,
+                    new RuntimeDiscoveryCandidateInfo(
+                        candidatePath,
+                        source,
+                        exists,
+                        isWindowsAppsAlias,
+                        validationAttempted: true,
+                        launchSucceeded: true,
+                        validationSucceeded: true,
+                        timedOut: false,
+                        exitCode,
+                        runtimeInfo.Edition,
+                        runtimeInfo.VersionText,
+                        runtimeInfo.Architecture,
+                        runtimeInfo.ResolvedExecutablePath,
+                        runtimeInfo.PsHome,
+                        stdoutSummary,
+                        stderrSummary,
+                        fileVersion,
+                        productVersion,
+                        string.Empty));
             }
 
-            var result = new string(numericChars.ToArray()).Trim('.');
-            return string.IsNullOrWhiteSpace(result) ? null : result;
-        }
-
-        private static bool TrySplitVersionText(string? versionText, out int major, out int minor, out int build, out int revision)
-        {
-            major = 0;
-            minor = 0;
-            build = 0;
-            revision = -1;
-
-            if (string.IsNullOrWhiteSpace(versionText))
+            public static RuntimeProbeResult Failure(
+                string candidatePath,
+                string source,
+                bool exists,
+                bool isWindowsAppsAlias,
+                string fileVersion,
+                string productVersion,
+                string failureReason,
+                bool launchSucceeded = false,
+                bool timedOut = false,
+                int? exitCode = null,
+                string edition = "",
+                string versionText = "",
+                string architecture = "",
+                string resolvedExecutablePath = "",
+                string psHome = "",
+                string stdoutSummary = "",
+                string stderrSummary = "")
             {
-                return false;
+                return new RuntimeProbeResult(
+                    null,
+                    new RuntimeDiscoveryCandidateInfo(
+                        candidatePath,
+                        source,
+                        exists,
+                        isWindowsAppsAlias,
+                        validationAttempted: exists,
+                        launchSucceeded,
+                        validationSucceeded: false,
+                        timedOut,
+                        exitCode,
+                        edition,
+                        versionText,
+                        architecture,
+                        resolvedExecutablePath,
+                        psHome,
+                        stdoutSummary,
+                        stderrSummary,
+                        fileVersion,
+                        productVersion,
+                        failureReason));
             }
-
-            var parts = versionText.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (parts.Length < 2)
-            {
-                return false;
-            }
-
-            if (!int.TryParse(parts[0], out major))
-            {
-                return false;
-            }
-
-            int.TryParse(parts[1], out minor);
-            if (parts.Length > 2)
-            {
-                int.TryParse(parts[2], out build);
-            }
-
-            if (parts.Length > 3)
-            {
-                int.TryParse(parts[3], out revision);
-            }
-
-            return true;
-        }
-
-        private static string BuildVersionText(int major, int minor, int build, int revision)
-        {
-            if (revision >= 0)
-            {
-                return $"{major}.{minor}.{Math.Max(build, 0)}.{revision}";
-            }
-
-            if (build > 0)
-            {
-                return $"{major}.{minor}.{build}";
-            }
-
-            return $"{major}.{minor}";
         }
     }
 }
