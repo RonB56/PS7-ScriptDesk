@@ -1,0 +1,67 @@
+THIRD-PARTY NOTICES
+
+PS7 ScriptDesk uses third-party software components. These components are free/open-source or redistributable components, but their notices are included here for transparency and license compliance.
+
+This application is independent software and is not affiliated with, sponsored by, or endorsed by Microsoft.
+
+============================================================
+ICSharpCode.AvalonEdit
+============================================================
+
+Project:
+ICSharpCode.AvalonEdit
+
+License:
+MIT License
+
+Notice:
+AvalonEdit is used as the text editor component in PS7 ScriptDesk.
+
+The MIT License permits use, copying, modification, distribution, sublicensing, and sale of the software, provided the copyright and permission notice are included with copies or substantial portions of the software.
+
+============================================================
+xterm.js
+============================================================
+
+Project:
+xterm.js
+
+License:
+MIT License
+
+Notice:
+xterm.js and related add-ons are used for terminal display/functionality in PS7 ScriptDesk.
+
+The MIT License permits use, copying, modification, distribution, sublicensing, and sale of the software, provided the copyright and permission notice are included with copies or substantial portions of the software.
+
+============================================================
+Microsoft Edge WebView2
+============================================================
+
+Project:
+Microsoft Edge WebView2 / Microsoft.Web.WebView2
+
+License:
+Microsoft software license terms / redistributable component license terms
+
+Notice:
+Microsoft Edge WebView2 components are used to host web-based UI content inside PS7 ScriptDesk.
+
+WebView2 is provided by Microsoft and is used under Microsoft’s applicable license terms.
+
+============================================================
+Microsoft .NET / WPF / Windows desktop runtime components
+============================================================
+
+Project:
+Microsoft .NET, WPF, Windows desktop runtime libraries, and related Microsoft runtime components
+
+License:
+Microsoft software license terms
+
+Notice:
+PS7 ScriptDesk is built using Microsoft .NET and Windows desktop technologies. Runtime components included with the application, when present, are provided under Microsoft’s applicable license terms.
+
+============================================================
+End of third-party notices
+============================================================
