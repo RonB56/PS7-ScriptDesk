@@ -216,8 +216,12 @@
                               Click="ClearDeveloperDiagnosticsLogs_Click" />
                 </MenuItem>
                 <Separator />
-                <MenuItem Header="Open _Logs Folder"
+                <MenuItem Header="Create Support _Logs ZIP..."
+                          Click="CreateSupportLogsZip_Click" />
+                <MenuItem Header="Open _Diagnostic Logs Folder"
                           Click="OpenLogsFolder_Click" />
+                <MenuItem Header="Copy Diagnostic Logs Folder _Path"
+                          Click="CopyLogsFolderPath_Click" />
             </MenuItem>
 
             <MenuItem Header="_Help" help:ContextHelp.Key="Help.Menu">

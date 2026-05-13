@@ -1,12 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 using PowerShellStudio.Application.Diagnostics;
+using PowerShellStudio.Application.Interfaces;
 using PowerShellStudio.Application.Utilities;
+using PowerShellStudio.Domain.Models;
+using PowerShellStudio.Infrastructure.Services;
 using PowerShellStudio.PowerShell.Services;
 using PowerShellStudio.Shell.Composition;
 
@@ -23,6 +28,16 @@ namespace PowerShellStudio.Shell
         protected override void OnStartup(StartupEventArgs e)
         {
             var startupArgs = e.Args ?? Array.Empty<string>();
+
+            try
+            {
+                StartupTimingLogger.StartSession("App.OnStartup");
+                LogStartupEnvironment(startupArgs);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("App", $"Startup diagnostics initialization failed: {ex.GetType().Name}: {ex.Message}");
+            }
 
             DeveloperDiagnostics.TryPreconfigureFromPersistedSettings();
             DeveloperDiagnostics.LogMethodEntry(
@@ -75,7 +90,30 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
-            var shellWindow = AppBootstrapper.CreateMainWindow();
+            var applicationSettingsService = new ApplicationSettingsService();
+            var applicationSettings = applicationSettingsService.LoadSettings();
+            DeveloperDiagnostics.LogInfo(
+                "Startup",
+                "Loaded settings for startup runtime validation.",
+                new Dictionary<string, object?>
+                {
+                    ["settingsPath"] = applicationSettingsService.SettingsFilePath,
+                    ["savedRuntimePath"] = applicationSettings.SelectedRuntimeExecutablePath
+                });
+
+            var startupRuntime = ResolveStartupRuntime(applicationSettings);
+            if (startupRuntime is null)
+            {
+                AppLogger.Info("App", "Startup canceled because no valid PowerShell 7 runtime was available.");
+                DeveloperDiagnostics.LogDecision("Startup", "ResolveStartupRuntime", "Application startup exited because no valid PowerShell 7 runtime was available.", "ExitWithoutMainWindow");
+                Shutdown(0);
+                return;
+            }
+
+            applicationSettings.SelectedRuntimeExecutablePath = startupRuntime.ExecutablePath;
+            SafeSaveSettings(applicationSettingsService, applicationSettings, startupRuntime);
+
+            var shellWindow = AppBootstrapper.CreateMainWindow(applicationSettingsService, applicationSettings);
             MainWindow = shellWindow;
             AppLogger.Info("App", "Main window created.");
             DeveloperDiagnostics.LogInfo("Startup", "Main window created by AppBootstrapper.");
@@ -89,6 +127,67 @@ namespace PowerShellStudio.Shell
             DeveloperDiagnostics.LogInfo("Startup", $"App.OnExit invoked with exit code {e.ApplicationExitCode}.");
             DeveloperDiagnostics.Shutdown();
             base.OnExit(e);
+        }
+
+        private static void LogStartupEnvironment(string[] startupArgs)
+        {
+            try
+            {
+                Directory.CreateDirectory(AppLogger.CurrentLogDirectory);
+                StartupTimingLogger.Log("App", $"Startup args count: {startupArgs.Length}.");
+                StartupTimingLogger.Log("App", $"App version: {ResolveAppVersion()}.");
+                StartupTimingLogger.Log("App", $"Process path: {Environment.ProcessPath ?? string.Empty}.");
+                StartupTimingLogger.Log("App", $"Base directory: {AppContext.BaseDirectory}.");
+                StartupTimingLogger.Log("App", $"Current directory: {Environment.CurrentDirectory}.");
+                StartupTimingLogger.Log("App", $"OS description: {RuntimeInformation.OSDescription}.");
+                StartupTimingLogger.Log("App", $"OS architecture: {RuntimeInformation.OSArchitecture}; Process architecture: {RuntimeInformation.ProcessArchitecture}.");
+                StartupTimingLogger.Log("App", $".NET runtime: {RuntimeInformation.FrameworkDescription}; Environment.Version={Environment.Version}.");
+                StartupTimingLogger.Log("App", $"Packaged process guess: {DetectPackagedProcess()}.");
+                StartupTimingLogger.Log("App", $"LocalApplicationData: {Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}.");
+                StartupTimingLogger.Log("App", $"App data root: {ApplicationBranding.LocalApplicationDataRoot}.");
+                StartupTimingLogger.Log("App", $"App logs folder: {AppLogger.CurrentLogDirectory}.");
+                StartupTimingLogger.Log("App", $"App log file: {AppLogger.CurrentLogPath}.");
+
+                AppLogger.Info(
+                    "App",
+                    $"Startup environment captured. Version={ResolveAppVersion()}, ProcessPath='{Environment.ProcessPath ?? string.Empty}', " +
+                    $"PackagedGuess={DetectPackagedProcess()}, AppDataRoot='{ApplicationBranding.LocalApplicationDataRoot}', Logs='{AppLogger.CurrentLogDirectory}'.");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("App", $"Startup environment logging failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        private static string ResolveAppVersion()
+        {
+            try
+            {
+                var version = Assembly.GetEntryAssembly()?.GetName().Version
+                    ?? Assembly.GetExecutingAssembly().GetName().Version;
+                return version?.ToString() ?? "unknown";
+            }
+            catch
+            {
+                return "unknown";
+            }
+        }
+
+        private static string DetectPackagedProcess()
+        {
+            try
+            {
+                var processPath = Environment.ProcessPath ?? string.Empty;
+                var baseDirectory = AppContext.BaseDirectory ?? string.Empty;
+                var packageFamilyName = Environment.GetEnvironmentVariable("APPX_PACKAGE_FAMILY_NAME") ?? string.Empty;
+                var hasWindowsAppsPath = processPath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
+                                         baseDirectory.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase);
+                return $"PackageFamilyName='{packageFamilyName}', WindowsAppsPath={hasWindowsAppsPath}";
+            }
+            catch (Exception ex)
+            {
+                return $"Unknown ({ex.GetType().Name}: {ex.Message})";
+            }
         }
 
         private static bool ShouldLaunchConsolePrototype(string[] args)
@@ -155,6 +254,104 @@ namespace PowerShellStudio.Shell
             catch
             {
                 // Last-resort handler only.
+            }
+        }
+
+        private PowerShellRuntimeInfo? ResolveStartupRuntime(ApplicationSettings applicationSettings)
+        {
+            var operationId = $"StartupRuntimeGate-{Guid.NewGuid():N}";
+            using var startupRuntimeScope = DeveloperDiagnostics.BeginTimedOperation(
+                "Startup",
+                "ResolveStartupRuntime",
+                "Startup runtime gate validation started.",
+                operationId: operationId);
+
+            var runtimeService = new RuntimeService(applicationSettings.SelectedRuntimeExecutablePath);
+            var discoveryResult = runtimeService.DiscoverRuntimes();
+            var preferredRuntime = discoveryResult.PreferredRuntime;
+
+            if (preferredRuntime is not null)
+            {
+                AppLogger.Info("App", $"Startup runtime selected: {preferredRuntime.ExecutablePath} ({preferredRuntime.VersionText})");
+                DeveloperDiagnostics.LogDecision(
+                    "Startup",
+                    "ResolveStartupRuntime",
+                    "Startup runtime discovery found a valid PowerShell 7 runtime.",
+                    "Discovered",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtimePath"] = preferredRuntime.ExecutablePath,
+                        ["runtimeVersion"] = preferredRuntime.VersionText,
+                        ["candidateCount"] = discoveryResult.CandidateResults.Count
+                    });
+                return preferredRuntime;
+            }
+
+            AppLogger.Info("App", "Startup runtime discovery did not find a valid PowerShell 7 runtime; showing resolver dialog.");
+            DeveloperDiagnostics.LogDecision(
+                "Startup",
+                "ResolveStartupRuntime",
+                "Startup runtime discovery did not find a valid PowerShell 7 runtime. Showing startup resolver dialog.",
+                "ShowResolver",
+                new Dictionary<string, object?>
+                {
+                    ["candidateCount"] = discoveryResult.CandidateResults.Count,
+                    ["savedRuntimePath"] = applicationSettings.SelectedRuntimeExecutablePath
+                });
+
+            var resolverWindow = new RuntimeResolverWindow(runtimeService);
+            var dialogResult = resolverWindow.ShowDialog();
+            if (dialogResult == true && resolverWindow.SelectedRuntime is not null)
+            {
+                AppLogger.Info("App", $"Startup runtime selected from resolver dialog: {resolverWindow.SelectedRuntime.ExecutablePath} ({resolverWindow.SelectedRuntime.VersionText})");
+                DeveloperDiagnostics.LogDecision(
+                    "Startup",
+                    "ResolveStartupRuntime",
+                    "Startup resolver dialog returned a valid PowerShell 7 runtime.",
+                    "ResolverAccepted",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtimePath"] = resolverWindow.SelectedRuntime.ExecutablePath,
+                        ["runtimeVersion"] = resolverWindow.SelectedRuntime.VersionText
+                    });
+                return resolverWindow.SelectedRuntime;
+            }
+
+            DeveloperDiagnostics.LogDecision(
+                "Startup",
+                "ResolveStartupRuntime",
+                "Startup resolver dialog was closed without a valid PowerShell 7 runtime.",
+                "ResolverCanceled");
+            return null;
+        }
+
+        private static void SafeSaveSettings(IApplicationSettingsService applicationSettingsService, ApplicationSettings applicationSettings, PowerShellRuntimeInfo runtimeInfo)
+        {
+            try
+            {
+                applicationSettingsService.SaveSettings(applicationSettings);
+                AppLogger.Info("App", $"Saved validated startup runtime '{runtimeInfo.ExecutablePath}' ({runtimeInfo.VersionText}).");
+                DeveloperDiagnostics.LogInfo(
+                    "Startup",
+                    "Validated startup runtime saved to settings.",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtimePath"] = runtimeInfo.ExecutablePath,
+                        ["runtimeVersion"] = runtimeInfo.VersionText
+                    });
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("App", "Failed to save validated startup runtime to settings.", ex);
+                DeveloperDiagnostics.LogException(
+                    "Startup",
+                    ex,
+                    "Failed to save validated startup runtime to settings.",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtimePath"] = runtimeInfo.ExecutablePath,
+                        ["runtimeVersion"] = runtimeInfo.VersionText
+                    });
             }
         }
     }

@@ -7,5 +7,7 @@ namespace PowerShellStudio.Application.Interfaces
         RuntimeDiscoveryResult DiscoverRuntimes();
 
         PowerShellRuntimeInfo? TryResolveRuntimeIdentity(string executablePath);
+
+        RuntimeValidationResult ValidateRuntimePath(string executablePath, string source);
     }
 }

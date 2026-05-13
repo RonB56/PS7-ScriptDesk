@@ -127,7 +127,7 @@ Settings are stored under Local AppData using the new internal name `PS7ScriptDe
 
 - `PowerShellStudio.PowerShell/Services/RuntimeService.cs`
 
-Runtime discovery inspects known install roots, registry locations, `PATH`, and Windows PowerShell fallback locations.
+Runtime discovery inspects known PowerShell 7 install roots, registry locations, `PATH`, and validated `pwsh.exe` aliases.
 
 ### Metadata / completion / help
 

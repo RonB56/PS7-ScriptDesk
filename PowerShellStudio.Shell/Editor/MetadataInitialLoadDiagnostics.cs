@@ -448,10 +448,8 @@ namespace PowerShellStudio.Shell.Editor
                         $"ResolvedExecutablePath='{runtime.ResolvedExecutablePath}', PSHOME='{runtime.PsHome}', ValidationMessage='{runtime.ValidationMessage}'");
                 }
 
-                var windowsPowerShellDetected = discovery.DetectedRuntimes.Any(runtime => runtime.IsWindowsPowerShell);
-                AppendLine(
-                    $"Windows PowerShell 5.1 detected but rejected or ignored: " +
-                    $"{(windowsPowerShellDetected && !string.Equals(discovery.PreferredRuntime?.ExecutablePath, _selectedRuntimePath, StringComparison.OrdinalIgnoreCase))}");
+                AppendLine($"Preferred runtime resolved during discovery: '{discovery.PreferredRuntime?.ExecutablePath ?? string.Empty}'");
+                AppendLine($"Validated PowerShell 7 runtime count: {discovery.DetectedRuntimes.Count}");
             }
             catch (Exception ex)
             {

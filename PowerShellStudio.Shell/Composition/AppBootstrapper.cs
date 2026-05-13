@@ -1,5 +1,6 @@
 ﻿using System.Collections.Generic;
 using PowerShellStudio.Application.Diagnostics;
+using PowerShellStudio.Domain.Models;
 using PowerShellStudio.Infrastructure.Services;
 using PowerShellStudio.PowerShell.Services;
 using PowerShellStudio.Shell.Services;
@@ -9,7 +10,7 @@ namespace PowerShellStudio.Shell.Composition
 {
     public static class AppBootstrapper
     {
-        public static MainWindow CreateMainWindow()
+        public static MainWindow CreateMainWindow(ApplicationSettingsService applicationSettingsService, ApplicationSettings applicationSettings)
         {
             var workspaceService = new WorkspaceService();
             var fileDocumentService = new FileDocumentService();
@@ -17,8 +18,6 @@ namespace PowerShellStudio.Shell.Composition
             var userPromptService = new UserPromptService();
             var liveConsoleService = new LiveConsoleService();
             var exeExportService = new ExeExportService();
-            var applicationSettingsService = new ApplicationSettingsService();
-            var applicationSettings = applicationSettingsService.LoadSettings();
             var runtimeService = new RuntimeService(applicationSettings.SelectedRuntimeExecutablePath);
             DeveloperDiagnostics.ConfigureFromSettings(applicationSettings, "AppBootstrapper loaded settings");
             DeveloperDiagnostics.LogInfo(

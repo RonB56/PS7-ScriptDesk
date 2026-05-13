@@ -77,6 +77,8 @@ namespace PowerShellStudio.Shell.Debug
                 throw new ArgumentNullException(nameof(runtime));
             }
 
+            ArgumentNullException.ThrowIfNull(breakpoints);
+
             if (string.IsNullOrWhiteSpace(runtime.ExecutablePath))
             {
                 throw new ArgumentException("A PowerShell runtime executable path is required.", nameof(runtime));

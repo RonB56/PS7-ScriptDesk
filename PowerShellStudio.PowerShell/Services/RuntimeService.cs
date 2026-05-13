@@ -1,10 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.Versioning;
 using System.Security;
+using PowerShellStudio.Application.Diagnostics;
 using Microsoft.Win32;
 using PowerShellStudio.Application.Interfaces;
 using PowerShellStudio.Application.Utilities;
@@ -34,27 +36,40 @@ namespace PowerShellStudio.PowerShell.Services
         {
             var discoveryStopwatch = Stopwatch.StartNew();
             StartupTimingLogger.Log("RuntimeService", "DiscoverRuntimes started.");
+            DeveloperDiagnostics.LogOperationStart("Runtime", "DiscoverRuntimes", "PowerShell runtime discovery started.");
 
             var candidateResults = new List<RuntimeDiscoveryCandidateInfo>();
             var detectedRuntimes = new List<PowerShellRuntimeInfo>();
 
-            foreach (var candidate in EnumerateCandidateExecutablePaths())
+            var candidates = EnumerateCandidateExecutablePaths().ToList();
+            StartupTimingLogger.Log(
+                "RuntimeService",
+                $"Candidate enumeration produced {candidates.Count} candidate(s). ConfiguredRuntimePath='{_configuredRuntimePath ?? string.Empty}', " +
+                $"ProgramFiles='{Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)}', " +
+                $"ProgramFilesX86='{Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)}', " +
+                $"LocalApplicationData='{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}'.");
+
+            if (candidates.Count == 0)
             {
+                StartupTimingLogger.Log(
+                    "RuntimeService",
+                    "No pwsh.exe candidates were discovered from configured path, Program Files, registry, PATH, WindowsApps alias, or where.exe.");
+            }
+
+            foreach (var candidate in candidates)
+            {
+                StartupTimingLogger.Log("RuntimeService", $"Considering runtime candidate '{candidate.Path}' from {candidate.Source}.");
                 var probeResult = ProbeRuntimeCandidate(candidate.Path, candidate.Source);
                 candidateResults.Add(probeResult.CandidateInfo);
 
                 if (probeResult.RuntimeInfo is null)
                 {
-                    continue;
-                }
-
-                if (probeResult.RuntimeInfo.IsWindowsPowerShell && probeResult.RuntimeInfo.Version.Major != 5)
-                {
-                    StartupTimingLogger.Log("RuntimeService", $"Ignored suspicious Windows PowerShell runtime '{probeResult.RuntimeInfo.DisplayName}' from {probeResult.RuntimeInfo.ExecutablePath}.");
+                    LogRejectedCandidate(probeResult.CandidateInfo);
                     continue;
                 }
 
                 detectedRuntimes.Add(probeResult.RuntimeInfo);
+                LogAcceptedCandidate(probeResult.RuntimeInfo, probeResult.CandidateInfo);
             }
 
             var consolidatedRuntimes = ConsolidateDuplicateRuntimes(detectedRuntimes);
@@ -90,6 +105,20 @@ namespace PowerShellStudio.PowerShell.Services
             var summaryText = BuildSummaryText(finalizedRuntimes, finalizedPreferredRuntime);
 
             StartupTimingLogger.Log("RuntimeService", $"DiscoverRuntimes completed in {discoveryStopwatch.ElapsedMilliseconds} ms with {finalizedRuntimes.Count} validated runtime(s).");
+            DeveloperDiagnostics.LogOperationStop(
+                "Runtime",
+                "DiscoverRuntimes",
+                finalizedPreferredRuntime is null
+                    ? "PowerShell runtime discovery completed without a valid PowerShell 7 runtime."
+                    : "PowerShell runtime discovery completed with a valid PowerShell 7 runtime.",
+                discoveryStopwatch.ElapsedMilliseconds,
+                new Dictionary<string, object?>
+                {
+                    ["candidateCount"] = candidateResults.Count,
+                    ["validatedRuntimeCount"] = finalizedRuntimes.Count,
+                    ["preferredRuntimePath"] = finalizedPreferredRuntime?.ExecutablePath,
+                    ["preferredRuntimeVersion"] = finalizedPreferredRuntime?.VersionText
+                });
             return new RuntimeDiscoveryResult(finalizedRuntimes, finalizedPreferredRuntime, summaryText, candidateResults);
         }
 
@@ -131,6 +160,22 @@ namespace PowerShellStudio.PowerShell.Services
                 probeResult.RuntimeInfo.ResolvedExecutablePath,
                 probeResult.RuntimeInfo.PsHome,
                 probeResult.RuntimeInfo.ValidationMessage);
+        }
+
+        public RuntimeValidationResult ValidateRuntimePath(string executablePath, string source)
+        {
+            var probeResult = ProbeRuntimeCandidate(executablePath, source);
+
+            if (probeResult.RuntimeInfo is null)
+            {
+                LogRejectedCandidate(probeResult.CandidateInfo);
+            }
+            else
+            {
+                LogAcceptedCandidate(probeResult.RuntimeInfo, probeResult.CandidateInfo);
+            }
+
+            return new RuntimeValidationResult(probeResult.RuntimeInfo, probeResult.CandidateInfo);
         }
 
         private static IReadOnlyList<PowerShellRuntimeInfo> ConsolidateDuplicateRuntimes(IReadOnlyList<PowerShellRuntimeInfo> detectedRuntimes)
@@ -256,6 +301,14 @@ namespace PowerShellStudio.PowerShell.Services
                 }
             }
 
+            foreach (var candidate in GetCommandResolutionCandidates())
+            {
+                if (seenPaths.Add(candidate.Path))
+                {
+                    yield return candidate;
+                }
+            }
+
             foreach (var candidate in GetWindowsAppsAliasCandidates())
             {
                 if (seenPaths.Add(candidate.Path))
@@ -265,14 +318,6 @@ namespace PowerShellStudio.PowerShell.Services
             }
 
             foreach (var candidate in GetWhereCommandCandidates())
-            {
-                if (seenPaths.Add(candidate.Path))
-                {
-                    yield return candidate;
-                }
-            }
-
-            foreach (var candidate in GetWindowsPowerShellCandidates())
             {
                 if (seenPaths.Add(candidate.Path))
                 {
@@ -426,17 +471,20 @@ namespace PowerShellStudio.PowerShell.Services
                     yield return (pwshPath, "PATH");
                 }
 
-                var powershellPath = Path.Combine(directory!, "powershell.exe");
-                if (File.Exists(powershellPath))
-                {
-                    yield return (powershellPath, "PATH");
-                }
             }
+        }
+
+        private static IEnumerable<(string Path, string Source)> GetCommandResolutionCandidates()
+        {
+            // This catches Microsoft Store / winget alias installs where pwsh.exe is launchable
+            // through normal process command resolution even when Program Files and registry probes
+            // do not expose a direct executable path to this packaged desktop app.
+            yield return ("pwsh.exe", "Process command resolution (PATH/App Execution Alias)");
         }
 
         private static IEnumerable<(string Path, string Source)> GetWhereCommandCandidates()
         {
-            foreach (var executableName in new[] { "pwsh.exe", "powershell.exe" })
+            foreach (var executableName in new[] { "pwsh.exe" })
             {
                 foreach (var path in RunWhereCommand(executableName))
                 {
@@ -531,25 +579,6 @@ namespace PowerShellStudio.PowerShell.Services
             }
         }
 
-        private static IEnumerable<(string Path, string Source)> GetWindowsPowerShellCandidates()
-        {
-            var windowsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-            if (!string.IsNullOrWhiteSpace(windowsDirectory))
-            {
-                var system32Path = Path.Combine(windowsDirectory, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-                if (File.Exists(system32Path))
-                {
-                    yield return (system32Path, "Windows system path");
-                }
-
-                var sysWow64Path = Path.Combine(windowsDirectory, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe");
-                if (File.Exists(sysWow64Path))
-                {
-                    yield return (sysWow64Path, "Windows system path");
-                }
-            }
-        }
-
         private static void AddIfDirectoryExists(ISet<string> roots, string? path)
         {
             if (!string.IsNullOrWhiteSpace(path) && Directory.Exists(path))
@@ -561,8 +590,10 @@ namespace PowerShellStudio.PowerShell.Services
         private static RuntimeProbeResult ProbeRuntimeCandidate(string executablePath, string discoverySource)
         {
             var normalizedRuntimePath = NormalizeExecutablePath(executablePath);
+            var isCommandResolutionCandidate = IsUnqualifiedExecutableName(normalizedRuntimePath);
             var isWindowsAppsAlias = IsWindowsAppsAliasPath(normalizedRuntimePath);
-            var exists = !string.IsNullOrWhiteSpace(normalizedRuntimePath) && File.Exists(normalizedRuntimePath);
+            var exists = !string.IsNullOrWhiteSpace(normalizedRuntimePath) &&
+                         (isCommandResolutionCandidate || File.Exists(normalizedRuntimePath));
             var fileVersion = string.Empty;
             var productVersion = string.Empty;
 
@@ -579,6 +610,18 @@ namespace PowerShellStudio.PowerShell.Services
                     fileVersion,
                     productVersion,
                     "Candidate path did not exist.");
+            }
+
+            if (!string.Equals(Path.GetFileName(normalizedRuntimePath), "pwsh.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return RuntimeProbeResult.Failure(
+                    normalizedRuntimePath,
+                    discoverySource,
+                    exists,
+                    isWindowsAppsAlias,
+                    fileVersion,
+                    productVersion,
+                    "PS7 ScriptDesk requires pwsh.exe from PowerShell 7.0 or newer. powershell.exe is not supported.");
             }
 
             var timeoutMilliseconds = isWindowsAppsAlias ? AliasProbeTimeoutMilliseconds : ProbeTimeoutMilliseconds;
@@ -778,28 +821,16 @@ namespace PowerShellStudio.PowerShell.Services
                 revision = -1;
             }
 
-            var isWindowsPowerShellCandidate = string.Equals(Path.GetFileName(executablePath), "powershell.exe", StringComparison.OrdinalIgnoreCase) &&
-                                               executablePath.Contains("WindowsPowerShell", StringComparison.OrdinalIgnoreCase);
-
-            if (isWindowsPowerShellCandidate && major != 5)
+            if (!string.Equals(edition, "Core", StringComparison.OrdinalIgnoreCase))
             {
-                failureReason = $"Windows PowerShell candidate returned unsupported version {versionText}.";
+                failureReason = $"Candidate returned PowerShell edition '{edition}', not PowerShell Core.";
                 return false;
             }
 
-            if (!isWindowsPowerShellCandidate)
+            if (major < 7)
             {
-                if (!string.Equals(edition, "Core", StringComparison.OrdinalIgnoreCase))
-                {
-                    failureReason = $"Candidate returned PowerShell edition '{edition}', not PowerShell Core.";
-                    return false;
-                }
-
-                if (major < 7)
-                {
-                    failureReason = $"Candidate returned PowerShell version {versionText}; PS7 or later is required.";
-                    return false;
-                }
+                failureReason = $"Candidate returned PowerShell version {versionText}; PS7 or later is required.";
+                return false;
             }
 
             runtimeInfo = CreateRuntimeInfo(
@@ -856,6 +887,18 @@ namespace PowerShellStudio.PowerShell.Services
             }
         }
 
+        private static bool IsUnqualifiedExecutableName(string executablePath)
+        {
+            if (string.IsNullOrWhiteSpace(executablePath))
+            {
+                return false;
+            }
+
+            var trimmed = executablePath.Trim();
+            return string.Equals(Path.GetFileName(trimmed), trimmed, StringComparison.OrdinalIgnoreCase) &&
+                   trimmed.EndsWith(".exe", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool IsWindowsAppsAliasPath(string executablePath)
         {
             return executablePath.Contains(@"\AppData\Local\Microsoft\WindowsApps\pwsh.exe", StringComparison.OrdinalIgnoreCase);
@@ -881,13 +924,27 @@ namespace PowerShellStudio.PowerShell.Services
                 return string.Empty;
             }
 
+            var trimmed = executablePath.Trim().Trim('"');
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return string.Empty;
+            }
+
+            // Keep bare commands such as "pwsh.exe" as commands. Turning them into
+            // CWD-relative paths breaks Microsoft Store App Execution Alias installs and
+            // PATH-based resolution in packaged desktop apps.
+            if (IsUnqualifiedExecutableName(trimmed))
+            {
+                return trimmed;
+            }
+
             try
             {
-                return Path.GetFullPath(executablePath).Trim();
+                return Path.GetFullPath(trimmed).Trim();
             }
             catch
             {
-                return executablePath.Trim();
+                return trimmed;
             }
         }
 
@@ -1011,12 +1068,75 @@ namespace PowerShellStudio.PowerShell.Services
                 return $"Runtime: {preferredRuntime.DisplayName} preferred ({detectedRuntimes.Count} validated)";
             }
 
-            if (detectedRuntimes.Any(runtime => runtime.IsWindowsPowerShell))
-            {
-                return "Runtime: PowerShell 7 was not found or could not be launched. Install PowerShell 7 or configure the pwsh.exe path.";
-            }
-
             return "Runtime: PowerShell 7 was not found or could not be launched. Install PowerShell 7 or configure the pwsh.exe path.";
+        }
+
+        private static void LogRejectedCandidate(RuntimeDiscoveryCandidateInfo candidateInfo)
+        {
+            StartupTimingLogger.Log(
+                "RuntimeService",
+                $"Rejected runtime candidate '{candidateInfo.CandidatePath}' from {candidateInfo.Source}. " +
+                $"Exists={candidateInfo.Exists}, WindowsAppsAlias={candidateInfo.IsWindowsAppsAlias}, ValidationAttempted={candidateInfo.ValidationAttempted}, " +
+                $"LaunchSucceeded={candidateInfo.LaunchSucceeded}, TimedOut={candidateInfo.TimedOut}, ExitCode={candidateInfo.ExitCode?.ToString(CultureInfo.InvariantCulture) ?? string.Empty}, " +
+                $"Edition='{candidateInfo.Edition}', Version='{candidateInfo.VersionText}', Architecture='{candidateInfo.Architecture}', " +
+                $"ResolvedPath='{candidateInfo.ResolvedExecutablePath}', PSHOME='{candidateInfo.PsHome}', " +
+                $"FileVersion='{candidateInfo.FileVersion}', ProductVersion='{candidateInfo.ProductVersion}', " +
+                $"Stdout='{candidateInfo.StdoutSummary}', Stderr='{candidateInfo.StderrSummary}', Reason={candidateInfo.FailureReason}");
+            DeveloperDiagnostics.LogDecision(
+                "Runtime",
+                "RuntimeCandidateEvaluated",
+                "Runtime candidate rejected during discovery or validation.",
+                "Rejected",
+                new Dictionary<string, object?>
+                {
+                    ["candidatePath"] = candidateInfo.CandidatePath,
+                    ["source"] = candidateInfo.Source,
+                    ["exists"] = candidateInfo.Exists,
+                    ["isWindowsAppsAlias"] = candidateInfo.IsWindowsAppsAlias,
+                    ["validationAttempted"] = candidateInfo.ValidationAttempted,
+                    ["launchSucceeded"] = candidateInfo.LaunchSucceeded,
+                    ["validationSucceeded"] = candidateInfo.ValidationSucceeded,
+                    ["timedOut"] = candidateInfo.TimedOut,
+                    ["exitCode"] = candidateInfo.ExitCode,
+                    ["failureReason"] = candidateInfo.FailureReason,
+                    ["version"] = candidateInfo.VersionText,
+                    ["edition"] = candidateInfo.Edition,
+                    ["architecture"] = candidateInfo.Architecture,
+                    ["resolvedPath"] = candidateInfo.ResolvedExecutablePath,
+                    ["psHome"] = candidateInfo.PsHome,
+                    ["stdout"] = candidateInfo.StdoutSummary,
+                    ["stderr"] = candidateInfo.StderrSummary,
+                    ["fileVersion"] = candidateInfo.FileVersion,
+                    ["productVersion"] = candidateInfo.ProductVersion
+                });
+        }
+
+        private static void LogAcceptedCandidate(PowerShellRuntimeInfo runtimeInfo, RuntimeDiscoveryCandidateInfo candidateInfo)
+        {
+            StartupTimingLogger.Log(
+                "RuntimeService",
+                $"Accepted runtime candidate '{runtimeInfo.ExecutablePath}' from {candidateInfo.Source}. " +
+                $"Version={runtimeInfo.VersionText}, Edition={runtimeInfo.Edition}, Architecture={runtimeInfo.Architecture}, " +
+                $"ResolvedPath='{runtimeInfo.ResolvedExecutablePath}', PSHOME='{runtimeInfo.PsHome}', WindowsAppsAlias={runtimeInfo.IsWindowsAppsAlias}, " +
+                $"FileVersion='{candidateInfo.FileVersion}', ProductVersion='{candidateInfo.ProductVersion}', Stdout='{candidateInfo.StdoutSummary}', Stderr='{candidateInfo.StderrSummary}'.");
+            DeveloperDiagnostics.LogDecision(
+                "Runtime",
+                "RuntimeCandidateEvaluated",
+                "Runtime candidate accepted during discovery or validation.",
+                "Accepted",
+                new Dictionary<string, object?>
+                {
+                    ["candidatePath"] = candidateInfo.CandidatePath,
+                    ["source"] = candidateInfo.Source,
+                    ["resolvedPath"] = runtimeInfo.ResolvedExecutablePath,
+                    ["psHome"] = runtimeInfo.PsHome,
+                    ["version"] = runtimeInfo.VersionText,
+                    ["edition"] = runtimeInfo.Edition,
+                    ["architecture"] = runtimeInfo.Architecture,
+                    ["isWindowsAppsAlias"] = runtimeInfo.IsWindowsAppsAlias,
+                    ["fileVersion"] = candidateInfo.FileVersion,
+                    ["productVersion"] = candidateInfo.ProductVersion
+                });
         }
 
         private sealed class RuntimeProbeResult

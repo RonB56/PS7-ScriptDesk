@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -20,7 +20,7 @@ namespace PowerShellStudio.Application.Diagnostics
     {
         private const long MaxLogFileBytes = 2 * 1024 * 1024;
         private const int MaxArchiveFiles = 5;
-        private static readonly TimeSpan LogRetentionWindow = TimeSpan.FromHours(24);
+        private static readonly TimeSpan LogRetentionWindow = TimeSpan.FromDays(14);
         private static readonly string RootDirectory = ApplicationBranding.LocalApplicationDataRoot;
         private static readonly string LogDirectory = Path.Combine(RootDirectory, "Logs");
         private static readonly string LogPath = Path.Combine(LogDirectory, ApplicationBranding.LogFileName);
@@ -181,7 +181,7 @@ namespace PowerShellStudio.Application.Diagnostics
                     return string.Empty;
                 }
 
-                return $"Startup log retention cleanup completed. Deleted={deletedCount}, Failed={failedCount}, RetentionHours={LogRetentionWindow.TotalHours:0}.";
+                return $"Startup log retention cleanup completed. Deleted={deletedCount}, Failed={failedCount}, RetentionDays={LogRetentionWindow.TotalDays:0}.";
             }
             catch
             {

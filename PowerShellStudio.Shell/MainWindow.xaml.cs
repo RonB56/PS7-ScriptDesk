@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.ObjectModel;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -5750,17 +5750,36 @@ namespace PowerShellStudio.Shell
 
         private void OpenLogsFolder_Click(object sender, RoutedEventArgs e)
         {
-            var target = AppLogger.CurrentLogDirectory;
-            if (string.IsNullOrWhiteSpace(target))
+            var target = ResolveDiagnosticLogsFolder();
+            if (OpenFolderInExplorer(target, copyPathToClipboard: true))
             {
-                target = Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Logs");
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = $"Opened diagnostic logs folder and copied path: {target}";
+                }
             }
+        }
 
-            OpenFolderInExplorer(target);
+        private void CopyLogsFolderPath_Click(object sender, RoutedEventArgs e)
+        {
+            var target = ResolveDiagnosticLogsFolder();
+            Directory.CreateDirectory(target);
+            TrySetClipboardText(target);
+            DeveloperDiagnostics.LogUserAction(
+                "UI",
+                "CopyLogsFolderPath",
+                "Copied diagnostic logs folder path to clipboard.",
+                new Dictionary<string, object?> { ["path"] = target });
+
             if (ViewModel is not null)
             {
-                ViewModel.StatusText = $"Opened logs folder: {target}";
+                ViewModel.StatusText = $"Diagnostic logs folder path copied: {target}";
             }
+        }
+
+        private void CreateSupportLogsZip_Click(object sender, RoutedEventArgs e)
+        {
+            CreateSupportLogsPackage(openContainingFolder: true, showConfirmation: true);
         }
 
         private void OpenLatestDiagnosticSessionFolder_Click(object sender, RoutedEventArgs e)
@@ -5799,10 +5818,7 @@ namespace PowerShellStudio.Shell
 
         private void PackageDeveloperDiagnosticsForSupport_Click(object sender, RoutedEventArgs e)
         {
-            var packagePath = DeveloperDiagnostics.CreateSupportPackage();
-            System.Windows.Clipboard.SetText(packagePath);
-            ViewModel!.StatusText = $"Developer diagnostics package created: {packagePath}";
-            OpenFolderInExplorer(Path.GetDirectoryName(packagePath) ?? DeveloperDiagnostics.DeveloperDebuggingPackagesDirectory);
+            CreateSupportLogsPackage(openContainingFolder: true, showConfirmation: false);
         }
 
         private void ClearDeveloperDiagnosticsLogs_Click(object sender, RoutedEventArgs e)
@@ -5840,18 +5856,92 @@ namespace PowerShellStudio.Shell
             }
         }
 
-        private void OpenFolderInExplorer(string path)
+        private static string ResolveDiagnosticLogsFolder()
+        {
+            return string.IsNullOrWhiteSpace(AppLogger.CurrentLogDirectory)
+                ? Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Logs")
+                : AppLogger.CurrentLogDirectory;
+        }
+
+        private void CreateSupportLogsPackage(bool openContainingFolder, bool showConfirmation)
         {
             try
             {
-                Directory.CreateDirectory(path);
+                var packagePath = DeveloperDiagnostics.CreateSupportPackage();
+                TrySetClipboardText(packagePath);
+                var containingFolder = Path.GetDirectoryName(packagePath) ?? DeveloperDiagnostics.DeveloperDebuggingPackagesDirectory;
+
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = $"Support logs ZIP created and copied to clipboard: {packagePath}";
+                }
+
+                if (showConfirmation)
+                {
+                    System.Windows.MessageBox.Show(
+                        this,
+                        $"A support logs ZIP was created and its full path was copied to the clipboard. Send this ZIP for support.\n\n{packagePath}",
+                        "Support Logs ZIP Created",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+
+                if (openContainingFolder)
+                {
+                    OpenFolderInExplorer(containingFolder);
+                }
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("UI", ex, "Failed to create support logs package.");
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = $"Create support logs ZIP failed: {ex.Message}";
+                }
+
+                System.Windows.MessageBox.Show(
+                    this,
+                    $"PS7 ScriptDesk could not create the support logs ZIP.\n\n{ex.Message}",
+                    "Support Logs ZIP Failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+        }
+
+        private bool OpenFolderInExplorer(string path, bool copyPathToClipboard = false)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    throw new ArgumentException("The folder path was empty.", nameof(path));
+                }
+
+                var normalizedPath = Path.GetFullPath(path.Trim());
+                Directory.CreateDirectory(normalizedPath);
+
+                if (!Directory.Exists(normalizedPath))
+                {
+                    throw new DirectoryNotFoundException($"The folder could not be created or found: {normalizedPath}");
+                }
+
+                if (copyPathToClipboard)
+                {
+                    TrySetClipboardText(normalizedPath);
+                }
+
                 Process.Start(new ProcessStartInfo
                 {
-                    FileName = "explorer.exe",
-                    Arguments = $"\"{path}\"",
+                    FileName = normalizedPath,
                     UseShellExecute = true
                 });
-                DeveloperDiagnostics.LogUserAction("UI", "OpenFolder", "Opened folder in Explorer.", new Dictionary<string, object?> { ["path"] = path });
+
+                DeveloperDiagnostics.LogUserAction(
+                    "UI",
+                    "OpenFolder",
+                    "Opened folder in Explorer.",
+                    new Dictionary<string, object?> { ["path"] = normalizedPath, ["copiedToClipboard"] = copyPathToClipboard });
+                return true;
             }
             catch (Exception ex)
             {
@@ -5860,6 +5950,26 @@ namespace PowerShellStudio.Shell
                 {
                     ViewModel.StatusText = $"Open folder failed: {ex.Message}";
                 }
+
+                return false;
+            }
+        }
+
+        private static bool TrySetClipboardText(string text)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    return false;
+                }
+
+                System.Windows.Clipboard.SetText(text);
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 

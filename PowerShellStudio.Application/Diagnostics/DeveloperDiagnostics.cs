@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -398,33 +398,19 @@ namespace PowerShellStudio.Application.Diagnostics
             {
             }
 
-            try
-            {
-                var appLogDir = Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Logs");
-                if (Directory.Exists(appLogDir))
-                {
-                    foreach (var path in Directory.EnumerateFiles(appLogDir, "*.log", SearchOption.TopDirectoryOnly))
-                    {
-                        result.Add(path);
-                    }
-                }
-            }
-            catch
-            {
-            }
-
             return result;
         }
 
         public static string CreateSupportPackage()
         {
             Directory.CreateDirectory(PackagesDirectory);
-            var archivePath = Path.Combine(PackagesDirectory, $"PS7ScriptDesk_DeveloperDiagnostics_{DateTime.Now:yyyy-MM-dd_HHmmss}_pid{Environment.ProcessId}.zip");
+            var archivePath = Path.Combine(PackagesDirectory, $"PS7ScriptDesk_SupportLogs_{DateTime.Now:yyyy-MM-dd_HHmmss}_pid{Environment.ProcessId}.zip");
             if (File.Exists(archivePath))
             {
                 File.Delete(archivePath);
             }
 
+            var addedEntryPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             using var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create);
 
             foreach (var sessionPath in GetSessionDirectoriesForPackaging())
@@ -436,13 +422,20 @@ namespace PowerShellStudio.Application.Diagnostics
 
                 foreach (var filePath in Directory.EnumerateFiles(sessionPath, "*", SearchOption.TopDirectoryOnly))
                 {
-                    AddFileToArchive(archive, filePath, Path.Combine("Sessions", Path.GetFileName(sessionPath), Path.GetFileName(filePath)));
+                    AddFileToArchive(
+                        archive,
+                        filePath,
+                        Path.Combine("DeveloperDiagnostics", "Sessions", Path.GetFileName(sessionPath), Path.GetFileName(filePath)),
+                        addedEntryPaths);
                 }
             }
 
+            var appLogDir = Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Logs");
+            AddDirectoryToArchive(archive, appLogDir, Path.Combine("Support", "Logs"), addedEntryPaths);
+
             foreach (var supportFilePath in GetPackagedSupportFilePaths())
             {
-                AddFileToArchive(archive, supportFilePath, Path.Combine("Support", Path.GetFileName(supportFilePath)));
+                AddFileToArchive(archive, supportFilePath, Path.Combine("Support", Path.GetFileName(supportFilePath)), addedEntryPaths);
             }
 
             var summaryEntry = archive.CreateEntry("Support/diagnostics-summary.txt");
@@ -451,11 +444,26 @@ namespace PowerShellStudio.Application.Diagnostics
                 writer.Write(BuildSummaryText());
             }
 
+            var readmeEntry = archive.CreateEntry("Support/README-send-this-zip.txt");
+            using (var writer = new StreamWriter(readmeEntry.Open(), new UTF8Encoding(false)))
+            {
+                writer.WriteLine("PS7 ScriptDesk support logs package");
+                writer.WriteLine();
+                writer.WriteLine("Send this entire ZIP file to support/developer for troubleshooting.");
+                writer.WriteLine("It includes normal app logs, metadata startup/load logs, startup error logs, and the most recent developer diagnostics sessions when present.");
+                writer.WriteLine();
+                writer.WriteLine($"Created local time: {DateTimeOffset.Now:O}");
+                writer.WriteLine($"App data root: {ApplicationBranding.LocalApplicationDataRoot}");
+                writer.WriteLine($"App logs folder: {appLogDir}");
+                writer.WriteLine($"Developer diagnostics folder: {RootDirectory}");
+                writer.WriteLine($"Package path: {archivePath}");
+            }
+
             try
             {
                 if (File.Exists(LatestSessionPointerPath))
                 {
-                    AddFileToArchive(archive, LatestSessionPointerPath, "latest-session.txt");
+                    AddFileToArchive(archive, LatestSessionPointerPath, "DeveloperDiagnostics/latest-session.txt", addedEntryPaths);
                 }
             }
             catch
@@ -464,9 +472,14 @@ namespace PowerShellStudio.Application.Diagnostics
 
             LogUserAction(
                 "Settings",
-                "PackageDeveloperDiagnostics",
-                $"Developer diagnostics package created at '{archivePath}'.",
-                new Dictionary<string, object?> { ["packagePath"] = archivePath });
+                "PackageSupportLogs",
+                $"Support logs package created at '{archivePath}'.",
+                new Dictionary<string, object?>
+                {
+                    ["packagePath"] = archivePath,
+                    ["appLogDir"] = appLogDir,
+                    ["developerDiagnosticsRoot"] = RootDirectory
+                });
 
             RefreshSummaryFile();
             return archivePath;
@@ -1054,11 +1067,48 @@ namespace PowerShellStudio.Application.Diagnostics
             }
         }
 
-        private static void AddFileToArchive(ZipArchive archive, string filePath, string entryPath)
+        private static void AddDirectoryToArchive(ZipArchive archive, string directoryPath, string archiveRootPath, ISet<string> addedEntryPaths)
         {
             try
             {
-                archive.CreateEntryFromFile(filePath, entryPath, CompressionLevel.Fastest);
+                if (!Directory.Exists(directoryPath))
+                {
+                    return;
+                }
+
+                foreach (var filePath in Directory.EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories))
+                {
+                    var relativePath = Path.GetRelativePath(directoryPath, filePath);
+                    var entryPath = Path.Combine(archiveRootPath, relativePath);
+                    AddFileToArchive(archive, filePath, entryPath, addedEntryPaths);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static void AddFileToArchive(ZipArchive archive, string filePath, string entryPath)
+        {
+            AddFileToArchive(archive, filePath, entryPath, null);
+        }
+
+        private static void AddFileToArchive(ZipArchive archive, string filePath, string entryPath, ISet<string>? addedEntryPaths)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath) || string.IsNullOrWhiteSpace(entryPath))
+                {
+                    return;
+                }
+
+                var normalizedEntryPath = entryPath.Replace(Path.DirectorySeparatorChar, '/').Replace(Path.AltDirectorySeparatorChar, '/');
+                if (addedEntryPaths is not null && !addedEntryPaths.Add(normalizedEntryPath))
+                {
+                    return;
+                }
+
+                archive.CreateEntryFromFile(filePath, normalizedEntryPath, CompressionLevel.Fastest);
             }
             catch
             {
