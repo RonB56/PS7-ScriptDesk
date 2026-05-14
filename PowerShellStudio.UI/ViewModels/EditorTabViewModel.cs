@@ -185,10 +185,18 @@ namespace PowerShellStudio.UI.ViewModels
 
         public ReadOnlyObservableCollection<EditorDiagnosticSpanViewModel> SyntaxDiagnosticSpans { get; }
 
-        public bool HasSyntaxErrors => _syntaxErrors.Count > 0;
+        public bool HasSyntaxErrors => DiagnosticErrorCount > 0;
+
+        public bool HasDiagnosticWarnings => DiagnosticWarningCount > 0;
+
+        public bool HasDiagnostics => _syntaxErrors.Count > 0;
+
+        public int DiagnosticErrorCount => _syntaxErrors.Count(static diagnostic => diagnostic.IsError);
+
+        public int DiagnosticWarningCount => _syntaxErrors.Count(static diagnostic => diagnostic.IsWarning);
 
         public bool HasSyntaxDiagnosticsStatusMessage =>
-            !HasSyntaxErrors &&
+            !HasDiagnostics &&
             !string.IsNullOrWhiteSpace(_syntaxDiagnosticsStatusText) &&
             !string.Equals(_syntaxDiagnosticsStatusText, "Syntax: OK", StringComparison.Ordinal) &&
             !string.Equals(_syntaxDiagnosticsStatusText, "Diagnostics: OK", StringComparison.Ordinal) &&
@@ -202,9 +210,17 @@ namespace PowerShellStudio.UI.ViewModels
             ? "Breakpoints: None"
             : $"Breakpoints: {string.Join(", ", _breakpoints.Select(pair => pair.Value ? pair.Key.ToString() : $"{pair.Key} (off)"))}";
 
-        public string SyntaxErrorSummaryText => HasSyntaxErrors
-            ? $"Editor diagnostics: {_syntaxErrors.Count}"
+        public string SyntaxErrorSummaryText => HasDiagnostics
+            ? BuildDiagnosticsSummaryText(prefix: "Editor diagnostics")
             : _syntaxDiagnosticsStatusText;
+
+        public string DiagnosticsTabHeaderText => HasDiagnostics
+            ? BuildDiagnosticsSummaryText(prefix: "Diagnostics")
+            : "Diagnostics";
+
+        public string DiagnosticsBadgeText => HasDiagnostics
+            ? BuildDiagnosticsSummaryText(prefix: string.Empty)
+            : string.Empty;
 
         /// <summary>The set of 1-based line numbers that have a breakpoint, enabled or disabled.</summary>
         public IReadOnlyCollection<int> BreakpointLineNumbers => _breakpoints.Keys.ToArray();
@@ -316,20 +332,16 @@ namespace PowerShellStudio.UI.ViewModels
             foreach (var diagnostic in diagnostics ?? Enumerable.Empty<EditorDiagnosticSpanViewModel>())
             {
                 _syntaxDiagnosticSpans.Add(diagnostic);
-                _syntaxErrors.Add(new SyntaxErrorViewModel(diagnostic.LineNumber, diagnostic.ColumnNumber, diagnostic.Message, diagnostic.StartOffset, diagnostic.EndOffset));
+                _syntaxErrors.Add(new SyntaxErrorViewModel(diagnostic.LineNumber, diagnostic.ColumnNumber, diagnostic.Message, diagnostic.StartOffset, diagnostic.EndOffset, diagnostic.Severity));
             }
 
-            _syntaxDiagnosticsStatusText = HasSyntaxErrors
-                ? $"Editor diagnostics: {_syntaxErrors.Count}"
+            _syntaxDiagnosticsStatusText = HasDiagnostics
+                ? BuildDiagnosticsSummaryText(prefix: "Editor diagnostics")
                 : (string.IsNullOrWhiteSpace(successStatusText) ? "Syntax: OK" : successStatusText);
 
             OnPropertyChanged(nameof(SyntaxDiagnosticSpans));
             OnPropertyChanged(nameof(SyntaxErrors));
-            OnPropertyChanged(nameof(HasSyntaxErrors));
-            OnPropertyChanged(nameof(SyntaxDiagnosticsStatusText));
-            OnPropertyChanged(nameof(SyntaxErrorSummaryText));
-            OnPropertyChanged(nameof(HasSyntaxDiagnosticsStatusMessage));
-            OnPropertyChanged(nameof(ShowSyntaxDiagnosticsPanel));
+            NotifyDiagnosticSummaryChanged();
         }
 
         public void SetSyntaxDiagnosticsStatus(string statusText, bool clearErrors = false)
@@ -343,7 +355,6 @@ namespace PowerShellStudio.UI.ViewModels
                 {
                     OnPropertyChanged(nameof(SyntaxDiagnosticSpans));
                     OnPropertyChanged(nameof(SyntaxErrors));
-                    OnPropertyChanged(nameof(HasSyntaxErrors));
                 }
             }
 
@@ -351,8 +362,49 @@ namespace PowerShellStudio.UI.ViewModels
                 ? "Syntax checking status unavailable"
                 : statusText;
 
+            NotifyDiagnosticSummaryChanged();
+        }
+
+
+        private string BuildDiagnosticsSummaryText(string prefix)
+        {
+            var errorCount = DiagnosticErrorCount;
+            var warningCount = DiagnosticWarningCount;
+
+            string detail;
+            if (errorCount > 0 && warningCount > 0)
+            {
+                detail = $"{errorCount} error{(errorCount == 1 ? string.Empty : "s")}, {warningCount} warning{(warningCount == 1 ? string.Empty : "s")}";
+            }
+            else if (errorCount > 0)
+            {
+                detail = $"{errorCount} error{(errorCount == 1 ? string.Empty : "s")}";
+            }
+            else if (warningCount > 0)
+            {
+                detail = $"{warningCount} warning{(warningCount == 1 ? string.Empty : "s")}";
+            }
+            else
+            {
+                detail = "0";
+            }
+
+            return string.IsNullOrWhiteSpace(prefix)
+                ? detail
+                : $"{prefix}: {detail}";
+        }
+
+        private void NotifyDiagnosticSummaryChanged()
+        {
+            OnPropertyChanged(nameof(HasSyntaxErrors));
+            OnPropertyChanged(nameof(HasDiagnosticWarnings));
+            OnPropertyChanged(nameof(HasDiagnostics));
+            OnPropertyChanged(nameof(DiagnosticErrorCount));
+            OnPropertyChanged(nameof(DiagnosticWarningCount));
             OnPropertyChanged(nameof(SyntaxDiagnosticsStatusText));
             OnPropertyChanged(nameof(SyntaxErrorSummaryText));
+            OnPropertyChanged(nameof(DiagnosticsTabHeaderText));
+            OnPropertyChanged(nameof(DiagnosticsBadgeText));
             OnPropertyChanged(nameof(HasSyntaxDiagnosticsStatusMessage));
             OnPropertyChanged(nameof(ShowSyntaxDiagnosticsPanel));
         }

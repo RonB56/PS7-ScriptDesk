@@ -54,6 +54,7 @@ namespace PowerShellStudio.PowerShell.Services
         private const string DispatchInstructionFilePrefix = "psi-";
         // Interactive terminals submit Enter as carriage return (\r). Do not send CRLF into ConPTY/PSReadLine.
         private const string TerminalEnterSequence = "\r";
+        private static readonly TimeSpan InterruptGracefulTimeout = TimeSpan.FromSeconds(2);
 
         private readonly object _syncRoot = new();
         private bool _firstOutputLogged;
@@ -203,6 +204,9 @@ namespace PowerShellStudio.PowerShell.Services
 
             try
             {
+                AppLogger.Info(
+                    "LiveConsole",
+                    $"Starting terminal session. DisplayPath='{runtime.ExecutablePath}', LaunchPath='{runtime.LaunchExecutablePath}', LaunchPathExists={File.Exists(runtime.LaunchExecutablePath)}, WorkingDirectory={workingDirectory}");
                 StartPseudoConsoleSession(runtime, workingDirectory, onOutput);
                 AppLogger.Info("LiveConsole", $"ConPTY terminal session started with {runtime.DisplayName}; WorkingDirectory={workingDirectory}");
                 onOutput(new ExecutionOutputRecord(
@@ -256,12 +260,6 @@ namespace PowerShellStudio.PowerShell.Services
             try
             {
                 await WriteTerminalInputAsync(commandText + TerminalEnterSequence, cancellationToken).ConfigureAwait(false);
-
-                // Option 3 behavior: editor commands are honestly sent to the real
-                // interactive terminal. There is no hidden sentinel or output filter.
-                // Mark dispatch complete as soon as the command is successfully sent
-                // so the app never waits on fragile prompt/sentinel detection.
-                CompleteCommandExecution();
 
                 return new LiveConsoleCommandResult(
                     "Console command",
@@ -436,6 +434,224 @@ namespace PowerShellStudio.PowerShell.Services
             }
         }
 
+        public async Task<LiveConsoleInterruptResult> InterruptOrRestartAsync(
+            Action<ExecutionOutputRecord>? onOutput = null,
+            CancellationToken cancellationToken = default)
+        {
+            var operationId = $"ConsoleInterrupt-{Guid.NewGuid():N}";
+            using var scope = DeveloperDiagnostics.BeginTimedOperation(
+                "Terminal",
+                "InterruptOrRestart",
+                "Interrupt or restart requested for the live PowerShell session.",
+                operationId: operationId);
+
+            Process? process;
+            PowerShellRuntimeInfo? runtime;
+            string? workingDirectory;
+            bool commandInProgress;
+            bool hasPseudoConsole;
+            bool hostAttached;
+
+            lock (_syncRoot)
+            {
+                process = _process;
+                runtime = ActiveRuntime;
+                workingDirectory = CurrentWorkingDirectory;
+                commandInProgress = _isCommandInProgress;
+                hasPseudoConsole = _pseudoConsoleHandle != IntPtr.Zero;
+                hostAttached = _hostAttached;
+            }
+
+            var ownedProcessId = TryGetProcessId(process);
+            AppLogger.Info(
+                "LiveConsole",
+                $"Interrupt requested. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, SessionRunning={process is not null && !process.HasExited}, CommandInProgress={commandInProgress}, HasPseudoConsole={hasPseudoConsole}, HostAttached={hostAttached}, Runtime='{runtime?.DisplayName ?? "(none)"}', WorkingDirectory='{workingDirectory ?? "(none)"}'.");
+            DeveloperDiagnostics.LogUserAction(
+                "Terminal",
+                "InterruptRequested",
+                "Interrupt requested for the live PowerShell session.",
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["ownedProcessId"] = ownedProcessId,
+                    ["sessionRunning"] = process is not null && !process.HasExited,
+                    ["commandInProgress"] = commandInProgress,
+                    ["hasPseudoConsole"] = hasPseudoConsole,
+                    ["hostAttached"] = hostAttached,
+                    ["runtimePath"] = runtime?.ExecutablePath,
+                    ["workingDirectory"] = workingDirectory
+                });
+
+            if (process is null || process.HasExited)
+            {
+                return new LiveConsoleInterruptResult(
+                    interruptAttempted: false,
+                    completedGracefully: false,
+                    escalationRequired: false,
+                    processTerminationSucceeded: false,
+                    sessionRestarted: false,
+                    ownedProcessId,
+                    InterruptGracefulTimeout);
+            }
+
+            if (!commandInProgress)
+            {
+                AppLogger.Info("LiveConsole", $"Interrupt request ignored because no tracked command was running. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}.");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "InterruptRequested",
+                    "Interrupt request was ignored because no tracked command was active.",
+                    "IgnoredNoTrackedCommand",
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = operationId,
+                        ["ownedProcessId"] = ownedProcessId
+                    });
+
+                return new LiveConsoleInterruptResult(
+                    interruptAttempted: false,
+                    completedGracefully: false,
+                    escalationRequired: false,
+                    processTerminationSucceeded: false,
+                    sessionRestarted: false,
+                    ownedProcessId,
+                    InterruptGracefulTimeout);
+            }
+
+            await SendInterruptAsync().ConfigureAwait(false);
+            AppLogger.Info("LiveConsole", $"Graceful Ctrl+C interrupt sent. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, TimeoutMs={InterruptGracefulTimeout.TotalMilliseconds:0}.");
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Graceful interrupt was sent to the owned PowerShell session.",
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["ownedProcessId"] = ownedProcessId,
+                    ["timeoutMs"] = InterruptGracefulTimeout.TotalMilliseconds
+                });
+
+            if (await WaitForCommandCompletionAsync(InterruptGracefulTimeout, cancellationToken).ConfigureAwait(false))
+            {
+                AppLogger.Info("LiveConsole", $"Graceful interrupt completed before timeout. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}.");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "InterruptRequested",
+                    "Graceful interrupt completed before timeout.",
+                    "GracefulCompletion",
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = operationId,
+                        ["ownedProcessId"] = ownedProcessId,
+                        ["timeoutMs"] = InterruptGracefulTimeout.TotalMilliseconds
+                    });
+
+                return new LiveConsoleInterruptResult(
+                    interruptAttempted: true,
+                    completedGracefully: true,
+                    escalationRequired: false,
+                    processTerminationSucceeded: false,
+                    sessionRestarted: false,
+                    ownedProcessId,
+                    InterruptGracefulTimeout);
+            }
+
+            if (!IsCommandInProgress)
+            {
+                return new LiveConsoleInterruptResult(
+                    interruptAttempted: true,
+                    completedGracefully: true,
+                    escalationRequired: false,
+                    processTerminationSucceeded: false,
+                    sessionRestarted: false,
+                    ownedProcessId,
+                    InterruptGracefulTimeout);
+            }
+
+            AppLogger.Warning("LiveConsole", $"Graceful interrupt timed out. Escalating to owned session restart. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, TimeoutMs={InterruptGracefulTimeout.TotalMilliseconds:0}.");
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "InterruptRequested",
+                "Graceful interrupt timed out. Escalating to owned session restart.",
+                "EscalateToRestart",
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["ownedProcessId"] = ownedProcessId,
+                    ["timeoutMs"] = InterruptGracefulTimeout.TotalMilliseconds
+                });
+
+            var output = onOutput ?? (_ => { });
+            output(new ExecutionOutputRecord(
+                ExecutionOutputStreamKind.Lifecycle,
+                $"Interrupt timed out after {InterruptGracefulTimeout.TotalSeconds:0.#} seconds. Restarting the owned PowerShell session.",
+                DateTime.Now));
+
+            var processTerminationSucceeded = await StopConsoleAsync(output).ConfigureAwait(false);
+            AppLogger.Info("LiveConsole", $"Owned PowerShell session termination completed. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, TerminationSucceeded={processTerminationSucceeded}.");
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Owned PowerShell session termination completed.",
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["ownedProcessId"] = ownedProcessId,
+                    ["terminationSucceeded"] = processTerminationSucceeded
+                });
+
+            var sessionRestarted = false;
+            if (processTerminationSucceeded && runtime is not null)
+            {
+                try
+                {
+                    await StartSessionAsync(runtime, output, workingDirectory, cancellationToken).ConfigureAwait(false);
+                    sessionRestarted = true;
+                    output(new ExecutionOutputRecord(
+                        ExecutionOutputStreamKind.Lifecycle,
+                        "PowerShell session was forcibly restarted because the running script did not respond to Interrupt.",
+                        DateTime.Now));
+                    AppLogger.Info("LiveConsole", $"Owned PowerShell session restarted after forced termination. OperationId={operationId}, PreviousProcessId={ownedProcessId?.ToString() ?? "(none)"}, Runtime='{runtime.DisplayName}'.");
+                    DeveloperDiagnostics.LogStateTransition(
+                        "Terminal",
+                        "InterruptRequested",
+                        "InterruptTimedOut",
+                        "SessionRestarted",
+                        "Owned PowerShell session restarted after forced termination.",
+                        new Dictionary<string, object?>
+                        {
+                            ["operationId"] = operationId,
+                            ["ownedProcessId"] = ownedProcessId,
+                            ["runtimePath"] = runtime.ExecutablePath,
+                            ["workingDirectory"] = workingDirectory
+                        });
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Error("LiveConsole", $"Failed to restart the owned PowerShell session after forced termination. OperationId={operationId}, PreviousProcessId={ownedProcessId?.ToString() ?? "(none)"}.", ex);
+                    DeveloperDiagnostics.LogException(
+                        "Terminal",
+                        ex,
+                        "Failed to restart the owned PowerShell session after forced termination.",
+                        new Dictionary<string, object?>
+                        {
+                            ["operationId"] = operationId,
+                            ["ownedProcessId"] = ownedProcessId,
+                            ["runtimePath"] = runtime.ExecutablePath,
+                            ["workingDirectory"] = workingDirectory
+                        });
+                    throw;
+                }
+            }
+
+            return new LiveConsoleInterruptResult(
+                interruptAttempted: true,
+                completedGracefully: false,
+                escalationRequired: true,
+                processTerminationSucceeded,
+                sessionRestarted,
+                ownedProcessId,
+                InterruptGracefulTimeout);
+        }
+
         public async Task<bool> StopConsoleAsync(Action<ExecutionOutputRecord>? onOutput = null)
         {
             Process? processToStop;
@@ -468,6 +684,7 @@ namespace PowerShellStudio.PowerShell.Services
                 _inputWriterHandle = IntPtr.Zero;
                 _outputReaderHandle = IntPtr.Zero;
                 ActiveRuntime = null;
+                CurrentWorkingDirectory = null;
                 _isCommandInProgress = false;
                 _currentCommandIsScript = false;
                 _firstOutputLogged = false;
@@ -693,11 +910,13 @@ namespace PowerShellStudio.PowerShell.Services
                 // prediction by default. The editor already provides IntelliSense, and
                 // predictions in the embedded terminal can look like editor autofill.
                 var startupCommand = BuildTerminalStartupCommand();
-                var commandLine = "\"" + runtime.ExecutablePath + "\"" +
+                var launchPath = runtime.LaunchExecutablePath;
+                AppLogger.Info("LiveConsole", $"ConPTY CreateProcessW launch path: '{launchPath}'.");
+                var commandLine = "\"" + launchPath + "\"" +
                     " -NoLogo -NoExit -ExecutionPolicy Bypass -Command " + QuoteCommandArgument(startupCommand);
 
                 if (!CreateProcessW(
-                        runtime.ExecutablePath,
+                        launchPath,
                         commandLine,
                         IntPtr.Zero,
                         IntPtr.Zero,
@@ -823,7 +1042,7 @@ namespace PowerShellStudio.PowerShell.Services
             {
                 StartInfo = new ProcessStartInfo
                 {
-                    FileName = runtime.ExecutablePath,
+                    FileName = runtime.LaunchExecutablePath,
                     Arguments = "-NoLogo -NoExit -ExecutionPolicy Bypass -Command " + QuoteCommandArgument(BuildTerminalStartupCommand()),
                     UseShellExecute = false,
                     CreateNoWindow = true,
@@ -837,6 +1056,7 @@ namespace PowerShellStudio.PowerShell.Services
                 },
                 EnableRaisingEvents = true
             };
+            AppLogger.Info("LiveConsole", $"Redirected terminal ProcessStartInfo.FileName='{process.StartInfo.FileName}'.");
 
             var capturedOnOutput = onOutput;
             process.Exited += (_, _) =>
@@ -1577,6 +1797,11 @@ namespace PowerShellStudio.PowerShell.Services
             }
 
             CurrentWorkingDirectory = path;
+
+            if (TryCompletePromptTrackedCommand())
+            {
+                AppLogger.Info("LiveConsole", $"Prompt observed after interactive command. Completing tracked command state. CurrentDirectory='{CurrentWorkingDirectory}'.");
+            }
         }
 
         private async Task WriteTerminalInputAsync(string text, CancellationToken cancellationToken)
@@ -1647,6 +1872,7 @@ namespace PowerShellStudio.PowerShell.Services
             try
             {
                 AppLogger.Debug("LiveConsole", $"Raw terminal input received. Length={data.Length}, Data='{FormatInputForLog(data)}'.");
+                TrackManualInteractiveInput(data);
                 await WriteTerminalInputAsync(data, cancellationToken).ConfigureAwait(false);
             }
             catch
@@ -1683,6 +1909,99 @@ namespace PowerShellStudio.PowerShell.Services
             }
 
             return builder.ToString();
+        }
+
+        private void TrackManualInteractiveInput(string data)
+        {
+            if (string.IsNullOrEmpty(data) || !data.Contains(TerminalEnterSequence, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            lock (_syncRoot)
+            {
+                if (_process is null || _process.HasExited || _isCommandInProgress)
+                {
+                    return;
+                }
+
+                _isCommandInProgress = true;
+                _currentCommandIsScript = false;
+                _pendingStartToken = null;
+                _pendingCompletionToken = null;
+            }
+
+            AppLogger.Info("LiveConsole", "Tracking manual interactive terminal input until the next PowerShell prompt is observed.");
+        }
+
+        private bool TryCompletePromptTrackedCommand()
+        {
+            lock (_syncRoot)
+            {
+                if (!_isCommandInProgress || _currentCommandIsScript || !string.IsNullOrEmpty(_pendingCompletionToken))
+                {
+                    return false;
+                }
+            }
+
+            CompleteCommandExecution();
+            return true;
+        }
+
+        private async Task<bool> WaitForCommandCompletionAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            if (!IsCommandInProgress)
+            {
+                return true;
+            }
+
+            var completionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            void HandleCompletion() => completionSource.TrySetResult(true);
+
+            CommandExecutionCompleted += HandleCompletion;
+            SessionTerminated += HandleCompletion;
+
+            try
+            {
+                if (!IsCommandInProgress || !IsSessionRunning)
+                {
+                    return true;
+                }
+
+                using var timeoutTaskCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var delayTask = Task.Delay(timeout, timeoutTaskCancellation.Token);
+                var completedTask = await Task.WhenAny(completionSource.Task, delayTask).ConfigureAwait(false);
+                if (completedTask == completionSource.Task)
+                {
+                    timeoutTaskCancellation.Cancel();
+                    return true;
+                }
+
+                return !IsCommandInProgress || !IsSessionRunning;
+            }
+            finally
+            {
+                CommandExecutionCompleted -= HandleCompletion;
+                SessionTerminated -= HandleCompletion;
+            }
+        }
+
+        private static int? TryGetProcessId(Process? process)
+        {
+            try
+            {
+                if (process is null)
+                {
+                    return null;
+                }
+
+                return process.Id;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static string FormatOutputForLog(string text, int maxLength = 120)

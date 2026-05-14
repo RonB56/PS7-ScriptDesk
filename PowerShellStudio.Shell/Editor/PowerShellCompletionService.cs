@@ -241,7 +241,7 @@ namespace PowerShellStudio.Shell.Editor
 
         private void RequestMetadataWarmup(PowerShellRuntimeInfo? runtimeInfo, bool forceRebuild, bool isUserInitiated)
         {
-            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.ExecutablePath))
+            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.LaunchExecutablePath))
             {
                 return;
             }
@@ -259,7 +259,7 @@ namespace PowerShellStudio.Shell.Editor
                     new EditorMetadataWarmupStatus(
                         EditorMetadataWarmupPhase.Failed,
                         "Editor metadata failed; see log",
-                        NormalizePath(runtimeInfo.ExecutablePath),
+                        NormalizePath(runtimeInfo.LaunchExecutablePath),
                         detailText: invalidRuntimeDiagnostics is null
                             ? invalidRuntimeDetail
                             : AppendMetadataLogSupportHint(invalidRuntimeDetail, invalidRuntimeDiagnostics.LogPath),
@@ -268,12 +268,12 @@ namespace PowerShellStudio.Shell.Editor
                             : EditorMetadataWarmupReason.FirstRunBuild));
                 AppLogger.Warning(
                     "EditorMetadata",
-                    $"Metadata warmup rejected runtime '{runtimeInfo.ExecutablePath}'. Version={runtimeInfo.VersionText}, Edition={runtimeInfo.Edition}, " +
+                    $"Metadata warmup rejected runtime DisplayPath='{runtimeInfo.ExecutablePath}', LaunchPath='{runtimeInfo.LaunchExecutablePath}'. Version={runtimeInfo.VersionText}, Edition={runtimeInfo.Edition}, " +
                     $"Validated={runtimeInfo.IsValidated}, IsPowerShell7OrLater={runtimeInfo.IsPowerShell7OrLater}.");
                 return;
             }
 
-            var normalizedRuntimePath = NormalizePath(runtimeInfo.ExecutablePath);
+            var normalizedRuntimePath = NormalizePath(runtimeInfo.LaunchExecutablePath);
             var startupDiagnostics = !forceRebuild && !isUserInitiated
                 ? MetadataInitialLoadDiagnostics.TryCreate(runtimeInfo)
                 : null;
@@ -359,11 +359,11 @@ namespace PowerShellStudio.Shell.Editor
                 RaiseMetadataWarmupStatus(
                     new EditorMetadataWarmupStatus(
                         EditorMetadataWarmupPhase.Completed,
-                        "Using cached editor metadata",
+                        "Editor metadata ready",
                         normalizedRuntimePath,
                         loadedCount,
                         loadedCount,
-                        $"Loaded the saved full editor metadata snapshot for {loadedCount:N0} commands. Created UTC: {GetManifestCreationUtcText(manifest)}.",
+                        $"Loaded from cache. Commands: {metadataHealth.CommandCount:N0}. Quick info: {metadataHealth.QuickInfoCount:N0}. Parameterized commands: {metadataHealth.ParameterizedQuickInfoCount:N0}. Total parameters are available from the cached snapshot. Created UTC: {GetManifestCreationUtcText(manifest)}.",
                         commandCount: metadataHealth.CommandCount,
                         quickInfoCount: metadataHealth.QuickInfoCount,
                         parameterizedQuickInfoCount: metadataHealth.ParameterizedQuickInfoCount,
@@ -614,7 +614,7 @@ namespace PowerShellStudio.Shell.Editor
             snapshot = null;
             manifest = null;
             reason = string.Empty;
-            var normalizedRuntimePath = NormalizePath(runtimeInfo.ExecutablePath);
+            var normalizedRuntimePath = NormalizePath(runtimeInfo.LaunchExecutablePath);
             var stopwatch = Stopwatch.StartNew();
             MetadataPerformanceLog.AppendSection(performanceLogPath, "Cache load decision");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Phase started: Cache probe. StartUtc={DateTime.UtcNow:O}. Runtime='{normalizedRuntimePath}'.");
@@ -622,7 +622,8 @@ namespace PowerShellStudio.Shell.Editor
                          normalizedRuntimePath,
                          runtimeInfo.VersionText ?? string.Empty,
                          runtimeInfo.Edition ?? string.Empty,
-                         runtimeInfo.Architecture ?? string.Empty))
+                         runtimeInfo.Architecture ?? string.Empty,
+                         runtimeInfo.PsHome ?? string.Empty))
             {
                 startupDiagnostics?.RecordCacheProbeCandidate(candidate);
             }
@@ -632,6 +633,7 @@ namespace PowerShellStudio.Shell.Editor
                     runtimeInfo.VersionText ?? string.Empty,
                     runtimeInfo.Edition ?? string.Empty,
                     runtimeInfo.Architecture ?? string.Empty,
+                    runtimeInfo.PsHome ?? string.Empty,
                     out var loadedSnapshot,
                     out var loadedManifest,
                     out var loadedCacheDirectory,
@@ -718,7 +720,7 @@ namespace PowerShellStudio.Shell.Editor
             EditorMetadataCacheManifest manifest,
             out string decisionReason)
         {
-            var normalizedRuntimePath = NormalizePath(runtimeInfo.ExecutablePath);
+            var normalizedRuntimePath = NormalizePath(runtimeInfo.LaunchExecutablePath);
             decisionReason = "The saved metadata snapshot matches the current runtime identity.";
 
             if (manifest is null)
@@ -766,6 +768,12 @@ namespace PowerShellStudio.Shell.Editor
             if (!string.Equals((manifest.RuntimeArchitecture ?? string.Empty).Trim(), (runtimeInfo.Architecture ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase))
             {
                 decisionReason = $"The PowerShell runtime architecture changed from '{manifest.RuntimeArchitecture}' to '{runtimeInfo.Architecture}'.";
+                return false;
+            }
+
+            if (!string.Equals((manifest.RuntimePsHome ?? string.Empty).Trim(), (runtimeInfo.PsHome ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                decisionReason = $"The PowerShell runtime PSHOME changed from '{manifest.RuntimePsHome}' to '{runtimeInfo.PsHome}'.";
                 return false;
             }
 
@@ -837,8 +845,9 @@ namespace PowerShellStudio.Shell.Editor
 
         private void LaunchMetadataBuilderProcess(PowerShellRuntimeInfo runtimeInfo, bool readyCacheAlreadyLoaded, EditorMetadataWarmupReason warmupReason, string performanceLogPath, MetadataInitialLoadDiagnostics? startupDiagnostics)
         {
-            var normalizedRuntimePath = NormalizePath(runtimeInfo.ExecutablePath);
+            var normalizedRuntimePath = NormalizePath(runtimeInfo.LaunchExecutablePath);
             var currentExecutablePath = Environment.ProcessPath;
+            AppLogger.Info("EditorMetadata", $"Metadata builder launch request ProcessStartInfo.FileName will remain '{currentExecutablePath}'. Worker runtime launch path='{normalizedRuntimePath}'.");
             startupDiagnostics?.RecordBackgroundRefreshStarted();
             MetadataPerformanceLog.AppendSection(performanceLogPath, "Background process launch requested");
             MetadataPerformanceLog.AppendLine(performanceLogPath, $"Background process launch requested UTC: {DateTime.UtcNow:O}");
@@ -935,7 +944,7 @@ namespace PowerShellStudio.Shell.Editor
             CancellationTokenSource builderCancellationTokenSource,
             MetadataInitialLoadDiagnostics? startupDiagnostics)
         {
-            var normalizedRuntimePath = NormalizePath(runtimeInfo.ExecutablePath);
+            var normalizedRuntimePath = NormalizePath(runtimeInfo.LaunchExecutablePath);
             var cancellationToken = builderCancellationTokenSource.Token;
             var processStartUtc = DateTimeOffset.UtcNow;
             var receivedTerminalStatus = false;
@@ -1073,7 +1082,7 @@ namespace PowerShellStudio.Shell.Editor
             string? performanceLogPath,
             EditorMetadataBuilderStatusMessage message)
         {
-            var normalizedRuntimePath = NormalizePath(runtimeInfo.ExecutablePath);
+            var normalizedRuntimePath = NormalizePath(runtimeInfo.LaunchExecutablePath);
             var hasReadyMetadata = readyCacheAlreadyLoaded || RuntimeHasReadyMetadataSnapshot(normalizedRuntimePath);
             var metadataHealth = GetLoadedMetadataHealth(normalizedRuntimePath);
             AppLogger.Debug("EditorMetadata", $"Metadata helper status for runtime '{normalizedRuntimePath}': Phase={message.Phase}, Processed={message.ProcessedCount}, Total={message.TotalCount}, Message={message.Message}");
@@ -1327,6 +1336,7 @@ namespace PowerShellStudio.Shell.Editor
             };
             process.Exited += (_, _) => HandleProcessExited(process);
             PowerShellBackgroundProcessEnvironment.Apply(process.StartInfo, "Completion", pwshExecutablePath);
+            AppLogger.Info("EditorCompletion", $"Completion helper ProcessStartInfo.FileName='{process.StartInfo.FileName}'.");
 
             try { process.Start(); }
             catch { processCts.Dispose(); process.Dispose(); throw; }

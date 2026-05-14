@@ -906,10 +906,11 @@ namespace PowerShellStudio.Shell.Help
                     "Version and packaging",
                     "The running shell version comes from the app assembly information, while Windows packaging details live in the repo's packaging project and manifest.",
                     "Use this topic when you want to understand what the app exposes at runtime versus what only exists in the packaging/build configuration.",
-                    "The app does not currently expose an in-app update screen, Store workflow, or AppInstaller UI. Do not assume package-update behavior unless you verify it in the packaging project.",
+                    "Store/MSIX builds can now surface Microsoft Store update guidance at startup, while unpackaged and non-Store builds continue to run without any Store-specific UI.",
                     Section("Current runtime-facing behavior", false,
                         "The About command writes a brief version note to the shell status/output areas.",
                         "The status bar also shows the running version string.",
+                        "Store-managed packaged builds can check for Microsoft Store updates during startup and prompt when an update is available or required.",
                         "Packaging and signing are build-time concerns, not a live in-app settings page."),
                     related: new[] { "Help.About", "Status.Version", "App.Overview" }),
 

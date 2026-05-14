@@ -19,7 +19,9 @@ namespace PowerShellStudio.Shell.Editor
         private const double ZigzagWidth  = 4.0;
 
         private static readonly System.Windows.Media.Pen ErrorPen = CreateErrorPen();
+        private static readonly System.Windows.Media.Pen WarningPen = CreateWarningPen();
         private static readonly System.Windows.Media.Brush ErrorBackgroundBrush = CreateErrorBackgroundBrush();
+        private static readonly System.Windows.Media.Brush WarningBackgroundBrush = CreateWarningBackgroundBrush();
 
         private IReadOnlyList<ParseErrorInfo> _errors = Array.Empty<ParseErrorInfo>();
 
@@ -70,8 +72,8 @@ namespace PowerShellStudio.Shell.Editor
 
                 foreach (var rect in rects)
                 {
-                    DrawBackground(drawingContext, rect);
-                    DrawZigzag(drawingContext, rect);
+                    DrawBackground(drawingContext, rect, error);
+                    DrawZigzag(drawingContext, rect, error);
                 }
             }
         }
@@ -109,13 +111,13 @@ namespace PowerShellStudio.Shell.Editor
         // Zigzag drawing
         // -------------------------------------------------------------------------
 
-        private static void DrawBackground(System.Windows.Media.DrawingContext dc, Rect rect)
+        private static void DrawBackground(System.Windows.Media.DrawingContext dc, Rect rect, ParseErrorInfo error)
         {
             var backgroundRect = new Rect(rect.Left, rect.Top, Math.Max(rect.Width, ZigzagWidth), rect.Height);
-            dc.DrawRectangle(ErrorBackgroundBrush, null, backgroundRect);
+            dc.DrawRectangle(error.IsWarning ? WarningBackgroundBrush : ErrorBackgroundBrush, null, backgroundRect);
         }
 
-        private static void DrawZigzag(System.Windows.Media.DrawingContext dc, Rect rect)
+        private static void DrawZigzag(System.Windows.Media.DrawingContext dc, Rect rect, ParseErrorInfo error)
         {
             // Draw the zigzag along the bottom edge of the error-highlighted rect.
             var baseline = rect.Bottom;
@@ -144,7 +146,7 @@ namespace PowerShellStudio.Shell.Editor
             }
 
             geometry.Freeze();
-            dc.DrawGeometry(null, ErrorPen, geometry);
+            dc.DrawGeometry(null, error.IsWarning ? WarningPen : ErrorPen, geometry);
         }
 
         private static System.Windows.Media.Pen CreateErrorPen()
@@ -154,9 +156,23 @@ namespace PowerShellStudio.Shell.Editor
             return pen;
         }
 
+        private static System.Windows.Media.Pen CreateWarningPen()
+        {
+            var pen = new System.Windows.Media.Pen(System.Windows.Media.Brushes.DarkOrange, 1.5);
+            pen.Freeze();
+            return pen;
+        }
+
         private static System.Windows.Media.Brush CreateErrorBackgroundBrush()
         {
             var brush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(26, 255, 0, 0));
+            brush.Freeze();
+            return brush;
+        }
+
+        private static System.Windows.Media.Brush CreateWarningBackgroundBrush()
+        {
+            var brush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(31, 245, 158, 11));
             brush.Freeze();
             return brush;
         }

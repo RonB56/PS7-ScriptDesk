@@ -9,13 +9,17 @@ namespace PowerShellStudio.UI.ViewModels
     /// </summary>
     public sealed class EditorDiagnosticSpanViewModel
     {
-        public EditorDiagnosticSpanViewModel(int lineNumber, int columnNumber, string message, int startOffset, int endOffset)
+        public const string ErrorSeverity = "Error";
+        public const string WarningSeverity = "Warning";
+
+        public EditorDiagnosticSpanViewModel(int lineNumber, int columnNumber, string message, int startOffset, int endOffset, string? severity = null)
         {
             LineNumber = Math.Max(1, lineNumber);
             ColumnNumber = Math.Max(1, columnNumber);
-            Message = string.IsNullOrWhiteSpace(message) ? "Syntax error" : message;
+            Message = string.IsNullOrWhiteSpace(message) ? "Editor diagnostic" : message;
             StartOffset = Math.Max(0, startOffset);
             EndOffset = Math.Max(StartOffset, endOffset);
+            Severity = NormalizeSeverity(severity);
         }
 
         public int LineNumber { get; }
@@ -28,6 +32,19 @@ namespace PowerShellStudio.UI.ViewModels
 
         public int EndOffset { get; }
 
+        public string Severity { get; }
+
+        public bool IsError => string.Equals(Severity, ErrorSeverity, StringComparison.OrdinalIgnoreCase);
+
+        public bool IsWarning => string.Equals(Severity, WarningSeverity, StringComparison.OrdinalIgnoreCase);
+
         public string DisplayText => $"Line {LineNumber}, Col {ColumnNumber}: {Message}";
+
+        private static string NormalizeSeverity(string? severity)
+        {
+            return string.Equals(severity, WarningSeverity, StringComparison.OrdinalIgnoreCase)
+                ? WarningSeverity
+                : ErrorSeverity;
+        }
     }
 }

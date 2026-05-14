@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.ObjectModel;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -518,6 +518,14 @@ namespace PowerShellStudio.Shell
             {
                 e.Handled = true;
                 ViewModel.CloseTabCommand.Execute(ViewModel.SelectedTab);
+                FocusActiveEditorSoon();
+                return;
+            }
+
+            if (isCtrl && isShift && e.Key == Key.W)
+            {
+                e.Handled = true;
+                ViewModel.CloseAllTabsCommand.Execute(null);
                 FocusActiveEditorSoon();
                 return;
             }
@@ -1309,6 +1317,32 @@ namespace PowerShellStudio.Shell
             }
 
             ContextHelp.OpenOverview(this);
+        }
+
+        private void ConsoleBottomPaneTab_Click(object sender, RoutedEventArgs e)
+        {
+            ConsoleBottomPaneTab.IsChecked = true;
+            DiagnosticsBottomPaneTab.IsChecked = false;
+            DeveloperDiagnostics.LogUserAction("UI", "BottomPaneConsoleTabSelected", "Console bottom pane tab selected.");
+            Dispatcher.BeginInvoke(new Action(() => TerminalConsole.FocusTerminal()), System.Windows.Threading.DispatcherPriority.Loaded);
+        }
+
+        private void DiagnosticsBottomPaneTab_Click(object sender, RoutedEventArgs e)
+        {
+            ConsoleBottomPaneTab.IsChecked = false;
+            DiagnosticsBottomPaneTab.IsChecked = true;
+
+            var errorCount = ViewModel?.SelectedTab?.DiagnosticErrorCount ?? 0;
+            var warningCount = ViewModel?.SelectedTab?.DiagnosticWarningCount ?? 0;
+            DeveloperDiagnostics.LogUserAction(
+                "UI",
+                "BottomPaneDiagnosticsTabSelected",
+                "Diagnostics bottom pane tab selected.",
+                new Dictionary<string, object?>
+                {
+                    ["errorCount"] = errorCount,
+                    ["warningCount"] = warningCount
+                });
         }
 
 
@@ -5290,7 +5324,7 @@ namespace PowerShellStudio.Shell
         private void StartEditorMetadataWarmup()
         {
             var runtimeInfo = ViewModel?.EffectiveRuntimeItem?.RuntimeInfo;
-            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.ExecutablePath))
+            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.LaunchExecutablePath))
             {
                 return;
             }
@@ -5299,15 +5333,15 @@ namespace PowerShellStudio.Shell
             {
                 AppLogger.Warning(
                     "MainWindow",
-                    $"Editor metadata warmup will report failure because the selected runtime is not a validated PowerShell 7 runtime. Path='{runtimeInfo.ExecutablePath}', " +
+                    $"Editor metadata warmup will report failure because the selected runtime is not a validated PowerShell 7 runtime. DisplayPath='{runtimeInfo.ExecutablePath}', LaunchPath='{runtimeInfo.LaunchExecutablePath}', " +
                     $"Version='{runtimeInfo.VersionText}', Edition='{runtimeInfo.Edition}', Validated={runtimeInfo.IsValidated}.");
-                StartupTimingLogger.Log("MainWindow", $"Editor metadata warmup scheduled for invalid runtime '{runtimeInfo.ExecutablePath}' so diagnostics can capture the failure.");
+                StartupTimingLogger.Log("MainWindow", $"Editor metadata warmup scheduled for invalid runtime '{runtimeInfo.LaunchExecutablePath}' so diagnostics can capture the failure.");
             }
 
             var runtimeIdentity = BuildRuntimeIdentityKey(runtimeInfo);
             if (string.Equals(_pendingEditorMetadataWarmupIdentity, runtimeIdentity, StringComparison.OrdinalIgnoreCase))
             {
-                AppLogger.Info("MainWindow", $"Skipped duplicate editor metadata warmup request while debounce is pending for runtime '{runtimeInfo.ExecutablePath}'.");
+                AppLogger.Info("MainWindow", $"Skipped duplicate editor metadata warmup request while debounce is pending for runtime '{runtimeInfo.LaunchExecutablePath}'.");
                 return;
             }
 
@@ -5315,7 +5349,7 @@ namespace PowerShellStudio.Shell
             _pendingEditorMetadataWarmupIdentity = runtimeIdentity;
             _editorMetadataWarmupTimer.Stop();
             _editorMetadataWarmupTimer.Start();
-            StartupTimingLogger.Log("MainWindow", $"Editor command metadata warmup requested for '{runtimeInfo.ExecutablePath}'.");
+            StartupTimingLogger.Log("MainWindow", $"Editor command metadata warmup requested for '{runtimeInfo.LaunchExecutablePath}'.");
         }
 
         private void EditorMetadataWarmupTimer_Tick(object? sender, EventArgs e)
@@ -5327,7 +5361,7 @@ namespace PowerShellStudio.Shell
             _pendingEditorMetadataWarmupRuntime = null;
             _pendingEditorMetadataWarmupIdentity = null;
 
-            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.ExecutablePath) || string.IsNullOrWhiteSpace(runtimeIdentity))
+            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.LaunchExecutablePath) || string.IsNullOrWhiteSpace(runtimeIdentity))
             {
                 return;
             }
@@ -5336,22 +5370,23 @@ namespace PowerShellStudio.Shell
             if (string.Equals(_lastScheduledEditorMetadataWarmupIdentity, runtimeIdentity, StringComparison.OrdinalIgnoreCase) &&
                 nowUtc - _lastScheduledEditorMetadataWarmupAtUtc <= TimeSpan.FromSeconds(15))
             {
-                AppLogger.Info("MainWindow", $"Skipped duplicate editor metadata warmup request for runtime '{runtimeInfo.ExecutablePath}' because the same runtime was already scheduled during startup.");
-                StartupTimingLogger.Log("MainWindow", $"Skipped duplicate editor metadata warmup schedule for '{runtimeInfo.ExecutablePath}'.");
+                AppLogger.Info("MainWindow", $"Skipped duplicate editor metadata warmup request for runtime '{runtimeInfo.LaunchExecutablePath}' because the same runtime was already scheduled during startup.");
+                StartupTimingLogger.Log("MainWindow", $"Skipped duplicate editor metadata warmup schedule for '{runtimeInfo.LaunchExecutablePath}'.");
                 return;
             }
 
             _lastScheduledEditorMetadataWarmupIdentity = runtimeIdentity;
             _lastScheduledEditorMetadataWarmupAtUtc = nowUtc;
             _intelliSenseService.StartMetadataWarmup(runtimeInfo);
-            StartupTimingLogger.Log("MainWindow", $"Editor command metadata warmup scheduled for '{runtimeInfo.ExecutablePath}'.");
+            StartupTimingLogger.Log("MainWindow", $"Editor command metadata warmup scheduled for '{runtimeInfo.LaunchExecutablePath}'.");
         }
 
         private static string BuildRuntimeIdentityKey(PowerShellRuntimeInfo runtimeInfo)
         {
             return string.Join(
                 "|",
-                runtimeInfo.ExecutablePath?.Trim() ?? string.Empty,
+                runtimeInfo.LaunchExecutablePath?.Trim() ?? string.Empty,
+                runtimeInfo.PsHome?.Trim() ?? string.Empty,
                 runtimeInfo.VersionText?.Trim() ?? string.Empty,
                 runtimeInfo.Edition?.Trim() ?? string.Empty,
                 runtimeInfo.Architecture?.Trim() ?? string.Empty);
@@ -5360,12 +5395,12 @@ namespace PowerShellStudio.Shell
         private void RefreshEditorMetadata_Click(object sender, RoutedEventArgs e)
         {
             var runtimeInfo = ViewModel?.EffectiveRuntimeItem?.RuntimeInfo;
-            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.ExecutablePath))
+            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.LaunchExecutablePath))
             {
                 return;
             }
 
-            AppLogger.Info("MainWindow", $"Manual PowerShell editor metadata refresh requested for runtime '{runtimeInfo.ExecutablePath}'.");
+            AppLogger.Info("MainWindow", $"Manual PowerShell editor metadata refresh requested for runtime '{runtimeInfo.LaunchExecutablePath}'.");
             StartupTimingLogger.Log("MainWindow", "Manual PowerShell editor metadata refresh requested.");
             _intelliSenseService.RefreshMetadata(runtimeInfo);
             UpdateRefreshEditorMetadataCommandAvailability();
@@ -5374,7 +5409,7 @@ namespace PowerShellStudio.Shell
         private void DeleteCurrentEditorMetadataCache_Click(object sender, RoutedEventArgs e)
         {
             var runtimeInfo = ViewModel?.EffectiveRuntimeItem?.RuntimeInfo;
-            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.ExecutablePath))
+            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.LaunchExecutablePath))
             {
                 System.Windows.MessageBox.Show(
                     this,
@@ -5386,7 +5421,7 @@ namespace PowerShellStudio.Shell
             }
 
             var cacheEntries = EditorMetadataCacheStore.GetCacheEntries();
-            var normalizedRuntimePath = EditorMetadataCacheStore.NormalizeRuntimePath(runtimeInfo.ExecutablePath);
+            var normalizedRuntimePath = EditorMetadataCacheStore.NormalizeRuntimePath(runtimeInfo.LaunchExecutablePath);
             var matchingEntries = cacheEntries
                 .Where(entry => MetadataCacheEntryMatchesRuntime(entry, runtimeInfo))
                 .ToList();
@@ -5417,10 +5452,11 @@ namespace PowerShellStudio.Shell
             AppLogger.Info("MainWindow", $"User requested deletion of current runtime metadata cache. Runtime='{normalizedRuntimePath}', Version={runtimeInfo.VersionText}, Edition={runtimeInfo.Edition}, Architecture={runtimeInfo.Architecture}.");
 
             var deleted = EditorMetadataCacheStore.DeleteCacheForRuntime(
-                runtimeInfo.ExecutablePath,
+                runtimeInfo.LaunchExecutablePath,
                 runtimeInfo.VersionText ?? string.Empty,
                 runtimeInfo.Edition ?? string.Empty,
                 runtimeInfo.Architecture ?? string.Empty,
+                runtimeInfo.PsHome ?? string.Empty,
                 out var resultMessage);
 
             ViewModel!.StatusText = deleted
@@ -5459,7 +5495,7 @@ namespace PowerShellStudio.Shell
             AppLogger.Info("MainWindow", $"All metadata cache deletion result. DeletedAll={deletedAll}. Message={resultMessage}");
 
             var runtimeInfo = ViewModel?.EffectiveRuntimeItem?.RuntimeInfo;
-            if (runtimeInfo is not null && !string.IsNullOrWhiteSpace(runtimeInfo.ExecutablePath))
+            if (runtimeInfo is not null && !string.IsNullOrWhiteSpace(runtimeInfo.LaunchExecutablePath))
             {
                 _intelliSenseService.RefreshMetadata(runtimeInfo);
             }
@@ -5474,7 +5510,7 @@ namespace PowerShellStudio.Shell
                 return false;
             }
 
-            return string.Equals(EditorMetadataCacheStore.NormalizeRuntimePath(entry.Manifest.RuntimePath), EditorMetadataCacheStore.NormalizeRuntimePath(runtimeInfo.ExecutablePath), StringComparison.OrdinalIgnoreCase) &&
+            return string.Equals(EditorMetadataCacheStore.NormalizeRuntimePath(entry.Manifest.RuntimePath), EditorMetadataCacheStore.NormalizeRuntimePath(runtimeInfo.LaunchExecutablePath), StringComparison.OrdinalIgnoreCase) &&
                    string.Equals((entry.Manifest.RuntimeVersion ?? string.Empty).Trim(), (runtimeInfo.VersionText ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase) &&
                    string.Equals((entry.Manifest.PowerShellEdition ?? string.Empty).Trim(), (runtimeInfo.Edition ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase) &&
                    string.Equals((entry.Manifest.RuntimeArchitecture ?? string.Empty).Trim(), (runtimeInfo.Architecture ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase);
@@ -6092,8 +6128,13 @@ namespace PowerShellStudio.Shell
 
                         ApplyParserTokensToEditor(editorTextEditor, parseResult.SyntaxTokens);
 
-                        var editorDiagnostics = parseResult.Errors
-                            .Concat(PowerShellAuthoringDiagnostics.Analyze(scriptSnapshot, parseResult))
+                        var parserDiagnostics = parseResult.Errors;
+                        var authoringDiagnostics = PowerShellAuthoringDiagnostics
+                            .Analyze(scriptSnapshot, parseResult)
+                            .Select(ParseErrorInfo.AsWarning);
+
+                        var editorDiagnostics = parserDiagnostics
+                            .Concat(authoringDiagnostics)
                             .OrderBy(error => error.StartOffset)
                             .ToList();
 
@@ -6188,11 +6229,25 @@ namespace PowerShellStudio.Shell
                     var lineNumber = line.LineNumber;
                     var columnNumber = Math.Max(1, safeOffset - line.Offset + 1);
 
-                    return new EditorDiagnosticSpanViewModel(lineNumber, columnNumber, error.Message, error.StartOffset, error.EndOffset);
+                    return new EditorDiagnosticSpanViewModel(lineNumber, columnNumber, error.Message, error.StartOffset, error.EndOffset, error.Severity);
                 })
                 .ToList();
 
             tab.SetSyntaxDiagnostics(diagnostics, "Diagnostics: OK");
+
+            var errorCount = diagnostics.Count(static diagnostic => diagnostic.IsError);
+            var warningCount = diagnostics.Count(static diagnostic => diagnostic.IsWarning);
+            DeveloperDiagnostics.LogDebug(
+                "Editor",
+                "Editor diagnostics applied to active document tab.",
+                new Dictionary<string, object?>
+                {
+                    ["documentTitle"] = tab.Title,
+                    ["filePath"] = tab.FilePath,
+                    ["diagnosticCount"] = diagnostics.Count,
+                    ["errorCount"] = errorCount,
+                    ["warningCount"] = warningCount
+                });
 
             if (ViewModel is null || !ReferenceEquals(ViewModel.SelectedTab, tab))
             {
@@ -6201,11 +6256,11 @@ namespace PowerShellStudio.Shell
 
             if (diagnostics.Count == 1)
             {
-                ViewModel.StatusText = diagnostics[0].DisplayText;
+                ViewModel.StatusText = $"{diagnostics[0].Severity}: {diagnostics[0].DisplayText}";
             }
             else if (diagnostics.Count > 1)
             {
-                ViewModel.StatusText = $"{diagnostics.Count} editor diagnostics detected";
+                ViewModel.StatusText = $"{tab.SyntaxErrorSummaryText} detected";
             }
             else
             {

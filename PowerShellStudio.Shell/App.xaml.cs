@@ -14,6 +14,7 @@ using PowerShellStudio.Domain.Models;
 using PowerShellStudio.Infrastructure.Services;
 using PowerShellStudio.PowerShell.Services;
 using PowerShellStudio.Shell.Composition;
+using PowerShellStudio.Shell.Services;
 
 namespace PowerShellStudio.Shell
 {
@@ -110,7 +111,7 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
-            applicationSettings.SelectedRuntimeExecutablePath = startupRuntime.ExecutablePath;
+            applicationSettings.SelectedRuntimeExecutablePath = startupRuntime.LaunchExecutablePath;
             SafeSaveSettings(applicationSettingsService, applicationSettings, startupRuntime);
 
             var shellWindow = AppBootstrapper.CreateMainWindow(applicationSettingsService, applicationSettings);
@@ -119,6 +120,7 @@ namespace PowerShellStudio.Shell
             DeveloperDiagnostics.LogInfo("Startup", "Main window created by AppBootstrapper.");
             shellWindow.Show();
             AppLogger.Info("App", "Main window shown.");
+            _ = CheckForStoreUpdatesAfterStartupAsync(shellWindow);
             DeveloperDiagnostics.LogMethodExit("Startup", "Main window shown; OnStartup completed.");
         }
 
@@ -269,10 +271,17 @@ namespace PowerShellStudio.Shell
             var runtimeService = new RuntimeService(applicationSettings.SelectedRuntimeExecutablePath);
             var discoveryResult = runtimeService.DiscoverRuntimes();
             var preferredRuntime = discoveryResult.PreferredRuntime;
+            AppLogger.Info(
+                "App",
+                $"Startup runtime gate evaluated. ConfiguredRuntimePath='{applicationSettings.SelectedRuntimeExecutablePath ?? string.Empty}', " +
+                $"SelectedDisplayPath='{preferredRuntime?.ExecutablePath ?? string.Empty}', SelectedLaunchPath='{preferredRuntime?.LaunchExecutablePath ?? string.Empty}', " +
+                $"LaunchPathExists={(preferredRuntime is not null && File.Exists(preferredRuntime.LaunchExecutablePath))}, CandidateCount={discoveryResult.CandidateResults.Count}.");
 
             if (preferredRuntime is not null)
             {
-                AppLogger.Info("App", $"Startup runtime selected: {preferredRuntime.ExecutablePath} ({preferredRuntime.VersionText})");
+                AppLogger.Info(
+                    "App",
+                    $"Startup runtime selected: {preferredRuntime.DisplayName}. DisplayPath='{preferredRuntime.ExecutablePath}', LaunchPath='{preferredRuntime.LaunchExecutablePath}', Version='{preferredRuntime.VersionText}', PSHOME='{preferredRuntime.PsHome}'.");
                 DeveloperDiagnostics.LogDecision(
                     "Startup",
                     "ResolveStartupRuntime",
@@ -280,7 +289,8 @@ namespace PowerShellStudio.Shell
                     "Discovered",
                     new Dictionary<string, object?>
                     {
-                        ["runtimePath"] = preferredRuntime.ExecutablePath,
+                        ["runtimePath"] = preferredRuntime.LaunchExecutablePath,
+                        ["displayPath"] = preferredRuntime.ExecutablePath,
                         ["runtimeVersion"] = preferredRuntime.VersionText,
                         ["candidateCount"] = discoveryResult.CandidateResults.Count
                     });
@@ -303,7 +313,9 @@ namespace PowerShellStudio.Shell
             var dialogResult = resolverWindow.ShowDialog();
             if (dialogResult == true && resolverWindow.SelectedRuntime is not null)
             {
-                AppLogger.Info("App", $"Startup runtime selected from resolver dialog: {resolverWindow.SelectedRuntime.ExecutablePath} ({resolverWindow.SelectedRuntime.VersionText})");
+                AppLogger.Info(
+                    "App",
+                    $"Startup runtime selected from resolver dialog: {resolverWindow.SelectedRuntime.DisplayName}. DisplayPath='{resolverWindow.SelectedRuntime.ExecutablePath}', LaunchPath='{resolverWindow.SelectedRuntime.LaunchExecutablePath}', Version='{resolverWindow.SelectedRuntime.VersionText}'.");
                 DeveloperDiagnostics.LogDecision(
                     "Startup",
                     "ResolveStartupRuntime",
@@ -311,7 +323,8 @@ namespace PowerShellStudio.Shell
                     "ResolverAccepted",
                     new Dictionary<string, object?>
                     {
-                        ["runtimePath"] = resolverWindow.SelectedRuntime.ExecutablePath,
+                        ["runtimePath"] = resolverWindow.SelectedRuntime.LaunchExecutablePath,
+                        ["displayPath"] = resolverWindow.SelectedRuntime.ExecutablePath,
                         ["runtimeVersion"] = resolverWindow.SelectedRuntime.VersionText
                     });
                 return resolverWindow.SelectedRuntime;
@@ -330,13 +343,14 @@ namespace PowerShellStudio.Shell
             try
             {
                 applicationSettingsService.SaveSettings(applicationSettings);
-                AppLogger.Info("App", $"Saved validated startup runtime '{runtimeInfo.ExecutablePath}' ({runtimeInfo.VersionText}).");
+                AppLogger.Info("App", $"Saved validated startup runtime '{runtimeInfo.LaunchExecutablePath}' ({runtimeInfo.VersionText}).");
                 DeveloperDiagnostics.LogInfo(
                     "Startup",
                     "Validated startup runtime saved to settings.",
                     new Dictionary<string, object?>
                     {
-                        ["runtimePath"] = runtimeInfo.ExecutablePath,
+                        ["runtimePath"] = runtimeInfo.LaunchExecutablePath,
+                        ["displayPath"] = runtimeInfo.ExecutablePath,
                         ["runtimeVersion"] = runtimeInfo.VersionText
                     });
             }
@@ -349,10 +363,85 @@ namespace PowerShellStudio.Shell
                     "Failed to save validated startup runtime to settings.",
                     new Dictionary<string, object?>
                     {
-                        ["runtimePath"] = runtimeInfo.ExecutablePath,
+                        ["runtimePath"] = runtimeInfo.LaunchExecutablePath,
+                        ["displayPath"] = runtimeInfo.ExecutablePath,
                         ["runtimeVersion"] = runtimeInfo.VersionText
                     });
             }
+        }
+
+        private static async Task CheckForStoreUpdatesAfterStartupAsync(Window shellWindow)
+        {
+            try
+            {
+                if (shellWindow is null)
+                {
+                    return;
+                }
+
+                var storeUpdateService = new StoreUpdateService();
+                AppLogger.Info("StoreUpdate", "Startup Store/MSIX update check requested.");
+                var storeUpdateCheckResult = await storeUpdateService.CheckForUpdatesAsync(CancellationToken.None).ConfigureAwait(true);
+                ShowNonBlockingStoreUpdateNotificationIfNeeded(shellWindow, storeUpdateService, storeUpdateCheckResult);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("StoreUpdate", "Startup Store/MSIX update check failed.", ex);
+                DeveloperDiagnostics.LogException("StoreUpdate", ex, "Startup Store/MSIX update check failed.");
+            }
+        }
+
+        private static void ShowNonBlockingStoreUpdateNotificationIfNeeded(Window shellWindow, StoreUpdateService storeUpdateService, StoreUpdateCheckResult? storeUpdateCheckResult)
+        {
+            if (shellWindow is null || storeUpdateCheckResult is null || !storeUpdateCheckResult.ShouldShowAutomaticNotification)
+            {
+                return;
+            }
+
+            shellWindow.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    var updateWindow = new StoreUpdateWindow(storeUpdateService, storeUpdateCheckResult, isMandatory: false)
+                    {
+                        Owner = shellWindow
+                    };
+                    if (storeUpdateCheckResult.HasMandatoryUpdate)
+                    {
+                        AppLogger.Info("StoreUpdate", "Mandatory Store-managed update detected after startup. Showing modal update dialog.");
+                        DeveloperDiagnostics.LogDecision("StoreUpdate", "StoreUpdateStartupGate", "Mandatory Store-managed update detected after startup.", "MandatoryUpdateDialog");
+                        updateWindow.ShowDialog();
+                        System.Windows.Application.Current?.Shutdown(0);
+                        return;
+                    }
+
+                    updateWindow.Show();
+
+                    AppLogger.Info(
+                        "StoreUpdate",
+                        storeUpdateCheckResult.HasConfirmedInstallableUpdate
+                            ? "Displayed non-blocking Microsoft Store update notification after main window load."
+                            : "Skipped automatic Microsoft Store update dialog because no confirmed installable update was returned.");
+                    DeveloperDiagnostics.LogDecision(
+                        "StoreUpdate",
+                        "ShowNonBlockingUpdateNotification",
+                        "Displayed Store update dialog after main window load only for a confirmed installable update.",
+                        "Shown",
+                        new Dictionary<string, object?>
+                        {
+                            ["packagingKind"] = storeUpdateCheckResult.PackagingKind.ToString(),
+                            ["availabilityState"] = storeUpdateCheckResult.AvailabilityState.ToString(),
+                            ["updateCount"] = storeUpdateCheckResult.UpdateCount,
+                            ["hasMandatoryUpdate"] = storeUpdateCheckResult.HasMandatoryUpdate,
+                            ["shouldShowManualInstructions"] = storeUpdateCheckResult.ShouldShowManualInstructions
+                        });
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Error("StoreUpdate", "Failed to show non-blocking Microsoft Store update notification.", ex);
+                    DeveloperDiagnostics.LogException("StoreUpdate", ex, "Failed to show non-blocking Microsoft Store update notification.");
+                }
+            }), DispatcherPriority.Background);
         }
     }
 }

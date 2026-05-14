@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using PowerShellStudio.Application.Diagnostics;
 
 namespace PowerShellStudio.Shell.Editor
 {
@@ -256,6 +257,7 @@ namespace PowerShellStudio.Shell.Editor
 
             process.Exited += (_, _) => HandleProcessExited(process);
             PowerShellBackgroundProcessEnvironment.Apply(process.StartInfo, "Diagnostics", pwshExecutablePath);
+            AppLogger.Info("EditorDiagnostics", $"Diagnostics helper ProcessStartInfo.FileName='{process.StartInfo.FileName}'.");
 
             try
             {

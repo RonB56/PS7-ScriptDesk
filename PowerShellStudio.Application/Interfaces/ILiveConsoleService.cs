@@ -87,5 +87,14 @@ namespace PowerShellStudio.Application.Interfaces
         /// Falls back to a no-op when the session is not running.
         /// </summary>
         Task SendInterruptAsync();
+
+        /// <summary>
+        /// Attempts a graceful interrupt first, then forcefully restarts only the
+        /// PowerShell session owned by PS7 ScriptDesk if the command does not stop
+        /// within the timeout window.
+        /// </summary>
+        Task<LiveConsoleInterruptResult> InterruptOrRestartAsync(
+            Action<ExecutionOutputRecord>? onOutput = null,
+            CancellationToken cancellationToken = default);
     }
 }

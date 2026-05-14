@@ -36,6 +36,7 @@ namespace PowerShellStudio.UI.ViewModels
         private readonly RelayCommand _sendConsoleCommand;
         private readonly RelayCommand _restartConsoleCommand;
         private readonly RelayCommand _exportAsExeCommand;
+        private readonly RelayCommand _closeAllTabsCommand;
         private readonly RelayCommand _zoomInCommand;
         private readonly RelayCommand _zoomOutCommand;
         private readonly RelayCommand _resetZoomCommand;
@@ -135,6 +136,8 @@ namespace PowerShellStudio.UI.ViewModels
 
             NewScriptCommand = new RelayCommand(OnNewScript);
             CloseTabCommand = new RelayCommand(OnCloseTab);
+            _closeAllTabsCommand = new RelayCommand(OnCloseAllTabs, CanCloseAllTabs);
+            CloseAllTabsCommand = _closeAllTabsCommand;
             _runCommand = new RelayCommand(async () => await OnRunAsync(), CanRunScript);
             RunCommand = _runCommand;
             _stopCommand = new RelayCommand(async () => await OnStopAsync(), CanStopScript);
@@ -568,7 +571,7 @@ namespace PowerShellStudio.UI.ViewModels
                     OnPropertyChanged(nameof(EffectiveRuntimeItem));
                     OnPropertyChanged(nameof(EffectiveRuntimeInfo));
                     OnPropertyChanged(nameof(EffectiveRuntimeExecutablePath));
-                    _selectedRuntimeExecutablePathToRestore = _selectedRuntimeItem?.ExecutablePath;
+                    _selectedRuntimeExecutablePathToRestore = _selectedRuntimeItem?.RuntimeInfo.LaunchExecutablePath;
                     RefreshCommandStates();
                 }
             }
@@ -630,7 +633,7 @@ namespace PowerShellStudio.UI.ViewModels
 
         public PowerShellRuntimeInfo? EffectiveRuntimeInfo => EffectiveRuntimeItem?.RuntimeInfo;
 
-        public string? EffectiveRuntimeExecutablePath => EffectiveRuntimeItem?.ExecutablePath;
+        public string? EffectiveRuntimeExecutablePath => EffectiveRuntimeItem?.RuntimeInfo.LaunchExecutablePath;
 
         public bool IsRunAvailable => CanRunScript();
 
@@ -651,6 +654,8 @@ namespace PowerShellStudio.UI.ViewModels
         public ICommand NewScriptCommand { get; }
 
         public ICommand CloseTabCommand { get; }
+
+        public ICommand CloseAllTabsCommand { get; }
 
         public ICommand RunCommand { get; }
 
@@ -722,19 +727,7 @@ namespace PowerShellStudio.UI.ViewModels
         /// <summary>Sends Ctrl+C (ETX) to the ConPTY terminal to interrupt a running script (4B).</summary>
         public async Task SendInterruptAsync()
         {
-            if (!_liveConsoleService.IsSessionRunning)
-            {
-                return;
-            }
-
-            try
-            {
-                await _liveConsoleService.SendInterruptAsync().ConfigureAwait(false);
-            }
-            catch
-            {
-                // Best effort — if the process is already gone, ignore.
-            }
+            await OnStopAsync().ConfigureAwait(false);
         }
 
         public async Task RunSelectionAsync(string selectedScriptText)
@@ -1012,7 +1005,7 @@ namespace PowerShellStudio.UI.ViewModels
                 LastWorkspaceFolderPath = !string.IsNullOrWhiteSpace(_currentWorkspaceFolderPath) && Directory.Exists(_currentWorkspaceFolderPath)
                     ? _currentWorkspaceFolderPath
                     : null,
-                SelectedRuntimeExecutablePath = SelectedRuntimeItem?.ExecutablePath ?? _preferredRuntimeItem?.ExecutablePath,
+                SelectedRuntimeExecutablePath = SelectedRuntimeItem?.RuntimeInfo.LaunchExecutablePath ?? _preferredRuntimeItem?.RuntimeInfo.LaunchExecutablePath,
                 SelectedTabFilePath = SelectedTab?.FilePath,
                 RecentFilePaths = new List<string>(_recentFilePaths),
                 ReopenFilePaths = reopenFilePaths
@@ -1035,7 +1028,7 @@ namespace PowerShellStudio.UI.ViewModels
             }
 
             IsExplorerVisible = settings.IsExplorerVisible;
-            _selectedRuntimeExecutablePathToRestore = NormalizeStoredPath(settings.SelectedRuntimeExecutablePath);
+            _selectedRuntimeExecutablePathToRestore = NormalizeStoredRuntimePath(settings.SelectedRuntimeExecutablePath);
 
             var persistedTheme = TryGetOptionalStringProperty(settings, "Theme");
             if (!string.IsNullOrWhiteSpace(persistedTheme))
@@ -1118,9 +1111,13 @@ namespace PowerShellStudio.UI.ViewModels
             DetectedRuntimes.Add(runtimeItem);
             _preferredRuntimeItem = runtimeItem;
             _selectedRuntimeItem = runtimeItem;
+            _selectedRuntimeExecutablePathToRestore = runtime.LaunchExecutablePath;
             RuntimeText = $"Runtime: Checking PowerShell runtime ({runtime.DisplayName})...";
             StatusText = "Checking PowerShell runtime...";
-            StartupTimingLogger.Log("MainWindowViewModel", $"Seeded persisted runtime selection in {stopwatch.ElapsedMilliseconds} ms: {runtime.DisplayName} ({runtime.ExecutablePath})");
+            StartupTimingLogger.Log(
+                "MainWindowViewModel",
+                $"Seeded persisted runtime selection in {stopwatch.ElapsedMilliseconds} ms: {runtime.DisplayName}. " +
+                $"ConfiguredPath='{_selectedRuntimeExecutablePathToRestore}', DisplayPath='{runtime.ExecutablePath}', LaunchPath='{runtime.LaunchExecutablePath}', LaunchPathExists={File.Exists(runtime.LaunchExecutablePath)}");
         }
 
         private static string? TryGetOptionalStringProperty(object target, string propertyName)
@@ -1369,6 +1366,35 @@ namespace PowerShellStudio.UI.ViewModels
             catch
             {
                 return null;
+            }
+        }
+
+        private static string? NormalizeStoredRuntimePath(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return null;
+            }
+
+            var trimmed = path.Trim().Trim('"');
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return null;
+            }
+
+            if (string.Equals(Path.GetFileName(trimmed), trimmed, StringComparison.OrdinalIgnoreCase) &&
+                trimmed.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return trimmed;
+            }
+
+            try
+            {
+                return Path.GetFullPath(trimmed);
+            }
+            catch
+            {
+                return trimmed;
             }
         }
 
@@ -1809,6 +1835,78 @@ namespace PowerShellStudio.UI.ViewModels
             CloseTabCore(tabToClose);
         }
 
+        private bool CanCloseAllTabs()
+        {
+            return OpenTabs.Count > 0;
+        }
+
+        private void OnCloseAllTabs()
+        {
+            var operationId = $"CloseAllTabs-{Guid.NewGuid():N}";
+            using var scope = DeveloperDiagnostics.BeginTimedOperation(
+                "Editor",
+                "CloseAllTabs",
+                "Close All requested.",
+                operationId: operationId);
+
+            var tabsToProcess = new List<EditorTabViewModel>(OpenTabs);
+            AppLogger.Info("Editor", $"Close All started. OpenDocumentCount={tabsToProcess.Count}.");
+            DeveloperDiagnostics.LogUserAction(
+                "Editor",
+                "CloseAllTabsRequested",
+                "Close All requested from the shell.",
+                new Dictionary<string, object?> { ["openDocumentCount"] = tabsToProcess.Count });
+
+            foreach (var tab in tabsToProcess)
+            {
+                var documentMarker = DescribeDocumentForCloseAll(tab);
+                AppLogger.Info("Editor", $"Close All inspecting document '{documentMarker}'. IsDirty={tab.IsDirty}.");
+                DeveloperDiagnostics.LogInfo(
+                    "Editor",
+                    "Close All inspecting document.",
+                    new Dictionary<string, object?>
+                    {
+                        ["document"] = documentMarker,
+                        ["filePath"] = tab.FilePath,
+                        ["isDirty"] = tab.IsDirty
+                    });
+
+                if (!TryHandleUnsavedChanges(tab))
+                {
+                    StatusText = "Close All canceled";
+                    AppLogger.Warning("Editor", $"Close All canceled while processing document '{documentMarker}'.");
+                    DeveloperDiagnostics.LogDecision(
+                        "Editor",
+                        "CloseAllTabsRequested",
+                        "Close All stopped because the unsaved-changes prompt was canceled or save failed.",
+                        "Canceled",
+                        new Dictionary<string, object?>
+                        {
+                            ["document"] = documentMarker,
+                            ["filePath"] = tab.FilePath,
+                            ["isDirty"] = tab.IsDirty
+                        });
+                    return;
+                }
+
+                CloseTabCore(tab);
+                AppLogger.Info("Editor", $"Close All closed document '{documentMarker}'.");
+                DeveloperDiagnostics.LogInfo(
+                    "Editor",
+                    "Close All closed document.",
+                    new Dictionary<string, object?> { ["document"] = documentMarker });
+            }
+
+            StatusText = "Close All completed";
+            AppLogger.Info("Editor", "Close All completed successfully.");
+            DeveloperDiagnostics.LogDecision(
+                "Editor",
+                "CloseAllTabsRequested",
+                "Close All completed successfully.",
+                "Completed",
+                new Dictionary<string, object?> { ["remainingDocumentCount"] = OpenTabs.Count });
+        }
+
         private void CloseTabCore(EditorTabViewModel tabToClose)
         {
             var closingTitle = tabToClose.Title;
@@ -1852,6 +1950,18 @@ namespace PowerShellStudio.UI.ViewModels
             OnPropertyChanged(nameof(OpenTabCountText));
             OnPropertyChanged(nameof(ActiveDocumentText));
             RefreshCommandStates();
+        }
+
+        private static string DescribeDocumentForCloseAll(EditorTabViewModel tab)
+        {
+            if (tab is null)
+            {
+                return "(null)";
+            }
+
+            return string.IsNullOrWhiteSpace(tab.FilePath)
+                ? $"Untitled:{tab.Title}"
+                : tab.FilePath;
         }
 
         private async Task OnRunAsync()
@@ -2074,26 +2184,90 @@ namespace PowerShellStudio.UI.ViewModels
                 return;
             }
 
+            var operationId = $"Interrupt-{Guid.NewGuid():N}";
+            using var scope = DeveloperDiagnostics.BeginTimedOperation(
+                "Terminal",
+                "InterruptRequested",
+                "Interrupt requested from the shell.",
+                operationId: operationId);
+
             StatusText = "Interrupting the current PowerShell operation...";
-            AppLogger.Info("Console", "Interrupt requested; sending Ctrl+C to the terminal session.");
+            AppLogger.Info("Console", $"Interrupt requested from the shell. OperationId={operationId}, SessionRunning={_liveConsoleService.IsSessionRunning}, CommandInProgress={_liveConsoleService.IsCommandInProgress}, IsExecutionRunning={IsExecutionRunning}, IsDebugSessionActive={IsDebugSessionActive}.");
+            DeveloperDiagnostics.LogUserAction(
+                "Terminal",
+                "InterruptRequested",
+                "Interrupt requested from the shell.",
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                    ["commandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                    ["isExecutionRunning"] = IsExecutionRunning,
+                    ["isDebugSessionActive"] = IsDebugSessionActive
+                });
             IsStopInProgress = true;
 
             try
             {
-                await _liveConsoleService.SendInterruptAsync().ConfigureAwait(false);
+                var interruptResult = await _liveConsoleService
+                    .InterruptOrRestartAsync(AppendExecutionOutput)
+                    .ConfigureAwait(false);
 
                 PostToUi(() =>
                 {
-                    StatusText = "Interrupt sent to the PowerShell terminal";
+                    if (interruptResult.SessionRestarted)
+                    {
+                        StatusText = "PowerShell session restarted after interrupt timeout";
+                    }
+                    else if (interruptResult.CompletedGracefully)
+                    {
+                        StatusText = "Interrupt completed";
+                    }
+                    else if (interruptResult.InterruptAttempted)
+                    {
+                        StatusText = "Interrupt attempted";
+                    }
+                    else
+                    {
+                        StatusText = "Interrupt was not needed";
+                    }
+
+                    IsExecutionRunning = false;
                     UpdateConsoleSessionPresentation();
                 });
+
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "InterruptRequested",
+                    interruptResult.SessionRestarted
+                        ? "Interrupt escalated to a forced owned-session restart."
+                        : "Interrupt completed without a forced restart.",
+                    interruptResult.SessionRestarted ? "ForcedRestart" : "GracefulOrNoOp",
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = operationId,
+                        ["interruptAttempted"] = interruptResult.InterruptAttempted,
+                        ["completedGracefully"] = interruptResult.CompletedGracefully,
+                        ["escalationRequired"] = interruptResult.EscalationRequired,
+                        ["processTerminationSucceeded"] = interruptResult.ProcessTerminationSucceeded,
+                        ["sessionRestarted"] = interruptResult.SessionRestarted,
+                        ["ownedProcessId"] = interruptResult.OwnedProcessId,
+                        ["gracefulTimeoutMs"] = interruptResult.GracefulTimeout.TotalMilliseconds
+                    });
             }
             catch (Exception ex)
             {
+                AppLogger.Error("Console", $"Interrupt or restart failed. OperationId={operationId}.", ex);
+                DeveloperDiagnostics.LogException(
+                    "Terminal",
+                    ex,
+                    "Interrupt or restart failed.",
+                    new Dictionary<string, object?> { ["operationId"] = operationId });
                 PostToUi(() =>
                 {
-                    StatusText = "Interrupt failed";
-                    AppendOutputLine($"Interrupt failed: {ex.Message}");
+                    StatusText = "Interrupt recovery failed";
+                    AppendOutputLine($"Interrupt recovery failed: {ex.Message}");
+                    IsExecutionRunning = false;
                     UpdateConsoleSessionPresentation();
                 });
             }
@@ -3105,7 +3279,9 @@ namespace PowerShellStudio.UI.ViewModels
             return message.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
                    message.Contains("fallback", StringComparison.OrdinalIgnoreCase) ||
                    message.Contains("exited", StringComparison.OrdinalIgnoreCase) ||
-                   message.Contains("stopped unexpectedly", StringComparison.OrdinalIgnoreCase);
+                   message.Contains("stopped unexpectedly", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("timed out", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("restarted", StringComparison.OrdinalIgnoreCase);
         }
 
         private void AppendOutputLine(string text)
@@ -3173,6 +3349,7 @@ namespace PowerShellStudio.UI.ViewModels
             return SelectedTab is not null &&
                    (SelectedRuntimeItem is not null || _preferredRuntimeItem is not null) &&
                    !IsExecutionRunning &&
+                   !_liveConsoleService.IsCommandInProgress &&
                    !IsStopInProgress &&
                    !IsRuntimeDiscoveryInProgress &&
                    !IsDebugSessionActive;
@@ -3200,6 +3377,7 @@ namespace PowerShellStudio.UI.ViewModels
         private bool CanExecuteConsoleCommand()
         {
             return !IsExecutionRunning &&
+                   !_liveConsoleService.IsCommandInProgress &&
                    !IsStopInProgress &&
                    !IsRuntimeDiscoveryInProgress &&
                    !string.IsNullOrWhiteSpace(ConsoleCommandText) &&
@@ -3209,6 +3387,7 @@ namespace PowerShellStudio.UI.ViewModels
         private bool CanRestartConsole()
         {
             return !IsExecutionRunning &&
+                   !_liveConsoleService.IsCommandInProgress &&
                    !IsStopInProgress &&
                    !IsRuntimeDiscoveryInProgress &&
                    (SelectedRuntimeItem is not null || _preferredRuntimeItem is not null);
@@ -3216,6 +3395,7 @@ namespace PowerShellStudio.UI.ViewModels
 
         public void RefreshCommandStates()
         {
+            _closeAllTabsCommand.RaiseCanExecuteChanged();
             _runCommand.RaiseCanExecuteChanged();
             _stopCommand.RaiseCanExecuteChanged();
             _refreshRuntimesCommand.RaiseCanExecuteChanged();

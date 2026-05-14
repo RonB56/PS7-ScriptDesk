@@ -34,7 +34,9 @@ namespace PowerShellStudio.Shell.Editor
         private string _failureMessage = string.Empty;
         private string _cacheOutcome = "Unknown";
         private int _commandCount;
-        private int _parameterCount;
+        private int _quickInfoCount;
+        private int _parameterizedCommandCount;
+        private int _totalParameterCount;
         private int _moduleCount;
 
         private MetadataInitialLoadDiagnostics(string logPath, string selectedRuntimePath)
@@ -49,7 +51,7 @@ namespace PowerShellStudio.Shell.Editor
 
         public static MetadataInitialLoadDiagnostics? TryCreate(PowerShellRuntimeInfo runtimeInfo)
         {
-            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.ExecutablePath))
+            if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.LaunchExecutablePath))
             {
                 return null;
             }
@@ -62,7 +64,7 @@ namespace PowerShellStudio.Shell.Editor
 
                 var timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-ffff", CultureInfo.InvariantCulture);
                 var logPath = Path.Combine(logDirectory, $"metadata-initial-load-{timestamp}.log");
-                var diagnostics = new MetadataInitialLoadDiagnostics(logPath, EditorMetadataCacheStore.NormalizeRuntimePath(runtimeInfo.ExecutablePath));
+                var diagnostics = new MetadataInitialLoadDiagnostics(logPath, EditorMetadataCacheStore.NormalizeRuntimePath(runtimeInfo.LaunchExecutablePath));
                 diagnostics.WriteHeader(runtimeInfo, logDirectory);
                 AppLogger.Info("EditorMetadata", $"Metadata initial-load diagnostics: {logPath}");
                 return diagnostics;
@@ -80,6 +82,9 @@ namespace PowerShellStudio.Shell.Editor
             AppendLine($"Local timestamp: {DateTime.Now:O}");
             AppendLine($"UTC timestamp: {DateTime.UtcNow:O}");
             AppendLine($"Selected runtime path: {_selectedRuntimePath}");
+            AppendLine($"Selected runtime display path: {runtimeInfo.ExecutablePath}");
+            AppendLine($"Selected runtime launch path: {runtimeInfo.LaunchExecutablePath}");
+            AppendLine($"Selected runtime launch path exists: {File.Exists(runtimeInfo.LaunchExecutablePath)}");
             AppendLine($"Selected runtime version: {runtimeInfo.VersionText ?? string.Empty}");
             AppendLine($"Selected runtime edition: {runtimeInfo.Edition ?? string.Empty}");
             AppendLine($"Selected runtime architecture: {runtimeInfo.Architecture ?? string.Empty}");
@@ -101,7 +106,7 @@ namespace PowerShellStudio.Shell.Editor
             {
                 AppendLine(
                     $"Cache candidate manifest: SchemaVersion={candidate.Manifest.SchemaVersion}, RuntimeVersion='{candidate.Manifest.RuntimeVersion}', " +
-                    $"Edition='{candidate.Manifest.PowerShellEdition}', Architecture='{candidate.Manifest.RuntimeArchitecture}', " +
+                    $"Edition='{candidate.Manifest.PowerShellEdition}', Architecture='{candidate.Manifest.RuntimeArchitecture}', PSHOME='{candidate.Manifest.RuntimePsHome}', " +
                     $"CatalogCount={candidate.Manifest.CatalogCount}, QuickInfoCount={candidate.Manifest.QuickInfoCount}, " +
                     $"CreatedUtc={FormatUtcTicks(candidate.Manifest.CreatedUtcTicks)}, BuiltUtc={FormatUtcTicks(candidate.Manifest.BuiltUtcTicks)}.");
             }
@@ -135,9 +140,14 @@ namespace PowerShellStudio.Shell.Editor
 
             lock (_syncRoot)
             {
-                _finalUiMetadataStatus = $"{status.Phase}: {status.Message}";
+                var readyDetail = status.IsCompletedSuccessfully && status.IsLoadedFromCache
+                    ? " | Loaded from cache"
+                    : string.Empty;
+                _finalUiMetadataStatus =
+                    $"{status.ReadinessCaption}{readyDetail} | Commands: {status.CommandCount:N0} | Quick info: {status.QuickInfoCount:N0} | Parameterized commands: {status.ParameterizedQuickInfoCount:N0}";
                 _commandCount = Math.Max(_commandCount, status.CommandCount);
-                _parameterCount = Math.Max(_parameterCount, status.QuickInfoCount > 0 ? status.ParameterizedQuickInfoCount : _parameterCount);
+                _quickInfoCount = Math.Max(_quickInfoCount, status.QuickInfoCount);
+                _parameterizedCommandCount = Math.Max(_parameterizedCommandCount, status.ParameterizedQuickInfoCount);
                 if (status.HasCommandCatalog)
                 {
                     _commandCatalogLoaded = true;
@@ -331,12 +341,12 @@ namespace PowerShellStudio.Shell.Editor
             AppendLine($"Selected runtime resolved executable path: {runtimeInfo.ResolvedExecutablePath}");
             AppendLine($"Selected runtime PSHOME: {runtimeInfo.PsHome}");
             AppendLine($"Selected runtime validation message: {runtimeInfo.ValidationMessage}");
-            LogRuntimeFileVersion(runtimeInfo.ExecutablePath);
+            LogRuntimeFileVersion(runtimeInfo.LaunchExecutablePath);
             LogRuntimeDiscovery();
-            LogSelectedRuntimePsVersionTable(runtimeInfo.ExecutablePath);
+            LogSelectedRuntimePsVersionTable(runtimeInfo.LaunchExecutablePath);
 
             AppendSection("Background PowerShell environment");
-            if (PowerShellBackgroundProcessEnvironment.TryBuildEnvironmentInfo("MetadataBuilder", runtimeInfo.ExecutablePath, createDirectories: true, out var environmentInfo, out var environmentFailureReason))
+            if (PowerShellBackgroundProcessEnvironment.TryBuildEnvironmentInfo("MetadataBuilder", runtimeInfo.LaunchExecutablePath, createDirectories: true, out var environmentInfo, out var environmentFailureReason))
             {
                 AppendLine($"Environment purpose: {environmentInfo.Purpose}");
                 AppendLine($"Environment LOCALAPPDATA: {environmentInfo.LocalAppData}");
@@ -364,25 +374,32 @@ namespace PowerShellStudio.Shell.Editor
 
         private void WriteFinalSummary()
         {
-            AppendSection("Failure summary");
+            var outcome = ResolveOutcomeLabel();
+            AppendSection("Metadata run summary");
             AppendLine($"Final metadata status: {_finalMetadataStatus}");
-            AppendLine($"Success / partial success / failure: {ResolveOutcomeLabel()}");
+            AppendLine($"Success / partial success / failure: {outcome}");
             AppendLine($"Did command catalog load: {_commandCatalogLoaded}");
             AppendLine($"Did parameter metadata load: {_parameterMetadataLoaded}");
             AppendLine($"Did cache load: {_cacheLoaded}");
             AppendLine($"Did background refresh run: {_backgroundRefreshRan}");
             AppendLine($"Did background refresh fail: {_backgroundRefreshFailed}");
-            AppendLine($"Most likely failure phase: {_failurePhase}");
-            AppendLine($"Most important exception/error message: {_failureMessage}");
-            AppendLine("Whether user should send this log file for support: Yes");
-
-            AppendSection("Success summary");
+            AppendLine($"Support log recommended: {(string.Equals(outcome, "Success", StringComparison.OrdinalIgnoreCase) ? "No" : "Yes")}");
             AppendLine($"Total duration ms: {_totalStopwatch.ElapsedMilliseconds:N0}");
             AppendLine($"Cache used or rebuilt: {_cacheOutcome}");
             AppendLine($"Command count: {_commandCount:N0}");
-            AppendLine($"Parameter count: {_parameterCount:N0}");
+            AppendLine($"Quick-info count: {_quickInfoCount:N0}");
+            AppendLine($"Parameterized command count: {_parameterizedCommandCount:N0}");
+            AppendLine($"Total parameter count: {_totalParameterCount:N0}");
             AppendLine($"Module count: {_moduleCount:N0}");
             AppendLine($"Final UI metadata status: {_finalUiMetadataStatus}");
+
+            if (!string.Equals(outcome, "Success", StringComparison.OrdinalIgnoreCase))
+            {
+                AppendSection("Failure summary");
+                AppendLine($"Most likely failure phase: {_failurePhase}");
+                AppendLine($"Most important exception/error message: {_failureMessage}");
+                AppendLine("Support log recommended: Yes");
+            }
         }
 
         private void LogDirectoryState(string label, string path, bool createIfMissing)
@@ -522,7 +539,9 @@ namespace PowerShellStudio.Shell.Editor
         private void PopulateSnapshotCounts(EditorMetadataCacheSnapshot snapshot)
         {
             _commandCount = Math.Max(_commandCount, snapshot.Catalog.Commands.Count);
-            _parameterCount = Math.Max(_parameterCount, snapshot.QuickInfos.Values.Sum(item => item?.Parameters.Count ?? 0));
+            _quickInfoCount = Math.Max(_quickInfoCount, snapshot.QuickInfos.Count);
+            _parameterizedCommandCount = Math.Max(_parameterizedCommandCount, snapshot.QuickInfos.Values.Count(item => item is not null && item.Parameters.Count > 0));
+            _totalParameterCount = Math.Max(_totalParameterCount, snapshot.QuickInfos.Values.Sum(item => item?.Parameters.Count ?? 0));
             _moduleCount = Math.Max(_moduleCount, snapshot.Catalog.Commands
                 .Select(item => item.ModuleName)
                 .Where(name => !string.IsNullOrWhiteSpace(name))

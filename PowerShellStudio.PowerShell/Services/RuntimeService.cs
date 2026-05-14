@@ -150,7 +150,7 @@ namespace PowerShellStudio.PowerShell.Services
                 probeResult.RuntimeInfo.VersionText,
                 probeResult.RuntimeInfo.Version,
                 probeResult.RuntimeInfo.Architecture,
-                probeResult.RuntimeInfo.ExecutablePath,
+                probeResult.RuntimeInfo.LaunchExecutablePath,
                 probeResult.RuntimeInfo.DiscoverySource,
                 probeResult.RuntimeInfo.IsPowerShell7OrLater,
                 probeResult.RuntimeInfo.IsWindowsPowerShell,
@@ -237,6 +237,13 @@ namespace PowerShellStudio.PowerShell.Services
                 return first.IsWindowsAppsAlias ? second : first;
             }
 
+            var firstPathPreference = GetExecutablePathPreference(first);
+            var secondPathPreference = GetExecutablePathPreference(second);
+            if (secondPathPreference != firstPathPreference)
+            {
+                return secondPathPreference > firstPathPreference ? second : first;
+            }
+
             if (first.IsWindowsPowerShell && second.IsWindowsPowerShell)
             {
                 var firstScore = GetWindowsPowerShellPathPreference(first.ExecutablePath);
@@ -248,6 +255,30 @@ namespace PowerShellStudio.PowerShell.Services
             }
 
             return second.Version > first.Version ? second : first;
+        }
+
+        private static int GetExecutablePathPreference(PowerShellRuntimeInfo runtime)
+        {
+            var executablePath = NormalizeComparablePath(runtime.ExecutablePath);
+            var resolvedPath = NormalizeComparablePath(runtime.ResolvedExecutablePath);
+
+            if (!string.IsNullOrWhiteSpace(resolvedPath) &&
+                string.Equals(executablePath, resolvedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return 3;
+            }
+
+            if (!string.IsNullOrWhiteSpace(resolvedPath))
+            {
+                return 2;
+            }
+
+            if (!IsUnqualifiedExecutableName(executablePath))
+            {
+                return 1;
+            }
+
+            return 0;
         }
 
         private static int GetWindowsPowerShellPathPreference(string path)

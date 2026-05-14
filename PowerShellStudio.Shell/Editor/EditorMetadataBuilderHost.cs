@@ -189,6 +189,7 @@ namespace PowerShellStudio.Shell.Editor
                     snapshotResult.RuntimeVersion,
                     snapshotResult.PowerShellEdition,
                     snapshotResult.RuntimeArchitecture,
+                    snapshotResult.RuntimePsHome,
                     moduleFingerprintHash);
                 saveStopwatch.Stop();
                 var savedParameterCount = snapshotResult.QuickInfos.Values.Sum(quickInfo => quickInfo.Parameters.Count);
@@ -565,6 +566,7 @@ namespace PowerShellStudio.Shell.Editor
                 root.TryGetProperty("rv", out var versionElement) ? versionElement.GetString() ?? string.Empty : string.Empty,
                 root.TryGetProperty("ed", out var editionElement) ? editionElement.GetString() ?? string.Empty : string.Empty,
                 root.TryGetProperty("ra", out var architectureElement) ? architectureElement.GetString() ?? string.Empty : string.Empty,
+                root.TryGetProperty("ph", out var psHomeElement) ? psHomeElement.GetString() ?? string.Empty : string.Empty,
                 root.TryGetProperty("mf", out var fingerprintElement) ? fingerprintElement.GetString() ?? string.Empty : string.Empty);
         }
 
@@ -2295,6 +2297,7 @@ try {
         rv = [string]$PSVersionTable.PSVersion
         ed = [string]$PSEdition
         ra = [string]([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)
+        ph = [string]$PSHOME
         mf = [string]$moduleFingerprint
         commands = @($catalog | ForEach-Object { $_ })
         items = @($items | ForEach-Object { $_ })
@@ -2417,6 +2420,7 @@ catch {
                 string runtimeVersion,
                 string powerShellEdition,
                 string runtimeArchitecture,
+                string runtimePsHome,
                 string moduleFingerprint)
             {
                 Catalog = catalog;
@@ -2424,6 +2428,7 @@ catch {
                 RuntimeVersion = runtimeVersion;
                 PowerShellEdition = powerShellEdition;
                 RuntimeArchitecture = runtimeArchitecture;
+                RuntimePsHome = runtimePsHome;
                 ModuleFingerprint = moduleFingerprint;
             }
 
@@ -2432,6 +2437,7 @@ catch {
             public string RuntimeVersion { get; }
             public string PowerShellEdition { get; }
             public string RuntimeArchitecture { get; }
+            public string RuntimePsHome { get; }
             public string ModuleFingerprint { get; }
         }
 

@@ -50,6 +50,10 @@ namespace PowerShellStudio.Domain.Models
 
         public string ExecutablePath { get; }
 
+        public string LaunchExecutablePath => string.IsNullOrWhiteSpace(ResolvedExecutablePath)
+            ? ExecutablePath
+            : ResolvedExecutablePath;
+
         public string DiscoverySource { get; }
 
         public bool IsPowerShell7OrLater { get; }

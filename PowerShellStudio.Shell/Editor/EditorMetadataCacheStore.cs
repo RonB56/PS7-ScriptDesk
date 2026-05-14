@@ -14,13 +14,14 @@ namespace PowerShellStudio.Shell.Editor
 {
     internal sealed class EditorMetadataCacheManifest
     {
-        public int SchemaVersion { get; set; } = 2;
+        public int SchemaVersion { get; set; } = 3;
         public string RuntimePath { get; set; } = string.Empty;
         public long RuntimeFileLength { get; set; }
         public long RuntimeLastWriteUtcTicks { get; set; }
         public string RuntimeVersion { get; set; } = string.Empty;
         public string PowerShellEdition { get; set; } = string.Empty;
         public string RuntimeArchitecture { get; set; } = string.Empty;
+        public string RuntimePsHome { get; set; } = string.Empty;
         public string ModuleFingerprintHash { get; set; } = string.Empty;
         public long BuiltUtcTicks { get; set; }
         public long CreatedUtcTicks { get; set; }
@@ -126,6 +127,7 @@ namespace PowerShellStudio.Shell.Editor
             string runtimeVersion,
             string powerShellEdition,
             string runtimeArchitecture,
+            string runtimePsHome,
             out EditorMetadataCacheSnapshot snapshot,
             out EditorMetadataCacheManifest manifest,
             out string cacheDirectory,
@@ -147,7 +149,8 @@ namespace PowerShellStudio.Shell.Editor
                 normalizedRuntimePath,
                 runtimeVersion,
                 powerShellEdition,
-                runtimeArchitecture);
+                runtimeArchitecture,
+                runtimePsHome);
 
             foreach (var candidate in candidates)
             {
@@ -185,6 +188,7 @@ namespace PowerShellStudio.Shell.Editor
                 runtimeVersion: string.Empty,
                 powerShellEdition: string.Empty,
                 runtimeArchitecture: string.Empty,
+                runtimePsHome: string.Empty,
                 out snapshot,
                 out manifest,
                 out _,
@@ -307,6 +311,7 @@ namespace PowerShellStudio.Shell.Editor
             string runtimeVersion,
             string powerShellEdition,
             string runtimeArchitecture,
+            string runtimePsHome,
             string moduleFingerprintHash)
         {
             var stopwatch = Stopwatch.StartNew();
@@ -321,7 +326,7 @@ namespace PowerShellStudio.Shell.Editor
             }
 
             var normalizedRuntimePath = NormalizeRuntimePath(runtimePath);
-            var cacheDirectory = GetCacheDirectory(normalizedRuntimePath, runtimeVersion, powerShellEdition, runtimeArchitecture);
+            var cacheDirectory = GetCacheDirectory(normalizedRuntimePath, runtimeVersion, powerShellEdition, runtimeArchitecture, runtimePsHome);
             Directory.CreateDirectory(cacheDirectory);
 
             var manifestPath = Path.Combine(cacheDirectory, ManifestFileName);
@@ -338,6 +343,7 @@ namespace PowerShellStudio.Shell.Editor
                 RuntimeVersion = runtimeVersion?.Trim() ?? string.Empty,
                 PowerShellEdition = powerShellEdition?.Trim() ?? string.Empty,
                 RuntimeArchitecture = runtimeArchitecture?.Trim() ?? string.Empty,
+                RuntimePsHome = runtimePsHome?.Trim() ?? string.Empty,
                 ModuleFingerprintHash = moduleFingerprintHash?.Trim() ?? string.Empty,
                 BuiltUtcTicks = DateTime.UtcNow.Ticks,
                 CreatedUtcTicks = DateTime.UtcNow.Ticks,
@@ -402,13 +408,25 @@ namespace PowerShellStudio.Shell.Editor
 
         public static string NormalizeRuntimePath(string runtimePath)
         {
+            if (string.IsNullOrWhiteSpace(runtimePath))
+            {
+                return string.Empty;
+            }
+
+            var trimmed = runtimePath.Trim().Trim('"');
+            if (string.Equals(Path.GetFileName(trimmed), trimmed, StringComparison.OrdinalIgnoreCase) &&
+                trimmed.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return trimmed;
+            }
+
             try
             {
-                return Path.GetFullPath(runtimePath).Trim();
+                return Path.GetFullPath(trimmed).Trim();
             }
             catch
             {
-                return runtimePath.Trim();
+                return trimmed;
             }
         }
 
@@ -443,7 +461,8 @@ namespace PowerShellStudio.Shell.Editor
             string runtimePath,
             string runtimeVersion,
             string powerShellEdition,
-            string runtimeArchitecture)
+            string runtimeArchitecture,
+            string runtimePsHome = "")
         {
             var root = GetCacheRootDirectory();
             var normalizedRuntimePath = NormalizeRuntimePath(runtimePath);
@@ -451,7 +470,8 @@ namespace PowerShellStudio.Shell.Editor
                 normalizedRuntimePath,
                 runtimeVersion,
                 powerShellEdition,
-                runtimeArchitecture);
+                runtimeArchitecture,
+                runtimePsHome);
             return Path.Combine(root, ComputeHash(identity));
         }
 
@@ -459,7 +479,8 @@ namespace PowerShellStudio.Shell.Editor
             string runtimePath,
             string runtimeVersion,
             string powerShellEdition,
-            string runtimeArchitecture)
+            string runtimeArchitecture,
+            string runtimePsHome = "")
         {
             return string.Join(
                 "|",
@@ -467,6 +488,7 @@ namespace PowerShellStudio.Shell.Editor
                 (runtimeVersion ?? string.Empty).Trim(),
                 (powerShellEdition ?? string.Empty).Trim(),
                 (runtimeArchitecture ?? string.Empty).Trim(),
+                (runtimePsHome ?? string.Empty).Trim(),
                 $"schema:{new EditorMetadataCacheManifest().SchemaVersion}");
         }
 
@@ -518,7 +540,8 @@ namespace PowerShellStudio.Shell.Editor
             string runtimePath,
             string runtimeVersion,
             string powerShellEdition,
-            string runtimeArchitecture)
+            string runtimeArchitecture,
+            string runtimePsHome = "")
         {
             if (string.IsNullOrWhiteSpace(runtimePath))
             {
@@ -526,7 +549,7 @@ namespace PowerShellStudio.Shell.Editor
             }
 
             var normalizedRuntimePath = NormalizeRuntimePath(runtimePath);
-            var candidates = GetCacheDirectoryCandidates(normalizedRuntimePath, runtimeVersion, powerShellEdition, runtimeArchitecture);
+            var candidates = GetCacheDirectoryCandidates(normalizedRuntimePath, runtimeVersion, powerShellEdition, runtimeArchitecture, runtimePsHome);
             var results = new List<EditorMetadataCacheProbeCandidateInfo>(candidates.Count);
 
             foreach (var candidate in candidates)
@@ -573,6 +596,7 @@ namespace PowerShellStudio.Shell.Editor
             string runtimeVersion,
             string powerShellEdition,
             string runtimeArchitecture,
+            string runtimePsHome,
             out string resultMessage)
         {
             resultMessage = string.Empty;
@@ -587,10 +611,11 @@ namespace PowerShellStudio.Shell.Editor
                 normalizedRuntimePath,
                 runtimeVersion,
                 powerShellEdition,
-                runtimeArchitecture);
+                runtimeArchitecture,
+                runtimePsHome);
             var matchingDirectories = new[] { identityCacheDirectory }
                 .Concat(GetCacheEntries()
-                    .Where(entry => ManifestMatchesRuntimeIdentity(entry.Manifest, normalizedRuntimePath, runtimeVersion, powerShellEdition, runtimeArchitecture))
+                    .Where(entry => ManifestMatchesRuntimeIdentity(entry.Manifest, normalizedRuntimePath, runtimeVersion, powerShellEdition, runtimeArchitecture, runtimePsHome))
                     .Select(entry => entry.CacheDirectory))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Where(Directory.Exists)
@@ -803,9 +828,10 @@ namespace PowerShellStudio.Shell.Editor
             string normalizedRuntimePath,
             string runtimeVersion,
             string powerShellEdition,
-            string runtimeArchitecture)
+            string runtimeArchitecture,
+            string runtimePsHome)
         {
-            var identityDirectory = GetCacheDirectory(normalizedRuntimePath, runtimeVersion, powerShellEdition, runtimeArchitecture);
+            var identityDirectory = GetCacheDirectory(normalizedRuntimePath, runtimeVersion, powerShellEdition, runtimeArchitecture, runtimePsHome);
             var legacyDirectory = GetCacheDirectory(normalizedRuntimePath);
             var candidates = new List<(string CacheDirectory, bool IsLegacyPathCache)>
             {
@@ -825,7 +851,8 @@ namespace PowerShellStudio.Shell.Editor
             string normalizedRuntimePath,
             string runtimeVersion,
             string powerShellEdition,
-            string runtimeArchitecture)
+            string runtimeArchitecture,
+            string runtimePsHome)
         {
             if (manifest is null)
             {
@@ -835,7 +862,8 @@ namespace PowerShellStudio.Shell.Editor
             return string.Equals(NormalizeRuntimePath(manifest.RuntimePath), normalizedRuntimePath, StringComparison.OrdinalIgnoreCase) &&
                    string.Equals((manifest.RuntimeVersion ?? string.Empty).Trim(), (runtimeVersion ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase) &&
                    string.Equals((manifest.PowerShellEdition ?? string.Empty).Trim(), (powerShellEdition ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase) &&
-                   string.Equals((manifest.RuntimeArchitecture ?? string.Empty).Trim(), (runtimeArchitecture ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase);
+                   string.Equals((manifest.RuntimeArchitecture ?? string.Empty).Trim(), (runtimeArchitecture ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals((manifest.RuntimePsHome ?? string.Empty).Trim(), (runtimePsHome ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool IsLegacyPathCacheDirectory(string directory, EditorMetadataCacheManifest? manifest)

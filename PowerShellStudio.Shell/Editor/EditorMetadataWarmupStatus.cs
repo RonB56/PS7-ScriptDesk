@@ -91,9 +91,7 @@ namespace PowerShellStudio.Shell.Editor
             GetChildItemParameterCount > 0;
 
         public string ReadinessCaption =>
-            IsLoadedFromCache
-                ? "Using cached editor metadata"
-                : "Editor metadata ready";
+            "Editor metadata ready";
 
         public string WarningCaption =>
             "Metadata refresh failed; cached metadata still in use";

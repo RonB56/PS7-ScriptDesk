@@ -1,4 +1,4 @@
-﻿<Window x:Class="PowerShellStudio.Shell.MainWindow"
+<Window x:Class="PowerShellStudio.Shell.MainWindow"
         x:Name="RootWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -46,18 +46,75 @@
         <Style x:Key="ToolbarIconDangerPathStyle" TargetType="Path" BasedOn="{StaticResource ToolbarIconPathStyle}">
             <Setter Property="Fill" Value="{DynamicResource Theme.Icon.Danger}" />
         </Style>
+
+        <Style x:Key="BottomPaneTabToggleButtonStyle" TargetType="ToggleButton">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Padding" Value="2,6,2,8" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ToggleButton}">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="2" />
+                                </Grid.RowDefinitions>
+                                <ContentPresenter Grid.Row="0"
+                                                  Margin="{TemplateBinding Padding}"
+                                                  HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"
+                                                  RecognizesAccessKey="True" />
+                                <Border x:Name="SelectionUnderline"
+                                        Grid.Row="1"
+                                        Background="Transparent"
+                                        CornerRadius="1" />
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+                                <Setter Property="FontWeight" Value="Bold" />
+                                <Setter TargetName="SelectionUnderline" Property="Background" Value="{DynamicResource Theme.Icon.Accent}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="BottomPaneHeaderBadgeBorderStyle" TargetType="Border">
+            <Setter Property="Padding" Value="8,2" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="Background" Value="#1F2937" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+        </Style>
     </Window.Resources>
 
     <Grid>
         <DockPanel>
 
         <Menu DockPanel.Dock="Top" help:ContextHelp.Key="App.Overview">
-            <MenuItem x:Name="FileMenuItem"
+                <MenuItem x:Name="FileMenuItem"
                       Header="_File"
                       SubmenuOpened="FileMenuItem_SubmenuOpened"
                       help:ContextHelp.Key="Menu.File">
                 <MenuItem Header="_New Script" InputGestureText="Ctrl+N" Command="{Binding NewScriptCommand}" help:ContextHelp.Key="Command.NewScript" />
                 <MenuItem Header="_Close Tab" InputGestureText="Ctrl+W" Command="{Binding CloseTabCommand}" help:ContextHelp.Key="Command.CloseTab" />
+                <MenuItem Header="Close _All" InputGestureText="Ctrl+Shift+W" Command="{Binding CloseAllTabsCommand}" help:ContextHelp.Key="Command.CloseTab" />
                 <MenuItem Header="_Open..." InputGestureText="Ctrl+O" Click="OpenFile_Click" help:ContextHelp.Key="Command.OpenFile" />
                 <MenuItem Header="Open _Folder..." InputGestureText="Ctrl+Shift+O" Command="{Binding OpenWorkspaceFolderCommand}" help:ContextHelp.Key="Command.OpenFolder" />
                 <Separator x:Name="RecentScriptsSectionTopSeparator" />
@@ -262,6 +319,20 @@
                                   Style="{StaticResource ToolbarIconNeutralPathStyle}" />
                         </Viewbox>
                         <TextBlock Text="Close (Ctrl+W)" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Close All Tabs -->
+                <Button Command="{Binding CloseAllTabsCommand}"
+                        help:ContextHelp.Key="Command.CloseTab"
+                        Padding="10,4" Margin="2,0" MinWidth="145"
+                        ToolTip="Close All (Ctrl+Shift+W)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <Path Data="M 0,2 H 11 V 4 H 0 Z M 2,6 L 6,10 L 10,6 L 12,8 L 8,12 L 12,16 L 10,18 L 6,14 L 2,18 L 0,16 L 4,12 L 0,8 Z M 12,2 H 16 V 4 H 12 Z"
+                                  Style="{StaticResource ToolbarIconNeutralPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Close All (Ctrl+Shift+W)" VerticalAlignment="Center" />
                     </StackPanel>
                 </Button>
 
@@ -1074,7 +1145,6 @@
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="*" />
                                         <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
 
                                     <Grid Grid.Row="0">
@@ -1139,60 +1209,6 @@
                                     </Grid>
 
                                     <Border Grid.Row="1"
-                                            help:ContextHelp.Key="Editor.SyntaxPanel"
-                                            Margin="0,8,0,0"
-                                            Padding="12,10"
-                                            Style="{StaticResource DiagnosticsPanelBorderStyle}"
-                                            Visibility="{Binding ShowSyntaxDiagnosticsPanel, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                        <Grid>
-                                            <Grid.RowDefinitions>
-                                                <RowDefinition Height="Auto" />
-                                                <RowDefinition Height="Auto" />
-                                                <RowDefinition Height="*" />
-                                            </Grid.RowDefinitions>
-
-                                            <DockPanel Grid.Row="0" Margin="0,0,0,8">
-                                                <TextBlock Text="Diagnostics"
-                                                           FontWeight="SemiBold"
-                                                           Foreground="{DynamicResource Theme.Status.Error.Foreground}" />
-                                                <TextBlock DockPanel.Dock="Right"
-                                                           Text="{Binding SyntaxErrorSummaryText}"
-                                                           Foreground="{DynamicResource Theme.Status.Error.Foreground}"
-                                                           FontWeight="SemiBold" />
-                                            </DockPanel>
-
-                                            <TextBlock Grid.Row="1"
-                                                       Text="{Binding SyntaxDiagnosticsStatusText}"
-                                                       TextWrapping="Wrap"
-                                                       Foreground="{DynamicResource Theme.Status.Error.Foreground}"
-                                                       Margin="0,0,0,8" />
-
-                                            <ScrollViewer Grid.Row="2"
-                                                          MaxHeight="160"
-                                                          VerticalScrollBarVisibility="Auto"
-                                                          HorizontalScrollBarVisibility="Disabled">
-                                                <ItemsControl ItemsSource="{Binding SyntaxErrors}">
-                                                    <ItemsControl.ItemTemplate>
-                                                        <DataTemplate>
-                                                            <Button Style="{StaticResource DiagnosticsItemButtonStyle}"
-                                                                    Click="SyntaxDiagnosticItem_Click">
-                                                                <StackPanel>
-                                                                    <TextBlock Text="{Binding DisplayText}"
-                                                                               TextWrapping="Wrap"
-                                                                               FontWeight="SemiBold" />
-                                                                    <TextBlock Text="Click to navigate to this diagnostic in the active editor"
-                                                                               Style="{StaticResource CaptionTextStyle}"
-                                                                               Margin="0,4,0,0" />
-                                                                </StackPanel>
-                                                            </Button>
-                                                        </DataTemplate>
-                                                    </ItemsControl.ItemTemplate>
-                                                </ItemsControl>
-                                            </ScrollViewer>
-                                        </Grid>
-                                    </Border>
-
-                                    <Border Grid.Row="2"
                                             help:ContextHelp.Key="Editor.Footer"
                                             Margin="0,8,0,0"
                                             Padding="10,8"
@@ -1204,7 +1220,6 @@
                                                        Margin="0,0,12,0" />
                                             <TextBlock Text="{Binding SelectionDisplayText}" Margin="0,0,12,0" />
                                             <TextBlock Text="{Binding BreakpointDisplayText}" Margin="0,0,12,0" />
-                                            <TextBlock Text="{Binding SyntaxErrorSummaryText}" />
                                         </DockPanel>
                                     </Border>
                                 </Grid>
@@ -1227,7 +1242,7 @@
             <Border Grid.Row="2"
                     help:ContextHelp.Key="Console.Area"
                     Grid.Column="2"
-                    Padding="12"
+                    Padding="8"
                     Style="{StaticResource PanelCardBorderStyle}">
                 <Grid>
                     <Grid.RowDefinitions>
@@ -1235,42 +1250,227 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <!-- Console header: title, session status, Reset Console button -->
-                    <DockPanel Grid.Row="0" Margin="0,0,0,6">
-                        <StackPanel Orientation="Vertical" DockPanel.Dock="Left">
-                            <DockPanel>
-                                <TextBlock Text="Console"
-                                           Style="{StaticResource SectionHeaderTextStyle}"
+                    <Grid Grid.Row="0" Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Orientation="Horizontal"
+                                    VerticalAlignment="Center">
+                            <ToggleButton x:Name="ConsoleBottomPaneTab"
+                                          IsChecked="True"
+                                          MinWidth="72"
+                                          Margin="0,0,18,0"
+                                          Content="Console"
+                                          Style="{StaticResource BottomPaneTabToggleButtonStyle}"
+                                          Click="ConsoleBottomPaneTab_Click"
+                                          help:ContextHelp.Key="Console.Area" />
+
+                            <ToggleButton x:Name="DiagnosticsBottomPaneTab"
+                                          MinWidth="82"
+                                          Content="Problems"
+                                          Style="{StaticResource BottomPaneTabToggleButtonStyle}"
+                                          Click="DiagnosticsBottomPaneTab_Click"
+                                          help:ContextHelp.Key="Editor.SyntaxPanel" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1"
+                                    Orientation="Horizontal"
+                                    VerticalAlignment="Center"
+                                    HorizontalAlignment="Right">
+                            <Border Margin="0,0,8,0">
+                                <Border.Style>
+                                    <Style TargetType="Border" BasedOn="{StaticResource BottomPaneHeaderBadgeBorderStyle}">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Setter Property="Background" Value="#7F1D1D" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedTab.HasSyntaxErrors}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <TextBlock Text="{Binding SelectedTab.DiagnosticErrorCount, StringFormat={}{0} errors}"
+                                           Foreground="#FEE2E2"
+                                           FontSize="11"
+                                           FontWeight="Bold" />
+                            </Border>
+
+                            <Border>
+                                <Border.Style>
+                                    <Style TargetType="Border" BasedOn="{StaticResource BottomPaneHeaderBadgeBorderStyle}">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Setter Property="Background" Value="#78350F" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedTab.HasDiagnosticWarnings}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <TextBlock Text="{Binding SelectedTab.DiagnosticWarningCount, StringFormat={}{0} warnings}"
+                                           Foreground="#FEF3C7"
+                                           FontSize="11"
+                                           FontWeight="Bold" />
+                            </Border>
+                        </StackPanel>
+                    </Grid>
+
+                    <Grid Grid.Row="1">
+                        <Grid x:Name="ConsoleBottomPane"
+                              Margin="4">
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=DiagnosticsBottomPaneTab}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <!-- Console header: session status, Reset Console button -->
+                            <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                                <TextBlock Text="{Binding ConsoleSessionText}"
+                                           VerticalAlignment="Center"
+                                           Foreground="{DynamicResource Theme.Text.Secondary}"
                                            help:ContextHelp.Key="Console.Area" />
+
+                                <StackPanel Orientation="Horizontal"
+                                            DockPanel.Dock="Right"
+                                            HorizontalAlignment="Right">
+                                    <Button Style="{StaticResource InlineAreaHelpButtonStyle}"
+                                            Content="?"
+                                            Tag="Console.Area"
+                                            Click="OpenHelpForKey_Click"
+                                            help:ContextHelp.Key="Console.Area" />
+                                    <Button Content="Reset Console"
+                                            Command="{Binding RestartConsoleCommand}"
+                                            Padding="10,4"
+                                            Margin="8,0,0,0"
+                                            MinWidth="110"
+                                            help:ContextHelp.Key="Console.Reset" />
+                                </StackPanel>
+                            </DockPanel>
+
+                            <!-- xterm.js terminal — replaces the old TextBox + command-input row -->
+                            <controls:TerminalControl x:Name="TerminalConsole"
+                                                      Grid.Row="1"
+                                                      help:ContextHelp.Key="Console.Output" />
+                        </Grid>
+
+                        <Grid x:Name="DiagnosticsBottomPane"
+                              Margin="4">
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=DiagnosticsBottomPaneTab}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                                <StackPanel Orientation="Vertical" DockPanel.Dock="Left">
+                                    <TextBlock Text="Problems"
+                                               Style="{StaticResource SectionHeaderTextStyle}"
+                                               help:ContextHelp.Key="Editor.SyntaxPanel" />
+                                    <TextBlock Text="{Binding SelectedTab.SyntaxErrorSummaryText, TargetNullValue=No active document}"
+                                               Margin="0,2,0,0"
+                                               Foreground="{DynamicResource Theme.Text.Secondary}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+
                                 <Button Style="{StaticResource InlineAreaHelpButtonStyle}"
                                         DockPanel.Dock="Right"
                                         Content="?"
-                                        Tag="Console.Area"
+                                        Tag="Editor.SyntaxPanel"
                                         Click="OpenHelpForKey_Click"
-                                        help:ContextHelp.Key="Console.Area" />
+                                        help:ContextHelp.Key="Editor.SyntaxPanel" />
                             </DockPanel>
-                            <TextBlock Text="{Binding ConsoleSessionText}"
-                                       Margin="0,2,0,0"
-                                       Foreground="{DynamicResource Theme.Text.Secondary}"
-                                       help:ContextHelp.Key="Console.Area" />
-                        </StackPanel>
 
-                        <StackPanel Orientation="Horizontal"
-                                    DockPanel.Dock="Right"
-                                    HorizontalAlignment="Right">
-                            <Button Content="Reset Console"
-                                    Command="{Binding RestartConsoleCommand}"
-                                    Padding="10,4"
-                                    Margin="8,0,0,0"
-                                    MinWidth="110"
-                                    help:ContextHelp.Key="Console.Reset" />
-                        </StackPanel>
-                    </DockPanel>
+                            <TextBlock Grid.Row="1"
+                                       Text="No problems for the active document."
+                                       Margin="0,0,0,8"
+                                       Foreground="{DynamicResource Theme.Text.Secondary}">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedTab.HasDiagnostics}" Value="False">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
 
-                    <!-- xterm.js terminal — replaces the old TextBox + command-input row -->
-                    <controls:TerminalControl x:Name="TerminalConsole"
-                                              Grid.Row="1"
-                                              help:ContextHelp.Key="Console.Output" />
+                            <ScrollViewer Grid.Row="2"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <ItemsControl ItemsSource="{Binding SelectedTab.SyntaxErrors}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Style="{StaticResource DiagnosticsItemButtonStyle}"
+                                                    Click="SyntaxDiagnosticItem_Click">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+
+                                                    <Border Grid.Column="0"
+                                                            Padding="6,2"
+                                                            CornerRadius="8"
+                                                            VerticalAlignment="Top"
+                                                            Margin="0,0,8,0">
+                                                        <Border.Style>
+                                                            <Style TargetType="Border">
+                                                                <Setter Property="Background" Value="#DC2626" />
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsWarning}" Value="True">
+                                                                        <Setter Property="Background" Value="#F59E0B" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </Border.Style>
+                                                        <TextBlock Text="{Binding Severity}"
+                                                                   Foreground="White"
+                                                                   FontWeight="SemiBold"
+                                                                   FontSize="11" />
+                                                    </Border>
+
+                                                    <StackPanel Grid.Column="1">
+                                                        <TextBlock Text="{Binding DisplayText}"
+                                                                   TextWrapping="Wrap"
+                                                                   FontWeight="SemiBold" />
+                                                        <TextBlock Text="Click to navigate to this diagnostic in the active editor"
+                                                                   Style="{StaticResource CaptionTextStyle}"
+                                                                   Margin="0,4,0,0" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </Grid>
+                    </Grid>
                 </Grid>
             </Border>
             <!-- Debug splitter — only visible when debug panel is open -->

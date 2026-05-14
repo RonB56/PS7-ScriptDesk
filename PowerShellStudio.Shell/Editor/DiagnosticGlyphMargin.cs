@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
@@ -11,12 +11,13 @@ using PowerShellStudio.UI.ViewModels;
 namespace PowerShellStudio.Shell.Editor
 {
     /// <summary>
-    /// Lightweight left-side glyph margin that shows one error marker per visible line with diagnostics.
+    /// Lightweight left-side glyph margin that shows one diagnostic marker per visible line.
+    /// Error lines render red; warning-only lines render orange.
     /// The margin stays inside AvalonEdit's existing architecture and does not replace the text renderer.
     /// </summary>
     public sealed class DiagnosticGlyphMargin : AbstractMargin
     {
-        private readonly HashSet<int> _diagnosticLineNumbers = new();
+        private readonly Dictionary<int, string> _diagnosticLineSeverities = new();
 
         public event Action<int>? DiagnosticLineClicked;
 
@@ -27,13 +28,18 @@ namespace PowerShellStudio.Shell.Editor
 
         public void SetDiagnostics(IEnumerable<EditorDiagnosticSpanViewModel> diagnostics)
         {
-            _diagnosticLineNumbers.Clear();
+            _diagnosticLineSeverities.Clear();
 
-            foreach (var lineNumber in (diagnostics ?? Enumerable.Empty<EditorDiagnosticSpanViewModel>())
-                         .Select(static diagnostic => Math.Max(1, diagnostic.LineNumber))
-                         .Distinct())
+            foreach (var diagnostic in diagnostics ?? Enumerable.Empty<EditorDiagnosticSpanViewModel>())
             {
-                _diagnosticLineNumbers.Add(lineNumber);
+                var lineNumber = Math.Max(1, diagnostic.LineNumber);
+                if (!_diagnosticLineSeverities.TryGetValue(lineNumber, out var existingSeverity) ||
+                    IsWarningSeverity(existingSeverity) && diagnostic.IsError)
+                {
+                    _diagnosticLineSeverities[lineNumber] = diagnostic.IsWarning
+                        ? EditorDiagnosticSpanViewModel.WarningSeverity
+                        : EditorDiagnosticSpanViewModel.ErrorSeverity;
+                }
             }
 
             InvalidateVisual();
@@ -54,18 +60,23 @@ namespace PowerShellStudio.Shell.Editor
                 return;
             }
 
-            var fillBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(220, 38, 38));
-            var strokePen = new System.Windows.Media.Pen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(127, 29, 29)), 1);
-            fillBrush.Freeze();
-            strokePen.Freeze();
-
             foreach (var visualLine in textView.VisualLines)
             {
                 var lineNumber = visualLine.FirstDocumentLine.LineNumber;
-                if (!_diagnosticLineNumbers.Contains(lineNumber))
+                if (!_diagnosticLineSeverities.TryGetValue(lineNumber, out var severity))
                 {
                     continue;
                 }
+
+                var fillBrush = new SolidColorBrush(IsWarningSeverity(severity)
+                    ? System.Windows.Media.Color.FromRgb(245, 158, 11)
+                    : System.Windows.Media.Color.FromRgb(220, 38, 38));
+                var strokeBrush = new SolidColorBrush(IsWarningSeverity(severity)
+                    ? System.Windows.Media.Color.FromRgb(180, 83, 9)
+                    : System.Windows.Media.Color.FromRgb(127, 29, 29));
+                fillBrush.Freeze();
+                strokeBrush.Freeze();
+                var strokePen = new System.Windows.Media.Pen(strokeBrush, 1);
 
                 var y = visualLine.VisualTop - textView.ScrollOffset.Y;
                 var glyphBounds = new Rect(3, y + 3, 12, Math.Max(10, visualLine.Height - 6));
@@ -101,7 +112,7 @@ namespace PowerShellStudio.Shell.Editor
                 if (clickY >= lineTop && clickY <= lineBottom)
                 {
                     var lineNumber = visualLine.FirstDocumentLine.LineNumber;
-                    if (_diagnosticLineNumbers.Contains(lineNumber))
+                    if (_diagnosticLineSeverities.ContainsKey(lineNumber))
                     {
                         DiagnosticLineClicked?.Invoke(lineNumber);
                         e.Handled = true;
@@ -110,6 +121,11 @@ namespace PowerShellStudio.Shell.Editor
                     return;
                 }
             }
+        }
+
+        private static bool IsWarningSeverity(string? severity)
+        {
+            return string.Equals(severity, EditorDiagnosticSpanViewModel.WarningSeverity, StringComparison.OrdinalIgnoreCase);
         }
     }
 }
