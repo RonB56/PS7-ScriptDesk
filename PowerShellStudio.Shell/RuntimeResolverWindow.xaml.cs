@@ -83,7 +83,7 @@ namespace PowerShellStudio.Shell
 
                 StatusMessageTextBlock.Text =
                     $"PowerShell 7 still was not found. Checked {discoveryResult.CandidateResults.Count} candidate(s). " +
-                    "Click Open Logs Folder and send the startup/runtime logs to the developer, or browse directly to pwsh.exe.";
+                    "Click Open Logs Folder and include the startup/runtime logs in your support report, or browse directly to pwsh.exe.";
                 DeveloperDiagnostics.LogDecision(
                     "Startup",
                     "StartupRuntimeRetryDiscoveryRequested",

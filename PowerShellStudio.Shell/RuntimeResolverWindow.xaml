@@ -173,7 +173,7 @@
                                 Look for <Run FontFamily="Consolas">pwsh.exe</Run>, not <Run FontFamily="Consolas">powershell.exe</Run>.
                             </TextBlock>
                             <TextBlock TextWrapping="Wrap" Foreground="{StaticResource ResolverSecondaryTextBrush}">
-                                If this window appears even though PowerShell 7 is installed, click <Run FontWeight="SemiBold">Open Logs Folder</Run> and send the startup/runtime logs to the developer.
+                                If this window appears even though PowerShell 7 is installed, click <Run FontWeight="SemiBold">Open Logs Folder</Run> and include the startup/runtime logs in your support report.
                             </TextBlock>
                         </StackPanel>
                     </Border>
@@ -202,7 +202,7 @@
                     Margin="0,7,7,0"
                     IsCancel="True"
                     Click="ExitButton_Click" />
-            <Button Content="Copy PowerShell 7 Help Text"
+            <Button Content="Copy Setup Help Text"
                     Margin="7,7,0,0"
                     Click="CopyHelpTextButton_Click" />
         </UniformGrid>

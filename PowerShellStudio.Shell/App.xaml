@@ -725,17 +725,6 @@
             </Setter>
         </Style>
 
-        <Style x:Key="InlineAreaHelpButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-            <Setter Property="Width" Value="28" />
-            <Setter Property="Height" Value="28" />
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="Margin" Value="8,0,0,0" />
-            <Setter Property="FontWeight" Value="Bold" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.Accent.Primary}" />
-            <Setter Property="Background" Value="{DynamicResource Theme.Surface.Tertiary}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
-        </Style>
-    
         </ResourceDictionary>
     </Application.Resources>
 </Application>

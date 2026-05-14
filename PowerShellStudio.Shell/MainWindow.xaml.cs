@@ -1307,18 +1307,6 @@ namespace PowerShellStudio.Shell
             ContextHelp.OpenForFocusedElement(this);
         }
 
-        private void OpenHelpForKey_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is FrameworkElement frameworkElement)
-            {
-                var helpKey = ContextHelp.GetKey(frameworkElement) ?? frameworkElement.Tag as string;
-                ContextHelp.OpenTopic(this, helpKey);
-                return;
-            }
-
-            ContextHelp.OpenOverview(this);
-        }
-
         private void ConsoleBottomPaneTab_Click(object sender, RoutedEventArgs e)
         {
             ConsoleBottomPaneTab.IsChecked = true;
