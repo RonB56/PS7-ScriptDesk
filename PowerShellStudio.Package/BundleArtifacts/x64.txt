@@ -1,6 +1,6 @@
-MainPackage=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.47.0_x64.msix
-SymbolPackage=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Package_1.0.47.0_x64.appxsym
-ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.47.0_scale-100.msix
-ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.47.0_scale-125.msix
-ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.47.0_scale-150.msix
-ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.47.0_scale-400.msix
+MainPackage=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.48.0_x64.msix
+SymbolPackage=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\obj\x64\Release\Symbols\PowerShellStudio.Package_1.0.48.0_x64.appxsym
+ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.48.0_scale-100.msix
+ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.48.0_scale-125.msix
+ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.48.0_scale-150.msix
+ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PowerShellStudio.Package\bin\x64\Release\PowerShellStudio.Package_1.0.48.0_scale-400.msix

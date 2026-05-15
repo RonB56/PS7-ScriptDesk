@@ -1802,7 +1802,12 @@ namespace PowerShellStudio.UI.ViewModels
 
             if (!_liveConsoleService.IsSessionRunning)
             {
-                StatusText = "The PowerShell terminal is not currently running";
+                IsExecutionRunning = false;
+                IsStopInProgress = false;
+                StatusText = "The PowerShell terminal already exited. Use Reset Console to start a new session.";
+                UpdateConsoleSessionPresentation();
+                RefreshCommandStates();
+                AppLogger.Info("Console", "Interrupt was requested after the PowerShell terminal had already exited. Cleared stale execution state so the console can be restarted.");
                 return;
             }
 
@@ -1847,6 +1852,14 @@ namespace PowerShellStudio.UI.ViewModels
 
         private async Task OnRestartConsoleAsync()
         {
+            if (IsExecutionRunning && !_liveConsoleService.IsSessionRunning)
+            {
+                AppLogger.Info("Console", "Reset Console requested while the UI still showed execution running but the PowerShell terminal process was already stopped. Clearing stale execution state before restart.");
+                IsExecutionRunning = false;
+                IsStopInProgress = false;
+                RefreshCommandStates();
+            }
+
             if (IsExecutionRunning)
             {
                 StatusText = "Wait for the current command to finish before restarting the console";
@@ -2652,14 +2665,20 @@ namespace PowerShellStudio.UI.ViewModels
 
         private void OnSessionTerminated()
         {
-            // The pwsh.exe process exited (e.g. the user typed 'exit' inside a script).
-            // Ensure the Run button is re-enabled even if the sentinel was never echoed.
+            // The pwsh.exe process exited unexpectedly or the user/script called exit.
+            // Ensure Run/Reset recover even if the helper sentinel was never echoed.
             PostToUi(() =>
             {
-                if (IsExecutionRunning)
-                {
-                    IsExecutionRunning = false;
-                }
+                var hadExecutionState = IsExecutionRunning;
+                var hadStopState = IsStopInProgress;
+
+                IsExecutionRunning = false;
+                IsStopInProgress = false;
+
+                StatusText = "PowerShell terminal exited. Use Reset Console to start a new session.";
+                AppLogger.Info(
+                    "Console",
+                    $"PowerShell terminal session termination observed by ViewModel. Cleared execution state. HadExecutionState={hadExecutionState}, HadStopState={hadStopState}, SessionRunning={_liveConsoleService.IsSessionRunning}, CommandInProgress={_liveConsoleService.IsCommandInProgress}.");
 
                 RefreshCommandStates();
                 UpdateConsoleSessionPresentation();
@@ -2878,7 +2897,11 @@ namespace PowerShellStudio.UI.ViewModels
 
         private bool CanRestartConsole()
         {
-            return !IsExecutionRunning &&
+            var sessionRunning = _liveConsoleService.IsSessionRunning;
+            var commandInProgress = _liveConsoleService.IsCommandInProgress;
+
+            return (!IsExecutionRunning || !sessionRunning) &&
+                   (!commandInProgress || !sessionRunning) &&
                    !IsStopInProgress &&
                    !IsRuntimeDiscoveryInProgress &&
                    (SelectedRuntimeItem is not null || _preferredRuntimeItem is not null);

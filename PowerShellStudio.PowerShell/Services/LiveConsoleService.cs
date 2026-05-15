@@ -55,6 +55,12 @@ namespace PowerShellStudio.PowerShell.Services
         // Interactive terminals submit Enter as carriage return (\r). Do not send CRLF into ConPTY/PSReadLine.
         private const string TerminalEnterSequence = "\r";
         private static readonly TimeSpan InterruptGracefulTimeout = TimeSpan.FromSeconds(2);
+        private static readonly TimeSpan NoVisibleOutputFeedbackDelay = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan ScriptStartConfirmationDelay = TimeSpan.FromSeconds(3);
+        private static readonly TimeSpan CommandHealthPollInterval = TimeSpan.FromMilliseconds(250);
+        private const long MaxTerminalCaptureBytes = 4L * 1024L * 1024L;
+        private const string TerminalCaptureDirectoryName = "TerminalCaptures";
+        private const string DispatchDiagnosticTokenPrefix = "##PSSTUDIO_DISPATCH_DIAG##";
 
         private readonly object _syncRoot = new();
         private bool _firstOutputLogged;
@@ -74,11 +80,20 @@ namespace PowerShellStudio.PowerShell.Services
         private bool _hostAttached = true;
         private bool _isCommandInProgress;
         private bool _currentCommandIsScript;
+        private int _commandDispatchGeneration;
+        // Tracks meaningful user/script output only. Internal dispatch echo, ANSI-only
+        // chunks, and blank lines must not suppress the user-facing "no output"
+        // warning because those can make a failed/blocked script look healthy.
+        private bool _currentDispatchVisibleOutputSeen;
+        private bool _currentDispatchStartConfirmed;
+        private DateTime? _currentDispatchStartedUtc;
+        private int? _handledTerminalExitProcessId;
         private string? _pendingStartToken;
         private string? _pendingCompletionToken;
         private readonly Queue<string> _pendingSnapshotPaths = new();
         private readonly List<string> _pendingHiddenOutputFragments = new();
         private string _hiddenOutputBuffer = string.Empty;
+        private TerminalCaptureState? _terminalCaptureState;
 
         public bool IsSessionRunning
         {
@@ -86,7 +101,7 @@ namespace PowerShellStudio.PowerShell.Services
             {
                 lock (_syncRoot)
                 {
-                    return _process is not null && !_process.HasExited;
+                    return IsProcessRunningNoThrow(_process);
                 }
             }
         }
@@ -97,7 +112,9 @@ namespace PowerShellStudio.PowerShell.Services
             {
                 lock (_syncRoot)
                 {
-                    return _isCommandInProgress;
+                    // A command cannot still be running after the owned PowerShell process exits.
+                    // Treat this as idle even if a process-exit race prevented normal cleanup.
+                    return _isCommandInProgress && IsProcessRunningNoThrow(_process);
                 }
             }
         }
@@ -132,6 +149,85 @@ namespace PowerShellStudio.PowerShell.Services
         public PowerShellRuntimeInfo? ActiveRuntime { get; private set; }
 
         public string? CurrentWorkingDirectory { get; private set; }
+
+        private sealed class TerminalCaptureState
+        {
+            public TerminalCaptureState(string filePath, int dispatchGeneration)
+            {
+                FilePath = filePath;
+                DispatchGeneration = dispatchGeneration;
+            }
+
+            public string FilePath { get; }
+
+            public int DispatchGeneration { get; }
+
+            public object SyncRoot { get; } = new();
+
+            public long BytesWritten { get; set; }
+
+            public bool Truncated { get; set; }
+        }
+
+        private static bool IsProcessRunningNoThrow(Process? process)
+        {
+            if (process is null)
+            {
+                return false;
+            }
+
+            try
+            {
+                return !process.HasExited;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private static string? TryGetMainWindowTitleNoThrow(Process? process)
+        {
+            if (process is null)
+            {
+                return null;
+            }
+
+            try
+            {
+                if (process.HasExited)
+                {
+                    return null;
+                }
+
+                var title = process.MainWindowTitle;
+                return string.IsNullOrWhiteSpace(title) ? null : title.Trim();
+            }
+            catch (ObjectDisposedException)
+            {
+                return null;
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private int? GetCurrentProcessIdNoThrow()
+        {
+            lock (_syncRoot)
+            {
+                return TryGetProcessId(_process);
+            }
+        }
 
         public void AttachHost(IntPtr hostHandle, int width, int height)
         {
@@ -229,6 +325,7 @@ namespace PowerShellStudio.PowerShell.Services
             {
                 ActiveRuntime = runtime;
                 CurrentWorkingDirectory = workingDirectory;
+                _handledTerminalExitProcessId = null;
             }
 
             await Task.CompletedTask.ConfigureAwait(false);
@@ -254,12 +351,15 @@ namespace PowerShellStudio.PowerShell.Services
                 throw new InvalidOperationException(dispatchFailure ?? "Another terminal operation is already running.");
             }
 
+            var dispatchGeneration = GetCurrentCommandDispatchGeneration();
             var startedAt = DateTime.Now;
             AppLogger.Info("LiveConsole", $"Sending visible editor command to the live ConPTY terminal. CommandLength={commandText.Length}.");
 
             try
             {
                 await WriteTerminalInputAsync(commandText + TerminalEnterSequence, cancellationToken).ConfigureAwait(false);
+                ScheduleNoVisibleOutputFeedback(dispatchGeneration, isScript: false, displayName: "console command", onOutput);
+                ScheduleCommandHealthMonitor(dispatchGeneration, isScript: false, displayName: "console command", onOutput);
 
                 return new LiveConsoleCommandResult(
                     "Console command",
@@ -305,6 +405,8 @@ namespace PowerShellStudio.PowerShell.Services
                 throw new InvalidOperationException(dispatchFailure ?? "Another terminal operation is already running.");
             }
 
+            var dispatchGeneration = GetCurrentCommandDispatchGeneration();
+            var ownedProcessIdAtDispatch = GetCurrentProcessIdNoThrow();
             AddPendingSnapshotPath(instructionSnapshotPath);
             SetPendingExecutionTokens(startToken, completionToken);
             var dispatchCommand = BuildScriptDispatchCommand(instructionSnapshotPath, executeInCurrentScope);
@@ -314,13 +416,63 @@ namespace PowerShellStudio.PowerShell.Services
             var instructionSnapshotExists = File.Exists(instructionSnapshotPath);
             AppLogger.Info(
                 "LiveConsole",
-                $"Dispatching editor script to the live ConPTY terminal via preloaded session helper and instruction snapshot. ScriptPath={scriptSnapshotPath}, ScriptPathExists={scriptSnapshotExists}, DeleteScriptAfterRun={executionTarget.DeleteAfterRun}, InstructionSnapshotPath={instructionSnapshotPath}, InstructionSnapshotExists={instructionSnapshotExists}, ScriptLength={scriptContent?.Length ?? 0}, ExecuteInCurrentScope={executeInCurrentScope}, CommandLength={scriptCommand.Length}, EndsWithEnter={scriptCommand.EndsWith(TerminalEnterSequence, StringComparison.Ordinal)}.");
+                $"Dispatching editor script to the live ConPTY terminal via preloaded session helper and instruction snapshot. ScriptPath={scriptSnapshotPath}, ScriptPathExists={scriptSnapshotExists}, DeleteScriptAfterRun={executionTarget.DeleteAfterRun}, InstructionSnapshotPath={instructionSnapshotPath}, InstructionSnapshotExists={instructionSnapshotExists}, ScriptLength={scriptContent?.Length ?? 0}, ExecuteInCurrentScope={executeInCurrentScope}, CommandLength={scriptCommand.Length}, EndsWithEnter={scriptCommand.EndsWith(TerminalEnterSequence, StringComparison.Ordinal)}, DispatchGeneration={dispatchGeneration}, OwnedProcessId={ownedProcessIdAtDispatch?.ToString() ?? "(none)"}.");
+            DeveloperDiagnostics.LogInfo(
+                "Execution",
+                "Live terminal script dispatch prepared.",
+                new Dictionary<string, object?>
+                {
+                    ["scriptPath"] = scriptSnapshotPath,
+                    ["scriptPathExists"] = scriptSnapshotExists,
+                    ["instructionSnapshotPath"] = instructionSnapshotPath,
+                    ["instructionSnapshotExists"] = instructionSnapshotExists,
+                    ["deleteScriptAfterRun"] = executionTarget.DeleteAfterRun,
+                    ["executeInCurrentScope"] = executeInCurrentScope,
+                    ["dispatchGeneration"] = dispatchGeneration,
+                    ["ownedProcessId"] = ownedProcessIdAtDispatch,
+                    ["startTokenPrefix"] = ExecStartTokenPrefix,
+                    ["completionTokenPrefix"] = ExecDoneTokenPrefix
+                });
+            StartTerminalCapture(
+                dispatchGeneration,
+                documentDisplayName,
+                scriptSnapshotPath,
+                instructionSnapshotPath,
+                ownedProcessIdAtDispatch,
+                executeInCurrentScope,
+                executionTarget.DeleteAfterRun);
             AppLogger.Debug("LiveConsole", $"Dispatch command: {FormatDispatchCommandForLog(scriptCommand)}");
+            PublishLifecycleMessage(
+                onOutput,
+                $"Running script '{GetDisplayNameForStatus(documentDisplayName)}'. Waiting for script output...");
 
             try
             {
                 AppLogger.Debug("LiveConsole", $"Sending helper dispatch command to terminal stdin. ScriptSnapshotPath={scriptSnapshotPath}, InstructionSnapshotPath={instructionSnapshotPath}");
                 await WriteTerminalInputAsync(scriptCommand, cancellationToken).ConfigureAwait(false);
+                AppendTerminalCaptureEvent(
+                    dispatchGeneration,
+                    "dispatch-command-written-to-terminal-input",
+                    new Dictionary<string, object?>
+                    {
+                        ["ownedProcessId"] = ownedProcessIdAtDispatch,
+                        ["commandLength"] = scriptCommand.Length,
+                        ["endsWithEnter"] = scriptCommand.EndsWith(TerminalEnterSequence, StringComparison.Ordinal)
+                    });
+                AppLogger.Info("LiveConsole", $"Script dispatch command written to terminal input. DispatchGeneration={dispatchGeneration}, OwnedProcessId={ownedProcessIdAtDispatch?.ToString() ?? "(none)"}.");
+                DeveloperDiagnostics.LogInfo(
+                    "Execution",
+                    "Script dispatch command written to terminal input; scheduling no-output and health monitors.",
+                    new Dictionary<string, object?>
+                    {
+                        ["dispatchGeneration"] = dispatchGeneration,
+                        ["ownedProcessId"] = ownedProcessIdAtDispatch,
+                        ["noVisibleOutputFeedbackDelayMs"] = NoVisibleOutputFeedbackDelay.TotalMilliseconds,
+                        ["scriptStartConfirmationDelayMs"] = ScriptStartConfirmationDelay.TotalMilliseconds,
+                        ["commandHealthPollIntervalMs"] = CommandHealthPollInterval.TotalMilliseconds
+                    });
+                ScheduleNoVisibleOutputFeedback(dispatchGeneration, isScript: true, displayName: documentDisplayName, onOutput);
+                ScheduleCommandHealthMonitor(dispatchGeneration, isScript: true, displayName: documentDisplayName, onOutput);
 
                 return new LiveConsoleCommandResult(
                     documentDisplayName,
@@ -355,6 +507,18 @@ namespace PowerShellStudio.PowerShell.Services
             return $"{invocationOperator} $__psstudioRun {quotedInstructionFileName}";
         }
 
+        private static string BuildInteractivePowerShellArguments(string startupCommand)
+        {
+            // PowerShell ISE-style script hosts should run the interactive session in
+            // STA on Windows. WinForms/WPF scripts commonly require STA and often
+            // self-relaunch into a separate pwsh.exe when they detect MTA. That
+            // separate child process is outside the embedded terminal's lifecycle, so
+            // crashes can look like a frozen/silent script. Starting the hosted
+            // terminal as STA keeps GUI scripts inside the process PS7 ScriptDesk
+            // owns and monitors.
+            return "-NoLogo -NoExit -STA -ExecutionPolicy Bypass -Command " + QuoteCommandArgument(startupCommand);
+        }
+
         private static string BuildTerminalStartupCommand()
         {
             var quotedSnapshotRoot = QuotePowerShellSingleQuotedString(GetSnapshotRootDirectory(createIfMissing: true));
@@ -371,8 +535,10 @@ namespace PowerShellStudio.PowerShell.Services
                 "$__d=$__l[2];",
                 "$__c=[System.Boolean]::Parse($__l[3]);",
                 "[Console]::Out.WriteLine($__s);",
+                "[Console]::Out.WriteLine('##PSSTUDIO_DISPATCH_DIAG## begin pid=' + $PID + ' apartment=' + [System.Threading.Thread]::CurrentThread.GetApartmentState() + ' script=' + $__p);",
                 "try { if ($__c) { . $__p } else { & $__p } }",
-                "finally { [Console]::Out.WriteLine($__d); Remove-Variable -Name __i,__l,__p,__s,__d,__c -ErrorAction SilentlyContinue }",
+                "catch { [Console]::Error.WriteLine('PS7 ScriptDesk: Script threw a terminating exception: ' + $_.Exception.Message); throw }",
+                "finally { [Console]::Out.WriteLine('##PSSTUDIO_DISPATCH_DIAG## finally pid=' + $PID); [Console]::Out.WriteLine($__d); Remove-Variable -Name __i,__l,__p,__s,__d,__c -ErrorAction SilentlyContinue }",
                 "}");
 
             return string.Join(
@@ -466,6 +632,20 @@ namespace PowerShellStudio.PowerShell.Services
             AppLogger.Info(
                 "LiveConsole",
                 $"Interrupt requested. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, SessionRunning={process is not null && !process.HasExited}, CommandInProgress={commandInProgress}, HasPseudoConsole={hasPseudoConsole}, HostAttached={hostAttached}, Runtime='{runtime?.DisplayName ?? "(none)"}', WorkingDirectory='{workingDirectory ?? "(none)"}'.");
+            AppendTerminalCaptureEvent(
+                GetCurrentCommandDispatchGeneration(),
+                "interrupt-requested",
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["ownedProcessId"] = ownedProcessId,
+                    ["sessionRunning"] = process is not null && !process.HasExited,
+                    ["commandInProgress"] = commandInProgress,
+                    ["hasPseudoConsole"] = hasPseudoConsole,
+                    ["hostAttached"] = hostAttached,
+                    ["runtime"] = runtime?.DisplayName,
+                    ["workingDirectory"] = workingDirectory
+                });
             DeveloperDiagnostics.LogUserAction(
                 "Terminal",
                 "InterruptRequested",
@@ -654,6 +834,8 @@ namespace PowerShellStudio.PowerShell.Services
 
         public async Task<bool> StopConsoleAsync(Action<ExecutionOutputRecord>? onOutput = null)
         {
+            CompleteTerminalCapture("StopConsoleAsync requested; the owned PowerShell terminal session is being stopped or restarted.");
+
             Process? processToStop;
             CancellationTokenSource? readerCancellation;
             Task? stdoutReaderTask;
@@ -911,9 +1093,19 @@ namespace PowerShellStudio.PowerShell.Services
                 // predictions in the embedded terminal can look like editor autofill.
                 var startupCommand = BuildTerminalStartupCommand();
                 var launchPath = runtime.LaunchExecutablePath;
-                AppLogger.Info("LiveConsole", $"ConPTY CreateProcessW launch path: '{launchPath}'.");
-                var commandLine = "\"" + launchPath + "\"" +
-                    " -NoLogo -NoExit -ExecutionPolicy Bypass -Command " + QuoteCommandArgument(startupCommand);
+                var arguments = BuildInteractivePowerShellArguments(startupCommand);
+                AppLogger.Info("LiveConsole", $"ConPTY CreateProcessW launch path: '{launchPath}'. Starting hosted PowerShell with -STA. Arguments='{arguments}'.");
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "Starting hosted ConPTY PowerShell process in STA mode.",
+                    new Dictionary<string, object?>
+                    {
+                        ["launchPath"] = launchPath,
+                        ["workingDirectory"] = workingDirectory,
+                        ["usesSta"] = true,
+                        ["arguments"] = arguments
+                    });
+                var commandLine = "\"" + launchPath + "\" " + arguments;
 
                 if (!CreateProcessW(
                         launchPath,
@@ -936,17 +1128,7 @@ namespace PowerShellStudio.PowerShell.Services
                 // correct sink and handler, even if a new session starts before this
                 // process fully terminates.
                 var capturedOnOutput = onOutput;
-                process.Exited += (_, _) =>
-                {
-                    AppLogger.Info("LiveConsole", "The ConPTY PowerShell terminal process exited.");
-                    capturedOnOutput(new ExecutionOutputRecord(
-                        ExecutionOutputStreamKind.Lifecycle,
-                        "The PowerShell terminal session exited.",
-                        DateTime.Now));
-                    // Notify the ViewModel so IsExecutionRunning can be cleared if the
-                    // script called 'exit' before the sentinel was echoed.
-                    SessionTerminated?.Invoke();
-                };
+                process.Exited += (_, _) => HandleTerminalProcessExited("ConPTY", process, capturedOnOutput);
 
                 _process = process;
                 _inputWriterHandle = inputWriteSide;
@@ -1038,12 +1220,13 @@ namespace PowerShellStudio.PowerShell.Services
 
         private void StartRedirectedSession(PowerShellRuntimeInfo runtime, string workingDirectory, Action<ExecutionOutputRecord> onOutput)
         {
+            var redirectedArguments = BuildInteractivePowerShellArguments(BuildTerminalStartupCommand());
             var process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = runtime.LaunchExecutablePath,
-                    Arguments = "-NoLogo -NoExit -ExecutionPolicy Bypass -Command " + QuoteCommandArgument(BuildTerminalStartupCommand()),
+                    Arguments = redirectedArguments,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardInput = true,
@@ -1056,19 +1239,20 @@ namespace PowerShellStudio.PowerShell.Services
                 },
                 EnableRaisingEvents = true
             };
-            AppLogger.Info("LiveConsole", $"Redirected terminal ProcessStartInfo.FileName='{process.StartInfo.FileName}'.");
+            AppLogger.Info("LiveConsole", $"Redirected terminal ProcessStartInfo.FileName='{process.StartInfo.FileName}'. Starting hosted PowerShell with -STA. Arguments='{redirectedArguments}'.");
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Starting redirected hosted PowerShell process in STA mode.",
+                new Dictionary<string, object?>
+                {
+                    ["launchPath"] = runtime.LaunchExecutablePath,
+                    ["workingDirectory"] = workingDirectory,
+                    ["usesSta"] = true,
+                    ["arguments"] = redirectedArguments
+                });
 
             var capturedOnOutput = onOutput;
-            process.Exited += (_, _) =>
-            {
-                AppLogger.Info("LiveConsole", "The redirected PowerShell terminal process exited.");
-                capturedOnOutput(new ExecutionOutputRecord(
-                    ExecutionOutputStreamKind.Lifecycle,
-                    "The PowerShell terminal session exited.",
-                    DateTime.Now));
-                ResetPendingCommandState(deleteSnapshots: true);
-                SessionTerminated?.Invoke();
-            };
+            process.Exited += (_, _) => HandleTerminalProcessExited("redirected", process, capturedOnOutput);
 
             if (!process.Start())
             {
@@ -1080,6 +1264,95 @@ namespace PowerShellStudio.PowerShell.Services
             _readerCancellationTokenSource = new CancellationTokenSource();
             _stdoutReaderTask = Task.Run(() => ReadStreamLoopAsync(process.StandardOutput, ExecutionOutputStreamKind.StandardOutput, onOutput, _readerCancellationTokenSource.Token));
             _stderrReaderTask = Task.Run(() => ReadStreamLoopAsync(process.StandardError, ExecutionOutputStreamKind.StandardError, onOutput, _readerCancellationTokenSource.Token));
+        }
+
+        private void HandleTerminalProcessExited(string terminalMode, Process? exitedProcess, Action<ExecutionOutputRecord> capturedOnOutput)
+        {
+            bool commandInProgress;
+            bool currentCommandIsScript;
+            int pendingSnapshotCount;
+            bool shouldIgnore;
+
+            var processId = TryGetProcessId(exitedProcess);
+
+            lock (_syncRoot)
+            {
+                var currentProcessId = TryGetProcessId(_process);
+                var trackedCommandInProgress = _isCommandInProgress;
+
+                // Ignore late Exited events from a previous session or from an intentional
+                // Reset/Stop path that has already detached _process. If the command state
+                // is still marked busy even though _process is gone, do not ignore it; that
+                // is the exact stale/frozen state this recovery path must clear.
+                shouldIgnore = (_process is null && !trackedCommandInProgress) ||
+                               (processId.HasValue && currentProcessId.HasValue && processId.Value != currentProcessId.Value) ||
+                               (processId.HasValue && _handledTerminalExitProcessId == processId.Value);
+
+                if (shouldIgnore)
+                {
+                    commandInProgress = false;
+                    currentCommandIsScript = false;
+                    pendingSnapshotCount = 0;
+                }
+                else
+                {
+                    if (processId.HasValue)
+                    {
+                        _handledTerminalExitProcessId = processId.Value;
+                    }
+
+                    commandInProgress = _isCommandInProgress;
+                    currentCommandIsScript = _currentCommandIsScript;
+                    pendingSnapshotCount = _pendingSnapshotPaths.Count;
+                }
+            }
+
+            if (shouldIgnore)
+            {
+                AppLogger.Debug(
+                    "LiveConsole",
+                    $"Ignored stale {terminalMode} PowerShell process-exit notification. ProcessId={processId?.ToString() ?? "(unknown)"}.");
+                return;
+            }
+
+            var exitCode = TryGetExitCode(exitedProcess);
+            var exitCodeText = exitCode.HasValue ? $" Exit code: {exitCode.Value}." : string.Empty;
+            var activeWorkDescription = currentCommandIsScript ? "script" : "command";
+            var userMessage = commandInProgress
+                ? $"PowerShell terminal process exited while a {activeWorkDescription} was running. The app detected the exit, cleared the running state, and the terminal must be reset before another command can run.{exitCodeText}"
+                : $"PowerShell terminal session exited. Use Reset Console to start a fresh PowerShell session.{exitCodeText}";
+
+            AppLogger.Info(
+                "LiveConsole",
+                $"The {terminalMode} PowerShell terminal process exited. ProcessId={processId?.ToString() ?? "(unknown)"}, ExitCode={exitCode?.ToString() ?? "(unknown)"}, CommandInProgress={commandInProgress}, CurrentCommandIsScript={currentCommandIsScript}, PendingSnapshots={pendingSnapshotCount}. Clearing pending execution state and notifying the UI.");
+            AppendTerminalCaptureEvent(
+                GetCurrentCommandDispatchGeneration(),
+                "terminal-process-exited",
+                new Dictionary<string, object?>
+                {
+                    ["terminalMode"] = terminalMode,
+                    ["processId"] = processId,
+                    ["exitCode"] = exitCode,
+                    ["commandInProgress"] = commandInProgress,
+                    ["currentCommandIsScript"] = currentCommandIsScript,
+                    ["pendingSnapshotCount"] = pendingSnapshotCount
+                });
+
+            // A hard pwsh.exe termination can happen before the helper sentinel is echoed.
+            // Always clear pending command/snapshot state so Run, Interrupt, and Reset Console
+            // cannot remain disabled after the owned terminal process is gone.
+            ResetPendingCommandState(deleteSnapshots: true);
+
+            PublishLifecycleMessage(capturedOnOutput, userMessage);
+
+            try
+            {
+                SessionTerminated?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("LiveConsole", "A PowerShell terminal process-exit subscriber failed.", ex);
+            }
         }
 
         private async Task ReadPseudoConsoleOutputLoopAsync(IntPtr outputReaderHandle, Action<ExecutionOutputRecord> onOutput, CancellationToken cancellationToken)
@@ -1185,11 +1458,15 @@ namespace PowerShellStudio.PowerShell.Services
                 return;
             }
 
+            var dispatchGenerationForCapture = GetCurrentCommandDispatchGeneration();
+            CaptureTerminalOutputChunk("raw-before-filter", dispatchGenerationForCapture, streamKind, rawChunk);
+
             // ── Raw path (for xterm.js) ───────────────────────────────────────────
             // Strip only null bytes; preserve all ANSI/VT100 sequences so xterm.js
             // can render colors, cursor movement, progress bars, etc.
             var raw = rawChunk.Replace("\0", string.Empty, StringComparison.Ordinal);
             raw = FilterInternalTerminalOutput(raw, out var hasSentinel);
+            CaptureTerminalOutputChunk("raw-after-filter", dispatchGenerationForCapture, streamKind, raw);
 
             // ── Cleaned path (for internal tracking) ─────────────────────────────
             // Strip OSC/ANSI sequences and normalise line endings so that the
@@ -1198,11 +1475,21 @@ namespace PowerShellStudio.PowerShell.Services
             cleaned = AnsiRegex.Replace(cleaned, string.Empty);
             cleaned = cleaned.Replace("\r\n", "\n", StringComparison.Ordinal);
             cleaned = cleaned.Replace("\r", "\n", StringComparison.Ordinal);
+            CaptureTerminalOutputChunk("cleaned-after-filter", dispatchGenerationForCapture, streamKind, cleaned);
 
             // Fire the completion event if the sentinel was present.
             if (hasSentinel)
             {
                 AppLogger.Debug("LiveConsole", "Execution-done sentinel detected in terminal output and filtered before xterm.js.");
+                AppendTerminalCaptureEvent(
+                    dispatchGenerationForCapture,
+                    "execution-completion-sentinel-observed",
+                    new Dictionary<string, object?>
+                    {
+                        ["streamKind"] = streamKind.ToString(),
+                        ["rawAfterFilterLength"] = raw.Length,
+                        ["cleanedAfterFilterLength"] = cleaned.Length
+                    });
                 CompleteCommandExecution();
             }
 
@@ -1233,6 +1520,8 @@ namespace PowerShellStudio.PowerShell.Services
             // so text is not silently dropped.
             if (!string.IsNullOrEmpty(raw))
             {
+                var meaningfulUserOutput = ContainsMeaningfulUserOutput(raw, cleaned);
+                MarkCurrentCommandVisibleOutputSeen(meaningfulUserOutput);
                 var rawHandler = RawOutputReceived;
                 if (rawHandler is not null)
                 {
@@ -1242,6 +1531,784 @@ namespace PowerShellStudio.PowerShell.Services
                 {
                     onOutput(new ExecutionOutputRecord(streamKind, cleaned, DateTime.Now));
                 }
+            }
+        }
+
+        private static bool ShouldWriteTerminalCapture()
+        {
+            return DeveloperDiagnostics.IsEnabled || AppLogger.IsDebugEnabled;
+        }
+
+        private void StartTerminalCapture(
+            int dispatchGeneration,
+            string displayName,
+            string scriptPath,
+            string instructionSnapshotPath,
+            int? ownedProcessId,
+            bool executeInCurrentScope,
+            bool deleteScriptAfterRun)
+        {
+            if (!ShouldWriteTerminalCapture())
+            {
+                return;
+            }
+
+            try
+            {
+                var captureDirectory = Path.Combine(AppLogger.CurrentLogDirectory, TerminalCaptureDirectoryName);
+                Directory.CreateDirectory(captureDirectory);
+
+                var timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
+                var safeName = SanitizeFileNamePart(GetDisplayNameForStatus(displayName));
+                if (safeName.Length > 80)
+                {
+                    safeName = safeName[..80];
+                }
+
+                var capturePath = Path.Combine(captureDirectory, $"terminal-capture-{timestamp}-gen{dispatchGeneration}-{safeName}.log");
+                var captureState = new TerminalCaptureState(capturePath, dispatchGeneration);
+
+                lock (_syncRoot)
+                {
+                    _terminalCaptureState = captureState;
+                }
+
+                AppendTerminalCaptureEvent(
+                    dispatchGeneration,
+                    "capture-started",
+                    new Dictionary<string, object?>
+                    {
+                        ["displayName"] = displayName,
+                        ["scriptPath"] = scriptPath,
+                        ["scriptPathExists"] = File.Exists(scriptPath),
+                        ["instructionSnapshotPath"] = instructionSnapshotPath,
+                        ["instructionSnapshotExists"] = File.Exists(instructionSnapshotPath),
+                        ["ownedProcessId"] = ownedProcessId,
+                        ["executeInCurrentScope"] = executeInCurrentScope,
+                        ["deleteScriptAfterRun"] = deleteScriptAfterRun,
+                        ["maxCaptureBytes"] = MaxTerminalCaptureBytes
+                    });
+
+                AppLogger.Info("LiveConsole", $"Terminal capture started for dispatch generation {dispatchGeneration}. Path='{capturePath}'.");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("LiveConsole", $"Terminal capture could not be started. DispatchGeneration={dispatchGeneration}, Error={ex.Message}");
+            }
+        }
+
+        private void CaptureTerminalOutputChunk(string phase, int dispatchGeneration, ExecutionOutputStreamKind streamKind, string text)
+        {
+            AppendTerminalCaptureEvent(
+                dispatchGeneration,
+                phase,
+                new Dictionary<string, object?>
+                {
+                    ["streamKind"] = streamKind.ToString(),
+                    ["length"] = text?.Length ?? 0,
+                    ["containsAnsi"] = text?.Contains('\x1b') == true,
+                    ["isEmpty"] = string.IsNullOrEmpty(text),
+                    ["data"] = text ?? string.Empty
+                });
+        }
+
+        private void AppendTerminalCaptureEvent(int dispatchGeneration, string eventName, IReadOnlyDictionary<string, object?>? properties = null)
+        {
+            TerminalCaptureState? captureState;
+            lock (_syncRoot)
+            {
+                captureState = _terminalCaptureState;
+                if (captureState is null || captureState.DispatchGeneration != dispatchGeneration)
+                {
+                    return;
+                }
+            }
+
+            try
+            {
+                var line = FormatTerminalCaptureLine(eventName, properties);
+                lock (captureState.SyncRoot)
+                {
+                    if (captureState.Truncated)
+                    {
+                        return;
+                    }
+
+                    var byteCount = Encoding.UTF8.GetByteCount(line + Environment.NewLine);
+                    if (captureState.BytesWritten + byteCount > MaxTerminalCaptureBytes)
+                    {
+                        var truncationLine = FormatTerminalCaptureLine(
+                            "capture-truncated",
+                            new Dictionary<string, object?>
+                            {
+                                ["maxCaptureBytes"] = MaxTerminalCaptureBytes,
+                                ["attemptedEvent"] = eventName
+                            });
+                        File.AppendAllText(captureState.FilePath, truncationLine + Environment.NewLine, Encoding.UTF8);
+                        captureState.Truncated = true;
+                        return;
+                    }
+
+                    File.AppendAllText(captureState.FilePath, line + Environment.NewLine, Encoding.UTF8);
+                    captureState.BytesWritten += byteCount;
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Debug("LiveConsole", $"Terminal capture write failed. Event='{eventName}', DispatchGeneration={dispatchGeneration}, Error={ex.Message}");
+            }
+        }
+
+        private void CompleteTerminalCapture(string reason)
+        {
+            TerminalCaptureState? captureState;
+            lock (_syncRoot)
+            {
+                captureState = _terminalCaptureState;
+            }
+
+            if (captureState is null)
+            {
+                return;
+            }
+
+            AppendTerminalCaptureEvent(
+                captureState.DispatchGeneration,
+                "capture-ended",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["bytesWrittenBeforeEnd"] = captureState.BytesWritten,
+                    ["truncated"] = captureState.Truncated
+                });
+
+            lock (_syncRoot)
+            {
+                if (ReferenceEquals(_terminalCaptureState, captureState))
+                {
+                    _terminalCaptureState = null;
+                }
+            }
+
+            AppLogger.Info("LiveConsole", $"Terminal capture ended for dispatch generation {captureState.DispatchGeneration}. Path='{captureState.FilePath}'. Reason='{reason}'.");
+        }
+
+        private static string FormatTerminalCaptureLine(string eventName, IReadOnlyDictionary<string, object?>? properties)
+        {
+            var builder = new StringBuilder(512);
+            builder.Append(DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz"));
+            builder.Append(" | ").Append(eventName);
+
+            if (properties is not null)
+            {
+                foreach (var pair in properties)
+                {
+                    builder.Append(" | ").Append(pair.Key).Append('=').Append(FormatTerminalCaptureValue(pair.Value));
+                }
+            }
+
+            return builder.ToString();
+        }
+
+        private static string FormatTerminalCaptureValue(object? value)
+        {
+            if (value is null)
+            {
+                return "(null)";
+            }
+
+            if (value is DateTime dateTime)
+            {
+                return dateTime.ToString("O");
+            }
+
+            if (value is DateTimeOffset dateTimeOffset)
+            {
+                return dateTimeOffset.ToString("O");
+            }
+
+            if (value is bool boolean)
+            {
+                return boolean ? "true" : "false";
+            }
+
+            return "'" + FormatOutputForLog(Convert.ToString(value) ?? string.Empty, maxLength: 12000) + "'";
+        }
+
+        private static string SanitizeFileNamePart(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "script";
+            }
+
+            var invalid = Path.GetInvalidFileNameChars();
+            var builder = new StringBuilder(value.Length);
+            foreach (var ch in value.Trim())
+            {
+                builder.Append(Array.IndexOf(invalid, ch) >= 0 ? '_' : ch);
+            }
+
+            var result = builder.ToString().Trim('.', ' ');
+            return string.IsNullOrWhiteSpace(result) ? "script" : result;
+        }
+
+        private bool TryLogInternalDispatchDiagnostic(string sanitizedSegment)
+        {
+            if (string.IsNullOrWhiteSpace(sanitizedSegment))
+            {
+                return false;
+            }
+
+            var normalized = TrimPromptPrefix(sanitizedSegment);
+            var tokenIndex = normalized.IndexOf(DispatchDiagnosticTokenPrefix, StringComparison.Ordinal);
+            if (tokenIndex < 0)
+            {
+                return false;
+            }
+
+            var message = normalized[(tokenIndex + DispatchDiagnosticTokenPrefix.Length)..].Trim();
+            AppLogger.Info("LiveConsole", $"Internal script dispatch diagnostic observed. {message}");
+            DeveloperDiagnostics.LogInfo(
+                "Execution",
+                "Internal script dispatch diagnostic observed from the hosted PowerShell process.",
+                new Dictionary<string, object?>
+                {
+                    ["message"] = message
+                });
+            AppendTerminalCaptureEvent(
+                GetCurrentCommandDispatchGeneration(),
+                "internal-dispatch-diagnostic",
+                new Dictionary<string, object?>
+                {
+                    ["message"] = message
+                });
+            return true;
+        }
+
+        private void CaptureRelevantProcessSnapshot(int dispatchGeneration, DateTime startedAtUtc, string reason)
+        {
+            if (!ShouldWriteTerminalCapture())
+            {
+                return;
+            }
+
+            try
+            {
+                var cutoffLocal = startedAtUtc.ToLocalTime().Subtract(TimeSpan.FromSeconds(10));
+                var capturedCount = 0;
+                foreach (var process in Process.GetProcesses())
+                {
+                    using (process)
+                    {
+                        string processName;
+                        try
+                        {
+                            processName = process.ProcessName;
+                        }
+                        catch
+                        {
+                            continue;
+                        }
+
+                        if (!IsProcessNameRelevantForTerminalDiagnostics(processName))
+                        {
+                            continue;
+                        }
+
+                        DateTime? startTime = null;
+                        try
+                        {
+                            startTime = process.StartTime;
+                        }
+                        catch
+                        {
+                            // Access can be denied for some processes. Keep the rest of the snapshot.
+                        }
+
+                        if (startTime.HasValue && startTime.Value < cutoffLocal)
+                        {
+                            continue;
+                        }
+
+                        string? path = null;
+                        try
+                        {
+                            path = process.MainModule?.FileName;
+                        }
+                        catch
+                        {
+                            // Access can be denied for some processes.
+                        }
+
+                        string? title = null;
+                        try
+                        {
+                            title = process.MainWindowTitle;
+                        }
+                        catch
+                        {
+                            // Best effort only.
+                        }
+
+                        bool? hasExited = null;
+                        try
+                        {
+                            hasExited = process.HasExited;
+                        }
+                        catch
+                        {
+                            // Best effort only.
+                        }
+
+                        AppendTerminalCaptureEvent(
+                            dispatchGeneration,
+                            "relevant-process-snapshot",
+                            new Dictionary<string, object?>
+                            {
+                                ["reason"] = reason,
+                                ["processId"] = TryGetProcessId(process),
+                                ["processName"] = processName,
+                                ["hasExited"] = hasExited,
+                                ["startTime"] = startTime,
+                                ["mainWindowTitle"] = title,
+                                ["path"] = path
+                            });
+
+                        capturedCount++;
+                        if (capturedCount >= 50)
+                        {
+                            AppendTerminalCaptureEvent(
+                                dispatchGeneration,
+                                "relevant-process-snapshot-truncated",
+                                new Dictionary<string, object?>
+                                {
+                                    ["reason"] = reason,
+                                    ["capturedCount"] = capturedCount
+                                });
+                            break;
+                        }
+                    }
+                }
+
+                if (capturedCount == 0)
+                {
+                    AppendTerminalCaptureEvent(
+                        dispatchGeneration,
+                        "relevant-process-snapshot-empty",
+                        new Dictionary<string, object?>
+                        {
+                            ["reason"] = reason,
+                            ["cutoffLocal"] = cutoffLocal
+                        });
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendTerminalCaptureEvent(
+                    dispatchGeneration,
+                    "relevant-process-snapshot-failed",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["error"] = ex.Message
+                    });
+            }
+        }
+
+        private static bool IsProcessNameRelevantForTerminalDiagnostics(string processName)
+        {
+            return processName.Equals("pwsh", StringComparison.OrdinalIgnoreCase) ||
+                   processName.Equals("powershell", StringComparison.OrdinalIgnoreCase) ||
+                   processName.Equals("ffmpeg", StringComparison.OrdinalIgnoreCase) ||
+                   processName.Equals("ffprobe", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private int GetCurrentCommandDispatchGeneration()
+        {
+            lock (_syncRoot)
+            {
+                return _commandDispatchGeneration;
+            }
+        }
+
+        private void MarkCurrentCommandVisibleOutputSeen(bool meaningfulUserOutput)
+        {
+            if (!meaningfulUserOutput)
+            {
+                return;
+            }
+
+            lock (_syncRoot)
+            {
+                if (_isCommandInProgress)
+                {
+                    _currentDispatchVisibleOutputSeen = true;
+                }
+            }
+        }
+
+        private static bool ContainsMeaningfulUserOutput(string raw, string cleaned)
+        {
+            if (!string.IsNullOrWhiteSpace(cleaned))
+            {
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return false;
+            }
+
+            var text = OscRegex.Replace(raw, string.Empty);
+            text = AnsiRegex.Replace(text, string.Empty);
+            text = text.Replace("\0", string.Empty, StringComparison.Ordinal);
+            return !string.IsNullOrWhiteSpace(text);
+        }
+
+        private void ScheduleCommandHealthMonitor(int dispatchGeneration, bool isScript, string displayName, Action<ExecutionOutputRecord> onOutput)
+        {
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Command health monitor scheduled.",
+                new Dictionary<string, object?>
+                {
+                    ["dispatchGeneration"] = dispatchGeneration,
+                    ["isScript"] = isScript,
+                    ["displayName"] = displayName,
+                    ["pollIntervalMs"] = CommandHealthPollInterval.TotalMilliseconds,
+                    ["startConfirmationDelayMs"] = ScriptStartConfirmationDelay.TotalMilliseconds
+                });
+
+            _ = Task.Run(async () =>
+            {
+                var startedAt = DateTime.UtcNow;
+                var startConfirmationNoticePublished = false;
+                var tickCount = 0;
+
+                while (true)
+                {
+                    try
+                    {
+                        await Task.Delay(CommandHealthPollInterval).ConfigureAwait(false);
+                        tickCount++;
+
+                        Process? process;
+                        bool commandInProgress;
+                        bool startConfirmed;
+                        bool meaningfulOutputSeen;
+                        int currentGeneration;
+                        DateTime? commandStartedUtc;
+
+                        lock (_syncRoot)
+                        {
+                            process = _process;
+                            commandInProgress = _isCommandInProgress;
+                            currentGeneration = _commandDispatchGeneration;
+                            startConfirmed = _currentDispatchStartConfirmed ||
+                                             !isScript ||
+                                             string.IsNullOrEmpty(_pendingStartToken);
+                            meaningfulOutputSeen = _currentDispatchVisibleOutputSeen;
+                            commandStartedUtc = _currentDispatchStartedUtc;
+                        }
+
+                        var processId = TryGetProcessId(process);
+                        var processRunning = IsProcessRunningNoThrow(process);
+
+                        if (tickCount == 1 || tickCount % 4 == 0)
+                        {
+                            var elapsedMs = (DateTime.UtcNow - startedAt).TotalMilliseconds;
+                            DeveloperDiagnostics.LogDebug(
+                                "Terminal",
+                                "Command health monitor tick.",
+                                new Dictionary<string, object?>
+                                {
+                                    ["dispatchGeneration"] = dispatchGeneration,
+                                    ["currentGeneration"] = currentGeneration,
+                                    ["isScript"] = isScript,
+                                    ["displayName"] = displayName,
+                                    ["tickCount"] = tickCount,
+                                    ["elapsedMs"] = elapsedMs,
+                                    ["commandInProgress"] = commandInProgress,
+                                    ["processId"] = processId,
+                                    ["processRunning"] = processRunning,
+                                    ["startConfirmed"] = startConfirmed,
+                                    ["meaningfulOutputSeen"] = meaningfulOutputSeen,
+                                    ["commandStartedUtc"] = commandStartedUtc
+                                });
+                            AppendTerminalCaptureEvent(
+                                dispatchGeneration,
+                                "health-monitor-tick",
+                                new Dictionary<string, object?>
+                                {
+                                    ["currentGeneration"] = currentGeneration,
+                                    ["isScript"] = isScript,
+                                    ["displayName"] = displayName,
+                                    ["tickCount"] = tickCount,
+                                    ["elapsedMs"] = elapsedMs,
+                                    ["commandInProgress"] = commandInProgress,
+                                    ["processId"] = processId,
+                                    ["processRunning"] = processRunning,
+                                    ["startConfirmed"] = startConfirmed,
+                                    ["meaningfulOutputSeen"] = meaningfulOutputSeen,
+                                    ["commandStartedUtc"] = commandStartedUtc
+                                });
+
+                            if (isScript && (tickCount == 4 || tickCount % 20 == 0))
+                            {
+                                CaptureRelevantProcessSnapshot(dispatchGeneration, startedAt, $"health-monitor-tick-{tickCount}");
+                            }
+                        }
+
+                        if (!commandInProgress || currentGeneration != dispatchGeneration)
+                        {
+                            DeveloperDiagnostics.LogDecision(
+                                "Terminal",
+                                "CommandHealthMonitorStop",
+                                "Command health monitor stopped because command tracking ended or generation changed.",
+                                "StopMonitor",
+                                new Dictionary<string, object?>
+                                {
+                                    ["dispatchGeneration"] = dispatchGeneration,
+                                    ["currentGeneration"] = currentGeneration,
+                                    ["commandInProgress"] = commandInProgress,
+                                    ["processId"] = processId,
+                                    ["processRunning"] = processRunning,
+                                    ["tickCount"] = tickCount
+                                });
+                            return;
+                        }
+
+                        if (!processRunning)
+                        {
+                            AppLogger.Warning(
+                                "LiveConsole",
+                                $"Command health monitor detected that the hosted PowerShell process is no longer running. DispatchGeneration={dispatchGeneration}, ProcessId={processId?.ToString() ?? "(none)"}, TickCount={tickCount}.");
+                            DeveloperDiagnostics.LogDecision(
+                                "Terminal",
+                                "CommandHealthMonitorProcessExit",
+                                "Command health monitor detected that the hosted PowerShell process is no longer running.",
+                                "HandleProcessExit",
+                                new Dictionary<string, object?>
+                                {
+                                    ["dispatchGeneration"] = dispatchGeneration,
+                                    ["processId"] = processId,
+                                    ["tickCount"] = tickCount,
+                                    ["elapsedMs"] = (DateTime.UtcNow - startedAt).TotalMilliseconds
+                                });
+                            HandleTerminalProcessExited("ConPTY health monitor", process, onOutput);
+                            return;
+                        }
+
+                        if (isScript &&
+                            !startConfirmed &&
+                            !startConfirmationNoticePublished &&
+                            DateTime.UtcNow - startedAt >= ScriptStartConfirmationDelay)
+                        {
+                            startConfirmationNoticePublished = true;
+                            var targetName = GetDisplayNameForStatus(displayName);
+                            AppLogger.Warning(
+                                "LiveConsole",
+                                $"Script dispatch start token was not observed within {ScriptStartConfirmationDelay.TotalSeconds:0.#} seconds. DispatchGeneration={dispatchGeneration}, ProcessId={processId?.ToString() ?? "(none)"}.");
+                            DeveloperDiagnostics.LogDecision(
+                                "Terminal",
+                                "ScriptStartNotConfirmed",
+                                "Script dispatch start token was not observed within the expected window.",
+                                "PublishUserWarning",
+                                new Dictionary<string, object?>
+                                {
+                                    ["dispatchGeneration"] = dispatchGeneration,
+                                    ["processId"] = processId,
+                                    ["delayMs"] = ScriptStartConfirmationDelay.TotalMilliseconds,
+                                    ["tickCount"] = tickCount,
+                                    ["elapsedMs"] = (DateTime.UtcNow - startedAt).TotalMilliseconds
+                                });
+                            PublishLifecycleMessage(
+                                onOutput,
+                                $"Script '{targetName}' was sent to PowerShell, but the terminal has not confirmed that execution started yet. This usually means PowerShell is still processing the hidden dispatch command, the prompt was not ready, or the session is stuck before the script body began. Use Interrupt or Reset Console if this does not clear shortly.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLogger.Debug("LiveConsole", $"Command health monitor stopped. Reason={ex.Message}");
+                        DeveloperDiagnostics.LogException(
+                            "Terminal",
+                            ex,
+                            "Command health monitor stopped because an exception occurred.",
+                            new Dictionary<string, object?>
+                            {
+                                ["dispatchGeneration"] = dispatchGeneration,
+                                ["isScript"] = isScript,
+                                ["displayName"] = displayName,
+                                ["tickCount"] = tickCount
+                            });
+                        return;
+                    }
+                }
+            });
+        }
+
+        private void ScheduleNoVisibleOutputFeedback(int dispatchGeneration, bool isScript, string displayName, Action<ExecutionOutputRecord> onOutput)
+        {
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "No-visible-output feedback monitor scheduled.",
+                new Dictionary<string, object?>
+                {
+                    ["dispatchGeneration"] = dispatchGeneration,
+                    ["isScript"] = isScript,
+                    ["displayName"] = displayName,
+                    ["delayMs"] = NoVisibleOutputFeedbackDelay.TotalMilliseconds
+                });
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(NoVisibleOutputFeedbackDelay).ConfigureAwait(false);
+
+                    bool shouldNotify;
+                    bool commandInProgress;
+                    bool meaningfulOutputSeen;
+                    bool processRunning;
+                    bool startConfirmed;
+                    int currentGeneration;
+                    int? processId;
+                    Process? process;
+                    lock (_syncRoot)
+                    {
+                        process = _process;
+                        commandInProgress = _isCommandInProgress;
+                        currentGeneration = _commandDispatchGeneration;
+                        meaningfulOutputSeen = _currentDispatchVisibleOutputSeen;
+                        processRunning = IsProcessRunningNoThrow(process);
+                        processId = TryGetProcessId(process);
+                        startConfirmed = _currentDispatchStartConfirmed ||
+                                         !isScript ||
+                                         string.IsNullOrEmpty(_pendingStartToken);
+                        shouldNotify = commandInProgress &&
+                                       currentGeneration == dispatchGeneration &&
+                                       !meaningfulOutputSeen &&
+                                       processRunning;
+                    }
+
+                    var visibleWindowTitle = TryGetMainWindowTitleNoThrow(process);
+
+                    DeveloperDiagnostics.LogDebug(
+                        "Terminal",
+                        "No-visible-output feedback monitor evaluated command state.",
+                        new Dictionary<string, object?>
+                        {
+                            ["dispatchGeneration"] = dispatchGeneration,
+                            ["currentGeneration"] = currentGeneration,
+                            ["isScript"] = isScript,
+                            ["displayName"] = displayName,
+                            ["commandInProgress"] = commandInProgress,
+                            ["processId"] = processId,
+                            ["processRunning"] = processRunning,
+                            ["startConfirmed"] = startConfirmed,
+                            ["meaningfulOutputSeen"] = meaningfulOutputSeen,
+                            ["visibleWindowTitle"] = visibleWindowTitle,
+                            ["shouldNotify"] = shouldNotify
+                        });
+                    AppendTerminalCaptureEvent(
+                        dispatchGeneration,
+                        "no-visible-output-monitor-evaluated",
+                        new Dictionary<string, object?>
+                        {
+                            ["currentGeneration"] = currentGeneration,
+                            ["isScript"] = isScript,
+                            ["displayName"] = displayName,
+                            ["commandInProgress"] = commandInProgress,
+                            ["processId"] = processId,
+                            ["processRunning"] = processRunning,
+                            ["startConfirmed"] = startConfirmed,
+                            ["meaningfulOutputSeen"] = meaningfulOutputSeen,
+                            ["visibleWindowTitle"] = visibleWindowTitle,
+                            ["shouldNotify"] = shouldNotify
+                        });
+                    CaptureRelevantProcessSnapshot(dispatchGeneration, DateTime.UtcNow.Subtract(NoVisibleOutputFeedbackDelay), "no-visible-output-monitor");
+
+                    if (!shouldNotify)
+                    {
+                        return;
+                    }
+
+                    var workKind = isScript ? "Script" : "Command";
+                    var targetName = GetDisplayNameForStatus(displayName);
+                    AppLogger.Warning(
+                        "LiveConsole",
+                        $"{workKind} '{targetName}' is still tracked as running after {NoVisibleOutputFeedbackDelay.TotalSeconds:0.#} seconds with no meaningful terminal output. DispatchGeneration={dispatchGeneration}, ProcessId={processId?.ToString() ?? "(none)"}, StartConfirmed={startConfirmed}, VisibleWindowTitle='{visibleWindowTitle ?? string.Empty}'.");
+
+                    if (isScript && !string.IsNullOrWhiteSpace(visibleWindowTitle))
+                    {
+                        AppendTerminalCaptureEvent(
+                            dispatchGeneration,
+                            "visible-window-detected-without-console-output",
+                            new Dictionary<string, object?>
+                            {
+                                ["displayName"] = displayName,
+                                ["processId"] = processId,
+                                ["mainWindowTitle"] = visibleWindowTitle
+                            });
+                        PublishLifecycleMessage(
+                            onOutput,
+                            $"Script '{targetName}' has not written console output yet, but a PowerShell-owned window is open: \"{visibleWindowTitle}\". This usually means the script is running a GUI or waiting on a dialog. Use that window, close it when finished, or use Interrupt if it appears stuck.");
+                    }
+                    else
+                    {
+                        PublishLifecycleMessage(
+                            onOutput,
+                            $"{workKind} '{targetName}' is still running, but no console output has been received yet. This can be normal for GUI scripts, long startup work, or a command waiting for input. Use Interrupt if it appears stuck.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Debug("LiveConsole", $"No-output feedback watchdog failed. Reason={ex.Message}");
+                    DeveloperDiagnostics.LogException(
+                        "Terminal",
+                        ex,
+                        "No-visible-output feedback monitor failed.",
+                        new Dictionary<string, object?>
+                        {
+                            ["dispatchGeneration"] = dispatchGeneration,
+                            ["isScript"] = isScript,
+                            ["displayName"] = displayName
+                        });
+                }
+            });
+        }
+
+        private static void PublishLifecycleMessage(Action<ExecutionOutputRecord> onOutput, string text)
+        {
+            try
+            {
+                onOutput(new ExecutionOutputRecord(
+                    ExecutionOutputStreamKind.Lifecycle,
+                    text,
+                    DateTime.Now));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("LiveConsole", "Failed to publish a terminal lifecycle message.", ex);
+            }
+        }
+
+        private static string GetDisplayNameForStatus(string? displayName)
+        {
+            if (string.IsNullOrWhiteSpace(displayName))
+            {
+                return "Untitled";
+            }
+
+            try
+            {
+                var fileName = Path.GetFileName(displayName);
+                return string.IsNullOrWhiteSpace(fileName) ? displayName : fileName;
+            }
+            catch
+            {
+                return displayName;
             }
         }
 
@@ -1263,6 +2330,10 @@ namespace PowerShellStudio.PowerShell.Services
 
                 _isCommandInProgress = true;
                 _currentCommandIsScript = isScript;
+                _commandDispatchGeneration++;
+                _currentDispatchVisibleOutputSeen = false;
+                _currentDispatchStartConfirmed = !isScript;
+                _currentDispatchStartedUtc = DateTime.UtcNow;
                 if (isScript && !string.IsNullOrWhiteSpace(snapshotPath))
                 {
                     _pendingSnapshotPaths.Enqueue(snapshotPath);
@@ -1304,7 +2375,12 @@ namespace PowerShellStudio.PowerShell.Services
                 _pendingCompletionToken = null;
                 _pendingHiddenOutputFragments.Clear();
                 _hiddenOutputBuffer = string.Empty;
+                _currentDispatchVisibleOutputSeen = false;
+                _currentDispatchStartConfirmed = false;
+                _currentDispatchStartedUtc = null;
             }
+
+            CompleteTerminalCapture($"Command dispatch was canceled. DeleteSnapshot={deleteSnapshot}.");
 
             if (deleteSnapshot)
             {
@@ -1340,12 +2416,31 @@ namespace PowerShellStudio.PowerShell.Services
                 _pendingCompletionToken = null;
                 _pendingHiddenOutputFragments.Clear();
                 _hiddenOutputBuffer = string.Empty;
+                _currentDispatchVisibleOutputSeen = false;
+                _currentDispatchStartConfirmed = false;
+                _currentDispatchStartedUtc = null;
             }
 
             foreach (var snapshotPath in snapshotPaths)
             {
                 TryDeleteSnapshot(snapshotPath);
             }
+
+            DeveloperDiagnostics.LogStateTransition(
+                "Execution",
+                "LiveConsoleCommandCompleted",
+                "Running",
+                "Idle",
+                "Live console command completed and pending execution state was cleared.",
+                new Dictionary<string, object?>
+                {
+                    ["wasScript"] = wasScript,
+                    ["deletedSnapshotCount"] = snapshotPaths.Count
+                });
+
+            CompleteTerminalCapture(wasScript
+                ? "Script execution completed after the hidden completion sentinel was observed."
+                : "Console command execution completed after the next prompt was observed.");
 
             if (wasScript)
             {
@@ -1369,7 +2464,12 @@ namespace PowerShellStudio.PowerShell.Services
                 _pendingCompletionToken = null;
                 _pendingHiddenOutputFragments.Clear();
                 _hiddenOutputBuffer = string.Empty;
+                _currentDispatchVisibleOutputSeen = false;
+                _currentDispatchStartConfirmed = false;
+                _currentDispatchStartedUtc = null;
             }
+
+            CompleteTerminalCapture($"Pending command state was reset. DeleteSnapshots={deleteSnapshots}.");
 
             if (!deleteSnapshots)
             {
@@ -1473,6 +2573,18 @@ namespace PowerShellStudio.PowerShell.Services
 
                     _hiddenOutputBuffer = _hiddenOutputBuffer[(startIndex + startToken.Length)..];
                     _pendingStartToken = null;
+                    _currentDispatchStartConfirmed = true;
+                    AppLogger.Info("LiveConsole", "Script dispatch start token observed in terminal output; hidden command echo was filtered before display.");
+                    DeveloperDiagnostics.LogStateTransition(
+                        "Terminal",
+                        "ScriptDispatchStartConfirmed",
+                        "WaitingForStartToken",
+                        "ScriptStarted",
+                        "Script dispatch start token observed in terminal output.",
+                        new Dictionary<string, object?>
+                        {
+                            ["hiddenBufferLengthAfterToken"] = _hiddenOutputBuffer.Length
+                        });
                     // The start token is written only after PowerShell has accepted and begun
                     // executing the hidden dispatch command. Everything before it is
                     // programmatic command echo and was discarded above, so clear any
@@ -1500,6 +2612,11 @@ namespace PowerShellStudio.PowerShell.Services
                 while (TryReadTerminalSegment(ref _hiddenOutputBuffer, out var segment))
                 {
                     var sanitizedSegment = RemoveControlSequences(segment);
+
+                    if (TryLogInternalDispatchDiagnostic(sanitizedSegment))
+                    {
+                        continue;
+                    }
 
                     if (IsInternalExecutionEcho(sanitizedSegment))
                     {
@@ -1997,6 +3114,24 @@ namespace PowerShellStudio.PowerShell.Services
                 }
 
                 return process.Id;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+
+        private static int? TryGetExitCode(Process? process)
+        {
+            try
+            {
+                if (process is null || !process.HasExited)
+                {
+                    return null;
+                }
+
+                return process.ExitCode;
             }
             catch
             {

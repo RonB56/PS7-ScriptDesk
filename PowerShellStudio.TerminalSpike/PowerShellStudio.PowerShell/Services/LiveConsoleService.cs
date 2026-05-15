@@ -76,7 +76,7 @@ namespace PowerShellStudio.PowerShell.Services
             {
                 lock (_syncRoot)
                 {
-                    return _process is not null && !_process.HasExited;
+                    return IsProcessRunningNoThrow(_process);
                 }
             }
         }
@@ -87,7 +87,9 @@ namespace PowerShellStudio.PowerShell.Services
             {
                 lock (_syncRoot)
                 {
-                    return _isCommandInProgress;
+                    // A command cannot still be running after the owned PowerShell process exits.
+                    // Treat this as idle even if a process-exit race prevented normal cleanup.
+                    return _isCommandInProgress && IsProcessRunningNoThrow(_process);
                 }
             }
         }
@@ -122,6 +124,27 @@ namespace PowerShellStudio.PowerShell.Services
         public PowerShellRuntimeInfo? ActiveRuntime { get; private set; }
 
         public string? CurrentWorkingDirectory { get; private set; }
+
+        private static bool IsProcessRunningNoThrow(Process? process)
+        {
+            if (process is null)
+            {
+                return false;
+            }
+
+            try
+            {
+                return !process.HasExited;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
 
         public void AttachHost(IntPtr hostHandle, int width, int height)
         {
@@ -632,17 +655,7 @@ namespace PowerShellStudio.PowerShell.Services
                 // correct sink and handler, even if a new session starts before this
                 // process fully terminates.
                 var capturedOnOutput = onOutput;
-                process.Exited += (_, _) =>
-                {
-                    AppLogger.Info("LiveConsole", "The ConPTY PowerShell terminal process exited.");
-                    capturedOnOutput(new ExecutionOutputRecord(
-                        ExecutionOutputStreamKind.Lifecycle,
-                        "The PowerShell terminal session exited.",
-                        DateTime.Now));
-                    // Notify the ViewModel so IsExecutionRunning can be cleared if the
-                    // script called 'exit' before the sentinel was echoed.
-                    SessionTerminated?.Invoke();
-                };
+                process.Exited += (_, _) => HandleTerminalProcessExited("ConPTY", capturedOnOutput);
 
                 _process = process;
                 _inputWriterHandle = inputWriteSide;
@@ -754,16 +767,7 @@ namespace PowerShellStudio.PowerShell.Services
             };
 
             var capturedOnOutput = onOutput;
-            process.Exited += (_, _) =>
-            {
-                AppLogger.Info("LiveConsole", "The redirected PowerShell terminal process exited.");
-                capturedOnOutput(new ExecutionOutputRecord(
-                    ExecutionOutputStreamKind.Lifecycle,
-                    "The PowerShell terminal session exited.",
-                    DateTime.Now));
-                ResetPendingCommandState(deleteSnapshots: true);
-                SessionTerminated?.Invoke();
-            };
+            process.Exited += (_, _) => HandleTerminalProcessExited("redirected", capturedOnOutput);
 
             if (!process.Start())
             {
@@ -775,6 +779,50 @@ namespace PowerShellStudio.PowerShell.Services
             _readerCancellationTokenSource = new CancellationTokenSource();
             _stdoutReaderTask = Task.Run(() => ReadStreamLoopAsync(process.StandardOutput, ExecutionOutputStreamKind.StandardOutput, onOutput, _readerCancellationTokenSource.Token));
             _stderrReaderTask = Task.Run(() => ReadStreamLoopAsync(process.StandardError, ExecutionOutputStreamKind.StandardError, onOutput, _readerCancellationTokenSource.Token));
+        }
+
+        private void HandleTerminalProcessExited(string terminalMode, Action<ExecutionOutputRecord> capturedOnOutput)
+        {
+            bool commandInProgress;
+            bool currentCommandIsScript;
+            int pendingSnapshotCount;
+
+            lock (_syncRoot)
+            {
+                commandInProgress = _isCommandInProgress;
+                currentCommandIsScript = _currentCommandIsScript;
+                pendingSnapshotCount = _pendingSnapshotPaths.Count;
+            }
+
+            AppLogger.Info(
+                "LiveConsole",
+                $"The {terminalMode} PowerShell terminal process exited. CommandInProgress={commandInProgress}, CurrentCommandIsScript={currentCommandIsScript}, PendingSnapshots={pendingSnapshotCount}. Clearing pending execution state and notifying the UI.");
+
+            try
+            {
+                capturedOnOutput(new ExecutionOutputRecord(
+                    ExecutionOutputStreamKind.Lifecycle,
+                    "The PowerShell terminal session exited.",
+                    DateTime.Now));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("LiveConsole", "Failed to publish the PowerShell terminal process-exit lifecycle message.", ex);
+            }
+
+            // A hard pwsh.exe termination can happen before the helper sentinel is echoed.
+            // Always clear pending command/snapshot state so Run, Interrupt, and Reset Console
+            // cannot remain disabled after the owned terminal process is gone.
+            ResetPendingCommandState(deleteSnapshots: true);
+
+            try
+            {
+                SessionTerminated?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("LiveConsole", "A PowerShell terminal process-exit subscriber failed.", ex);
+            }
         }
 
         private async Task ReadPseudoConsoleOutputLoopAsync(IntPtr outputReaderHandle, Action<ExecutionOutputRecord> onOutput, CancellationToken cancellationToken)

@@ -350,9 +350,9 @@ namespace PowerShellStudio.TerminalSpike
                 startupInfo.lpAttributeList = attributeListBuffer;
 
                 var startupCommand = "try { Set-PSReadLineOption -PredictionSource None -ErrorAction SilentlyContinue } catch { }";
-                var commandLine = $"\"{powerShellPath}\" -NoLogo -NoExit -Command {QuoteCommandArgument(startupCommand)}";
+                var commandLine = $"\"{powerShellPath}\" -NoLogo -NoExit -STA -Command {QuoteCommandArgument(startupCommand)}";
                 environmentBlock = CreateEnvironmentBlock();
-                TerminalSpikeLogger.Info("CONPTY", $"Starting pwsh under ConPTY. CommandLine={commandLine}");
+                TerminalSpikeLogger.Info("CONPTY", $"Starting pwsh under ConPTY in STA mode. CommandLine={commandLine}");
 
                 TerminalSpikeLogger.Info("CONPTY", "Calling CreateProcessW with EXTENDED_STARTUPINFO_PRESENT.");
                 if (!CreateProcessW(
