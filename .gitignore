@@ -71,3 +71,9 @@ PowerShellStudio_User_Guide.docx
 PowerShellStudio_Professionalization_Roadmap_Checklist.docx
 TestScript.ps1
 .codex
+
+# Internal testing tools not stored in GitHub
+Tools/
+
+# Local-only files not stored in GitHub
+docs/LocalOnly_NotForGitHub/
