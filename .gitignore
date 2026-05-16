@@ -77,3 +77,6 @@ Tools/
 
 # Local-only files not stored in GitHub
 docs/LocalOnly_NotForGitHub/
+
+# Portable release build output
+PortableBuild/
