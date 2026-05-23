@@ -369,6 +369,7 @@ namespace PowerShellStudio.Shell
                 };
 
                 TerminalConsole.TerminalActivated += source => OnTerminalActivated(source);
+                TerminalConsole.AppShortcutRequested += command => HandleTerminalAppShortcutRequested(command);
 
                 // Resize ConPTY when xterm.js reports a new grid size.
                 TerminalConsole.TerminalResized += (cols, rows) =>
@@ -456,6 +457,23 @@ namespace PowerShellStudio.Shell
 
             var isCtrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
             var isShift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
+
+            // Handle the app-level find/replace shortcuts at the window level so they
+            // work even when focus is not inside the AvalonEdit editor. The editor
+            // preview-key handler keeps these shortcuts as a fallback for older paths.
+            if (isCtrl && !isShift && e.Key == Key.F)
+            {
+                e.Handled = true;
+                OpenFindReplaceWindow(showReplace: false);
+                return;
+            }
+
+            if (isCtrl && !isShift && e.Key == Key.H)
+            {
+                e.Handled = true;
+                OpenFindReplaceWindow(showReplace: true);
+                return;
+            }
 
             if (!isCtrl && !isShift && e.Key == Key.F1)
             {
@@ -1717,10 +1735,17 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
-            if (!TryFindNext(editorTextEditor, findText, matchCase, wholeWord, useRegex, forward: true))
-                _findReplaceWindow?.ShowStatus("The search text was not found");
-            else
-                _findReplaceWindow?.ShowStatus(null);
+            try
+            {
+                if (!TryFindNext(editorTextEditor, findText, matchCase, wholeWord, useRegex, forward: true))
+                    _findReplaceWindow?.ShowStatus("The search text was not found");
+                else
+                    _findReplaceWindow?.ShowStatus(null);
+            }
+            catch (ArgumentException ex)
+            {
+                _findReplaceWindow?.ShowStatus($"Invalid regex: {ex.Message}");
+            }
         }
 
         public void ExecuteFindPrev(string findText, bool matchCase, bool wholeWord = false, bool useRegex = false)
@@ -1739,10 +1764,17 @@ namespace PowerShellStudio.Shell
                 return;
             }
 
-            if (!TryFindNext(editorTextEditor, findText, matchCase, wholeWord, useRegex, forward: false))
-                _findReplaceWindow?.ShowStatus("The search text was not found");
-            else
-                _findReplaceWindow?.ShowStatus(null);
+            try
+            {
+                if (!TryFindNext(editorTextEditor, findText, matchCase, wholeWord, useRegex, forward: false))
+                    _findReplaceWindow?.ShowStatus("The search text was not found");
+                else
+                    _findReplaceWindow?.ShowStatus(null);
+            }
+            catch (ArgumentException ex)
+            {
+                _findReplaceWindow?.ShowStatus($"Invalid regex: {ex.Message}");
+            }
         }
 
         public void ExecuteReplace(string findText, string replaceText, bool matchCase, bool wholeWord = false, bool useRegex = false)
@@ -2286,6 +2318,32 @@ namespace PowerShellStudio.Shell
                     ["source"] = source,
                     ["focusedElement"] = DescribeFocusedElement()
                 });
+        }
+
+        private void HandleTerminalAppShortcutRequested(string command)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                AppLogger.Debug("Terminal", $"Terminal requested app shortcut. Command={command}.");
+                DeveloperDiagnostics.LogUserAction(
+                    "Terminal",
+                    "TerminalAppShortcut",
+                    "Terminal requested an app-level shortcut.",
+                    new Dictionary<string, object?>
+                    {
+                        ["command"] = command,
+                        ["focusedElement"] = DescribeFocusedElement()
+                    });
+
+                if (string.Equals(command, "find", StringComparison.OrdinalIgnoreCase))
+                {
+                    OpenFindReplaceWindow(showReplace: false);
+                }
+                else if (string.Equals(command, "replace", StringComparison.OrdinalIgnoreCase))
+                {
+                    OpenFindReplaceWindow(showReplace: true);
+                }
+            }));
         }
 
         private void OpenConsolePrototype_Click(object sender, RoutedEventArgs e)
@@ -4519,16 +4577,123 @@ namespace PowerShellStudio.Shell
 
         private void OpenFindReplaceWindow(bool showReplace)
         {
+            var selectedFindText = GetActiveEditorSelectedSearchText();
+            if (!string.IsNullOrEmpty(selectedFindText))
+            {
+                _lastFindText = selectedFindText;
+            }
+
             _findReplaceWindow ??= new FindReplaceWindow(this, _lastFindText, _lastReplaceText, _lastFindMatchCase);
-            _findReplaceWindow.Title = showReplace ? "Replace" : "Find";
             _findReplaceWindow.FindText = _lastFindText;
             _findReplaceWindow.ReplaceText = _lastReplaceText;
             _findReplaceWindow.MatchCase = _lastFindMatchCase;
             _findReplaceWindow.WholeWord = _lastFindWholeWord;
             _findReplaceWindow.UseRegex = _lastFindUseRegex;
             _findReplaceWindow.ShowStatus(null);
+            _findReplaceWindow.RefreshResultList();
             _findReplaceWindow.Show();
             _findReplaceWindow.Activate();
+            _findReplaceWindow.SetMode(showReplace);
+        }
+
+        private string GetActiveEditorSelectedSearchText()
+        {
+            if (FindActiveEditor() is not TextEditor editorTextEditor ||
+                editorTextEditor.Document is null ||
+                editorTextEditor.SelectionLength <= 0)
+            {
+                return string.Empty;
+            }
+
+            var selectedText = editorTextEditor.SelectedText ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(selectedText))
+            {
+                return string.Empty;
+            }
+
+            // The Find/Replace input is intentionally a single-line field. Do not
+            // push a multi-line selection into it because that makes the dialog hard
+            // to read and can look broken to non-advanced users.
+            if (selectedText.Contains('\r') || selectedText.Contains('\n'))
+            {
+                return string.Empty;
+            }
+
+            return selectedText;
+        }
+
+        public IReadOnlyList<FindResultRow> GetFindResults(string findText, bool matchCase, bool wholeWord = false, bool useRegex = false)
+        {
+            var results = new List<FindResultRow>();
+            if (FindActiveEditor() is not TextEditor editorTextEditor ||
+                editorTextEditor.Document is null ||
+                string.IsNullOrWhiteSpace(findText))
+            {
+                return results;
+            }
+
+            var text = editorTextEditor.Text ?? string.Empty;
+            if (text.Length == 0)
+            {
+                return results;
+            }
+
+            var rx = BuildFindRegex(findText, matchCase, wholeWord, useRegex);
+            var matches = rx.Matches(text);
+            var resultNumber = 1;
+
+            foreach (Match match in matches)
+            {
+                if (!match.Success)
+                {
+                    continue;
+                }
+
+                var safeOffset = Math.Clamp(match.Index, 0, text.Length);
+                var line = editorTextEditor.Document.GetLineByOffset(safeOffset);
+                var column = safeOffset - line.Offset + 1;
+                var lineText = editorTextEditor.Document.GetText(line.Offset, line.Length).Trim();
+                if (string.IsNullOrEmpty(lineText))
+                {
+                    lineText = "(blank line)";
+                }
+
+                results.Add(new FindResultRow(
+                    resultNumber++,
+                    line.LineNumber,
+                    Math.Max(1, column),
+                    safeOffset,
+                    match.Length,
+                    lineText));
+            }
+
+            return results;
+        }
+
+        public void NavigateToFindResult(int offset, int length, int lineNumber, int column)
+        {
+            if (FindActiveEditor() is not TextEditor editorTextEditor)
+            {
+                return;
+            }
+
+            var textLength = editorTextEditor.Text?.Length ?? 0;
+            if (textLength == 0)
+            {
+                return;
+            }
+
+            var safeOffset = Math.Clamp(offset, 0, textLength);
+            var safeLength = Math.Clamp(length, 0, textLength - safeOffset);
+            editorTextEditor.Select(safeOffset, safeLength);
+            editorTextEditor.ScrollTo(lineNumber, Math.Max(1, column));
+            editorTextEditor.CaretOffset = Math.Min(textLength, safeOffset + safeLength);
+            editorTextEditor.Focus();
+
+            if (ViewModel is not null)
+            {
+                ViewModel.StatusText = $"Jumped to search result at line {lineNumber}, column {column}";
+            }
         }
 
         // Throws ArgumentException for invalid regex patterns.

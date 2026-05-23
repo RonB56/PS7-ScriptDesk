@@ -248,6 +248,17 @@ namespace PowerShellStudio.Shell.Controls
                 // Right-click → paste via the host clipboard bridge.
                 term.attachCustomKeyEventHandler(function(e) {
                   if (e.type !== 'keydown') return true;
+
+                  if (e.ctrlKey && !e.altKey && !e.metaKey && e.key && e.key.toLowerCase() === 'f') {
+                    post({ type: 'app_shortcut', command: 'find' });
+                    return false;
+                  }
+
+                  if (e.ctrlKey && !e.altKey && !e.metaKey && e.key && e.key.toLowerCase() === 'h') {
+                    post({ type: 'app_shortcut', command: 'replace' });
+                    return false;
+                  }
+
                   if (e.ctrlKey && e.key === 'c') {
                     if (term.hasSelection()) {
                       post({ type: 'copy', text: term.getSelection() });
@@ -396,6 +407,9 @@ namespace PowerShellStudio.Shell.Controls
 
         /// <summary>Fires when the terminal is explicitly activated by click/focus/input.</summary>
         public event Action<string>? TerminalActivated;
+
+        /// <summary>Fires when xterm.js captures a keyboard gesture that belongs to the host app, such as Ctrl+F or Ctrl+H.</summary>
+        public event Action<string>? AppShortcutRequested;
 
         // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -923,6 +937,24 @@ namespace PowerShellStudio.Shell.Controls
                                 ? blurSourceProp.GetString()
                                 : "unknown";
                             AppLogger.Debug("Terminal", $"xterm blur reported. Source={source}, WebViewFocused={WebView.IsKeyboardFocusWithin}.");
+                        }
+                        break;
+
+                    case "app_shortcut":
+                        {
+                            var command = root.TryGetProperty("command", out var commandProp)
+                                ? commandProp.GetString()
+                                : null;
+                            if (!string.IsNullOrWhiteSpace(command))
+                            {
+                                AppLogger.Debug("Terminal", $"xterm requested host shortcut. Command={command}.");
+                                DeveloperDiagnostics.LogUserAction(
+                                    "Terminal",
+                                    "AppShortcutRequested",
+                                    "xterm requested a host-level shortcut.",
+                                    new Dictionary<string, object?> { ["command"] = command });
+                                AppShortcutRequested?.Invoke(command);
+                            }
                         }
                         break;
 

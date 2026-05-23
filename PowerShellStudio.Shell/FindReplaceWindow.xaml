@@ -3,68 +3,253 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:help="clr-namespace:PowerShellStudio.Shell.Help"
         Title="Find / Replace"
-        Width="460"
-        Height="285"
+        Width="760"
+        Height="500"
+        MinWidth="680"
+        MinHeight="420"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
+        ResizeMode="CanResizeWithGrip"
         ShowInTaskbar="False"
         PreviewKeyDown="Window_PreviewKeyDown"
         help:ContextHelp.Key="FindReplace.Dialog">
-    <Grid Margin="12">
+    <Window.Resources>
+        <Style x:Key="FindReplaceActionButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Control.Border}" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Control.Foreground}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="10,7" />
+            <Setter Property="MinHeight" Value="34" />
+            <Setter Property="MinWidth" Value="132" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="RootBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="5"
+                                Padding="{TemplateBinding Padding}"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              RecognizesAccessKey="True" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsDefault" Value="True">
+                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Control.HoverBackground}" />
+                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Control.PressedBackground}" />
+                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Pressed}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Secondary}" />
+                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Border.Strong}" />
+                                <Setter TargetName="RootBorder" Property="Opacity" Value="0.65" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="FindReplacePrimaryActionButtonStyle" TargetType="Button" BasedOn="{StaticResource FindReplaceActionButtonStyle}">
+            <Setter Property="Background" Value="{DynamicResource Theme.Accent.Primary}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Accent.Foreground}" />
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="Auto" />
-            <ColumnDefinition Width="*" />
-        </Grid.ColumnDefinitions>
 
-        <TextBlock Grid.Row="0" Grid.Column="0" Margin="0,0,12,10" VerticalAlignment="Center" Text="Find:" help:ContextHelp.Key="FindReplace.FindText" />
-        <TextBox x:Name="FindTextBox" Grid.Row="0" Grid.Column="1" Margin="0,0,0,10" MinWidth="280" help:ContextHelp.Key="FindReplace.FindText" />
-
-        <TextBlock Grid.Row="1" Grid.Column="0" Margin="0,0,12,10" VerticalAlignment="Center" Text="Replace:" help:ContextHelp.Key="FindReplace.ReplaceText" />
-        <TextBox x:Name="ReplaceTextBox" Grid.Row="1" Grid.Column="1" Margin="0,0,0,10" MinWidth="280" help:ContextHelp.Key="FindReplace.ReplaceText" />
-
-        <!-- Options row -->
-        <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,14">
-            <CheckBox x:Name="MatchCaseCheckBox"
-                      Margin="0,0,16,0"
-                      VerticalAlignment="Center"
-                      Content="Match _case"
-                      help:ContextHelp.Key="FindReplace.MatchCase" />
-            <CheckBox x:Name="WholeWordCheckBox"
-                      Margin="0,0,16,0"
-                      VerticalAlignment="Center"
-                      Content="_Whole word"
-                      ToolTip="Match only complete words"
-                      help:ContextHelp.Key="FindReplace.WholeWord" />
-            <CheckBox x:Name="UseRegexCheckBox"
-                      VerticalAlignment="Center"
-                      Content="Use _regex"
-                      ToolTip="Treat the search pattern as a .NET regular expression"
-                      help:ContextHelp.Key="FindReplace.Regex" />
+        <StackPanel Grid.Row="0" Margin="0,0,0,14">
+            <TextBlock Text="Find and replace"
+                       FontSize="18"
+                       FontWeight="SemiBold" />
+            <TextBlock Text="Search the active script, review every match, and jump directly to a result."
+                       Margin="0,3,0,0"
+                       Foreground="{DynamicResource Theme.Text.Secondary}" />
         </StackPanel>
 
-        <!-- Status text -->
-        <TextBlock x:Name="StatusText"
-                   Grid.Row="3" Grid.Column="1"
-                   Margin="0,0,0,10"
-                   Foreground="Red"
-                   FontSize="11"
-                   Text=""
-                   TextWrapping="NoWrap"
-                   help:ContextHelp.Key="FindReplace.Dialog" />
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="152" />
+            </Grid.ColumnDefinitions>
 
-        <UniformGrid Grid.Row="4" Grid.ColumnSpan="2" Rows="1" Columns="5" Margin="0,2,0,0">
-            <Button Content="Find _Next (F3)"  Margin="0,0,8,0" Padding="8,4" Click="FindNext_Click"   help:ContextHelp.Key="FindReplace.FindNext" />
-            <Button Content="Find _Prev"       Margin="0,0,8,0" Padding="8,4" Click="FindPrev_Click"   ToolTip="Find Previous (Shift+F3)" help:ContextHelp.Key="FindReplace.FindNext" />
-            <Button Content="_Replace"         Margin="0,0,8,0" Padding="8,4" Click="Replace_Click"    help:ContextHelp.Key="FindReplace.ReplaceOne" />
-            <Button Content="Replace _All"     Margin="0,0,8,0" Padding="8,4" Click="ReplaceAll_Click" help:ContextHelp.Key="FindReplace.ReplaceAll" />
-            <Button Content="Close"            Padding="8,4"   Click="Close_Click"                     help:ContextHelp.Key="FindReplace.Dialog" />
-        </UniformGrid>
+            <Grid Grid.Column="0" Margin="0,0,14,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="80" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0"
+                           Grid.Column="0"
+                           Margin="0,0,10,10"
+                           VerticalAlignment="Center"
+                           Text="Find:"
+                           help:ContextHelp.Key="FindReplace.FindText" />
+                <TextBox x:Name="FindTextBox"
+                         Grid.Row="0"
+                         Grid.Column="1"
+                         Margin="0,0,0,10"
+                         TextChanged="FindTextBox_TextChanged"
+                         help:ContextHelp.Key="FindReplace.FindText" />
+
+                <TextBlock x:Name="ReplaceLabel"
+                           Grid.Row="1"
+                           Grid.Column="0"
+                           Margin="0,0,10,10"
+                           VerticalAlignment="Center"
+                           Text="Replace:"
+                           help:ContextHelp.Key="FindReplace.ReplaceText" />
+                <TextBox x:Name="ReplaceTextBox"
+                         Grid.Row="1"
+                         Grid.Column="1"
+                         Margin="0,0,0,10"
+                         help:ContextHelp.Key="FindReplace.ReplaceText" />
+
+                <StackPanel Grid.Row="2"
+                            Grid.Column="1"
+                            Orientation="Horizontal"
+                            Margin="0,0,0,12">
+                    <CheckBox x:Name="MatchCaseCheckBox"
+                              Margin="0,0,18,0"
+                              VerticalAlignment="Center"
+                              Content="Match _case"
+                              Checked="SearchOption_Changed"
+                              Unchecked="SearchOption_Changed"
+                              help:ContextHelp.Key="FindReplace.MatchCase" />
+                    <CheckBox x:Name="WholeWordCheckBox"
+                              Margin="0,0,18,0"
+                              VerticalAlignment="Center"
+                              Content="_Whole word"
+                              ToolTip="Match only complete words"
+                              Checked="SearchOption_Changed"
+                              Unchecked="SearchOption_Changed"
+                              help:ContextHelp.Key="FindReplace.WholeWord" />
+                    <CheckBox x:Name="UseRegexCheckBox"
+                              VerticalAlignment="Center"
+                              Content="Use regular _expression"
+                              ToolTip="Allows pattern-based searching. Examples: \d+ finds numbers; \$\w+ finds PowerShell variables."
+                              Checked="SearchOption_Changed"
+                              Unchecked="SearchOption_Changed"
+                              help:ContextHelp.Key="FindReplace.Regex" />
+                </StackPanel>
+
+                <Border Grid.Row="3"
+                        Grid.ColumnSpan="2"
+                        Margin="0,0,0,8"
+                        Padding="10,7"
+                        Background="{DynamicResource Theme.Surface.Secondary}"
+                        BorderBrush="{DynamicResource Theme.Border.Subtle}"
+                        BorderThickness="1"
+                        CornerRadius="5">
+                    <DockPanel LastChildFill="True">
+                        <TextBlock x:Name="CountText"
+                                   DockPanel.Dock="Left"
+                                   FontWeight="SemiBold"
+                                   Text="0 matches" />
+                        <TextBlock Text="Select a result to jump to it; double-click or press Enter to jump again."
+                                   Margin="16,0,0,0"
+                                   Foreground="{DynamicResource Theme.Text.Secondary}"
+                                   TextTrimming="CharacterEllipsis" />
+                    </DockPanel>
+                </Border>
+
+                <Grid Grid.Row="4" Grid.ColumnSpan="2">
+                    <ListBox x:Name="ResultsListBox"
+                             MouseDoubleClick="ResultsListBox_MouseDoubleClick"
+                             KeyDown="ResultsListBox_KeyDown"
+                             SelectionChanged="ResultsListBox_SelectionChanged"
+                             help:ContextHelp.Key="FindReplace.FindNext">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,1">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="84" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               Text="{Binding Location}"
+                                               FontWeight="SemiBold"
+                                               Foreground="{DynamicResource Theme.Text.Primary}" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding Preview}"
+                                               Foreground="{DynamicResource Theme.Text.Secondary}"
+                                               TextTrimming="CharacterEllipsis" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBlock x:Name="ResultsEmptyText"
+                               Text="Type search text to see matching lines here."
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource Theme.Text.Secondary}"
+                               IsHitTestVisible="False" />
+                </Grid>
+            </Grid>
+
+            <StackPanel Grid.Column="1" VerticalAlignment="Top">
+                <Button Content="Find _Next"
+                        Margin="0,0,0,8"
+                        Style="{StaticResource FindReplacePrimaryActionButtonStyle}"
+                        IsDefault="True"
+                        Click="FindNext_Click"
+                        ToolTip="Find Next (F3)"
+                        help:ContextHelp.Key="FindReplace.FindNext" />
+                <Button Content="Find _Previous"
+                        Margin="0,0,0,8"
+                        Style="{StaticResource FindReplaceActionButtonStyle}"
+                        Click="FindPrev_Click"
+                        ToolTip="Find Previous (Shift+F3)"
+                        help:ContextHelp.Key="FindReplace.FindNext" />
+                <Button Content="_Replace"
+                        Margin="0,0,0,8"
+                        Style="{StaticResource FindReplaceActionButtonStyle}"
+                        Click="Replace_Click"
+                        help:ContextHelp.Key="FindReplace.ReplaceOne" />
+                <Button Content="Replace _All"
+                        Margin="0,0,0,8"
+                        Style="{StaticResource FindReplaceActionButtonStyle}"
+                        Click="ReplaceAll_Click"
+                        help:ContextHelp.Key="FindReplace.ReplaceAll" />
+                <Button Content="Close"
+                        Margin="0,10,0,0"
+                        Style="{StaticResource FindReplaceActionButtonStyle}"
+                        Click="Close_Click"
+                        help:ContextHelp.Key="FindReplace.Dialog" />
+            </StackPanel>
+        </Grid>
+
+        <TextBlock x:Name="StatusText"
+                   Grid.Row="2"
+                   Margin="0,12,0,0"
+                   Foreground="{DynamicResource Theme.Status.Error.Foreground}"
+                   Text=""
+                   TextWrapping="Wrap"
+                   help:ContextHelp.Key="FindReplace.Dialog" />
     </Grid>
 </Window>
