@@ -1,6 +1,6 @@
 # Codex Primer Rules
 
-This repo builds the Windows desktop app **PS7 ScriptDesk**. Historical/internal names still use `PowerShellStudio`. The app is a WPF/.NET desktop tool for opening, editing, running, and debugging user-selected PowerShell 7.x scripts.
+This repo builds the Windows desktop app **PS7 ScriptDesk**. The internal code/project-safe root name is `PS7ScriptDesk`. The app is a WPF/.NET desktop tool for opening, editing, running, and debugging user-selected PowerShell 7.x scripts.
 
 Future Codex sessions must:
 

@@ -1,9 +1,0 @@
-<Solution>
-  <Project Path="PowerShellStudio.Application/PowerShellStudio.Application.csproj" />
-  <Project Path="PowerShellStudio.Domain/PowerShellStudio.Domain.csproj" />
-  <Project Path="PowerShellStudio.Editor/PowerShellStudio.Editor.csproj" />
-  <Project Path="PowerShellStudio.Infrastructure/PowerShellStudio.Infrastructure.csproj" />
-  <Project Path="PowerShellStudio.PowerShell/PowerShellStudio.PowerShell.csproj" />
-  <Project Path="PowerShellStudio.Shell/PowerShellStudio.Shell.csproj" />
-  <Project Path="PowerShellStudio.UI/PowerShellStudio.UI.csproj" />
-</Solution>

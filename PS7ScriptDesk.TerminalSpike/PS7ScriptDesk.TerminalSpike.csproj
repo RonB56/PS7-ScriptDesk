@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+	<RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <AssemblyName>PS7ScriptDesk.TerminalSpike</AssemblyName>
+    <RootNamespace>PS7ScriptDesk.TerminalSpike</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2535.41" />
+  </ItemGroup>
+
+  <!-- Exclude copied source trees that do not belong to the terminal spike project.
+       They were being picked up by the SDK default globs and compiled as part of
+       this project, which pulled in incomplete app-layer code and broke the build. -->
+  <ItemGroup>
+    <Compile Remove="PS7ScriptDesk.Application\**\*.cs" />
+    <Compile Remove="PS7ScriptDesk.PowerShell\**\*.cs" />
+    <Compile Remove="PS7ScriptDesk.Shell\**\*.cs" />
+    <Compile Remove="PS7ScriptDesk.UI\**\*.cs" />
+    <EmbeddedResource Remove="PS7ScriptDesk.Application\**\*" />
+    <EmbeddedResource Remove="PS7ScriptDesk.PowerShell\**\*" />
+    <EmbeddedResource Remove="PS7ScriptDesk.Shell\**\*" />
+    <EmbeddedResource Remove="PS7ScriptDesk.UI\**\*" />
+    <None Remove="PS7ScriptDesk.Application\**\*" />
+    <None Remove="PS7ScriptDesk.PowerShell\**\*" />
+    <None Remove="PS7ScriptDesk.Shell\**\*" />
+    <None Remove="PS7ScriptDesk.UI\**\*" />
+    <Page Remove="PS7ScriptDesk.Application\**\*" />
+    <Page Remove="PS7ScriptDesk.PowerShell\**\*" />
+    <Page Remove="PS7ScriptDesk.Shell\**\*" />
+    <Page Remove="PS7ScriptDesk.UI\**\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\PS7ScriptDesk.Shell\terminal\xterm.min.js">
+      <Link>terminal\xterm.min.js</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\PS7ScriptDesk.Shell\terminal\xterm.css">
+      <Link>terminal\xterm.css</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\PS7ScriptDesk.Shell\terminal\xterm-addon-fit.min.js">
+      <Link>terminal\xterm-addon-fit.min.js</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

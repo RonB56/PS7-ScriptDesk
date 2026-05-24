@@ -1,0 +1,52 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+	<RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <AssemblyName>PS7ScriptDesk.Shell</AssemblyName>
+    <RootNamespace>PS7ScriptDesk.Shell</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+	<UseWindowsForms>true</UseWindowsForms>
+    <Version>1.4.0</Version>
+    <AssemblyVersion>1.4.0.0</AssemblyVersion>
+    <FileVersion>1.4.0.0</FileVersion>
+    <InformationalVersion>1.4.0</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <AssemblyTitle>PS7 ScriptDesk</AssemblyTitle>
+    <Product>PS7 ScriptDesk</Product>
+    <Description>An ISE-style scripting tool for PowerShell 7.x</Description>
+	<ApplicationIcon>Assets\PS7ScriptDesk.Safe.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AvalonEdit" Version="6.3.1.120" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2535.41" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="terminal\xterm.min.js">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="terminal\xterm.css">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="terminal\xterm-addon-fit.min.js">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="terminal\xterm-addon-web-links.min.js">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PS7ScriptDesk.Application\PS7ScriptDesk.Application.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.Domain\PS7ScriptDesk.Domain.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.Editor\PS7ScriptDesk.Editor.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.Infrastructure\PS7ScriptDesk.Infrastructure.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.PowerShell\PS7ScriptDesk.PowerShell.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.UI\PS7ScriptDesk.UI.csproj" />
+  </ItemGroup>
+</Project>

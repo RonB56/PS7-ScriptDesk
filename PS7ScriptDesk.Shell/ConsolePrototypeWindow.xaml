@@ -1,0 +1,53 @@
+<Window x:Class="PS7ScriptDesk.Shell.ConsolePrototypeWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:PS7ScriptDesk.Shell.Controls"
+        Title="PowerShell Console Prototype"
+        Height="760"
+        Width="1180"
+        MinHeight="480"
+        MinWidth="720"
+        WindowStartupLocation="CenterScreen"
+        Loaded="Window_Loaded"
+        Closed="Window_Closed">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Margin="0,0,0,10"
+                   Text="Isolated ConPTY terminal prototype. This window bypasses AvalonEdit, metadata loading, Run Script injection, and the main shell ViewModel."
+                   TextWrapping="Wrap" />
+
+        <DockPanel Grid.Row="1"
+                   Margin="0,0,0,10">
+            <StackPanel DockPanel.Dock="Left"
+                        Orientation="Vertical">
+                <TextBlock Text="Prototype Status"
+                           FontWeight="SemiBold" />
+                <TextBlock x:Name="StatusTextBlock"
+                           Margin="0,4,0,0"
+                           Text="Initializing prototype terminal..." />
+            </StackPanel>
+
+            <StackPanel DockPanel.Dock="Right"
+                        Orientation="Horizontal"
+                        HorizontalAlignment="Right">
+                <Button Content="Restart Session"
+                        Click="RestartSession_Click"
+                        Padding="10,4"
+                        Margin="8,0,0,0"
+                        MinWidth="120" />
+            </StackPanel>
+        </DockPanel>
+
+        <Border Grid.Row="2"
+                BorderThickness="1"
+                Padding="0">
+            <controls:TerminalControl x:Name="PrototypeTerminal" />
+        </Border>
+    </Grid>
+</Window>

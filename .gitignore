@@ -67,8 +67,8 @@ appsettings.Development.json
 
 # Local Codex and personal test files
 .codex/
-PowerShellStudio_User_Guide.docx
-PowerShellStudio_Professionalization_Roadmap_Checklist.docx
+PS7ScriptDesk_User_Guide.docx
+PS7ScriptDesk_Professionalization_Roadmap_Checklist.docx
 TestScript.ps1
 .codex
 

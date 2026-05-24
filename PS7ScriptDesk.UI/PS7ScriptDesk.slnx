@@ -1,0 +1,9 @@
+<Solution>
+  <Project Path="PS7ScriptDesk.Application/PS7ScriptDesk.Application.csproj" />
+  <Project Path="PS7ScriptDesk.Domain/PS7ScriptDesk.Domain.csproj" />
+  <Project Path="PS7ScriptDesk.Editor/PS7ScriptDesk.Editor.csproj" />
+  <Project Path="PS7ScriptDesk.Infrastructure/PS7ScriptDesk.Infrastructure.csproj" />
+  <Project Path="PS7ScriptDesk.PowerShell/PS7ScriptDesk.PowerShell.csproj" />
+  <Project Path="PS7ScriptDesk.Shell/PS7ScriptDesk.Shell.csproj" />
+  <Project Path="PS7ScriptDesk.UI/PS7ScriptDesk.UI.csproj" />
+</Solution>

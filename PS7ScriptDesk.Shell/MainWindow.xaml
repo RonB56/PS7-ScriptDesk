@@ -1,0 +1,1692 @@
+﻿<Window x:Class="PS7ScriptDesk.Shell.MainWindow"
+        x:Name="RootWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:avalonedit="http://icsharpcode.net/sharpdevelop/avalonedit"
+        xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
+        xmlns:controls="clr-namespace:PS7ScriptDesk.Shell.Controls"
+                Title="{Binding Title}"
+        Height="700"
+        Width="1200"
+        MinHeight="500"
+        MinWidth="800"
+        WindowStartupLocation="CenterScreen"
+        Loaded="Window_Loaded"
+        ContentRendered="Window_ContentRendered"
+        Closing="Window_Closing"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        AllowDrop="True">
+
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+
+        <Style x:Key="ToolbarIconPathStyle" TargetType="Path">
+            <Setter Property="Fill" Value="{DynamicResource Theme.Icon.Accent}" />
+            <Setter Property="Stretch" Value="Uniform" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsEnabled, RelativeSource={RelativeSource AncestorType=Button}}" Value="False">
+                    <Setter Property="Fill" Value="{DynamicResource Theme.Icon.Muted}" />
+                    <Setter Property="Opacity" Value="0.7" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="ToolbarIconNeutralPathStyle" TargetType="Path" BasedOn="{StaticResource ToolbarIconPathStyle}">
+            <Setter Property="Fill" Value="{DynamicResource Theme.Icon.Muted}" />
+        </Style>
+
+        <Style x:Key="ToolbarIconPositivePathStyle" TargetType="Path" BasedOn="{StaticResource ToolbarIconPathStyle}">
+            <Setter Property="Fill" Value="{DynamicResource Theme.Icon.Success}" />
+        </Style>
+
+        <Style x:Key="ToolbarIconWarningPathStyle" TargetType="Path" BasedOn="{StaticResource ToolbarIconPathStyle}">
+            <Setter Property="Fill" Value="{DynamicResource Theme.Icon.Warning}" />
+        </Style>
+
+        <Style x:Key="ToolbarIconDangerPathStyle" TargetType="Path" BasedOn="{StaticResource ToolbarIconPathStyle}">
+            <Setter Property="Fill" Value="{DynamicResource Theme.Icon.Danger}" />
+        </Style>
+
+        <Style x:Key="BottomPaneTabToggleButtonStyle" TargetType="ToggleButton">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Padding" Value="2,6,2,8" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ToggleButton}">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="2" />
+                                </Grid.RowDefinitions>
+                                <ContentPresenter Grid.Row="0"
+                                                  Margin="{TemplateBinding Padding}"
+                                                  HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"
+                                                  RecognizesAccessKey="True" />
+                                <Border x:Name="SelectionUnderline"
+                                        Grid.Row="1"
+                                        Background="Transparent"
+                                        CornerRadius="1" />
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+                                <Setter Property="FontWeight" Value="Bold" />
+                                <Setter TargetName="SelectionUnderline" Property="Background" Value="{DynamicResource Theme.Icon.Accent}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="BottomPaneHeaderBadgeBorderStyle" TargetType="Border">
+            <Setter Property="Padding" Value="8,2" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="Background" Value="#1F2937" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <DockPanel>
+
+        <Menu DockPanel.Dock="Top" help:ContextHelp.Key="App.Overview">
+                <MenuItem x:Name="FileMenuItem"
+                      Header="_File"
+                      SubmenuOpened="FileMenuItem_SubmenuOpened"
+                      help:ContextHelp.Key="Menu.File">
+                <MenuItem Header="_New Script" InputGestureText="Ctrl+N" Command="{Binding NewScriptCommand}" help:ContextHelp.Key="Command.NewScript" />
+                <MenuItem Header="_Close Tab" InputGestureText="Ctrl+W" Command="{Binding CloseTabCommand}" help:ContextHelp.Key="Command.CloseTab" />
+                <MenuItem Header="Close _All" InputGestureText="Ctrl+Shift+W" Command="{Binding CloseAllTabsCommand}" help:ContextHelp.Key="Command.CloseAll" />
+                <MenuItem Header="_Open..." InputGestureText="Ctrl+O" Click="OpenFile_Click" help:ContextHelp.Key="Command.OpenFile" />
+                <MenuItem Header="Open _Folder..." InputGestureText="Ctrl+Shift+O" Command="{Binding OpenWorkspaceFolderCommand}" help:ContextHelp.Key="Command.OpenFolder" />
+                <Separator x:Name="RecentScriptsSectionTopSeparator" />
+                <MenuItem x:Name="RecentScriptsSectionHeaderMenuItem"
+                          Header="Recent _Scripts"
+                          IsEnabled="False"
+                          help:ContextHelp.Key="Menu.RecentScripts" />
+                <MenuItem x:Name="RecentScriptsEmptyMenuItem"
+                          Header="No recent scripts"
+                          IsEnabled="False" />
+                <Separator x:Name="RecentScriptsSectionBottomSeparator" />
+                <Separator />
+                <MenuItem Header="_Save" InputGestureText="Ctrl+S" Click="SaveFile_Click" help:ContextHelp.Key="Command.Save" />
+                <MenuItem Header="Save _As..." InputGestureText="Ctrl+Shift+S" Click="SaveFileAs_Click" help:ContextHelp.Key="Command.SaveAs" />
+                <MenuItem Header="Export as E_XE..." Command="{Binding ExportAsExeCommand}" help:ContextHelp.Key="Command.ExportAsExe" />
+                <Separator />
+                <MenuItem Header="E_xit" Click="Exit_Click" help:ContextHelp.Key="Menu.File" />
+            </MenuItem>
+
+            <MenuItem Header="_Edit" help:ContextHelp.Key="Command.Find">
+                <MenuItem Header="_Find" InputGestureText="Ctrl+F" Click="Find_Click" help:ContextHelp.Key="Command.Find" />
+                <MenuItem Header="_Replace" InputGestureText="Ctrl+H" Click="Replace_Click" help:ContextHelp.Key="Command.Replace" />
+                <Separator />
+                <MenuItem Header="Go to _Line..." InputGestureText="Ctrl+G" Click="GoToLine_Click" help:ContextHelp.Key="Command.GoToLine" />
+                <Separator />
+                <MenuItem Header="_Clear Output" Command="{Binding ClearConsoleCommand}" help:ContextHelp.Key="Command.ClearOutput" />
+            </MenuItem>
+
+            <MenuItem Header="_View" help:ContextHelp.Key="View.Menu">
+                <MenuItem Header="Show _Explorer"
+                          help:ContextHelp.Key="View.Explorer"
+                          IsCheckable="True"
+                          IsChecked="{Binding IsExplorerVisible, Mode=TwoWay}" />
+                <MenuItem x:Name="ShowDebugPanelMenuItem"
+                          help:ContextHelp.Key="View.DebugPanels"
+                          Header="Show _Debug Panels"
+                          IsCheckable="True"
+                          IsChecked="False"
+                          Click="ShowDebugPanel_Click" />
+                <MenuItem x:Name="PopOutDebugPaneMenuItem"
+                          Header="Debug Pane Pop _Out"
+                          Click="PopOutDebugPaneMenuItem_Click" />
+                <MenuItem x:Name="DockDebugPaneMenuItem"
+                          Header="Debug Pane _Dock Back"
+                          Click="DockDebugPaneMenuItem_Click"
+                          Visibility="Collapsed" />
+                <Separator />
+                <MenuItem Header="Zoom _In"  InputGestureText="Ctrl+=" Command="{Binding ZoomInCommand}" help:ContextHelp.Key="View.Zoom" />
+                <MenuItem Header="Zoom _Out" InputGestureText="Ctrl+-" Command="{Binding ZoomOutCommand}" help:ContextHelp.Key="View.Zoom" />
+                <MenuItem Header="_Reset Zoom" InputGestureText="Ctrl+0" Command="{Binding ResetZoomCommand}" help:ContextHelp.Key="View.Zoom" />
+                <Separator />
+                <MenuItem Header="_Theme" help:ContextHelp.Key="View.ThemeMenu">
+                    <MenuItem Header="_Dark"    Click="ThemeDark_Click" help:ContextHelp.Key="Theme.Dark" />
+                    <MenuItem Header="_Light"   Click="ThemeLight_Click" help:ContextHelp.Key="Theme.Light" />
+                    <MenuItem Header="_ISE Blue" Click="ThemeIseBlue_Click" help:ContextHelp.Key="Theme.IseBlue" />
+                </MenuItem>
+                <MenuItem Header="Editor _Highlight Colors">
+                    <MenuItem x:Name="ForceHighContrastSelectionTextMenuItem"
+                              Header="Force _high-contrast selected text"
+                              IsCheckable="True"
+                              Click="ForceHighContrastSelectionText_Click" />
+                    <Separator />
+                    <MenuItem Header="_Selection background">
+                        <MenuItem x:Name="SelectionThemeDefaultMenuItem" Header="Use active _theme default" IsCheckable="True" Click="SelectionHighlightThemeDefault_Click" />
+                        <Separator />
+                        <MenuItem x:Name="SelectionPowerShellBlueMenuItem" Header="PowerShell blue" IsCheckable="True" Tag="#0F4C81" Click="SelectionHighlightPreset_Click" />
+                        <MenuItem x:Name="SelectionNavyMenuItem" Header="Deep navy" IsCheckable="True" Tag="#0B2A4A" Click="SelectionHighlightPreset_Click" />
+                        <MenuItem x:Name="SelectionCharcoalMenuItem" Header="Charcoal" IsCheckable="True" Tag="#374151" Click="SelectionHighlightPreset_Click" />
+                        <MenuItem x:Name="SelectionPurpleMenuItem" Header="Purple" IsCheckable="True" Tag="#6D28D9" Click="SelectionHighlightPreset_Click" />
+                        <MenuItem x:Name="SelectionGoldMenuItem" Header="Gold" IsCheckable="True" Tag="#F59E0B" Click="SelectionHighlightPreset_Click" />
+                        <Separator />
+                        <MenuItem Header="_Custom selection color..." Click="SelectionHighlightCustom_Click" />
+                    </MenuItem>
+                    <MenuItem Header="_Current line background">
+                        <MenuItem x:Name="CurrentLineThemeDefaultMenuItem" Header="Use active _theme default" IsCheckable="True" Click="CurrentLineHighlightThemeDefault_Click" />
+                        <Separator />
+                        <MenuItem x:Name="CurrentLineSubtleNavyMenuItem" Header="Subtle navy" IsCheckable="True" Tag="#082F49" Click="CurrentLineHighlightPreset_Click" />
+                        <MenuItem x:Name="CurrentLineSoftSlateMenuItem" Header="Soft slate" IsCheckable="True" Tag="#334155" Click="CurrentLineHighlightPreset_Click" />
+                        <MenuItem x:Name="CurrentLineSoftPurpleMenuItem" Header="Soft purple" IsCheckable="True" Tag="#3B0764" Click="CurrentLineHighlightPreset_Click" />
+                        <MenuItem x:Name="CurrentLineSoftGoldMenuItem" Header="Soft gold" IsCheckable="True" Tag="#78350F" Click="CurrentLineHighlightPreset_Click" />
+                        <Separator />
+                        <MenuItem Header="C_ustom current-line color..." Click="CurrentLineHighlightCustom_Click" />
+                    </MenuItem>
+                    <Separator />
+                    <MenuItem Header="_Restore highlight defaults" Click="RestoreEditorHighlightDefaults_Click" />
+                </MenuItem>
+            </MenuItem>
+
+            <MenuItem Header="_Run" help:ContextHelp.Key="Command.RunScript">
+                <MenuItem Header="_Run Script" InputGestureText="Ctrl+F5" Click="RunScript_Click" IsEnabled="{Binding IsRunAvailable}" help:ContextHelp.Key="Command.RunScript" />
+                <MenuItem Header="Run _Selection" InputGestureText="F8" Click="RunSelection_Click" IsEnabled="{Binding IsRunAvailable}" help:ContextHelp.Key="Command.RunSelection" />
+                <MenuItem Header="_Interrupt" Command="{Binding StopCommand}" help:ContextHelp.Key="Command.Interrupt" />
+                <Separator />
+                <MenuItem x:Name="RefreshEditorMetadataMenuItem"
+                          Header="Refresh PowerShell Editor Metadata"
+                          Click="RefreshEditorMetadata_Click"
+                          help:ContextHelp.Key="Editor.Metadata" />
+                <Separator />
+                <MenuItem x:Name="DeleteCurrentEditorMetadataCacheMenuItem"
+                          Header="Delete Current Runtime Metadata Cache"
+                          Click="DeleteCurrentEditorMetadataCache_Click"
+                          help:ContextHelp.Key="Editor.Metadata" />
+                <MenuItem x:Name="DeleteAllEditorMetadataCachesMenuItem"
+                          Header="Delete All PowerShell Metadata Caches"
+                          Click="DeleteAllEditorMetadataCaches_Click"
+                          help:ContextHelp.Key="Editor.Metadata" />
+            </MenuItem>
+
+            <MenuItem Header="_Debug" help:ContextHelp.Key="Debug.Area">
+                <MenuItem Header="_Toggle Breakpoint" InputGestureText="F9" Click="ToggleBreakpoint_Click" help:ContextHelp.Key="Command.ToggleBreakpoint" />
+                <Separator />
+                <MenuItem Header="Open Console Prototype"
+                          Click="OpenConsolePrototype_Click"
+                          help:ContextHelp.Key="Debug.Area" />
+                <Separator />
+                <MenuItem x:Name="StartDebugMenuItem" Header="Start _Debug"  InputGestureText="F5" Click="StartDebug_Click" IsEnabled="False" help:ContextHelp.Key="Command.StartDebug" />
+                <MenuItem x:Name="StepIntoMenuItem"   Header="Step _Into"    InputGestureText="F11"       Click="StepInto_Click"   IsEnabled="False" help:ContextHelp.Key="Command.StepInto" />
+                <MenuItem x:Name="StepOverMenuItem"   Header="Step _Over"    InputGestureText="F10"       Click="StepOver_Click"   IsEnabled="False" help:ContextHelp.Key="Command.StepOver" />
+                <MenuItem x:Name="StepOutMenuItem"    Header="Step O_ut"     InputGestureText="Shift+F11" Click="StepOut_Click"    IsEnabled="False" help:ContextHelp.Key="Command.StepOut" />
+                <MenuItem x:Name="ContinueMenuItem"   Header="_Continue"     InputGestureText="F5"       Click="ContinueDebug_Click" IsEnabled="False" help:ContextHelp.Key="Command.ContinueDebug" />
+                <MenuItem x:Name="StopDebugMenuItem"  Header="Stop D_ebug"  InputGestureText="Shift+F5" Click="StopDebug_Click"  IsEnabled="False" help:ContextHelp.Key="Command.StopDebug" />
+            </MenuItem>
+
+            <MenuItem Header="_Tools" help:ContextHelp.Key="Menu.Tools">
+                <MenuItem Header="_Developer Diagnostics">
+                    <MenuItem x:Name="EnableDeveloperDiagnosticsMenuItem"
+                              Header="_Enable Developer Diagnostics"
+                              IsCheckable="True"
+                              Click="EnableDeveloperDiagnostics_Click" />
+                    <Separator />
+                    <MenuItem x:Name="VerboseUiLoggingMenuItem"
+                              Header="Verbose _UI Logging"
+                              IsCheckable="True"
+                              Click="VerboseUiLogging_Click" />
+                    <MenuItem x:Name="VerboseDebuggerLoggingMenuItem"
+                              Header="Verbose _Debugger Logging"
+                              IsCheckable="True"
+                              Click="VerboseDebuggerLogging_Click" />
+                    <MenuItem x:Name="VerboseTerminalLoggingMenuItem"
+                              Header="Verbose _Terminal Logging"
+                              IsCheckable="True"
+                              Click="VerboseTerminalLogging_Click" />
+                    <MenuItem x:Name="VerboseEditorLoggingMenuItem"
+                              Header="Verbose _Editor Logging"
+                              IsCheckable="True"
+                              Click="VerboseEditorLogging_Click" />
+                    <Separator />
+                    <MenuItem Header="_Open Developer Debugging Folder"
+                              Click="OpenDeveloperDebuggingFolder_Click" />
+                    <MenuItem Header="Open _Latest Diagnostic Session Folder"
+                              Click="OpenLatestDiagnosticSessionFolder_Click" />
+                    <MenuItem Header="_Copy Diagnostics Summary to Clipboard"
+                              Click="CopyDiagnosticsSummaryToClipboard_Click" />
+                    <MenuItem Header="_Package Developer Diagnostics for Support"
+                              Click="PackageDeveloperDiagnosticsForSupport_Click" />
+                    <MenuItem Header="_Clear Developer Diagnostics Logs"
+                              Click="ClearDeveloperDiagnosticsLogs_Click" />
+                </MenuItem>
+                <Separator />
+                <MenuItem Header="Create Support _Logs ZIP..."
+                          Click="CreateSupportLogsZip_Click"
+                          help:ContextHelp.Key="Help.Logs" />
+                <MenuItem Header="Open _Diagnostic Logs Folder"
+                          Click="OpenLogsFolder_Click"
+                          help:ContextHelp.Key="Help.Logs" />
+                <MenuItem Header="Copy Diagnostic Logs Folder _Path"
+                          Click="CopyLogsFolderPath_Click"
+                          help:ContextHelp.Key="Help.Logs" />
+            </MenuItem>
+
+            <MenuItem Header="_Help" help:ContextHelp.Key="Help.Menu">
+                <MenuItem Header="Context _Help" InputGestureText="F1" Click="ContextHelp_Click" help:ContextHelp.Key="Help.Context" />
+                <MenuItem Header="Help _Enabled"
+                          IsCheckable="True"
+                          IsChecked="{Binding IsContextHelpEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}"
+                          help:ContextHelp.Key="Help.Context" />
+                <MenuItem Header="PS7 ScriptDesk _Help" Click="HelpOverview_Click" help:ContextHelp.Key="App.Overview" />
+                <Separator />
+                <MenuItem Header="_About" Command="{Binding AboutCommand}" help:ContextHelp.Key="Help.About" />
+            </MenuItem>
+        </Menu>
+
+        <ToolBarTray DockPanel.Dock="Top" help:ContextHelp.Key="App.Overview">
+            <ToolBar>
+                <!-- New Script -->
+                <Button Command="{Binding NewScriptCommand}"
+                        help:ContextHelp.Key="Command.NewScript"
+                        Padding="10,4" Margin="2,0" MinWidth="110"
+                        ToolTip="New Script (Ctrl+N)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <Path Data="M 6,0 H 10 V 6 H 16 V 10 H 10 V 16 H 6 V 10 H 0 V 6 H 6 Z"
+                                  Style="{StaticResource ToolbarIconPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="New (Ctrl+N)" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Close Tab -->
+                <Button Command="{Binding CloseTabCommand}"
+                        help:ContextHelp.Key="Command.CloseTab"
+                        Padding="10,4" Margin="2,0" MinWidth="110"
+                        ToolTip="Close Tab (Ctrl+W)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <Path Data="M 2,0 L 8,6 L 14,0 L 16,2 L 10,8 L 16,14 L 14,16 L 8,10 L 2,16 L 0,14 L 6,8 L 0,2 Z"
+                                  Style="{StaticResource ToolbarIconNeutralPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Close (Ctrl+W)" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Close All Tabs -->
+                <Button Command="{Binding CloseAllTabsCommand}"
+                        help:ContextHelp.Key="Command.CloseAll"
+                        Padding="10,4" Margin="2,0" MinWidth="145"
+                        ToolTip="Close All (Ctrl+Shift+W)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <Path Data="M 0,2 H 11 V 4 H 0 Z M 2,6 L 6,10 L 10,6 L 12,8 L 8,12 L 12,16 L 10,18 L 6,14 L 2,18 L 0,16 L 4,12 L 0,8 Z M 12,2 H 16 V 4 H 12 Z"
+                                  Style="{StaticResource ToolbarIconNeutralPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Close All (Ctrl+Shift+W)" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Open File -->
+                <Button Click="OpenFile_Click"
+                        help:ContextHelp.Key="Command.OpenFile"
+                        Padding="10,4" Margin="2,0" MinWidth="110"
+                        ToolTip="Open File (Ctrl+O)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <Path Data="M 2,0 H 10 L 14,4 V 16 H 2 Z"
+                                  Style="{StaticResource ToolbarIconNeutralPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Open (Ctrl+O)" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Open Folder -->
+                <Button Command="{Binding OpenWorkspaceFolderCommand}"
+                        help:ContextHelp.Key="Command.OpenFolder"
+                        Padding="10,4" Margin="2,0" MinWidth="150"
+                        ToolTip="Open Folder (Ctrl+Shift+O)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <Path Data="M 0,5 H 7 L 8,3 H 16 V 14 H 0 Z"
+                                  Style="{StaticResource ToolbarIconWarningPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Folder (Ctrl+Shift+O)" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Save -->
+                <Button Click="SaveFile_Click"
+                        help:ContextHelp.Key="Command.Save"
+                        Padding="10,4" Margin="2,0" MinWidth="105"
+                        ToolTip="Save (Ctrl+S)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <!-- Down-arrow save icon: arrow body + baseline -->
+                            <Path Data="M 4,0 H 12 V 7 H 15 L 8,14 L 1,7 H 4 Z M 0,15 H 16 V 16 H 0 Z"
+                                  Style="{StaticResource ToolbarIconPositivePathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Save (Ctrl+S)" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <Separator />
+
+                <!-- Run Script -->
+                <Button Click="RunScript_Click"
+                        help:ContextHelp.Key="Command.RunScript"
+                        IsEnabled="{Binding IsRunAvailable}"
+                        Padding="10,4" Margin="2,0" MinWidth="95"
+                        ToolTip="Run Script (Ctrl+F5)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <Path Data="M 3,2 L 14,8 L 3,14 Z"
+                                  Style="{StaticResource ToolbarIconPositivePathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Run (Ctrl+F5)" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Run Selection -->
+                <Button Click="RunSelection_Click"
+                        help:ContextHelp.Key="Command.RunSelection"
+                        IsEnabled="{Binding IsRunAvailable}"
+                        Padding="10,4" Margin="2,0" MinWidth="150"
+                        ToolTip="Run the current selection in the shared PowerShell session, or run the current line when nothing is selected (F8)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <!-- Vertical bar + right triangle = "run selection" -->
+                            <Path Data="M 0,2 H 3 V 14 H 0 Z M 5,2 L 15,8 L 5,14 Z"
+                                  Style="{StaticResource ToolbarIconPositivePathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Run Selection (F8)" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Interrupt -->
+                <Button Command="{Binding StopCommand}"
+                        help:ContextHelp.Key="Command.Interrupt"
+                        Padding="10,4" Margin="2,0" MinWidth="85"
+                        ToolTip="Try to interrupt the current command or script. If PowerShell does not respond, ScriptDesk can restart only its own session and keep your editor tabs open.">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <Path Data="M 2,2 H 14 V 14 H 2 Z"
+                                  Style="{StaticResource ToolbarIconDangerPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Interrupt" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Clear Output -->
+                <Button Command="{Binding ClearConsoleCommand}"
+                        help:ContextHelp.Key="Command.ClearOutput"
+                        Padding="10,4" Margin="2,0" MinWidth="120"
+                        ToolTip="Clear Output window">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <!-- Backspace/erase shape -->
+                            <Path Data="M 6,2 L 0,8 L 6,14 H 16 V 2 Z"
+                                  Style="{StaticResource ToolbarIconWarningPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Clear Output" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <Separator />
+
+                <!-- Debug / Stop Debug toggle -->
+                <Button x:Name="DebugToggleButton"
+                        help:ContextHelp.Key="Command.StartDebug"
+                        Click="DebugToggle_Click"
+                        IsEnabled="False"
+                        Padding="10,4" Margin="2,0" MinWidth="105"
+                        ToolTip="Start or stop a debug session (F5 / Shift+F5)">
+                    <Grid>
+                        <!-- Idle: Debug -->
+                        <StackPanel Orientation="Horizontal">
+                            <StackPanel.Style>
+                                <Style TargetType="StackPanel">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsDebugSessionActive}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </StackPanel.Style>
+                            <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                                <Path Data="M 3,2 L 14,8 L 3,14 Z"
+                                      Style="{StaticResource ToolbarIconPathStyle}" />
+                            </Viewbox>
+                            <TextBlock Text="Debug (F5)" VerticalAlignment="Center" />
+                        </StackPanel>
+                        <!-- Active: Stop Debug -->
+                        <StackPanel Orientation="Horizontal">
+                            <StackPanel.Style>
+                                <Style TargetType="StackPanel">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsDebugSessionActive}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </StackPanel.Style>
+                            <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                                <Path Data="M 3,3 H 13 V 13 H 3 Z"
+                                      Style="{StaticResource ToolbarIconDangerPathStyle}" />
+                            </Viewbox>
+                            <TextBlock Text="Stop Debug" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
+                </Button>
+
+                <!-- Step Over -->
+                <Button x:Name="StepOverButton"
+                        help:ContextHelp.Key="Command.StepOver"
+                        Click="StepOver_Click"
+                        IsEnabled="False"
+                        Padding="8,4" Margin="2,0" MinWidth="75"
+                        ToolTip="Step Over (F10)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <!-- Arrow curving over a bar -->
+                            <Path Data="M 0,6 H 10 L 7,3 L 10,6 L 7,9 M 0,12 H 16 V 13 H 0 Z"
+                                  Style="{StaticResource ToolbarIconPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Step Over" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Step Into -->
+                <Button x:Name="StepIntoButton"
+                        help:ContextHelp.Key="Command.StepInto"
+                        Click="StepInto_Click"
+                        IsEnabled="False"
+                        Padding="8,4" Margin="2,0" MinWidth="75"
+                        ToolTip="Step Into (F11)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <!-- Down-pointing arrow into a bar -->
+                            <Path Data="M 8,0 V 10 L 5,7 H 3 L 8,13 L 13,7 H 11 L 8,10 V 0"
+                                  Style="{StaticResource ToolbarIconPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Step Into" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Step Out -->
+                <Button x:Name="StepOutButton"
+                        help:ContextHelp.Key="Command.StepOut"
+                        Click="StepOut_Click"
+                        IsEnabled="False"
+                        Padding="8,4" Margin="2,0" MinWidth="75"
+                        ToolTip="Step Out (Shift+F11)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <!-- Up-pointing arrow out of a bar -->
+                            <Path Data="M 8,16 V 6 L 5,9 H 3 L 8,3 L 13,9 H 11 L 8,6 V 16 M 0,2 H 16 V 3 H 0 Z"
+                                  Style="{StaticResource ToolbarIconPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Step Out" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Continue -->
+                <Button x:Name="ContinueButton"
+                        help:ContextHelp.Key="Command.ContinueDebug"
+                        Click="ContinueDebug_Click"
+                        IsEnabled="False"
+                        Padding="8,4" Margin="2,0" MinWidth="80"
+                        ToolTip="Continue (F5)">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <!-- Double right-arrow (continue/resume) -->
+                            <Path Data="M 0,2 L 7,8 L 0,14 Z M 8,2 L 15,8 L 8,14 Z"
+                                  Style="{StaticResource ToolbarIconPositivePathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Continue" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <Separator />
+
+                <Button Click="HelpOverview_Click"
+                        help:ContextHelp.Key="App.Overview"
+                        Padding="10,4" Margin="2,0" MinWidth="90">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                            <Path Data="M 8,0 A 8,8 0 1 1 7.99,0 Z M 7,4 H 9 V 5 H 7 Z M 6.2,7.2 C 6.3,5.6 7.1,4.8 8.4,4.8 C 9.7,4.8 10.6,5.6 10.6,6.9 C 10.6,8.0 10.0,8.6 9.1,9.2 C 8.2,9.8 8.0,10.1 8.0,11.0 V 11.4 H 6.8 V 10.8 C 6.8,9.7 7.2,9.1 8.1,8.5 C 8.8,8.0 9.3,7.6 9.3,6.8 C 9.3,6.0 8.8,5.5 8.1,5.5 C 7.3,5.5 6.8,6.1 6.8,7.2 Z"
+                                  Style="{StaticResource ToolbarIconPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Help (F1)" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+            </ToolBar>
+        </ToolBarTray>
+
+        <StatusBar DockPanel.Dock="Bottom" help:ContextHelp.Key="Status.General">
+            <StatusBarItem help:ContextHelp.Key="Status.Version">
+                <TextBlock Text="{Binding VersionText}" />
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem help:ContextHelp.Key="Status.General">
+                <TextBlock Text="{Binding StatusText}" />
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem help:ContextHelp.Key="Status.Caret">
+                <TextBlock Text="{Binding SelectedTab.CaretDisplayText, TargetNullValue='Ln 1, Col 1'}" />
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem help:ContextHelp.Key="Status.Lines">
+                <TextBlock Text="{Binding SelectedTab.EditorMetricsText, TargetNullValue=Lines: 1}" />
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem help:ContextHelp.Key="Status.Selection">
+                <TextBlock Text="{Binding SelectedTab.SelectionDisplayText, TargetNullValue=Selection: None}" />
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem help:ContextHelp.Key="Status.Breakpoints">
+                <TextBlock Text="{Binding SelectedTab.BreakpointDisplayText, TargetNullValue=Breakpoints: None}" />
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem help:ContextHelp.Key="Status.Runtime">
+                <TextBlock Text="{Binding RuntimeText}" />
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem help:ContextHelp.Key="Status.Workspace">
+                <TextBlock Text="{Binding WorkspaceText}" />
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem help:ContextHelp.Key="Status.Zoom">
+                <TextBlock Text="{Binding ZoomLevelText}" />
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem help:ContextHelp.Key="Status.Execution">
+                <TextBlock Text="{Binding ExecutionProgressText}"
+                           Foreground="{DynamicResource Theme.Status.Warning.Foreground}"
+                           FontWeight="SemiBold" />
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem x:Name="EditorMetadataStatusItem"
+                           help:ContextHelp.Key="Editor.Metadata"
+                           Visibility="Collapsed">
+                <Border x:Name="EditorMetadataStatusBadge"
+                        Background="#FFF59D"
+                        BorderBrush="#FFE65100"
+                        BorderThickness="2.5"
+                        CornerRadius="999"
+                        Padding="14,5"
+                        MinWidth="320"
+                        ToolTip="PowerShell editor metadata is still loading in the background.">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock x:Name="EditorMetadataStatusGlyph"
+                                   Text="⏳"
+                                   Margin="0,0,8,0"
+                                   FontSize="15"
+                                   FontWeight="Bold"
+                                   VerticalAlignment="Center" />
+                        <TextBlock x:Name="EditorMetadataStatusTextBlock"
+                                   Text="Editor metadata loading..."
+                                   FontWeight="Bold"
+                                   FontSize="13"
+                                   VerticalAlignment="Center"
+                                   TextWrapping="NoWrap" />
+                    </StackPanel>
+                </Border>
+            </StatusBarItem>
+            <Separator />
+            <StatusBarItem help:ContextHelp.Key="Help.Context">
+                <ToggleButton Style="{StaticResource StatusPillToggleButtonStyle}"
+                              ToolTip="Toggle all context help UI on or off"
+                              IsChecked="{Binding IsContextHelpEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}"
+                              MinWidth="120"
+                              Padding="14,4">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Help" FontWeight="SemiBold" />
+                        <TextBlock Margin="8,0,0,0" FontWeight="Bold">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Text" Value="OFF" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsChecked, RelativeSource={RelativeSource AncestorType=ToggleButton}}" Value="True">
+                                            <Setter Property="Text" Value="ON" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </StackPanel>
+                </ToggleButton>
+            </StatusBarItem>
+        </StatusBar>
+
+        <Grid Margin="8">
+            <Grid.RowDefinitions>
+                <RowDefinition x:Name="EditorRowDefinition" Height="*" />
+                <RowDefinition Height="6" />
+                <RowDefinition x:Name="ConsoleRowDefinition" Height="230" />
+            </Grid.RowDefinitions>
+
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="ExplorerColumnDefinition" Width="300" />
+
+                <ColumnDefinition x:Name="ExplorerSplitterColumnDefinition" Width="6" />
+
+                <ColumnDefinition x:Name="EditorColumnDefinition" Width="*" />
+
+                <ColumnDefinition x:Name="DebugPanelSplitterColumn" Width="0" />
+
+                <ColumnDefinition x:Name="DebugPanelColumn" Width="0" MinWidth="0" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Row="0"
+                    Grid.RowSpan="3"
+                    Grid.Column="0"
+                    help:ContextHelp.Key="Explorer.Area"
+                    Padding="12"
+                    Style="{StaticResource PanelCardBorderStyle}"
+                    Margin="0"
+                    Visibility="{Binding IsExplorerVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <Grid MinHeight="0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition x:Name="WorkspaceTreeRowDefinition" Height="*" />
+                        <RowDefinition Height="6" />
+                        <RowDefinition x:Name="OpenTabsRowDefinition" Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <DockPanel Grid.Row="0" Margin="0,0,0,10">
+                        <TextBlock Text="Explorer"
+                                   Style="{StaticResource SectionHeaderTextStyle}"
+                                   help:ContextHelp.Key="Explorer.Area" />
+                    </DockPanel>
+
+                    <GroupBox Grid.Row="1"
+                              Header="PowerShell Runtime"
+                              help:ContextHelp.Key="Runtime.Area"
+                              Margin="0,0,0,10"
+                              Padding="6,4">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" MinHeight="38" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <Grid Grid.Row="0"
+                                  Grid.Column="0"
+                                  Margin="0,0,8,6"
+                                  help:ContextHelp.Key="Runtime.Area">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <TextBlock Grid.Row="0"
+                                           Text="{Binding PreferredRuntimeText}"
+                                           FontWeight="SemiBold"
+                                           TextWrapping="NoWrap"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding PreferredRuntimeText}" />
+
+                                <TextBlock Grid.Row="1"
+                                           Margin="0,2,0,0"
+                                           Text="{Binding SelectedRuntimeCompactText}"
+                                           TextWrapping="NoWrap"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding SelectedRuntimeCompactText}" />
+                            </Grid>
+
+                            <Button Grid.Row="0"
+                                    Grid.Column="1"
+                                    help:ContextHelp.Key="Runtime.Refresh"
+                                    Content="{Binding RefreshRuntimesButtonText}"
+                                    Command="{Binding RefreshRuntimesCommand}"
+                                    Padding="10,4"
+                                    MinWidth="130"
+                                    VerticalAlignment="Top" />
+
+                            <TextBlock Grid.Row="1"
+                                       Grid.ColumnSpan="2"
+                                       Text="Executable Path"
+                                       FontWeight="SemiBold"
+                                       Margin="0,0,0,3" />
+
+                            <Border Grid.Row="2"
+                                    Grid.ColumnSpan="2"
+                                    Style="{StaticResource SubtlePanelBorderStyle}"
+                                    Padding="4"
+                                    Margin="0,0,0,8"
+                                    help:ContextHelp.Key="Runtime.Path">
+                                <TextBox Text="{Binding SelectedRuntimePathOnlyText, Mode=OneWay}"
+                                         IsReadOnly="True"
+                                         BorderThickness="0"
+                                         Background="Transparent"
+                                         ToolTip="{Binding SelectedRuntimePathOnlyText}"
+                                         HorizontalScrollBarVisibility="Auto" />
+                            </Border>
+
+                            <TextBlock Grid.Row="3"
+                                       Grid.ColumnSpan="2"
+                                       Text="{Binding RuntimeListHeaderText}"
+                                       FontWeight="SemiBold"
+                                       Margin="0,0,0,3" />
+
+                            <Border Grid.Row="4"
+                                    Grid.ColumnSpan="2"
+                                    Margin="0,0,0,6"
+                                    MinHeight="38"
+                                    Padding="8,6"
+                                    VerticalAlignment="Top"
+                                    Style="{StaticResource SubtlePanelBorderStyle}"
+                                    help:ContextHelp.Key="Runtime.Area">
+                                <TextBlock Foreground="{DynamicResource Theme.Text.Secondary}"
+                                           TextWrapping="Wrap"
+                                           Text="{Binding RuntimeSelectionStatusText}" />
+                            </Border>
+
+                            <ListBox Grid.Row="5"
+                                     help:ContextHelp.Key="Runtime.List"
+                                     Grid.ColumnSpan="2"
+                                     Margin="0,0,0,2"
+                                     MinHeight="96"
+                                     MaxHeight="160"
+                                     IsEnabled="{Binding IsRuntimeListEnabled}"
+                                     ScrollViewer.CanContentScroll="True"
+                                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                     VirtualizingPanel.IsVirtualizing="True"
+                                     VirtualizingPanel.VirtualizationMode="Recycling"
+                                     ItemsSource="{Binding DetectedRuntimes}"
+                                     SelectedItem="{Binding SelectedRuntimeItem}">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap" />
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
+                    </GroupBox>
+
+                    <StackPanel Grid.Row="2" Margin="0,0,0,10" help:ContextHelp.Key="Explorer.WorkspaceSummary">
+                        <TextBlock Text="{Binding OpenTabCountText}" Margin="0,0,0,4" />
+                        <TextBlock Text="{Binding WorkspaceFileCountText}" Margin="0,0,0,4" />
+                        <TextBlock Text="{Binding WorkspaceFolderCountText}" Margin="0,0,0,4" />
+                        <TextBlock Text="{Binding CurrentWorkspaceText}" TextWrapping="Wrap" Margin="0,0,0,4" />
+                        <TextBlock Text="{Binding SelectedWorkspacePathText}" TextWrapping="Wrap" Margin="0,0,0,4" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Row="3" Margin="0,0,0,10" help:ContextHelp.Key="Explorer.WorkspaceFilter">
+                        <TextBlock Text="Workspace Filter"
+                                   FontWeight="SemiBold"
+                                   Margin="0,0,0,4" />
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <Grid Grid.Column="0" Margin="0,0,8,0">
+                                <TextBox x:Name="WorkspaceFilterBox"
+                                         help:ContextHelp.Key="Explorer.WorkspaceFilter"
+                                         Text="{Binding WorkspaceFilterText, UpdateSourceTrigger=PropertyChanged}"
+                                         VerticalContentAlignment="Center"
+                                         Padding="6,2,6,2"
+                                         ToolTip="Type to filter the already-loaded workspace. Filtering now uses the cached workspace instead of rescanning the drive each time." />
+                                <TextBlock Text="Type to filter loaded workspace"
+                                           Margin="8,0,0,0"
+                                           VerticalAlignment="Center"
+                                           Foreground="{DynamicResource Theme.Text.Secondary}"
+                                           FontSize="{StaticResource Theme.FontSize.Caption}"
+                                           IsHitTestVisible="False">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Text, ElementName=WorkspaceFilterBox}" Value="">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Grid>
+
+                            <Button Grid.Column="1"
+                                    help:ContextHelp.Key="Explorer.WorkspaceRefresh"
+                                    Content="{Binding RefreshWorkspaceButtonText}"
+                                    Command="{Binding RefreshWorkspaceCommand}"
+                                    IsEnabled="{Binding IsWorkspaceCommandsEnabled}"
+                                    Padding="10,4"
+                                    Margin="0,0,8,0"
+                                    MinWidth="75" />
+
+                            <Button Grid.Column="2"
+                                    help:ContextHelp.Key="Command.OpenFolder"
+                                    Content="Open Folder"
+                                    Command="{Binding OpenWorkspaceFolderCommand}"
+                                    IsEnabled="{Binding IsWorkspaceCommandsEnabled}"
+                                    Padding="10,4"
+                                    Margin="0,0,8,0"
+                                    MinWidth="95"
+                                    ToolTip="Choose a workspace folder and load it into the explorer pane." />
+
+                            <Button Grid.Column="3"
+                                    help:ContextHelp.Key="Explorer.ShowInExplorer"
+                                    Content="Show in Explorer"
+                                    Command="{Binding ShowWorkspaceFolderInExplorerCommand}"
+                                    IsEnabled="{Binding IsWorkspaceCommandsEnabled}"
+                                    Padding="10,4"
+                                    MinWidth="95"
+                                    ToolTip="Open the current workspace folder in Windows Explorer. If a file is selected, Windows Explorer will highlight it there." />
+                        </Grid>
+                    </StackPanel>
+
+                    <GroupBox Grid.Row="4"
+                              help:ContextHelp.Key="Explorer.WorkspaceTree"
+                              Header="{Binding WorkspaceGroupHeaderText}"
+                              MinHeight="0"
+                              Padding="6">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0"
+                                       Text="{Binding WorkspaceLoadingText}"
+                                       Foreground="{DynamicResource Theme.Text.Secondary}"
+                                       TextWrapping="Wrap"
+                                       Margin="0,0,0,6" />
+
+                            <TreeView x:Name="WorkspaceTree"
+                                      help:ContextHelp.Key="Explorer.WorkspaceTree"
+                                      Grid.Row="1"
+                                      MinHeight="0"
+                                      ItemsSource="{Binding WorkspaceItems}"
+                                      SelectedItemChanged="WorkspaceTree_SelectedItemChanged"
+                                      MouseDoubleClick="WorkspaceTree_MouseDoubleClick"
+                                      ScrollViewer.CanContentScroll="True"
+                                      VirtualizingPanel.IsVirtualizing="True"
+                                      VirtualizingPanel.VirtualizationMode="Recycling">
+                                <TreeView.ItemContainerStyle>
+                                    <Style TargetType="TreeViewItem">
+                                        <EventSetter Event="Expanded" Handler="WorkspaceTreeItem_Expanded" />
+                                    </Style>
+                                </TreeView.ItemContainerStyle>
+                                <TreeView.ItemTemplate>
+                                    <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                        <TextBlock Text="{Binding DisplayText}" />
+                                    </HierarchicalDataTemplate>
+                                </TreeView.ItemTemplate>
+                            </TreeView>
+                        </Grid>
+                    </GroupBox>
+
+                    <GridSplitter Grid.Row="5"
+                                  Height="6"
+                                  HorizontalAlignment="Stretch"
+                                  VerticalAlignment="Stretch"
+                                  ResizeDirection="Rows"
+                                  ResizeBehavior="PreviousAndNext"
+                                  ShowsPreview="True" />
+
+                    <GroupBox Grid.Row="6"
+                              help:ContextHelp.Key="Explorer.OpenTabs"
+                              Header="Open Tabs"
+                              MinHeight="0"
+                              Padding="6">
+                        <Grid MinHeight="0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0"
+                                       Text="{Binding ActiveDocumentText}"
+                                       Margin="0,0,0,10"
+                                       TextWrapping="Wrap" />
+
+                            <ListBox Grid.Row="1"
+                                     help:ContextHelp.Key="Explorer.OpenTabs"
+                                     MinHeight="0"
+                                     ItemsSource="{Binding OpenTabs}"
+                                     SelectedItem="{Binding SelectedTab}">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding DisplayTitle}" />
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
+                    </GroupBox>
+                </Grid>
+            </Border>
+
+            <GridSplitter Grid.Row="0"
+                          Grid.RowSpan="3"
+                          Grid.Column="1"
+                          Width="6"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          ResizeDirection="Columns"
+                          ResizeBehavior="PreviousAndNext"
+                          ShowsPreview="True"
+                          Visibility="{Binding IsExplorerVisible, Converter={StaticResource BooleanToVisibilityConverter}}" />
+
+            <Border x:Name="EditorPaneBorder" Grid.Row="0"
+                    help:ContextHelp.Key="Editor.Area"
+                    Grid.Column="2"
+                    Padding="12"
+                    Style="{StaticResource PanelCardBorderStyle}"
+                    Margin="0,0,0,8">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0" Margin="0,0,0,10">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <DockPanel Grid.Row="0" Margin="0,0,0,10">
+                            <TextBlock Text="Editor"
+                                       Style="{StaticResource SectionHeaderTextStyle}"
+                                       help:ContextHelp.Key="Editor.Area" />
+                        </DockPanel>
+
+                        <Border Grid.Row="1"
+                                help:ContextHelp.Key="Editor.ActiveDocument"
+                                Padding="10,8"
+                                Style="{StaticResource SubtlePanelBorderStyle}">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Grid.Row="0"
+                                           Grid.Column="0"
+                                           Text="{Binding ActiveDocumentText}"
+                                           FontWeight="SemiBold"
+                                           TextWrapping="NoWrap"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding ActiveDocumentText}" />
+
+                                <TextBlock Grid.Row="0"
+                                           Grid.Column="1"
+                                           Margin="12,0,0,0"
+                                           Text="{Binding SelectedTab.SelectionDisplayText, TargetNullValue=Selection: None}"
+                                           TextWrapping="NoWrap" />
+
+                                <TextBlock Grid.Row="1"
+                                           Grid.Column="0"
+                                           Margin="0,4,0,0"
+                                           Text="{Binding SelectedTab.FilePath, StringFormat=Path: {0}, TargetNullValue=Path: Unsaved document}"
+                                           TextWrapping="NoWrap"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding SelectedTab.FilePath, TargetNullValue=Unsaved document}" />
+
+                                <TextBlock Grid.Row="1"
+                                           Grid.Column="1"
+                                           Margin="12,4,0,0"
+                                           Text="{Binding SelectedTab.BreakpointDisplayText, TargetNullValue=Breakpoints: None}"
+                                           TextWrapping="NoWrap" />
+                            </Grid>
+                        </Border>
+                    </Grid>
+
+                    <Grid Grid.Row="1">
+                        <TabControl ItemsSource="{Binding OpenTabs}"
+                                    help:ContextHelp.Key="Editor.TabStrip"
+                                    SelectedItem="{Binding SelectedTab}">
+                            <TabControl.Template>
+                                <ControlTemplate TargetType="{x:Type TabControl}">
+                                    <Grid KeyboardNavigation.TabNavigation="Local">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="*" />
+                                        </Grid.RowDefinitions>
+
+                                        <DockPanel Grid.Row="0"
+                                                   LastChildFill="False"
+                                                   Margin="0,0,0,8">
+                                            <TabPanel x:Name="HeaderPanel"
+                                                      DockPanel.Dock="Left"
+                                                      IsItemsHost="True"
+                                                      KeyboardNavigation.TabIndex="1"
+                                                      Background="Transparent"
+                                                      Panel.ZIndex="1" />
+
+                                            <Button DockPanel.Dock="Left"
+                                                    help:ContextHelp.Key="Editor.PlusTab"
+                                                    VerticalAlignment="Top"
+                                                    Width="24"
+                                                    Height="24"
+                                                    Margin="0,4,0,0"
+                                                    Padding="0"
+                                                    FontSize="16"
+                                                    FontWeight="Bold"
+                                                    ToolTip="Open a new blank tab"
+                                                    Command="{Binding DataContext.NewScriptCommand, RelativeSource={RelativeSource TemplatedParent}}"
+                                                    Content="+" />
+                                        </DockPanel>
+
+                                        <ContentPresenter Grid.Row="1"
+                                                          x:Name="PART_SelectedContentHost"
+                                                          ContentSource="SelectedContent" />
+                                    </Grid>
+                                </ControlTemplate>
+                            </TabControl.Template>
+
+                            <TabControl.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal" help:ContextHelp.Key="Editor.TabStrip">
+                                        <TextBlock Text="{Binding DisplayTitle}"
+                                                   VerticalAlignment="Center"
+                                                   Margin="0,0,6,0" />
+                                        <Button Content="x"
+                                                help:ContextHelp.Key="Editor.CloseTabButton"
+                                                Width="18"
+                                                Height="18"
+                                                Padding="0"
+                                                Margin="0"
+                                                VerticalAlignment="Center"
+                                                Command="{Binding DataContext.CloseTabCommand, ElementName=RootWindow}"
+                                                CommandParameter="{Binding}" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </TabControl.ItemTemplate>
+
+                            <TabControl.ContentTemplate>
+                            <DataTemplate>
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <Grid Grid.Row="0">
+                                        <Border help:ContextHelp.Key="Editor.Surface"
+                                                Style="{StaticResource EditorSurfaceBorderStyle}">
+                                            <avalonedit:TextEditor FontFamily="Consolas"
+                                                                       help:ContextHelp.Key="Editor.Surface"
+                                                                       FontSize="14"
+                                                                       Background="{DynamicResource Theme.Editor.Background}"
+                                                                       Foreground="{DynamicResource Theme.Editor.Foreground}"
+                                                                       LineNumbersForeground="{DynamicResource Theme.Editor.LineNumber}"
+                                                                       ShowLineNumbers="True"
+                                                                       HorizontalScrollBarVisibility="Auto"
+                                                                       VerticalScrollBarVisibility="Auto"
+                                                                       Loaded="EditorTextEditor_Loaded"
+                                                                       Unloaded="EditorTextEditor_Unloaded"
+                                                                       DataContextChanged="EditorTextEditor_DataContextChanged"
+                                                                       AllowDrop="True"
+                                                                       PreviewDragOver="EditorTextEditor_PreviewDragOver"
+                                                                       Drop="EditorTextEditor_Drop">
+                                                <avalonedit:TextEditor.ContextMenu>
+                                                    <ContextMenu>
+                                                        <MenuItem Header="Cut"
+                                                                  help:ContextHelp.Key="Editor.Surface"
+                                                                  InputGestureText="Ctrl+X"
+                                                                  Click="EditorCut_Click" />
+                                                        <MenuItem Header="Copy"
+                                                                  help:ContextHelp.Key="Editor.Surface"
+                                                                  InputGestureText="Ctrl+C"
+                                                                  Click="EditorCopy_Click" />
+                                                        <MenuItem Header="Paste"
+                                                                  help:ContextHelp.Key="Editor.Surface"
+                                                                  InputGestureText="Ctrl+V"
+                                                                  Click="EditorPaste_Click" />
+                                                        <MenuItem Header="Select All"
+                                                                  help:ContextHelp.Key="Editor.Surface"
+                                                                  InputGestureText="Ctrl+A"
+                                                                  Click="EditorSelectAll_Click" />
+                                                        <Separator />
+                                                        <MenuItem Header="Run Selection"
+                                                                  help:ContextHelp.Key="Command.RunSelection"
+                                                                  InputGestureText="F8"
+                                                                  IsEnabled="{Binding DataContext.IsRunAvailable, Source={x:Reference RootWindow}}"
+                                                                  Click="RunSelection_Click" />
+                                                        <MenuItem Header="Toggle Breakpoint"
+                                                                  help:ContextHelp.Key="Command.ToggleBreakpoint"
+                                                                  InputGestureText="F9"
+                                                                  Click="ToggleBreakpoint_Click" />
+                                                        <Separator />
+                                                        <MenuItem Header="Find"
+                                                                  help:ContextHelp.Key="Command.Find"
+                                                                  InputGestureText="Ctrl+F"
+                                                                  Click="Find_Click" />
+                                                        <MenuItem Header="Replace"
+                                                                  help:ContextHelp.Key="Command.Replace"
+                                                                  InputGestureText="Ctrl+H"
+                                                                  Click="Replace_Click" />
+                                                    </ContextMenu>
+                                                </avalonedit:TextEditor.ContextMenu>
+                                            </avalonedit:TextEditor>
+                                        </Border>
+                                    </Grid>
+
+                                    <Border Grid.Row="1"
+                                            help:ContextHelp.Key="Editor.Footer"
+                                            Margin="0,8,0,0"
+                                            Padding="10,8"
+                                            Style="{StaticResource SubtlePanelBorderStyle}">
+                                        <DockPanel LastChildFill="False">
+                                            <TextBlock Text="{Binding CaretDisplayText}"
+                                                       Margin="0,0,12,0" />
+                                            <TextBlock Text="{Binding EditorMetricsText}"
+                                                       Margin="0,0,12,0" />
+                                            <TextBlock Text="{Binding SelectionDisplayText}" Margin="0,0,12,0" />
+                                            <TextBlock Text="{Binding BreakpointDisplayText}" Margin="0,0,12,0" />
+                                        </DockPanel>
+                                    </Border>
+                                </Grid>
+                            </DataTemplate>
+                            </TabControl.ContentTemplate>
+                        </TabControl>
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <GridSplitter Grid.Row="1"
+                          Grid.Column="2"
+                          Height="6"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          ResizeDirection="Rows"
+                          ResizeBehavior="PreviousAndNext"
+                          ShowsPreview="True" />
+
+            <Border Grid.Row="2"
+                    help:ContextHelp.Key="Console.Area"
+                    Grid.Column="2"
+                    Padding="8"
+                    Style="{StaticResource PanelCardBorderStyle}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0" Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Orientation="Horizontal"
+                                    VerticalAlignment="Center">
+                            <ToggleButton x:Name="ConsoleBottomPaneTab"
+                                          IsChecked="True"
+                                          MinWidth="72"
+                                          Margin="0,0,18,0"
+                                          Content="Console"
+                                          Style="{StaticResource BottomPaneTabToggleButtonStyle}"
+                                          Click="ConsoleBottomPaneTab_Click"
+                                          help:ContextHelp.Key="Console.Area" />
+
+                            <ToggleButton x:Name="DiagnosticsBottomPaneTab"
+                                          MinWidth="82"
+                                          Content="Problems"
+                                          Style="{StaticResource BottomPaneTabToggleButtonStyle}"
+                                          Click="DiagnosticsBottomPaneTab_Click"
+                                          help:ContextHelp.Key="Editor.SyntaxPanel" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1"
+                                    Orientation="Horizontal"
+                                    VerticalAlignment="Center"
+                                    HorizontalAlignment="Right">
+                            <Border Margin="0,0,8,0">
+                                <Border.Style>
+                                    <Style TargetType="Border" BasedOn="{StaticResource BottomPaneHeaderBadgeBorderStyle}">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Setter Property="Background" Value="#7F1D1D" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedTab.HasSyntaxErrors}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <TextBlock Text="{Binding SelectedTab.DiagnosticErrorCount, StringFormat={}{0} errors}"
+                                           Foreground="#FEE2E2"
+                                           FontSize="11"
+                                           FontWeight="Bold" />
+                            </Border>
+
+                            <Border>
+                                <Border.Style>
+                                    <Style TargetType="Border" BasedOn="{StaticResource BottomPaneHeaderBadgeBorderStyle}">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Setter Property="Background" Value="#78350F" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedTab.HasDiagnosticWarnings}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <TextBlock Text="{Binding SelectedTab.DiagnosticWarningCount, StringFormat={}{0} warnings}"
+                                           Foreground="#FEF3C7"
+                                           FontSize="11"
+                                           FontWeight="Bold" />
+                            </Border>
+                        </StackPanel>
+                    </Grid>
+
+                    <Grid Grid.Row="1">
+                        <Grid x:Name="ConsoleBottomPane"
+                              Margin="4">
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=DiagnosticsBottomPaneTab}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <!-- Console header: session status, Reset Console button -->
+                            <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                                <TextBlock Text="{Binding ConsoleSessionText}"
+                                           VerticalAlignment="Center"
+                                           Foreground="{DynamicResource Theme.Text.Secondary}"
+                                           help:ContextHelp.Key="Console.Area" />
+
+                                <StackPanel Orientation="Horizontal"
+                                            DockPanel.Dock="Right"
+                                            HorizontalAlignment="Right">
+                                    <Button Content="Reset Console"
+                                            Command="{Binding RestartConsoleCommand}"
+                                            Padding="10,4"
+                                            Margin="8,0,0,0"
+                                            MinWidth="110"
+                                            ToolTip="Start a fresh PowerShell session for the console. Editor tabs stay open."
+                                            help:ContextHelp.Key="Console.Reset" />
+                                </StackPanel>
+                            </DockPanel>
+
+                            <!-- xterm.js terminal — replaces the old TextBox + command-input row -->
+                            <controls:TerminalControl x:Name="TerminalConsole"
+                                                      Grid.Row="1"
+                                                      help:ContextHelp.Key="Console.Output" />
+                        </Grid>
+
+                        <Grid x:Name="DiagnosticsBottomPane"
+                              Margin="4">
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=DiagnosticsBottomPaneTab}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                                <StackPanel Orientation="Vertical" DockPanel.Dock="Left">
+                                    <TextBlock Text="Problems"
+                                               Style="{StaticResource SectionHeaderTextStyle}"
+                                               help:ContextHelp.Key="Editor.SyntaxPanel" />
+                                    <TextBlock Text="{Binding SelectedTab.SyntaxErrorSummaryText, TargetNullValue=No active document}"
+                                               Margin="0,2,0,0"
+                                               Foreground="{DynamicResource Theme.Text.Secondary}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+
+                            </DockPanel>
+
+                            <TextBlock Grid.Row="1"
+                                       Text="No problems for the active document."
+                                       Margin="0,0,0,8"
+                                       Foreground="{DynamicResource Theme.Text.Secondary}">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedTab.HasDiagnostics}" Value="False">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+
+                            <ScrollViewer Grid.Row="2"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <ItemsControl ItemsSource="{Binding SelectedTab.SyntaxErrors}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Style="{StaticResource DiagnosticsItemButtonStyle}"
+                                                    Click="SyntaxDiagnosticItem_Click">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+
+                                                    <Border Grid.Column="0"
+                                                            Padding="6,2"
+                                                            CornerRadius="8"
+                                                            VerticalAlignment="Top"
+                                                            Margin="0,0,8,0">
+                                                        <Border.Style>
+                                                            <Style TargetType="Border">
+                                                                <Setter Property="Background" Value="#DC2626" />
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsWarning}" Value="True">
+                                                                        <Setter Property="Background" Value="#F59E0B" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </Border.Style>
+                                                        <TextBlock Text="{Binding Severity}"
+                                                                   Foreground="White"
+                                                                   FontWeight="SemiBold"
+                                                                   FontSize="11" />
+                                                    </Border>
+
+                                                    <StackPanel Grid.Column="1">
+                                                        <TextBlock Text="{Binding DisplayText}"
+                                                                   TextWrapping="Wrap"
+                                                                   FontWeight="SemiBold" />
+                                                        <TextBlock Text="Click to navigate to this diagnostic in the active editor"
+                                                                   Style="{StaticResource CaptionTextStyle}"
+                                                                   Margin="0,4,0,0" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </Grid>
+                    </Grid>
+                </Grid>
+            </Border>
+            <!-- Debug splitter — only visible when debug panel is open -->
+            <GridSplitter Grid.Row="0"
+                          Grid.RowSpan="3"
+                          Grid.Column="3"
+                          x:Name="DebugPanelSplitter"
+                          Width="6"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          ResizeDirection="Columns"
+                          ResizeBehavior="PreviousAndNext"
+                          ShowsPreview="True"
+                          Visibility="Collapsed" />
+
+            <!-- Debug panels — Variables / Call Stack / Breakpoints -->
+            <Border x:Name="DebugPanelBorder"
+                    help:ContextHelp.Key="Debug.Area"
+                    Grid.Row="0"
+                    Grid.RowSpan="3"
+                    Grid.Column="4"
+                    Padding="12"
+                    Style="{StaticResource PanelCardBorderStyle}"
+                    Visibility="Collapsed">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <DockPanel Grid.Row="0" Margin="0,0,0,8">
+                        <TextBlock Text="Debug"
+                                   Style="{StaticResource SectionHeaderTextStyle}"
+                                   help:ContextHelp.Key="Debug.Area" />
+                        <Button x:Name="PopOutDebugPaneButton"
+                                DockPanel.Dock="Right"
+                                Content="Pop Out"
+                                Padding="10,4"
+                                Margin="8,0,0,0"
+                                Click="PopOutDebugPaneButton_Click" />
+                    </DockPanel>
+
+                    <Grid Grid.Row="1">
+                        <TabControl x:Name="DebugPaneTabControl"
+                                    help:ContextHelp.Key="Debug.Area"
+                                    SelectionChanged="DebugPaneTabControl_SelectionChanged">
+
+                            <!-- Variables tab -->
+                            <TabItem Header="Variables" help:ContextHelp.Key="Debug.Variables">
+                                <DataGrid x:Name="DebugVariablesGrid"
+                                          help:ContextHelp.Key="Debug.Variables"
+                                          AutoGenerateColumns="False"
+                                          IsReadOnly="True"
+                                          CanUserAddRows="False"
+                                          CanUserDeleteRows="False"
+                                          SelectionMode="Single"
+                                          GridLinesVisibility="Horizontal"
+                                          FontFamily="Consolas"
+                                          FontSize="12">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Name"  Binding="{Binding Name}"  Width="80" />
+                                        <DataGridTextColumn Header="Type"  Binding="{Binding Type}"  Width="70" />
+                                        <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*" />
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </TabItem>
+
+                            <!-- Call Stack tab -->
+                            <TabItem Header="Call Stack" help:ContextHelp.Key="Debug.CallStack">
+                                <DataGrid x:Name="DebugCallStackGrid"
+                                          help:ContextHelp.Key="Debug.CallStack"
+                                          AutoGenerateColumns="False"
+                                          IsReadOnly="True"
+                                          CanUserAddRows="False"
+                                          CanUserDeleteRows="False"
+                                          SelectionMode="Single"
+                                          GridLinesVisibility="Horizontal"
+                                          FontFamily="Consolas"
+                                          FontSize="12">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Function" Binding="{Binding FunctionName}" Width="100" />
+                                        <DataGridTextColumn Header="Script"   Binding="{Binding ScriptName}"   Width="*" />
+                                        <DataGridTextColumn Header="Line"     Binding="{Binding LineNumber}"   Width="45" />
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </TabItem>
+
+                            <!-- Breakpoints tab -->
+                            <TabItem Header="Breakpoints" help:ContextHelp.Key="Debug.Breakpoints">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <DataGrid x:Name="DebugBreakpointsGrid"
+                                              help:ContextHelp.Key="Debug.Breakpoints"
+                                              Grid.Row="0"
+                                              AutoGenerateColumns="False"
+                                              IsReadOnly="False"
+                                              CanUserAddRows="False"
+                                              CanUserDeleteRows="False"
+                                              SelectionMode="Single"
+                                              GridLinesVisibility="Horizontal"
+                                              FontFamily="Consolas"
+                                              FontSize="12">
+                                        <DataGrid.Columns>
+                                            <DataGridCheckBoxColumn Header="On"   Binding="{Binding IsEnabled, UpdateSourceTrigger=PropertyChanged}" Width="30" />
+                                            <DataGridTextColumn    Header="File"  Binding="{Binding FileName}"  Width="*" IsReadOnly="True" />
+                                            <DataGridTextColumn    Header="Line"  Binding="{Binding LineNumber}" Width="45" IsReadOnly="True" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+
+                                    <Button Grid.Row="1"
+                                            help:ContextHelp.Key="Debug.RemoveBreakpoint"
+                                            Content="Remove Selected"
+                                            Margin="0,6,0,0"
+                                            Padding="10,4"
+                                            HorizontalAlignment="Right"
+                                            Click="DebugBreakpointRemove_Click" />
+                                </Grid>
+                            </TabItem>
+
+                        </TabControl>
+
+                        <Border x:Name="DebugPanePoppedOutPlaceholder"
+                                Visibility="Collapsed"
+                                BorderBrush="{DynamicResource Theme.Border.Subtle}"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Background="{DynamicResource Theme.Panel.Subtle}"
+                                Padding="14">
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Debug pane is popped out."
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,0,6" />
+                                <TextBlock Text="Variables, Call Stack, and Breakpoints are showing in a separate window."
+                                           TextWrapping="Wrap"
+                                           Margin="0,0,0,10" />
+                                <Button x:Name="DockBackDebugPaneButton"
+                                        Content="Dock Back"
+                                        Padding="10,4"
+                                        HorizontalAlignment="Left"
+                                        Click="DockDebugPaneButton_Click" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
+        </DockPanel>
+
+        <Border x:Name="MetadataToastHost"
+                Panel.ZIndex="400"
+                Visibility="Collapsed"
+                Opacity="0"
+                MaxWidth="440"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Top"
+                Margin="0,104,20,0"
+                IsHitTestVisible="False">
+            <Border x:Name="MetadataToastCard"
+                    Style="{StaticResource PanelCardBorderStyle}"
+                    Background="{DynamicResource Theme.Surface.Primary}"
+                    BorderBrush="{DynamicResource Theme.Accent.Primary}"
+                    BorderThickness="1.5"
+                    Padding="16">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <Border Grid.Row="0"
+                            Grid.RowSpan="2"
+                            Grid.Column="0"
+                            Width="36"
+                            Height="36"
+                            Margin="0,0,12,0"
+                            CornerRadius="18"
+                            Background="#FFE8F2FF"
+                            BorderBrush="#FF4A90E2"
+                            BorderThickness="1">
+                        <TextBlock x:Name="MetadataToastGlyph"
+                                   Text="⏳"
+                                   FontSize="18"
+                                   FontWeight="Bold"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                    </Border>
+
+                    <TextBlock x:Name="MetadataToastTitleTextBlock"
+                               Grid.Row="0"
+                               Grid.Column="1"
+                               Text="Preparing PowerShell editor metadata"
+                               FontSize="16"
+                               FontWeight="SemiBold"
+                               TextWrapping="Wrap" />
+
+                    <TextBlock x:Name="MetadataToastBodyTextBlock"
+                               Grid.Row="1"
+                               Grid.Column="1"
+                               Margin="0,6,0,0"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource Theme.Text.Secondary}"
+                               Text="PS7 ScriptDesk is loading command, parameter, syntax, and help metadata for this PowerShell runtime." />
+
+                    <ProgressBar x:Name="MetadataToastProgressBar"
+                                 Grid.Row="2"
+                                 Grid.ColumnSpan="2"
+                                 Height="6"
+                                 Margin="0,14,0,0"
+                                 IsIndeterminate="True"
+                                 Minimum="0"
+                                 Maximum="1"
+                                 Value="0.5" />
+
+                    <TextBlock x:Name="MetadataToastPhaseTextBlock"
+                               Grid.Row="3"
+                               Grid.ColumnSpan="2"
+                               Margin="0,10,0,0"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource Theme.Text.Secondary}"
+                               FontSize="{StaticResource Theme.FontSize.Caption}"
+                               Text="You can keep using the editor while this runs." />
+                </Grid>
+            </Border>
+        </Border>
+    </Grid>
+</Window>

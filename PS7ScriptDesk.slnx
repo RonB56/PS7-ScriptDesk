@@ -1,0 +1,20 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="ARM" />
+    <Platform Name="ARM64" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PS7ScriptDesk.Application/PS7ScriptDesk.Application.csproj" />
+  <Project Path="PS7ScriptDesk.Domain/PS7ScriptDesk.Domain.csproj" />
+  <Project Path="PS7ScriptDesk.Editor/PS7ScriptDesk.Editor.csproj" />
+  <Project Path="PS7ScriptDesk.Infrastructure/PS7ScriptDesk.Infrastructure.csproj" />
+  <Project Path="PS7ScriptDesk.Package/PS7ScriptDesk.Package.wapproj" Type="c7167f0d-bc9f-4e6e-afe1-012c56b48db5" Id="ce979ae6-f20b-4504-9446-2f4017dca8b9">
+    <Deploy />
+  </Project>
+  <Project Path="PS7ScriptDesk.PowerShell/PS7ScriptDesk.PowerShell.csproj" />
+  <Project Path="PS7ScriptDesk.Shell/PS7ScriptDesk.Shell.csproj" />
+  <Project Path="PS7ScriptDesk.TerminalSpike/PS7ScriptDesk.TerminalSpike.csproj" />
+  <Project Path="PS7ScriptDesk.UI/PS7ScriptDesk.UI.csproj" />
+</Solution>
