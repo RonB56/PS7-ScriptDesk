@@ -102,6 +102,49 @@
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
         </Style>
+
+        <Style x:Key="PanelCloseButtonStyle" TargetType="Button">
+            <Setter Property="Width" Value="24" />
+            <Setter Property="Height" Value="24" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Content" Value="×" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="CloseButtonBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              RecognizesAccessKey="True" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="CloseButtonBorder" Property="Background" Value="{DynamicResource Theme.Surface.Hover}" />
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="CloseButtonBorder" Property="Background" Value="{DynamicResource Theme.Surface.Tertiary}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid>
@@ -713,10 +756,15 @@
                         <RowDefinition x:Name="OpenTabsRowDefinition" Height="*" />
                     </Grid.RowDefinitions>
 
-                    <DockPanel Grid.Row="0" Margin="0,0,0,10">
-                        <TextBlock Text="Explorer"
-                                   Style="{StaticResource SectionHeaderTextStyle}"
-                                   help:ContextHelp.Key="Explorer.Area" />
+                    <DockPanel Grid.Row="0"
+                               LastChildFill="False"
+                               Margin="0,0,0,10">
+                        <Button x:Name="CloseExplorerPanelButton"
+                                DockPanel.Dock="Right"
+                                Style="{StaticResource PanelCloseButtonStyle}"
+                                ToolTip="Hide Explorer panel"
+                                AutomationProperties.Name="Hide Explorer panel"
+                                Click="CloseExplorerPanelButton_Click" />
                     </DockPanel>
 
                     <GroupBox Grid.Row="1"
@@ -1016,16 +1064,9 @@
                     <Grid Grid.Row="0" Margin="0,0,0,10">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
-                        <DockPanel Grid.Row="0" Margin="0,0,0,10">
-                            <TextBlock Text="Editor"
-                                       Style="{StaticResource SectionHeaderTextStyle}"
-                                       help:ContextHelp.Key="Editor.Area" />
-                        </DockPanel>
-
-                        <Border Grid.Row="1"
+                        <Border Grid.Row="0"
                                 help:ContextHelp.Key="Editor.ActiveDocument"
                                 Padding="10,8"
                                 Style="{StaticResource SubtlePanelBorderStyle}">
@@ -1484,16 +1525,22 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <DockPanel Grid.Row="0" Margin="0,0,0,8">
-                        <TextBlock Text="Debug"
-                                   Style="{StaticResource SectionHeaderTextStyle}"
-                                   help:ContextHelp.Key="Debug.Area" />
-                        <Button x:Name="PopOutDebugPaneButton"
-                                DockPanel.Dock="Right"
-                                Content="Pop Out"
-                                Padding="10,4"
-                                Margin="8,0,0,0"
-                                Click="PopOutDebugPaneButton_Click" />
+                    <DockPanel Grid.Row="0"
+                               LastChildFill="False"
+                               Margin="0,0,0,8">
+                        <StackPanel Orientation="Horizontal"
+                                    DockPanel.Dock="Right">
+                            <Button x:Name="PopOutDebugPaneButton"
+                                    Content="Pop Out"
+                                    Padding="10,4"
+                                    Margin="0,0,8,0"
+                                    Click="PopOutDebugPaneButton_Click" />
+                            <Button x:Name="CloseDebugPanelButton"
+                                    Style="{StaticResource PanelCloseButtonStyle}"
+                                    ToolTip="Hide Debug panel"
+                                    AutomationProperties.Name="Hide Debug panel"
+                                    Click="CloseDebugPanelButton_Click" />
+                        </StackPanel>
                     </DockPanel>
 
                     <Grid Grid.Row="1">

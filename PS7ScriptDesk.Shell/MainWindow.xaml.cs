@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.ObjectModel;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -52,7 +52,21 @@ namespace PS7ScriptDesk.Shell
         private const double MinimumExplorerWidth = 220;
         private const double MinimumConsoleHeight = 160;
         private const double MinimumExplorerSectionHeight = 120;
-        private const int SyntaxDiagnosticsDebounceMilliseconds = 175;
+        private const int LiveSyntaxDiagnosticsQuietDelayMilliseconds = 0;
+        private const int LiveSyntaxDiagnosticsLargeFileQuietDelayMilliseconds = 125;
+        private const int LiveSyntaxDiagnosticsMinimumIntervalMilliseconds = 16;
+        private const int LiveSyntaxDiagnosticsLargeFileMinimumIntervalMilliseconds = 250;
+        private const int LiveSyntaxDiagnosticsLargeFileCharacterThreshold = 45000;
+        private const int LiveSyntaxDiagnosticsLargeFileLineThreshold = 800;
+        private const int AuthoringDiagnosticsSmallDocumentDelayMilliseconds = 1400;
+        private const int AuthoringDiagnosticsMediumDocumentDelayMilliseconds = 2200;
+        private const int AuthoringDiagnosticsLargeDocumentDelayMilliseconds = 4000;
+        private const int AuthoringDiagnosticsMediumCharacterThreshold = 20000;
+        private const int AuthoringDiagnosticsMediumLineThreshold = 400;
+        private const int AuthoringDiagnosticsLargeCharacterThreshold = 45000;
+        private const int AuthoringDiagnosticsLargeLineThreshold = 800;
+        private const int AuthoringDiagnosticsVeryLargeCharacterThreshold = 120000;
+        private const int AuthoringDiagnosticsVeryLargeLineThreshold = 2000;
         private const int EditorFoldingDebounceMilliseconds = 350;
         private const int EditorHoverDelayMilliseconds = 450;
         private const int EditorMetadataWarmupDebounceMilliseconds = 150;
@@ -146,8 +160,12 @@ namespace PS7ScriptDesk.Shell
         private readonly Dictionary<TextEditor, ErrorMarkerRenderer> _errorRenderers = new();
         private readonly Dictionary<TextEditor, DiagnosticGlyphMargin> _diagnosticGlyphMargins = new();
         private readonly Dictionary<TextEditor, PowerShellSyntaxColorizer> _syntaxColorizers = new();
-        private readonly Dictionary<TextEditor, CancellationTokenSource> _diagnosticsCancellationSources = new();
+        private readonly Dictionary<TextEditor, LiveSyntaxPumpState> _liveSyntaxPumpStates = new();
+        private readonly Dictionary<TextEditor, int> _liveSyntaxRequestVersions = new();
+        private readonly Dictionary<TextEditor, AuthoringDiagnosticsPumpState> _authoringDiagnosticsPumpStates = new();
         private readonly Dictionary<TextEditor, int> _diagnosticsRequestVersions = new();
+        private readonly Dictionary<TextEditor, DiagnosticLayerSnapshot> _liveSyntaxDiagnosticLayers = new();
+        private readonly Dictionary<TextEditor, DiagnosticLayerSnapshot> _authoringDiagnosticLayers = new();
         private readonly Dictionary<TextEditor, int> _editorRegistrationVersions = new();
         private readonly Dictionary<TextEditor, FoldingManager> _foldingManagers = new();
         private readonly Dictionary<TextEditor, CancellationTokenSource> _foldingCancellationSources = new();
@@ -157,6 +175,7 @@ namespace PS7ScriptDesk.Shell
         private readonly IApplicationSettingsService _applicationSettingsService;
         private readonly ApplicationSettings _loadedSettings;
         private readonly PowerShellIntelliSenseService _intelliSenseService = new();
+        private readonly InProcessPowerShellSyntaxDiagnosticsService _liveSyntaxDiagnosticsService = new();
         private readonly PowerShellDiagnosticsService _diagnosticsService = new();
         private readonly DispatcherTimer _editorHoverTimer;
         private readonly DispatcherTimer _editorMetadataWarmupTimer;
@@ -1040,7 +1059,10 @@ namespace PS7ScriptDesk.Shell
             }
 
             UpdateEditorCaretMetrics(editorTextEditor);
-            ClearParserTokensForEditor(editorTextEditor);
+
+            // Keep the last parser tokens visible until the live syntax pump replaces
+            // them. Clearing tokens on every keystroke made the editor appear slower
+            // because syntax coloring disappeared while the background parse was pending.
 
             // Folding is a whole-document operation. Debounce it so regular typing
             // stays smooth and AvalonEdit can repaint only the changed visual lines.
@@ -1974,14 +1996,62 @@ namespace PS7ScriptDesk.Shell
             return nextVersion;
         }
 
+        private int IncrementLiveSyntaxRequestVersion(TextEditor editorTextEditor)
+        {
+            var nextVersion = _liveSyntaxRequestVersions.TryGetValue(editorTextEditor, out var currentVersion)
+                ? currentVersion + 1
+                : 1;
+            _liveSyntaxRequestVersions[editorTextEditor] = nextVersion;
+            return nextVersion;
+        }
+
         private void CancelPendingDiagnostics(TextEditor editorTextEditor)
         {
-            if (_diagnosticsCancellationSources.TryGetValue(editorTextEditor, out var cts))
+            DisposeAuthoringDiagnosticsPump(editorTextEditor);
+        }
+
+        private void DisposeAuthoringDiagnosticsPump(TextEditor editorTextEditor)
+        {
+            if (_authoringDiagnosticsPumpStates.TryGetValue(editorTextEditor, out var state))
             {
-                cts.Cancel();
-                cts.Dispose();
-                _diagnosticsCancellationSources.Remove(editorTextEditor);
+                state.Dispose();
+                _authoringDiagnosticsPumpStates.Remove(editorTextEditor);
             }
+
+            _diagnosticsRequestVersions.Remove(editorTextEditor);
+        }
+
+        private void DisposeLiveSyntaxPump(TextEditor editorTextEditor)
+        {
+            if (_liveSyntaxPumpStates.TryGetValue(editorTextEditor, out var state))
+            {
+                state.Dispose();
+                _liveSyntaxPumpStates.Remove(editorTextEditor);
+            }
+
+            _liveSyntaxRequestVersions.Remove(editorTextEditor);
+        }
+
+        private void DisposeLiveSyntaxPumps()
+        {
+            foreach (var state in _liveSyntaxPumpStates.Values.ToList())
+            {
+                state.Dispose();
+            }
+
+            _liveSyntaxPumpStates.Clear();
+            _liveSyntaxRequestVersions.Clear();
+        }
+
+        private void DisposeAuthoringDiagnosticsPumps()
+        {
+            foreach (var state in _authoringDiagnosticsPumpStates.Values.ToList())
+            {
+                state.Dispose();
+            }
+
+            _authoringDiagnosticsPumpStates.Clear();
+            _diagnosticsRequestVersions.Clear();
         }
 
         private void CancelPendingFolding(TextEditor editorTextEditor)
@@ -2125,16 +2195,23 @@ namespace PS7ScriptDesk.Shell
                 .ToList();
         }
 
-        private void ApplyPersistedSyntaxDiagnosticsToEditor(ErrorMarkerRenderer errorRenderer, EditorTabViewModel tab, TextEditor editorTextEditor)
+        private bool ApplyPersistedSyntaxDiagnosticsToEditor(ErrorMarkerRenderer errorRenderer, EditorTabViewModel tab, TextEditor editorTextEditor)
         {
-            errorRenderer.SetErrors(BuildParseErrorsFromTab(tab));
+            var rendererChanged = errorRenderer.SetErrors(BuildParseErrorsFromTab(tab));
+            var glyphMarginChanged = false;
 
             if (_diagnosticGlyphMargins.TryGetValue(editorTextEditor, out var diagnosticGlyphMargin))
             {
-                diagnosticGlyphMargin.SetDiagnostics(tab.SyntaxDiagnosticSpans);
+                glyphMarginChanged = diagnosticGlyphMargin.SetDiagnostics(tab.SyntaxDiagnosticSpans);
             }
 
-            editorTextEditor.TextArea.TextView.Redraw();
+            var visualsChanged = rendererChanged || glyphMarginChanged;
+            if (visualsChanged)
+            {
+                editorTextEditor.TextArea.TextView.Redraw();
+            }
+
+            return visualsChanged;
         }
 
         private void SynchronizeEditorTextFromViewModel(TextEditor editorTextEditor, string? content)
@@ -2163,6 +2240,8 @@ namespace PS7ScriptDesk.Shell
         {
             IncrementEditorRegistrationVersion(editorTextEditor);
             CancelPendingDiagnostics(editorTextEditor);
+            DisposeLiveSyntaxPump(editorTextEditor);
+            ClearDiagnosticLayers(editorTextEditor);
             CancelPendingFolding(editorTextEditor);
 
             if (_tabByEditor.TryGetValue(editorTextEditor, out var tab))
@@ -4827,6 +4906,9 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            DisposeLiveSyntaxPumps();
+            DisposeAuthoringDiagnosticsPumps();
+            _liveSyntaxDiagnosticsService.Dispose();
             _diagnosticsService.Dispose();
             _intelliSenseService.Dispose();
             _activeCompletionCts?.Cancel();
@@ -4850,6 +4932,9 @@ namespace PS7ScriptDesk.Shell
             if (_allowWindowClose)
             {
                 _debugPaneWindow?.CloseForOwnerShutdown();
+                DisposeLiveSyntaxPumps();
+                DisposeAuthoringDiagnosticsPumps();
+                _liveSyntaxDiagnosticsService.Dispose();
                 _diagnosticsService.Dispose();
                 _intelliSenseService.Dispose();
                 _activeCompletionCts?.Cancel();
@@ -5710,6 +5795,14 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
+        private void CloseExplorerPanelButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel is not null)
+            {
+                ViewModel.IsExplorerVisible = false;
+            }
+        }
+
         private void ApplyExplorerVisibilityLayout()
         {
             var isVisible = ViewModel?.IsExplorerVisible ?? true;
@@ -6193,19 +6286,20 @@ namespace PS7ScriptDesk.Shell
         // -------------------------------------------------------------------------
 
         /// <summary>
-        /// Debounces and schedules a background syntax-parse for <paramref name="editorTextEditor"/>.
-        /// Any in-flight parse for the same editor is cancelled before the new one starts.
-        /// The results are applied on the UI thread via <see cref="Dispatcher"/>.
+        /// Queues live syntax diagnostics immediately and schedules the heavier
+        /// authoring pass after the editor has been idle. Syntax and authoring now
+        /// use separate background paths. The live syntax path parses in process,
+        /// so command metadata work and hidden-pwsh transport cannot block the
+        /// fast parser feedback loop.
         /// </summary>
         private void ScheduleDiagnostics(TextEditor editorTextEditor)
         {
             if (editorTextEditor.DataContext is not EditorTabViewModel tab)
             {
                 CancelPendingDiagnostics(editorTextEditor);
+                DisposeLiveSyntaxPump(editorTextEditor);
                 return;
             }
-
-            CancelPendingDiagnostics(editorTextEditor);
 
             if (!_tabByEditor.TryGetValue(editorTextEditor, out var currentTab) || !ReferenceEquals(currentTab, tab))
             {
@@ -6215,17 +6309,22 @@ namespace PS7ScriptDesk.Shell
             var registrationVersion = _editorRegistrationVersions.TryGetValue(editorTextEditor, out var editorRegistrationVersion)
                 ? editorRegistrationVersion
                 : IncrementEditorRegistrationVersion(editorTextEditor);
-            var requestVersion = IncrementDiagnosticsRequestVersion(editorTextEditor);
 
             var pwshPath = ViewModel?.EffectiveRuntimeExecutablePath;
             var errorRenderer = EnsureErrorRendererAttached(editorTextEditor);
 
             if (string.IsNullOrWhiteSpace(pwshPath))
             {
-                ClearParserTokensForEditor(editorTextEditor);
-                errorRenderer.SetErrors(Array.Empty<ParseErrorInfo>());
-                tab.SetSyntaxDiagnosticsStatus("No PowerShell runtime is available for syntax checking", clearErrors: true);
-                ApplyPersistedSyntaxDiagnosticsToEditor(errorRenderer, tab, editorTextEditor);
+                CancelPendingDiagnostics(editorTextEditor);
+                DisposeLiveSyntaxPump(editorTextEditor);
+                ClearDiagnosticLayers(editorTextEditor);
+                var parserTokensChanged = ClearParserTokensForEditor(editorTextEditor);
+                _ = tab.SetSyntaxDiagnosticsStatus("No PowerShell runtime is available for syntax checking", clearErrors: true);
+                var diagnosticsVisualsChanged = ApplyPersistedSyntaxDiagnosticsToEditor(errorRenderer, tab, editorTextEditor);
+                if (parserTokensChanged && !diagnosticsVisualsChanged)
+                {
+                    editorTextEditor.TextArea.TextView.Redraw();
+                }
 
                 if (ViewModel is not null && ReferenceEquals(ViewModel.SelectedTab, tab) &&
                     !string.Equals(ViewModel.StatusText, "No PowerShell runtime is available for syntax checking", StringComparison.Ordinal))
@@ -6236,110 +6335,604 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            var cts = new CancellationTokenSource();
-            _diagnosticsCancellationSources[editorTextEditor] = cts;
-
-            tab.SetSyntaxDiagnosticsStatus("Syntax checking…");
-
             var scriptSnapshot = editorTextEditor.Text ?? string.Empty;
-            var token = cts.Token;
+            var lineCount = editorTextEditor.Document?.LineCount ?? CountLines(scriptSnapshot);
 
-            ObserveFireAndForget(Task.Run(async () =>
+            if (string.Equals(tab.SyntaxDiagnosticsStatusText, "Syntax checking is waiting for a PowerShell runtime", StringComparison.Ordinal))
             {
-                try
-                {
-                    await Task.Delay(SyntaxDiagnosticsDebounceMilliseconds, token).ConfigureAwait(false);
+                tab.SetSyntaxDiagnosticsStatus("Syntax checking…");
+            }
 
-                    var parseResult = await _diagnosticsService
-                        .ParseAsync(scriptSnapshot, pwshPath, token)
+            QueueLiveSyntaxDiagnostics(
+                editorTextEditor,
+                tab,
+                pwshPath,
+                registrationVersion,
+                scriptSnapshot,
+                lineCount);
+
+            ScheduleAuthoringDiagnostics(
+                editorTextEditor,
+                tab,
+                errorRenderer,
+                pwshPath,
+                registrationVersion,
+                scriptSnapshot,
+                lineCount);
+        }
+
+        private void QueueLiveSyntaxDiagnostics(
+            TextEditor editorTextEditor,
+            EditorTabViewModel tab,
+            string pwshPath,
+            int registrationVersion,
+            string scriptSnapshot,
+            int lineCount)
+        {
+            var requestVersion = IncrementLiveSyntaxRequestVersion(editorTextEditor);
+            var state = GetOrCreateLiveSyntaxPumpState(editorTextEditor);
+            var workItem = new LiveSyntaxWorkItem(
+                scriptSnapshot,
+                pwshPath,
+                registrationVersion,
+                requestVersion,
+                lineCount,
+                tab.Title,
+                tab.FilePath);
+
+            state.Publish(workItem);
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Editor",
+                    "Live syntax diagnostics queued latest editor snapshot.",
+                    new Dictionary<string, object?>
+                    {
+                        ["documentTitle"] = tab.Title,
+                        ["filePath"] = tab.FilePath,
+                        ["requestVersion"] = requestVersion,
+                        ["textLength"] = scriptSnapshot.Length,
+                        ["lineCount"] = lineCount
+                    });
+            }
+        }
+
+        private LiveSyntaxPumpState GetOrCreateLiveSyntaxPumpState(TextEditor editorTextEditor)
+        {
+            if (_liveSyntaxPumpStates.TryGetValue(editorTextEditor, out var state) && !state.IsDisposed)
+            {
+                return state;
+            }
+
+            state = new LiveSyntaxPumpState();
+            _liveSyntaxPumpStates[editorTextEditor] = state;
+            state.WorkerTask = Task.Run(() => RunLiveSyntaxPumpAsync(editorTextEditor, state), state.CancellationToken);
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Editor",
+                    "Live syntax diagnostics pump started for editor.",
+                    new Dictionary<string, object?>
+                    {
+                        ["editorHashCode"] = editorTextEditor.GetHashCode()
+                    });
+            }
+
+            return state;
+        }
+
+        private async Task RunLiveSyntaxPumpAsync(TextEditor editorTextEditor, LiveSyntaxPumpState state)
+        {
+            var token = state.CancellationToken;
+
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    await state.WaitForSignalAsync(token).ConfigureAwait(false);
+
+                    var queuedWorkItem = state.LatestWorkItem;
+                    if (queuedWorkItem is null)
+                    {
+                        continue;
+                    }
+
+                    var quietDelay = GetLiveSyntaxQuietDelay(queuedWorkItem);
+                    if (quietDelay > TimeSpan.Zero)
+                    {
+                        await Task.Delay(quietDelay, token).ConfigureAwait(false);
+                    }
+
+                    state.DrainSignals();
+
+                    var workItem = state.LatestWorkItem;
+                    if (workItem is null)
+                    {
+                        continue;
+                    }
+
+                    var minimumIntervalDelay = GetLiveSyntaxMinimumIntervalDelay(state, workItem);
+                    if (minimumIntervalDelay > TimeSpan.Zero)
+                    {
+                        await Task.Delay(minimumIntervalDelay, token).ConfigureAwait(false);
+                        state.DrainSignals();
+
+                        workItem = state.LatestWorkItem;
+                        if (workItem is null)
+                        {
+                            continue;
+                        }
+                    }
+
+                    state.LastParseStartedUtc = DateTimeOffset.UtcNow;
+                    var stopwatch = Stopwatch.StartNew();
+                    var syntaxParseResult = await _liveSyntaxDiagnosticsService
+                        .ParseAsync(workItem.ScriptSnapshot, workItem.PwshPath, PowerShellDiagnosticsMode.SyntaxOnly, token)
                         .ConfigureAwait(false);
+                    stopwatch.Stop();
 
                     await Dispatcher.InvokeAsync(() =>
                     {
-                        if (!IsDiagnosticsRequestCurrent(editorTextEditor, tab, cts, registrationVersion, requestVersion, scriptSnapshot))
-                        {
-                            return;
-                        }
-
-                        if (!parseResult.Succeeded)
-                        {
-                            ClearParserTokensForEditor(editorTextEditor);
-                            errorRenderer.SetErrors(Array.Empty<ParseErrorInfo>());
-
-                            if (!string.Equals(parseResult.FailureMessage, "Syntax checking was canceled.", StringComparison.Ordinal))
-                            {
-                                tab.SetSyntaxDiagnosticsStatus(parseResult.FailureMessage ?? "Syntax checking failed.", clearErrors: true);
-                                ApplyPersistedSyntaxDiagnosticsToEditor(errorRenderer, tab, editorTextEditor);
-                                if (ViewModel is not null && ReferenceEquals(ViewModel.SelectedTab, tab))
-                                {
-                                    ViewModel.StatusText = parseResult.FailureMessage ?? "Syntax checking failed.";
-                                }
-                            }
-
-                            return;
-                        }
-
-                        ApplyParserTokensToEditor(editorTextEditor, parseResult.SyntaxTokens);
-
-                        var parserDiagnostics = parseResult.Errors;
-                        var authoringDiagnostics = PowerShellAuthoringDiagnostics
-                            .Analyze(scriptSnapshot, parseResult)
-                            .Select(ParseErrorInfo.AsWarning);
-
-                        var editorDiagnostics = parserDiagnostics
-                            .Concat(authoringDiagnostics)
-                            .OrderBy(error => error.StartOffset)
-                            .ToList();
-
-                        errorRenderer.SetErrors(editorDiagnostics);
-                        editorTextEditor.TextArea.TextView.Redraw();
-                        UpdateSyntaxDiagnosticsForTab(editorTextEditor, editorDiagnostics);
-                    });
+                        ApplyLiveSyntaxDiagnosticsResult(editorTextEditor, state, workItem, syntaxParseResult, stopwatch.ElapsedMilliseconds);
+                    }, DispatcherPriority.Background, token);
                 }
-                catch (OperationCanceledException)
-                {
-                    // Superseded by a newer keystroke — nothing to do.
-                }
-                catch (Exception ex)
-                {
-                    _ = Dispatcher.InvokeAsync(() =>
-                    {
-                        if (!IsDiagnosticsRequestCurrent(editorTextEditor, tab, cts, registrationVersion, requestVersion, scriptSnapshot))
-                        {
-                            return;
-                        }
-
-                        ClearParserTokensForEditor(editorTextEditor);
-                        errorRenderer.SetErrors(Array.Empty<ParseErrorInfo>());
-                        tab.SetSyntaxDiagnosticsStatus($"Syntax checking failed: {ex.Message}", clearErrors: true);
-                        ApplyPersistedSyntaxDiagnosticsToEditor(errorRenderer, tab, editorTextEditor);
-                        if (ViewModel is not null && ReferenceEquals(ViewModel.SelectedTab, tab))
-                        {
-                            ViewModel.StatusText = $"Syntax checking failed: {ex.Message}";
-                        }
-                    });
-                }
-            }, token), "syntax diagnostics update");
+            }
+            catch (OperationCanceledException)
+            {
+                // The editor was closed or the app is shutting down.
+            }
+            catch (ObjectDisposedException)
+            {
+                // The editor was closed or the app is shutting down.
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("Editor", ex, "Live syntax diagnostics pump failed unexpectedly.");
+            }
         }
 
-        private bool IsDiagnosticsRequestCurrent(
+        private void ApplyLiveSyntaxDiagnosticsResult(
+            TextEditor editorTextEditor,
+            LiveSyntaxPumpState state,
+            LiveSyntaxWorkItem workItem,
+            DiagnosticsParseResult syntaxParseResult,
+            long elapsedMilliseconds)
+        {
+            if (!IsLiveSyntaxRequestCurrent(editorTextEditor, state, workItem))
+            {
+                if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+                {
+                    DeveloperDiagnostics.LogDebug(
+                        "Editor",
+                        "Discarded stale live syntax diagnostics result.",
+                        new Dictionary<string, object?>
+                        {
+                            ["documentTitle"] = workItem.DocumentTitle,
+                            ["filePath"] = workItem.FilePath,
+                            ["requestVersion"] = workItem.RequestVersion,
+                            ["elapsedMilliseconds"] = elapsedMilliseconds
+                        });
+                }
+
+                return;
+            }
+
+            if (editorTextEditor.DataContext is not EditorTabViewModel tab)
+            {
+                return;
+            }
+
+            var errorRenderer = EnsureErrorRendererAttached(editorTextEditor);
+
+            if (!syntaxParseResult.Succeeded)
+            {
+                ApplyDiagnosticsFailure(
+                    editorTextEditor,
+                    tab,
+                    errorRenderer,
+                    syntaxParseResult.FailureMessage ?? "Syntax checking failed.",
+                    clearExistingDiagnostics: false);
+                return;
+            }
+
+            ApplyDiagnosticsResult(
+                editorTextEditor,
+                workItem.ScriptSnapshot,
+                syntaxParseResult,
+                includeAuthoringDiagnostics: false,
+                successStatusText: "Syntax: OK");
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Editor",
+                    "Live syntax diagnostics applied.",
+                    new Dictionary<string, object?>
+                    {
+                        ["documentTitle"] = workItem.DocumentTitle,
+                        ["filePath"] = workItem.FilePath,
+                        ["requestVersion"] = workItem.RequestVersion,
+                        ["elapsedMilliseconds"] = elapsedMilliseconds,
+                        ["textLength"] = workItem.ScriptSnapshot.Length,
+                        ["lineCount"] = workItem.LineCount,
+                        ["syntaxErrorCount"] = syntaxParseResult.Errors.Count,
+                        ["syntaxTokenCount"] = syntaxParseResult.SyntaxTokens.Count
+                    });
+            }
+        }
+
+        private void ScheduleAuthoringDiagnostics(
             TextEditor editorTextEditor,
             EditorTabViewModel tab,
-            CancellationTokenSource requestTokenSource,
+            ErrorMarkerRenderer errorRenderer,
+            string pwshPath,
             int registrationVersion,
-            int requestVersion,
-            string scriptSnapshot)
+            string scriptSnapshot,
+            int lineCount)
+        {
+            if (ShouldSkipAuthoringDiagnostics(scriptSnapshot, lineCount))
+            {
+                if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+                {
+                    DeveloperDiagnostics.LogDebug(
+                        "Editor",
+                        "Full authoring diagnostics skipped for very large document; live syntax diagnostics remain active.",
+                        new Dictionary<string, object?>
+                        {
+                            ["documentTitle"] = tab.Title,
+                            ["filePath"] = tab.FilePath,
+                            ["textLength"] = scriptSnapshot.Length,
+                            ["lineCount"] = lineCount
+                        });
+                }
+
+                return;
+            }
+
+            var requestVersion = IncrementDiagnosticsRequestVersion(editorTextEditor);
+            var state = GetOrCreateAuthoringDiagnosticsPumpState(editorTextEditor);
+            var workItem = new AuthoringDiagnosticsWorkItem(
+                scriptSnapshot,
+                pwshPath,
+                registrationVersion,
+                requestVersion,
+                lineCount,
+                tab.Title,
+                tab.FilePath);
+
+            state.Publish(workItem);
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Editor",
+                    "Full authoring diagnostics queued latest editor snapshot.",
+                    new Dictionary<string, object?>
+                    {
+                        ["documentTitle"] = tab.Title,
+                        ["filePath"] = tab.FilePath,
+                        ["requestVersion"] = requestVersion,
+                        ["delayMilliseconds"] = GetAuthoringDiagnosticsDelay(scriptSnapshot, lineCount).TotalMilliseconds,
+                        ["textLength"] = scriptSnapshot.Length,
+                        ["lineCount"] = lineCount
+                    });
+            }
+        }
+
+        private AuthoringDiagnosticsPumpState GetOrCreateAuthoringDiagnosticsPumpState(TextEditor editorTextEditor)
+        {
+            if (_authoringDiagnosticsPumpStates.TryGetValue(editorTextEditor, out var state) && !state.IsDisposed)
+            {
+                return state;
+            }
+
+            state = new AuthoringDiagnosticsPumpState();
+            _authoringDiagnosticsPumpStates[editorTextEditor] = state;
+            state.WorkerTask = Task.Run(() => RunAuthoringDiagnosticsPumpAsync(editorTextEditor, state), state.CancellationToken);
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Editor",
+                    "Full authoring diagnostics pump started for editor.",
+                    new Dictionary<string, object?>
+                    {
+                        ["editorHashCode"] = editorTextEditor.GetHashCode()
+                    });
+            }
+
+            return state;
+        }
+
+        private async Task RunAuthoringDiagnosticsPumpAsync(TextEditor editorTextEditor, AuthoringDiagnosticsPumpState state)
+        {
+            var pumpToken = state.CancellationToken;
+
+            try
+            {
+                while (!pumpToken.IsCancellationRequested)
+                {
+                    await state.WaitForSignalAsync(pumpToken).ConfigureAwait(false);
+
+                    var workItem = state.LatestWorkItem;
+                    if (workItem is null)
+                    {
+                        continue;
+                    }
+
+                    using var workCancellationSource = CancellationTokenSource.CreateLinkedTokenSource(pumpToken);
+                    state.SetActiveWorkCancellationSource(workCancellationSource);
+                    var workToken = workCancellationSource.Token;
+
+                    try
+                    {
+                        var authoringDelay = GetAuthoringDiagnosticsDelay(workItem.ScriptSnapshot, workItem.LineCount);
+                        await Task.Delay(authoringDelay, workToken).ConfigureAwait(false);
+
+                        state.DrainSignals();
+
+                        workItem = state.LatestWorkItem;
+                        if (workItem is null)
+                        {
+                            continue;
+                        }
+
+                        var shouldRunFullAuthoringPass = await Dispatcher.InvokeAsync(() =>
+                        {
+                            return IsAuthoringDiagnosticsRequestCurrent(editorTextEditor, state, workItem) &&
+                                editorTextEditor.DataContext is EditorTabViewModel tab &&
+                                !tab.SyntaxDiagnosticSpans.Any(static diagnostic => diagnostic.IsError);
+                        }, DispatcherPriority.Background, workToken);
+
+                        if (!shouldRunFullAuthoringPass)
+                        {
+                            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+                            {
+                                DeveloperDiagnostics.LogDebug(
+                                    "Editor",
+                                    "Full authoring diagnostics skipped because the request was stale or live syntax currently has parser errors.",
+                                    new Dictionary<string, object?>
+                                    {
+                                        ["documentTitle"] = workItem.DocumentTitle,
+                                        ["filePath"] = workItem.FilePath,
+                                        ["requestVersion"] = workItem.RequestVersion,
+                                        ["delayMilliseconds"] = authoringDelay.TotalMilliseconds,
+                                        ["textLength"] = workItem.ScriptSnapshot.Length,
+                                        ["lineCount"] = workItem.LineCount
+                                    });
+                            }
+
+                            continue;
+                        }
+
+                        var authoringStopwatch = Stopwatch.StartNew();
+                        var fullParseResult = await _diagnosticsService
+                            .ParseAsync(workItem.ScriptSnapshot, workItem.PwshPath, PowerShellDiagnosticsMode.FullAuthoring, workToken)
+                            .ConfigureAwait(false);
+                        authoringStopwatch.Stop();
+
+                        await Dispatcher.InvokeAsync(() =>
+                        {
+                            if (!IsAuthoringDiagnosticsRequestCurrent(editorTextEditor, state, workItem))
+                            {
+                                return;
+                            }
+
+                            if (editorTextEditor.DataContext is not EditorTabViewModel tab)
+                            {
+                                return;
+                            }
+
+                            var errorRenderer = EnsureErrorRendererAttached(editorTextEditor);
+
+                            if (!fullParseResult.Succeeded)
+                            {
+                                ApplyDiagnosticsFailure(
+                                    editorTextEditor,
+                                    tab,
+                                    errorRenderer,
+                                    fullParseResult.FailureMessage ?? "Authoring diagnostics failed.",
+                                    clearExistingDiagnostics: false);
+                                return;
+                            }
+
+                            if (fullParseResult.Errors.Any(static diagnostic => diagnostic.IsError))
+                            {
+                                // The in-process live syntax pump owns immediate parser feedback.
+                                // If the slower pwsh-backed pass sees parser errors, apply those
+                                // errors without touching syntax color tokens or adding authoring warnings.
+                                ApplyDiagnosticsResult(
+                                    editorTextEditor,
+                                    workItem.ScriptSnapshot,
+                                    fullParseResult,
+                                    includeAuthoringDiagnostics: false,
+                                    successStatusText: "Syntax issues detected",
+                                    applyParserTokens: false);
+                            }
+                            else
+                            {
+                                ApplyAuthoringDiagnosticsResult(
+                                    editorTextEditor,
+                                    workItem.ScriptSnapshot,
+                                    fullParseResult,
+                                    successStatusText: "Diagnostics: OK");
+                            }
+
+                            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+                            {
+                                DeveloperDiagnostics.LogDebug(
+                                    "Editor",
+                                    "Full authoring diagnostics applied.",
+                                    new Dictionary<string, object?>
+                                    {
+                                        ["documentTitle"] = workItem.DocumentTitle,
+                                        ["filePath"] = workItem.FilePath,
+                                        ["requestVersion"] = workItem.RequestVersion,
+                                        ["delayMilliseconds"] = authoringDelay.TotalMilliseconds,
+                                        ["elapsedMilliseconds"] = authoringStopwatch.ElapsedMilliseconds,
+                                        ["textLength"] = workItem.ScriptSnapshot.Length,
+                                        ["lineCount"] = workItem.LineCount,
+                                        ["syntaxErrorCount"] = fullParseResult.Errors.Count,
+                                        ["syntaxTokenCount"] = fullParseResult.SyntaxTokens.Count,
+                                        ["functionFactCount"] = fullParseResult.AuthoringFacts?.Functions.Count ?? 0,
+                                        ["commandFactCount"] = fullParseResult.AuthoringFacts?.Commands.Count ?? 0,
+                                        ["commandMetadataCount"] = fullParseResult.AuthoringFacts?.CommandMetadata.Count ?? 0,
+                                        ["variableFactCount"] = fullParseResult.AuthoringFacts?.Variables.Count ?? 0
+                                    });
+                            }
+                        }, DispatcherPriority.Background, workToken);
+                    }
+                    catch (OperationCanceledException) when (!pumpToken.IsCancellationRequested)
+                    {
+                        // Superseded by a newer edit. The latest-work-item storage and signal will drive the next pass.
+                    }
+                    catch (Exception ex) when (!pumpToken.IsCancellationRequested)
+                    {
+                        var failureWorkItem = workItem;
+                        _ = Dispatcher.InvokeAsync(() =>
+                        {
+                            if (!IsAuthoringDiagnosticsRequestCurrent(editorTextEditor, state, failureWorkItem))
+                            {
+                                return;
+                            }
+
+                            if (editorTextEditor.DataContext is not EditorTabViewModel tab)
+                            {
+                                return;
+                            }
+
+                            var errorRenderer = EnsureErrorRendererAttached(editorTextEditor);
+                            ApplyDiagnosticsFailure(editorTextEditor, tab, errorRenderer, $"Authoring diagnostics failed: {ex.Message}", clearExistingDiagnostics: false);
+                        });
+                    }
+                    finally
+                    {
+                        state.ClearActiveWorkCancellationSource(workCancellationSource);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // The editor was closed or the app is shutting down.
+            }
+            catch (ObjectDisposedException)
+            {
+                // The editor was closed or the app is shutting down.
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("Editor", ex, "Full authoring diagnostics pump failed unexpectedly.");
+            }
+        }
+
+        private static TimeSpan GetAuthoringDiagnosticsDelay(string scriptSnapshot, int lineCount)
+        {
+            if (scriptSnapshot.Length >= AuthoringDiagnosticsLargeCharacterThreshold ||
+                lineCount >= AuthoringDiagnosticsLargeLineThreshold)
+            {
+                return TimeSpan.FromMilliseconds(AuthoringDiagnosticsLargeDocumentDelayMilliseconds);
+            }
+
+            if (scriptSnapshot.Length >= AuthoringDiagnosticsMediumCharacterThreshold ||
+                lineCount >= AuthoringDiagnosticsMediumLineThreshold)
+            {
+                return TimeSpan.FromMilliseconds(AuthoringDiagnosticsMediumDocumentDelayMilliseconds);
+            }
+
+            return TimeSpan.FromMilliseconds(AuthoringDiagnosticsSmallDocumentDelayMilliseconds);
+        }
+
+        private static bool ShouldSkipAuthoringDiagnostics(string scriptSnapshot, int lineCount)
+        {
+            return scriptSnapshot.Length >= AuthoringDiagnosticsVeryLargeCharacterThreshold ||
+                lineCount >= AuthoringDiagnosticsVeryLargeLineThreshold;
+        }
+
+        private bool IsLiveSyntaxRequestCurrent(
+            TextEditor editorTextEditor,
+            LiveSyntaxPumpState requestState,
+            LiveSyntaxWorkItem workItem)
         {
             return _errorRenderers.ContainsKey(editorTextEditor)
                 && _tabByEditor.TryGetValue(editorTextEditor, out var currentTab)
+                && editorTextEditor.DataContext is EditorTabViewModel tab
                 && ReferenceEquals(currentTab, tab)
-                && _diagnosticsCancellationSources.TryGetValue(editorTextEditor, out var currentCts)
-                && ReferenceEquals(currentCts, requestTokenSource)
+                && _liveSyntaxPumpStates.TryGetValue(editorTextEditor, out var currentState)
+                && ReferenceEquals(currentState, requestState)
                 && _editorRegistrationVersions.TryGetValue(editorTextEditor, out var currentRegistrationVersion)
-                && currentRegistrationVersion == registrationVersion
+                && currentRegistrationVersion == workItem.RegistrationVersion
+                && _liveSyntaxRequestVersions.TryGetValue(editorTextEditor, out var currentRequestVersion)
+                && currentRequestVersion == workItem.RequestVersion
+                && string.Equals(editorTextEditor.Text ?? string.Empty, workItem.ScriptSnapshot, StringComparison.Ordinal);
+        }
+
+        private static TimeSpan GetLiveSyntaxQuietDelay(LiveSyntaxWorkItem workItem)
+        {
+            return IsLargeLiveSyntaxDocument(workItem)
+                ? TimeSpan.FromMilliseconds(LiveSyntaxDiagnosticsLargeFileQuietDelayMilliseconds)
+                : TimeSpan.FromMilliseconds(LiveSyntaxDiagnosticsQuietDelayMilliseconds);
+        }
+
+        private static TimeSpan GetLiveSyntaxMinimumIntervalDelay(LiveSyntaxPumpState state, LiveSyntaxWorkItem workItem)
+        {
+            var minimumInterval = IsLargeLiveSyntaxDocument(workItem)
+                ? TimeSpan.FromMilliseconds(LiveSyntaxDiagnosticsLargeFileMinimumIntervalMilliseconds)
+                : TimeSpan.FromMilliseconds(LiveSyntaxDiagnosticsMinimumIntervalMilliseconds);
+
+            if (state.LastParseStartedUtc == DateTimeOffset.MinValue)
+            {
+                return TimeSpan.Zero;
+            }
+
+            var elapsedSinceLastParse = DateTimeOffset.UtcNow - state.LastParseStartedUtc;
+            return elapsedSinceLastParse >= minimumInterval
+                ? TimeSpan.Zero
+                : minimumInterval - elapsedSinceLastParse;
+        }
+
+        private static bool IsLargeLiveSyntaxDocument(LiveSyntaxWorkItem workItem)
+        {
+            return workItem.ScriptSnapshot.Length >= LiveSyntaxDiagnosticsLargeFileCharacterThreshold ||
+                workItem.LineCount >= LiveSyntaxDiagnosticsLargeFileLineThreshold;
+        }
+
+        private static int CountLines(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return 1;
+            }
+
+            var count = 1;
+            foreach (var character in text)
+            {
+                if (character == '\n')
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        private bool IsAuthoringDiagnosticsRequestCurrent(
+            TextEditor editorTextEditor,
+            AuthoringDiagnosticsPumpState requestState,
+            AuthoringDiagnosticsWorkItem workItem)
+        {
+            return _errorRenderers.ContainsKey(editorTextEditor)
+                && _tabByEditor.TryGetValue(editorTextEditor, out var currentTab)
+                && editorTextEditor.DataContext is EditorTabViewModel tab
+                && ReferenceEquals(currentTab, tab)
+                && _authoringDiagnosticsPumpStates.TryGetValue(editorTextEditor, out var currentState)
+                && ReferenceEquals(currentState, requestState)
+                && _editorRegistrationVersions.TryGetValue(editorTextEditor, out var currentRegistrationVersion)
+                && currentRegistrationVersion == workItem.RegistrationVersion
                 && _diagnosticsRequestVersions.TryGetValue(editorTextEditor, out var currentRequestVersion)
-                && currentRequestVersion == requestVersion
-                && string.Equals(editorTextEditor.Text ?? string.Empty, scriptSnapshot, StringComparison.Ordinal);
+                && currentRequestVersion == workItem.RequestVersion
+                && string.Equals(editorTextEditor.Text ?? string.Empty, workItem.ScriptSnapshot, StringComparison.Ordinal);
         }
 
         private void RescheduleDiagnosticsForAllEditors()
@@ -6350,27 +6943,155 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        private void ApplyParserTokensToEditor(TextEditor editorTextEditor, IReadOnlyList<SyntaxTokenInfo> syntaxTokens)
+        private bool ApplyParserTokensToEditor(TextEditor editorTextEditor, IReadOnlyList<SyntaxTokenInfo> syntaxTokens)
         {
-            if (_syntaxColorizers.TryGetValue(editorTextEditor, out var colorizer))
-            {
+            return _syntaxColorizers.TryGetValue(editorTextEditor, out var colorizer) &&
                 colorizer.SetParserTokens(syntaxTokens);
-            }
         }
 
-        private void ClearParserTokensForEditor(TextEditor editorTextEditor)
+        private bool ClearParserTokensForEditor(TextEditor editorTextEditor)
         {
-            if (_syntaxColorizers.TryGetValue(editorTextEditor, out var colorizer))
-            {
+            return _syntaxColorizers.TryGetValue(editorTextEditor, out var colorizer) &&
                 colorizer.ClearParserTokens();
+        }
+
+        private void ApplyDiagnosticsResult(
+            TextEditor editorTextEditor,
+            string scriptSnapshot,
+            DiagnosticsParseResult parseResult,
+            bool includeAuthoringDiagnostics,
+            string successStatusText,
+            bool applyParserTokens = true)
+        {
+            var parserTokensChanged = applyParserTokens && ApplyParserTokensToEditor(editorTextEditor, parseResult.SyntaxTokens);
+            var parserDiagnostics = parseResult.Errors
+                .OrderBy(error => error.StartOffset)
+                .ToList();
+
+            _liveSyntaxDiagnosticLayers[editorTextEditor] = new DiagnosticLayerSnapshot(scriptSnapshot, parserDiagnostics);
+
+            if (parserDiagnostics.Any(static diagnostic => diagnostic.IsError))
+            {
+                // Parser errors are authoritative for the current text.  Do not keep
+                // stale authoring warnings beside them because those warnings were
+                // calculated against a syntactically valid snapshot.
+                _authoringDiagnosticLayers.Remove(editorTextEditor);
+            }
+            else if (includeAuthoringDiagnostics)
+            {
+                var authoringDiagnostics = PowerShellAuthoringDiagnostics
+                    .Analyze(scriptSnapshot, parseResult)
+                    .Select(ParseErrorInfo.AsWarning)
+                    .OrderBy(error => error.StartOffset)
+                    .ToList();
+                _authoringDiagnosticLayers[editorTextEditor] = new DiagnosticLayerSnapshot(scriptSnapshot, authoringDiagnostics);
+            }
+            else
+            {
+                RemoveStaleAuthoringDiagnostics(editorTextEditor, scriptSnapshot);
+            }
+
+            var diagnosticsChanged = ApplyCombinedDiagnosticsToTab(editorTextEditor, scriptSnapshot, successStatusText);
+            if (parserTokensChanged && !diagnosticsChanged)
+            {
+                editorTextEditor.TextArea.TextView.Redraw();
             }
         }
 
-        private void UpdateSyntaxDiagnosticsForTab(TextEditor editorTextEditor, IReadOnlyList<ParseErrorInfo> errors)
+        private void ApplyAuthoringDiagnosticsResult(
+            TextEditor editorTextEditor,
+            string scriptSnapshot,
+            DiagnosticsParseResult parseResult,
+            string successStatusText)
+        {
+            var authoringDiagnostics = PowerShellAuthoringDiagnostics
+                .Analyze(scriptSnapshot, parseResult)
+                .Select(ParseErrorInfo.AsWarning)
+                .OrderBy(error => error.StartOffset)
+                .ToList();
+
+            _authoringDiagnosticLayers[editorTextEditor] = new DiagnosticLayerSnapshot(scriptSnapshot, authoringDiagnostics);
+            _ = ApplyCombinedDiagnosticsToTab(editorTextEditor, scriptSnapshot, successStatusText);
+        }
+
+        private bool ApplyCombinedDiagnosticsToTab(TextEditor editorTextEditor, string scriptSnapshot, string successStatusText)
+        {
+            var combinedDiagnostics = new List<ParseErrorInfo>();
+            var hasCurrentParserErrors = false;
+
+            if (_liveSyntaxDiagnosticLayers.TryGetValue(editorTextEditor, out var syntaxLayer) &&
+                syntaxLayer.IsForSnapshot(scriptSnapshot))
+            {
+                combinedDiagnostics.AddRange(syntaxLayer.Diagnostics);
+                hasCurrentParserErrors = syntaxLayer.Diagnostics.Any(static diagnostic => diagnostic.IsError);
+            }
+
+            if (!hasCurrentParserErrors &&
+                _authoringDiagnosticLayers.TryGetValue(editorTextEditor, out var authoringLayer) &&
+                authoringLayer.IsForSnapshot(scriptSnapshot))
+            {
+                combinedDiagnostics.AddRange(authoringLayer.Diagnostics);
+            }
+
+            var orderedDiagnostics = combinedDiagnostics
+                .OrderBy(error => error.StartOffset)
+                .ThenBy(error => error.EndOffset)
+                .ThenBy(error => error.Severity, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return UpdateSyntaxDiagnosticsForTab(editorTextEditor, orderedDiagnostics, successStatusText);
+        }
+
+        private void RemoveStaleAuthoringDiagnostics(TextEditor editorTextEditor, string scriptSnapshot)
+        {
+            if (_authoringDiagnosticLayers.TryGetValue(editorTextEditor, out var authoringLayer) &&
+                !authoringLayer.IsForSnapshot(scriptSnapshot))
+            {
+                _authoringDiagnosticLayers.Remove(editorTextEditor);
+            }
+        }
+
+        private void ClearDiagnosticLayers(TextEditor editorTextEditor)
+        {
+            _liveSyntaxDiagnosticLayers.Remove(editorTextEditor);
+            _authoringDiagnosticLayers.Remove(editorTextEditor);
+        }
+
+        private void ApplyDiagnosticsFailure(
+            TextEditor editorTextEditor,
+            EditorTabViewModel tab,
+            ErrorMarkerRenderer errorRenderer,
+            string failureMessage,
+            bool clearExistingDiagnostics = true)
+        {
+            var parserTokensChanged = false;
+            if (clearExistingDiagnostics)
+            {
+                ClearDiagnosticLayers(editorTextEditor);
+                parserTokensChanged = ClearParserTokensForEditor(editorTextEditor);
+            }
+
+            if (!string.Equals(failureMessage, "Syntax checking was canceled.", StringComparison.Ordinal))
+            {
+                _ = tab.SetSyntaxDiagnosticsStatus(failureMessage, clearErrors: clearExistingDiagnostics);
+                var diagnosticsVisualsChanged = ApplyPersistedSyntaxDiagnosticsToEditor(errorRenderer, tab, editorTextEditor);
+                if (parserTokensChanged && !diagnosticsVisualsChanged)
+                {
+                    editorTextEditor.TextArea.TextView.Redraw();
+                }
+
+                if (ViewModel is not null && ReferenceEquals(ViewModel.SelectedTab, tab))
+                {
+                    ViewModel.StatusText = failureMessage;
+                }
+            }
+        }
+
+        private bool UpdateSyntaxDiagnosticsForTab(TextEditor editorTextEditor, IReadOnlyList<ParseErrorInfo> errors, string? successStatusText = null)
         {
             if (editorTextEditor.DataContext is not EditorTabViewModel tab || editorTextEditor.Document is null)
             {
-                return;
+                return false;
             }
 
             var document = editorTextEditor.Document;
@@ -6386,25 +7107,35 @@ namespace PS7ScriptDesk.Shell
                 })
                 .ToList();
 
-            tab.SetSyntaxDiagnostics(diagnostics, "Diagnostics: OK");
+            var okStatusText = string.IsNullOrWhiteSpace(successStatusText)
+                ? "Diagnostics: OK"
+                : successStatusText;
+            var diagnosticsChanged = tab.SetSyntaxDiagnostics(diagnostics, okStatusText);
 
-            var errorCount = diagnostics.Count(static diagnostic => diagnostic.IsError);
-            var warningCount = diagnostics.Count(static diagnostic => diagnostic.IsWarning);
-            DeveloperDiagnostics.LogDebug(
-                "Editor",
-                "Editor diagnostics applied to active document tab.",
-                new Dictionary<string, object?>
-                {
-                    ["documentTitle"] = tab.Title,
-                    ["filePath"] = tab.FilePath,
-                    ["diagnosticCount"] = diagnostics.Count,
-                    ["errorCount"] = errorCount,
-                    ["warningCount"] = warningCount
-                });
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+            {
+                var errorCount = diagnostics.Count(static diagnostic => diagnostic.IsError);
+                var warningCount = diagnostics.Count(static diagnostic => diagnostic.IsWarning);
+                DeveloperDiagnostics.LogDebug(
+                    "Editor",
+                    diagnosticsChanged
+                        ? "Editor diagnostics applied to active document tab."
+                        : "Editor diagnostics unchanged; skipped redundant tab notifications.",
+                    new Dictionary<string, object?>
+                    {
+                        ["documentTitle"] = tab.Title,
+                        ["filePath"] = tab.FilePath,
+                        ["diagnosticCount"] = diagnostics.Count,
+                        ["errorCount"] = errorCount,
+                        ["warningCount"] = warningCount,
+                        ["statusText"] = okStatusText,
+                        ["diagnosticsChanged"] = diagnosticsChanged
+                    });
+            }
 
             if (ViewModel is null || !ReferenceEquals(ViewModel.SelectedTab, tab))
             {
-                return;
+                return diagnosticsChanged;
             }
 
             if (diagnostics.Count == 1)
@@ -6417,8 +7148,10 @@ namespace PS7ScriptDesk.Shell
             }
             else
             {
-                ViewModel.StatusText = "Diagnostics: OK";
+                ViewModel.StatusText = okStatusText;
             }
+
+            return diagnosticsChanged;
         }
 
         // -------------------------------------------------------------------------
@@ -6747,6 +7480,11 @@ namespace PS7ScriptDesk.Shell
         private void ShowDebugPanel_Click(object sender, RoutedEventArgs e)
         {
             SetDebugPanelVisible(ShowDebugPanelMenuItem.IsChecked);
+        }
+
+        private void CloseDebugPanelButton_Click(object sender, RoutedEventArgs e)
+        {
+            SetDebugPanelVisible(false);
         }
 
         private void PopOutDebugPaneButton_Click(object sender, RoutedEventArgs e)
@@ -7708,6 +8446,351 @@ namespace PS7ScriptDesk.Shell
 
             RefreshBreakpointsList();
             RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
+        }
+
+        private sealed class DiagnosticLayerSnapshot
+        {
+            public DiagnosticLayerSnapshot(string scriptSnapshot, IReadOnlyList<ParseErrorInfo> diagnostics)
+            {
+                ScriptSnapshot = scriptSnapshot ?? string.Empty;
+                Diagnostics = diagnostics?.ToList() ?? new List<ParseErrorInfo>();
+            }
+
+            public string ScriptSnapshot { get; }
+
+            public IReadOnlyList<ParseErrorInfo> Diagnostics { get; }
+
+            public bool IsForSnapshot(string scriptSnapshot)
+            {
+                return string.Equals(ScriptSnapshot, scriptSnapshot ?? string.Empty, StringComparison.Ordinal);
+            }
+        }
+
+        private sealed class AuthoringDiagnosticsWorkItem
+        {
+            public AuthoringDiagnosticsWorkItem(
+                string scriptSnapshot,
+                string pwshPath,
+                int registrationVersion,
+                int requestVersion,
+                int lineCount,
+                string documentTitle,
+                string? filePath)
+            {
+                ScriptSnapshot = scriptSnapshot ?? string.Empty;
+                PwshPath = pwshPath;
+                RegistrationVersion = registrationVersion;
+                RequestVersion = requestVersion;
+                LineCount = Math.Max(1, lineCount);
+                DocumentTitle = documentTitle;
+                FilePath = filePath;
+            }
+
+            public string ScriptSnapshot { get; }
+
+            public string PwshPath { get; }
+
+            public int RegistrationVersion { get; }
+
+            public int RequestVersion { get; }
+
+            public int LineCount { get; }
+
+            public string DocumentTitle { get; }
+
+            public string? FilePath { get; }
+        }
+
+        private sealed class AuthoringDiagnosticsPumpState : IDisposable
+        {
+            private readonly object _syncRoot = new();
+            private int _signalPending;
+            private AuthoringDiagnosticsWorkItem? _latestWorkItem;
+            private CancellationTokenSource? _activeWorkCancellationSource;
+
+            public AuthoringDiagnosticsPumpState()
+            {
+                CancellationTokenSource = new CancellationTokenSource();
+                Signal = new SemaphoreSlim(0, 1);
+            }
+
+            public CancellationTokenSource CancellationTokenSource { get; }
+
+            public CancellationToken CancellationToken => CancellationTokenSource.Token;
+
+            public SemaphoreSlim Signal { get; }
+
+            public Task? WorkerTask { get; set; }
+
+            public bool IsDisposed { get; private set; }
+
+            public AuthoringDiagnosticsWorkItem? LatestWorkItem
+            {
+                get
+                {
+                    lock (_syncRoot)
+                    {
+                        return _latestWorkItem;
+                    }
+                }
+            }
+
+            public void Publish(AuthoringDiagnosticsWorkItem workItem)
+            {
+                if (IsDisposed)
+                {
+                    return;
+                }
+
+                lock (_syncRoot)
+                {
+                    _latestWorkItem = workItem;
+                    CancelActiveWork_NoLock();
+                }
+
+                if (Interlocked.Exchange(ref _signalPending, 1) == 0)
+                {
+                    try
+                    {
+                        Signal.Release();
+                    }
+                    catch (SemaphoreFullException)
+                    {
+                        // A wake signal is already pending; latest-work-item storage is authoritative.
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                }
+            }
+
+            public async Task WaitForSignalAsync(CancellationToken cancellationToken)
+            {
+                await Signal.WaitAsync(cancellationToken).ConfigureAwait(false);
+                Interlocked.Exchange(ref _signalPending, 0);
+            }
+
+            public void DrainSignals()
+            {
+                while (Signal.Wait(0))
+                {
+                }
+
+                Interlocked.Exchange(ref _signalPending, 0);
+            }
+
+            public void SetActiveWorkCancellationSource(CancellationTokenSource cancellationTokenSource)
+            {
+                lock (_syncRoot)
+                {
+                    CancelActiveWork_NoLock();
+                    _activeWorkCancellationSource = cancellationTokenSource;
+                }
+            }
+
+            public void ClearActiveWorkCancellationSource(CancellationTokenSource cancellationTokenSource)
+            {
+                lock (_syncRoot)
+                {
+                    if (ReferenceEquals(_activeWorkCancellationSource, cancellationTokenSource))
+                    {
+                        _activeWorkCancellationSource = null;
+                    }
+                }
+            }
+
+            private void CancelActiveWork_NoLock()
+            {
+                if (_activeWorkCancellationSource is null)
+                {
+                    return;
+                }
+
+                try
+                {
+                    _activeWorkCancellationSource.Cancel();
+                }
+                catch
+                {
+                }
+            }
+
+            public void Dispose()
+            {
+                if (IsDisposed)
+                {
+                    return;
+                }
+
+                IsDisposed = true;
+
+                try
+                {
+                    CancellationTokenSource.Cancel();
+                }
+                catch
+                {
+                }
+
+                lock (_syncRoot)
+                {
+                    CancelActiveWork_NoLock();
+                    _activeWorkCancellationSource = null;
+                }
+
+                try
+                {
+                    Signal.Dispose();
+                }
+                catch
+                {
+                }
+
+                CancellationTokenSource.Dispose();
+            }
+        }
+
+        private sealed class LiveSyntaxWorkItem
+        {
+            public LiveSyntaxWorkItem(
+                string scriptSnapshot,
+                string pwshPath,
+                int registrationVersion,
+                int requestVersion,
+                int lineCount,
+                string documentTitle,
+                string? filePath)
+            {
+                ScriptSnapshot = scriptSnapshot ?? string.Empty;
+                PwshPath = pwshPath;
+                RegistrationVersion = registrationVersion;
+                RequestVersion = requestVersion;
+                LineCount = Math.Max(1, lineCount);
+                DocumentTitle = documentTitle;
+                FilePath = filePath;
+            }
+
+            public string ScriptSnapshot { get; }
+
+            public string PwshPath { get; }
+
+            public int RegistrationVersion { get; }
+
+            public int RequestVersion { get; }
+
+            public int LineCount { get; }
+
+            public string DocumentTitle { get; }
+
+            public string? FilePath { get; }
+        }
+
+        private sealed class LiveSyntaxPumpState : IDisposable
+        {
+            private readonly object _syncRoot = new();
+            private int _signalPending;
+
+            public LiveSyntaxPumpState()
+            {
+                CancellationTokenSource = new CancellationTokenSource();
+                Signal = new SemaphoreSlim(0, 1);
+            }
+
+            public CancellationTokenSource CancellationTokenSource { get; }
+
+            public CancellationToken CancellationToken => CancellationTokenSource.Token;
+
+            public SemaphoreSlim Signal { get; }
+
+            public Task? WorkerTask { get; set; }
+
+            public DateTimeOffset LastParseStartedUtc { get; set; } = DateTimeOffset.MinValue;
+
+            public bool IsDisposed { get; private set; }
+
+            public LiveSyntaxWorkItem? LatestWorkItem
+            {
+                get
+                {
+                    lock (_syncRoot)
+                    {
+                        return _latestWorkItem;
+                    }
+                }
+            }
+
+            private LiveSyntaxWorkItem? _latestWorkItem;
+
+            public void Publish(LiveSyntaxWorkItem workItem)
+            {
+                if (IsDisposed)
+                {
+                    return;
+                }
+
+                lock (_syncRoot)
+                {
+                    _latestWorkItem = workItem;
+                }
+
+                if (Interlocked.Exchange(ref _signalPending, 1) == 0)
+                {
+                    try
+                    {
+                        Signal.Release();
+                    }
+                    catch (SemaphoreFullException)
+                    {
+                        // A wake signal is already pending; latest-work-item storage is authoritative.
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                }
+            }
+
+            public async Task WaitForSignalAsync(CancellationToken cancellationToken)
+            {
+                await Signal.WaitAsync(cancellationToken).ConfigureAwait(false);
+                Interlocked.Exchange(ref _signalPending, 0);
+            }
+
+            public void DrainSignals()
+            {
+                while (Signal.Wait(0))
+                {
+                }
+
+                Interlocked.Exchange(ref _signalPending, 0);
+            }
+
+            public void Dispose()
+            {
+                if (IsDisposed)
+                {
+                    return;
+                }
+
+                IsDisposed = true;
+
+                try
+                {
+                    CancellationTokenSource.Cancel();
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    Signal.Dispose();
+                }
+                catch
+                {
+                }
+
+                CancellationTokenSource.Dispose();
+            }
         }
 
         /// <summary>Row model for the Breakpoints DataGrid.</summary>

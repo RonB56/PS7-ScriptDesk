@@ -66,19 +66,57 @@ namespace PS7ScriptDesk.Shell.Editor
         private ITextSourceVersion? _cachedDocumentVersion;
         private List<ColoredRegion>? _cachedRegions;
 
-        public void SetParserTokens(IReadOnlyList<SyntaxTokenInfo>? parserTokens)
+        public bool SetParserTokens(IReadOnlyList<SyntaxTokenInfo>? parserTokens)
         {
-            _parserTokens = parserTokens is null || parserTokens.Count == 0
+            IReadOnlyList<SyntaxTokenInfo> nextTokens = parserTokens is null || parserTokens.Count == 0
                 ? Array.Empty<SyntaxTokenInfo>()
                 : parserTokens
                     .Where(token => token.Length > 0)
                     .OrderBy(token => token.StartOffset)
                     .ToList();
+
+            if (SyntaxTokensAreEquivalent(_parserTokens, nextTokens))
+            {
+                return false;
+            }
+
+            _parserTokens = nextTokens;
+            return true;
         }
 
-        public void ClearParserTokens()
+        public bool ClearParserTokens()
         {
+            if (_parserTokens.Count == 0)
+            {
+                return false;
+            }
+
             _parserTokens = Array.Empty<SyntaxTokenInfo>();
+            return true;
+        }
+
+
+        private static bool SyntaxTokensAreEquivalent(IReadOnlyList<SyntaxTokenInfo> existingTokens, IReadOnlyList<SyntaxTokenInfo> nextTokens)
+        {
+            if (existingTokens.Count != nextTokens.Count)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < existingTokens.Count; index++)
+            {
+                var existing = existingTokens[index];
+                var next = nextTokens[index];
+                if (existing.StartOffset != next.StartOffset ||
+                    existing.EndOffset != next.EndOffset ||
+                    !string.Equals(existing.Kind, next.Kind, StringComparison.Ordinal) ||
+                    !string.Equals(existing.Text, next.Text, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         protected override void ColorizeLine(DocumentLine line)

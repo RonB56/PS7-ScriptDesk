@@ -50,6 +50,21 @@ Microsoft Edge WebView2 components are used to host web-based UI content inside 
 WebView2 is provided by Microsoft and is used under Microsoft’s applicable license terms.
 
 ============================================================
+Microsoft PowerShell / System.Management.Automation
+============================================================
+
+Project:
+Microsoft PowerShell / System.Management.Automation
+
+License:
+MIT License
+
+Notice:
+System.Management.Automation is used for in-process PowerShell syntax parsing in the editor diagnostics path.
+
+The MIT License permits use, copying, modification, distribution, sublicensing, and sale of the software, provided the copyright and permission notice are included with copies or substantial portions of the software.
+
+============================================================
 Microsoft .NET / WPF / Windows desktop runtime components
 ============================================================
 

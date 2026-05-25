@@ -324,53 +324,77 @@ namespace PS7ScriptDesk.UI.ViewModels
             NotifyBreakpointsChanged();
         }
 
-        public void SetSyntaxDiagnostics(IEnumerable<EditorDiagnosticSpanViewModel> diagnostics, string? successStatusText = null)
+        public bool SetSyntaxDiagnostics(IEnumerable<EditorDiagnosticSpanViewModel> diagnostics, string? successStatusText = null)
         {
+            var incomingDiagnostics = (diagnostics ?? Enumerable.Empty<EditorDiagnosticSpanViewModel>()).ToList();
+            var errorCount = incomingDiagnostics.Count(static diagnostic => diagnostic.IsError);
+            var warningCount = incomingDiagnostics.Count(static diagnostic => diagnostic.IsWarning);
+            var nextStatusText = incomingDiagnostics.Count > 0
+                ? BuildDiagnosticsSummaryText(prefix: "Editor diagnostics", errorCount: errorCount, warningCount: warningCount)
+                : (string.IsNullOrWhiteSpace(successStatusText) ? "Syntax: OK" : successStatusText);
+
+            if (DiagnosticsAreEquivalent(_syntaxDiagnosticSpans, incomingDiagnostics) &&
+                string.Equals(_syntaxDiagnosticsStatusText, nextStatusText, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
             _syntaxDiagnosticSpans.Clear();
             _syntaxErrors.Clear();
 
-            foreach (var diagnostic in diagnostics ?? Enumerable.Empty<EditorDiagnosticSpanViewModel>())
+            foreach (var diagnostic in incomingDiagnostics)
             {
                 _syntaxDiagnosticSpans.Add(diagnostic);
                 _syntaxErrors.Add(new SyntaxErrorViewModel(diagnostic.LineNumber, diagnostic.ColumnNumber, diagnostic.Message, diagnostic.StartOffset, diagnostic.EndOffset, diagnostic.Severity));
             }
 
-            _syntaxDiagnosticsStatusText = HasDiagnostics
-                ? BuildDiagnosticsSummaryText(prefix: "Editor diagnostics")
-                : (string.IsNullOrWhiteSpace(successStatusText) ? "Syntax: OK" : successStatusText);
+            _syntaxDiagnosticsStatusText = nextStatusText;
 
             OnPropertyChanged(nameof(SyntaxDiagnosticSpans));
             OnPropertyChanged(nameof(SyntaxErrors));
             NotifyDiagnosticSummaryChanged();
+            return true;
         }
 
-        public void SetSyntaxDiagnosticsStatus(string statusText, bool clearErrors = false)
+        public bool SetSyntaxDiagnosticsStatus(string statusText, bool clearErrors = false)
         {
+            var diagnosticsChanged = false;
             if (clearErrors)
             {
-                var hadDiagnostics = _syntaxDiagnosticSpans.Count > 0 || _syntaxErrors.Count > 0;
+                diagnosticsChanged = _syntaxDiagnosticSpans.Count > 0 || _syntaxErrors.Count > 0;
                 _syntaxDiagnosticSpans.Clear();
                 _syntaxErrors.Clear();
-                if (hadDiagnostics)
+                if (diagnosticsChanged)
                 {
                     OnPropertyChanged(nameof(SyntaxDiagnosticSpans));
                     OnPropertyChanged(nameof(SyntaxErrors));
                 }
             }
 
-            _syntaxDiagnosticsStatusText = string.IsNullOrWhiteSpace(statusText)
+            var nextStatusText = string.IsNullOrWhiteSpace(statusText)
                 ? "Syntax checking status unavailable"
                 : statusText;
 
+            if (!diagnosticsChanged &&
+                string.Equals(_syntaxDiagnosticsStatusText, nextStatusText, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            _syntaxDiagnosticsStatusText = nextStatusText;
+
             NotifyDiagnosticSummaryChanged();
+            return true;
         }
 
 
         private string BuildDiagnosticsSummaryText(string prefix)
         {
-            var errorCount = DiagnosticErrorCount;
-            var warningCount = DiagnosticWarningCount;
+            return BuildDiagnosticsSummaryText(prefix, DiagnosticErrorCount, DiagnosticWarningCount);
+        }
 
+        private static string BuildDiagnosticsSummaryText(string prefix, int errorCount, int warningCount)
+        {
             string detail;
             if (errorCount > 0 && warningCount > 0)
             {
@@ -392,6 +416,33 @@ namespace PS7ScriptDesk.UI.ViewModels
             return string.IsNullOrWhiteSpace(prefix)
                 ? detail
                 : $"{prefix}: {detail}";
+        }
+
+        private static bool DiagnosticsAreEquivalent(
+            IReadOnlyList<EditorDiagnosticSpanViewModel> existingDiagnostics,
+            IReadOnlyList<EditorDiagnosticSpanViewModel> incomingDiagnostics)
+        {
+            if (existingDiagnostics.Count != incomingDiagnostics.Count)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < existingDiagnostics.Count; index++)
+            {
+                var existing = existingDiagnostics[index];
+                var incoming = incomingDiagnostics[index];
+                if (existing.LineNumber != incoming.LineNumber ||
+                    existing.ColumnNumber != incoming.ColumnNumber ||
+                    existing.StartOffset != incoming.StartOffset ||
+                    existing.EndOffset != incoming.EndOffset ||
+                    !string.Equals(existing.Message, incoming.Message, StringComparison.Ordinal) ||
+                    !string.Equals(existing.Severity, incoming.Severity, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private void NotifyDiagnosticSummaryChanged()

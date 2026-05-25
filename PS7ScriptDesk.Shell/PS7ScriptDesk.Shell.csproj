@@ -24,6 +24,7 @@
   <ItemGroup>
     <PackageReference Include="AvalonEdit" Version="6.3.1.120" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2535.41" />
+    <PackageReference Include="System.Management.Automation" Version="7.6.2" />
   </ItemGroup>
 
   <ItemGroup>

@@ -83,12 +83,20 @@ namespace PS7ScriptDesk.Shell.Editor
         // -------------------------------------------------------------------------
 
         /// <summary>
-        /// Replaces the current error list.  Call this on the UI thread, then call
-        /// <c>textView.Redraw()</c> to repaint.
+        /// Replaces the current error list.  Call this on the UI thread.
+        /// Returns <c>true</c> only when the visible diagnostic spans actually changed,
+        /// so callers can avoid redundant AvalonEdit redraws during live typing.
         /// </summary>
-        public void SetErrors(IReadOnlyList<ParseErrorInfo> errors)
+        public bool SetErrors(IReadOnlyList<ParseErrorInfo> errors)
         {
-            _errors = errors ?? Array.Empty<ParseErrorInfo>();
+            var nextErrors = errors ?? Array.Empty<ParseErrorInfo>();
+            if (ErrorsAreEquivalent(_errors, nextErrors))
+            {
+                return false;
+            }
+
+            _errors = nextErrors;
+            return true;
         }
 
         /// <summary>
@@ -105,6 +113,30 @@ namespace PS7ScriptDesk.Shell.Editor
                 }
             }
             return null;
+        }
+
+
+        private static bool ErrorsAreEquivalent(IReadOnlyList<ParseErrorInfo> existingErrors, IReadOnlyList<ParseErrorInfo> nextErrors)
+        {
+            if (existingErrors.Count != nextErrors.Count)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < existingErrors.Count; index++)
+            {
+                var existing = existingErrors[index];
+                var next = nextErrors[index];
+                if (existing.StartOffset != next.StartOffset ||
+                    existing.EndOffset != next.EndOffset ||
+                    !string.Equals(existing.Message, next.Message, StringComparison.Ordinal) ||
+                    !string.Equals(existing.Severity, next.Severity, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         // -------------------------------------------------------------------------

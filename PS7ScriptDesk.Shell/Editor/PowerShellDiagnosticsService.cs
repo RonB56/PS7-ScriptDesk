@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -11,6 +11,12 @@ using PS7ScriptDesk.Application.Diagnostics;
 
 namespace PS7ScriptDesk.Shell.Editor
 {
+    public enum PowerShellDiagnosticsMode
+    {
+        SyntaxOnly,
+        FullAuthoring
+    }
+
     /// <summary>
     /// Keeps a lightweight hidden pwsh.exe parser session alive for live editor diagnostics.
     ///
@@ -43,9 +49,18 @@ namespace PS7ScriptDesk.Shell.Editor
         private const int FullAuthoringAnalysisMaxLines = 800;
         private const int MaximumCommandMetadataLookups = 80;
 
+        public Task<DiagnosticsParseResult> ParseAsync(
+            string scriptText,
+            string pwshExecutablePath,
+            CancellationToken cancellationToken = default)
+        {
+            return ParseAsync(scriptText, pwshExecutablePath, PowerShellDiagnosticsMode.FullAuthoring, cancellationToken);
+        }
+
         public async Task<DiagnosticsParseResult> ParseAsync(
             string scriptText,
             string pwshExecutablePath,
+            PowerShellDiagnosticsMode diagnosticsMode,
             CancellationToken cancellationToken = default)
         {
             // The hidden syntax-checking process is disposable infrastructure.
@@ -53,7 +68,7 @@ namespace PS7ScriptDesk.Shell.Editor
             // If it is still unavailable after the retry, do not paint a scary
             // diagnostics failure into the editor; return an empty successful
             // result so diagnostics gracefully pause until the next edit/refresh.
-            var result = await ParseOnceAsync(scriptText, pwshExecutablePath, cancellationToken).ConfigureAwait(false);
+            var result = await ParseOnceAsync(scriptText, pwshExecutablePath, diagnosticsMode, cancellationToken).ConfigureAwait(false);
             if (!IsRetryableInfrastructureFailure(result.FailureMessage))
             {
                 return result;
@@ -61,7 +76,7 @@ namespace PS7ScriptDesk.Shell.Editor
 
             TeardownProcess();
 
-            result = await ParseOnceAsync(scriptText, pwshExecutablePath, cancellationToken).ConfigureAwait(false);
+            result = await ParseOnceAsync(scriptText, pwshExecutablePath, diagnosticsMode, cancellationToken).ConfigureAwait(false);
             if (IsRetryableInfrastructureFailure(result.FailureMessage))
             {
                 TeardownProcess();
@@ -97,6 +112,7 @@ namespace PS7ScriptDesk.Shell.Editor
         private async Task<DiagnosticsParseResult> ParseOnceAsync(
             string scriptText,
             string pwshExecutablePath,
+            PowerShellDiagnosticsMode diagnosticsMode,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(scriptText))
@@ -134,7 +150,7 @@ namespace PS7ScriptDesk.Shell.Editor
                     _activeRequest = request;
                 }
 
-                var diagnosticsOptions = DiagnosticsRequestOptions.FromScript(scriptText);
+                var diagnosticsOptions = DiagnosticsRequestOptions.FromScript(scriptText, diagnosticsMode);
                 var command = BuildParseCommand(scriptText, request.StartMarker, request.EndMarker, diagnosticsOptions);
 
                 try
@@ -588,13 +604,23 @@ namespace PS7ScriptDesk.Shell.Editor
             builder.AppendLine("  $commandNames[[string]$name] = $true");
             builder.AppendLine("}");
             builder.AppendLine("$metadataResult = @(); $availableCommandNames = @(); $unknownCommandCount = 0");
+            builder.AppendLine("if ($null -eq $script:__psstudioCommandMetadataCache) { $script:__psstudioCommandMetadataCache = @{} }");
             builder.AppendLine($"if ($commandNames.Count -le {MaximumCommandMetadataLookups}) {{");
             builder.AppendLine("  foreach ($name in @($commandNames.Keys)) {");
+            builder.AppendLine("    $cacheKey = [string]$name");
+            builder.AppendLine("    if ($script:__psstudioCommandMetadataCache.ContainsKey($cacheKey)) {");
+            builder.AppendLine("      $cachedMetadata = $script:__psstudioCommandMetadataCache[$cacheKey]");
+            builder.AppendLine("      $metadataResult += $cachedMetadata");
+            builder.AppendLine("      if (-not [bool]$cachedMetadata.exists) { $unknownCommandCount++ }");
+            builder.AppendLine("      continue");
+            builder.AppendLine("    }");
             builder.AppendLine("    $info = @(Get-Command -Name $name -ErrorAction SilentlyContinue)[0]");
-            builder.AppendLine("    if ($null -eq $info) { $metadataResult += [PSCustomObject]@{ name = [string]$name; exists = $false; resolvedName = $null; commandType = $null; moduleName = $null; definition = $null; parameterNames = @() }; $unknownCommandCount++; continue }");
+            builder.AppendLine("    if ($null -eq $info) { $metadata = [PSCustomObject]@{ name = [string]$name; exists = $false; resolvedName = $null; commandType = $null; moduleName = $null; definition = $null; parameterNames = @() }; $script:__psstudioCommandMetadataCache[$cacheKey] = $metadata; $metadataResult += $metadata; $unknownCommandCount++; continue }");
             builder.AppendLine("    $parameterNames = @{}");
             builder.AppendLine("    foreach ($p in @($info.Parameters.Values)) { if ($null -ne $p -and -not [string]::IsNullOrWhiteSpace($p.Name)) { $parameterNames[[string]$p.Name] = $true; foreach ($alias in @($p.Aliases)) { if (-not [string]::IsNullOrWhiteSpace($alias)) { $parameterNames[[string]$alias] = $true } } } }");
-            builder.AppendLine("    $metadataResult += [PSCustomObject]@{ name = [string]$name; exists = $true; resolvedName = [string]$info.Name; commandType = [string]$info.CommandType; moduleName = [string]$info.ModuleName; definition = [string]$info.Definition; parameterNames = @($parameterNames.Keys) }");
+            builder.AppendLine("    $metadata = [PSCustomObject]@{ name = [string]$name; exists = $true; resolvedName = [string]$info.Name; commandType = [string]$info.CommandType; moduleName = [string]$info.ModuleName; definition = [string]$info.Definition; parameterNames = @($parameterNames.Keys) }");
+            builder.AppendLine("    $script:__psstudioCommandMetadataCache[$cacheKey] = $metadata");
+            builder.AppendLine("    $metadataResult += $metadata");
             builder.AppendLine("  }");
             builder.AppendLine("  if ($unknownCommandCount -gt 0) { if ($null -eq $script:__psstudioCommandNameCache) { $script:__psstudioCommandNameCache = @(Get-Command -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | Sort-Object -Unique) }; $availableCommandNames = @($script:__psstudioCommandNameCache) }");
             builder.AppendLine("}");
@@ -1176,9 +1202,9 @@ namespace PS7ScriptDesk.Shell.Editor
 
             public bool IncludeAuthoringFacts { get; }
 
-            public static DiagnosticsRequestOptions FromScript(string scriptText)
+            public static DiagnosticsRequestOptions FromScript(string scriptText, PowerShellDiagnosticsMode diagnosticsMode)
             {
-                if (string.IsNullOrEmpty(scriptText))
+                if (diagnosticsMode == PowerShellDiagnosticsMode.SyntaxOnly || string.IsNullOrEmpty(scriptText))
                 {
                     return new DiagnosticsRequestOptions(includeAuthoringFacts: false);
                 }
