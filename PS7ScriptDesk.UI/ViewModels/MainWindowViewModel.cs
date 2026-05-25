@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
@@ -29,6 +29,11 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly IUserPromptService _userPromptService;
         private readonly IExeExportService _exeExportService;
         private SynchronizationContext? _uiSynchronizationContext;
+        private readonly SemaphoreSlim _consoleSessionGate = new(1, 1);
+        private CancellationTokenSource? _runtimeLaunchVerificationCancellationTokenSource;
+        private int _runtimeLaunchVerificationGeneration;
+        private bool _runtimeLaunchVerificationWarningShown;
+        private bool _runtimeReplacementPromptShown;
 
         private readonly RelayCommand _runCommand;
         private readonly RelayCommand _stopCommand;
@@ -62,6 +67,8 @@ namespace PS7ScriptDesk.UI.ViewModels
         private EditorTabViewModel? _selectedTab;
         private RuntimeItemViewModel? _selectedRuntimeItem;
         private RuntimeItemViewModel? _preferredRuntimeItem;
+        private readonly PowerShellRuntimeInfo? _startupRuntimeInfo;
+        private bool _startupRuntimeSeeded;
         private WorkspaceTreeItemViewModel? _selectedWorkspaceItem;
         private bool _isExplorerVisible = true;
         private bool _isRuntimeDiscoveryInProgress;
@@ -111,7 +118,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             IUserPromptService userPromptService,
             ILiveConsoleService liveConsoleService,
             IExeExportService exeExportService,
-            ApplicationSettings? initialSettings = null)
+            ApplicationSettings? initialSettings = null,
+            PowerShellRuntimeInfo? startupRuntimeInfo = null)
         {
             _fileDocumentService = fileDocumentService;
             _runtimeService = runtimeService;
@@ -120,6 +128,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _liveConsoleService = liveConsoleService;
             _exeExportService = exeExportService;
             _uiSynchronizationContext = SynchronizationContext.Current;
+            _startupRuntimeInfo = startupRuntimeInfo;
             _applicationVersionText = GetApplicationVersionText();
 
             Title = $"{ApplicationBranding.PublicName} {_applicationVersionText}";
@@ -170,7 +179,14 @@ namespace PS7ScriptDesk.UI.ViewModels
             _liveConsoleService.SessionTerminated       += OnSessionTerminated;
 
             RestorePersistedState(initialSettings);
-            TrySeedPersistedRuntimeSelection();
+            if (_startupRuntimeInfo is not null)
+            {
+                SeedValidatedStartupRuntime(_startupRuntimeInfo);
+            }
+            else
+            {
+                TrySeedPersistedRuntimeSelection();
+            }
 
             if (OpenTabs.Count == 0)
             {
@@ -696,7 +712,17 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             try
             {
-                var runtimeDiscoveryTask = RefreshRuntimeDiscoveryAsync(logOperation: true, updateStatusText: false);
+                Task? runtimeDiscoveryTask = null;
+                if (_startupRuntimeSeeded)
+                {
+                    StartupTimingLogger.Log(
+                        "MainWindowViewModel",
+                        "Deferred initialization skipped startup runtime discovery because App.OnStartup already validated and seeded the runtime. Use Refresh Runtimes to scan all installed runtimes.");
+                }
+                else
+                {
+                    runtimeDiscoveryTask = RefreshRuntimeDiscoveryAsync(logOperation: true, updateStatusText: false);
+                }
 
                 if (!string.IsNullOrWhiteSpace(_currentWorkspaceFolderPath) && Directory.Exists(_currentWorkspaceFolderPath))
                 {
@@ -704,7 +730,13 @@ namespace PS7ScriptDesk.UI.ViewModels
                     StartupTimingLogger.Log("MainWindowViewModel", $"Persisted workspace loaded in {startupStopwatch.ElapsedMilliseconds} ms.");
                 }
 
-                await runtimeDiscoveryTask.ConfigureAwait(false);
+                if (runtimeDiscoveryTask is not null)
+                {
+                    await runtimeDiscoveryTask.ConfigureAwait(false);
+                }
+
+                ScheduleDeferredRuntimeLaunchVerification("deferred startup verification");
+
                 StartupTimingLogger.Log("MainWindowViewModel", $"Deferred initialization completed in {startupStopwatch.ElapsedMilliseconds} ms.");
             }
             catch (Exception ex)
@@ -968,6 +1000,15 @@ namespace PS7ScriptDesk.UI.ViewModels
                 }
             }
 
+            try
+            {
+                _runtimeLaunchVerificationCancellationTokenSource?.Cancel();
+            }
+            catch
+            {
+                // Best effort shutdown only.
+            }
+
             // Fire-and-forget the terminal stop.  Blocking on async work from the UI
             // thread (GetAwaiter().GetResult()) risks a deadlock and freezes the window
             // during close.  The process will be killed by the OS when the app exits
@@ -1087,6 +1128,39 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 StatusText = "Session restored";
             }
+        }
+
+        private void SeedValidatedStartupRuntime(PowerShellRuntimeInfo runtime)
+        {
+            if (runtime is null)
+            {
+                return;
+            }
+
+            var runtimeItem = new RuntimeItemViewModel(runtime);
+            DetectedRuntimes.Clear();
+            DetectedRuntimes.Add(runtimeItem);
+            _preferredRuntimeItem = runtimeItem;
+            SelectedRuntimeItem = runtimeItem;
+            _selectedRuntimeExecutablePathToRestore = runtime.LaunchExecutablePath;
+            _startupRuntimeSeeded = true;
+
+            RuntimeText = $"Runtime: {runtime.DisplayName}";
+            StartupTimingLogger.Log(
+                "MainWindowViewModel",
+                $"Startup runtime seeded without a duplicate identity probe. DisplayPath='{runtime.ExecutablePath}', LaunchPath='{runtime.LaunchExecutablePath}', Version={runtime.VersionText}.");
+
+            OnPropertyChanged(nameof(RuntimeCountText));
+            OnPropertyChanged(nameof(PreferredRuntimeText));
+            OnPropertyChanged(nameof(RuntimeListHeaderText));
+            OnPropertyChanged(nameof(RuntimeDetailsText));
+            OnPropertyChanged(nameof(RuntimePathText));
+            OnPropertyChanged(nameof(SelectedRuntimeCompactText));
+            OnPropertyChanged(nameof(SelectedRuntimePathOnlyText));
+            OnPropertyChanged(nameof(EffectiveRuntimeItem));
+            OnPropertyChanged(nameof(EffectiveRuntimeInfo));
+            OnPropertyChanged(nameof(EffectiveRuntimeExecutablePath));
+            RefreshCommandStates();
         }
 
         private void TrySeedPersistedRuntimeSelection()
@@ -2388,10 +2462,10 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task OnRefreshRuntimesAsync()
         {
-            await RefreshRuntimeDiscoveryAsync(logOperation: true, updateStatusText: true).ConfigureAwait(false);
+            await RefreshRuntimeDiscoveryAsync(logOperation: true, updateStatusText: true, requireLaunchValidation: true).ConfigureAwait(false);
         }
 
-        private async Task RefreshRuntimeDiscoveryAsync(bool logOperation, bool updateStatusText)
+        private async Task RefreshRuntimeDiscoveryAsync(bool logOperation, bool updateStatusText, bool requireLaunchValidation = false)
         {
             if (IsRuntimeDiscoveryInProgress)
             {
@@ -2411,12 +2485,18 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ? "Runtime: Refreshing installed PowerShell runtimes..."
                     : "Runtime: Checking PowerShell runtime...";
             });
-            StartupTimingLogger.Log("MainWindowViewModel", "Runtime discovery started.");
+            StartupTimingLogger.Log(
+                "MainWindowViewModel",
+                requireLaunchValidation
+                    ? "Runtime discovery started. Mode=LaunchValidation"
+                    : "Runtime discovery started. Mode=MetadataFastPath");
 
             try
             {
-                var discoveryResult = await Task.Run(() => _runtimeService.DiscoverRuntimes()).ConfigureAwait(false);
-                StartupTimingLogger.Log("MainWindowViewModel", $"Runtime discovery finished in {discoveryStopwatch.ElapsedMilliseconds} ms with {discoveryResult.DetectedRuntimes.Count} detected runtime(s).");
+                var discoveryResult = await Task.Run(() => _runtimeService.DiscoverRuntimes(requireLaunchValidation)).ConfigureAwait(false);
+                StartupTimingLogger.Log(
+                    "MainWindowViewModel",
+                    $"Runtime discovery finished in {discoveryStopwatch.ElapsedMilliseconds} ms with {discoveryResult.DetectedRuntimes.Count} detected runtime(s). Mode={(requireLaunchValidation ? "LaunchValidation" : "MetadataFastPath")}");
 
                 PostToUi(() =>
                 {
@@ -2527,33 +2607,342 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
-            var sessionIsCurrent = _liveConsoleService.IsSessionRunning &&
-                                   _liveConsoleService.ActiveRuntime is not null &&
-                                   string.Equals(_liveConsoleService.ActiveRuntime.ExecutablePath, runtime.ExecutablePath, StringComparison.OrdinalIgnoreCase);
-
-            if (forceRestart && _liveConsoleService.IsSessionRunning)
+            await _consoleSessionGate.WaitAsync().ConfigureAwait(false);
+            try
             {
-                await _liveConsoleService.StopConsoleAsync(AppendExecutionOutput).ConfigureAwait(false);
-                sessionIsCurrent = false;
+                var sessionIsCurrent = _liveConsoleService.IsSessionRunning &&
+                                       _liveConsoleService.ActiveRuntime is not null &&
+                                       string.Equals(_liveConsoleService.ActiveRuntime.ExecutablePath, runtime.ExecutablePath, StringComparison.OrdinalIgnoreCase);
+
+                if (forceRestart && _liveConsoleService.IsSessionRunning)
+                {
+                    await _liveConsoleService.StopConsoleAsync(AppendExecutionOutput).ConfigureAwait(false);
+                    sessionIsCurrent = false;
+                }
+
+                if (!sessionIsCurrent)
+                {
+                    var startupDirectory = GetConsoleStartupDirectory();
+                    AppLogger.Info("Console", $"Starting PowerShell terminal using {runtime.DisplayName}; StartupDirectory={startupDirectory}; ForceRestart={forceRestart}; LogOperation={logOperation}");
+                    await _liveConsoleService.StartSessionAsync(runtime, AppendExecutionOutput, startupDirectory).ConfigureAwait(false);
+
+                    PostToUi(() =>
+                    {
+                        UpdateConsoleSessionPresentation();
+                        StatusText = $"PowerShell terminal ready: {runtime.DisplayName}";
+                        AppLogger.Info("Console", $"PowerShell terminal ready using {runtime.DisplayName}; CurrentDirectory={_liveConsoleService.CurrentWorkingDirectory ?? startupDirectory}");
+                    });
+                }
+                else
+                {
+                    PostToUi(UpdateConsoleSessionPresentation);
+                }
+            }
+            catch (Exception ex)
+            {
+                await HandleConsoleRuntimeLaunchFailureAsync(runtime, ex).ConfigureAwait(false);
+                throw;
+            }
+            finally
+            {
+                _consoleSessionGate.Release();
+            }
+        }
+
+        private void ScheduleDeferredRuntimeLaunchVerification(string source)
+        {
+            var runtime = EffectiveRuntimeInfo;
+            if (runtime is null || !runtime.IsPowerShell7OrLater || string.IsNullOrWhiteSpace(runtime.LaunchExecutablePath))
+            {
+                return;
             }
 
-            if (!sessionIsCurrent)
+            var generation = Interlocked.Increment(ref _runtimeLaunchVerificationGeneration);
+            CancellationTokenSource? previousCancellationTokenSource = null;
+            var verificationCancellationTokenSource = new CancellationTokenSource();
+
+            previousCancellationTokenSource = Interlocked.Exchange(
+                ref _runtimeLaunchVerificationCancellationTokenSource,
+                verificationCancellationTokenSource);
+
+            try
             {
-                var startupDirectory = GetConsoleStartupDirectory();
-                AppLogger.Info("Console", $"Starting PowerShell terminal using {runtime.DisplayName}; StartupDirectory={startupDirectory}");
-                await _liveConsoleService.StartSessionAsync(runtime, AppendExecutionOutput, startupDirectory).ConfigureAwait(false);
+                previousCancellationTokenSource?.Cancel();
+            }
+            catch
+            {
+                // Best effort cancellation only.
+            }
+            finally
+            {
+                previousCancellationTokenSource?.Dispose();
+            }
+
+            StartupTimingLogger.Log(
+                "MainWindowViewModel",
+                $"Scheduled delayed PowerShell runtime launch verification for '{runtime.LaunchExecutablePath}'. Source={source}.");
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(15), verificationCancellationTokenSource.Token).ConfigureAwait(false);
+
+                    if (verificationCancellationTokenSource.Token.IsCancellationRequested || generation != _runtimeLaunchVerificationGeneration)
+                    {
+                        return;
+                    }
+
+                    var validationStopwatch = Stopwatch.StartNew();
+                    var validationResult = _runtimeService.ValidateRuntimePath(
+                        runtime.LaunchExecutablePath,
+                        $"Delayed runtime launch verification ({source})");
+                    validationStopwatch.Stop();
+
+                    if (verificationCancellationTokenSource.Token.IsCancellationRequested || generation != _runtimeLaunchVerificationGeneration)
+                    {
+                        return;
+                    }
+
+                    if (validationResult.RuntimeInfo is null || !validationResult.RuntimeInfo.IsPowerShell7OrLater)
+                    {
+                        StartupTimingLogger.Log(
+                            "MainWindowViewModel",
+                            $"Delayed PowerShell runtime launch verification failed in {validationStopwatch.ElapsedMilliseconds} ms for '{runtime.LaunchExecutablePath}'. Reason={validationResult.CandidateInfo.FailureReason}");
+
+                        PostToUi(() => ApplyRuntimeLaunchVerificationFailure(
+                            runtime,
+                            validationResult.CandidateInfo.FailureReason,
+                            "Delayed runtime launch verification failed.",
+                            showWarning: true));
+                        return;
+                    }
+
+                    StartupTimingLogger.Log(
+                        "MainWindowViewModel",
+                        $"Delayed PowerShell runtime launch verification succeeded in {validationStopwatch.ElapsedMilliseconds} ms for '{validationResult.RuntimeInfo.DisplayName}' ({validationResult.RuntimeInfo.LaunchExecutablePath}).");
+                    AppLogger.Info(
+                        "Runtime",
+                        $"Delayed runtime launch verification succeeded for {validationResult.RuntimeInfo.DisplayName}. DisplayPath='{validationResult.RuntimeInfo.ExecutablePath}', LaunchPath='{validationResult.RuntimeInfo.LaunchExecutablePath}'.");
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected during shutdown or when a newer runtime verification supersedes this one.
+                }
+                catch (Exception ex)
+                {
+                    StartupTimingLogger.Log(
+                        "MainWindowViewModel",
+                        $"Delayed PowerShell runtime launch verification failed unexpectedly for '{runtime.LaunchExecutablePath}': {ex.GetType().Name}: {ex.Message}");
+                    AppLogger.Error("Runtime", "Delayed PowerShell runtime launch verification failed unexpectedly.", ex);
+                }
+            });
+        }
+
+        private async Task HandleConsoleRuntimeLaunchFailureAsync(PowerShellRuntimeInfo runtime, Exception exception)
+        {
+            var runtimePath = runtime.LaunchExecutablePath;
+            StartupTimingLogger.Log(
+                "MainWindowViewModel",
+                $"Console runtime launch failed for '{runtimePath}'. Verifying runtime with a real launch probe. Error={exception.GetType().Name}: {exception.Message}");
+            AppLogger.Error("Console", $"PowerShell terminal launch failed for runtime '{runtimePath}'.", exception);
+
+            RuntimeValidationResult? validationResult = null;
+            try
+            {
+                validationResult = await Task.Run(() => _runtimeService.ValidateRuntimePath(runtimePath, "Console startup failure verification")).ConfigureAwait(false);
+            }
+            catch (Exception validationException)
+            {
+                AppLogger.Error("Runtime", $"Runtime validation after console launch failure also failed for '{runtimePath}'.", validationException);
+            }
+
+            var failureReason = validationResult?.RuntimeInfo is null
+                ? validationResult?.CandidateInfo.FailureReason ?? exception.Message
+                : exception.Message;
+
+            PostToUi(() =>
+            {
+                ApplyRuntimeLaunchVerificationFailure(
+                    runtime,
+                    failureReason,
+                    "PowerShell terminal launch failed.",
+                    showWarning: true);
+
+                PromptForReplacementRuntimeAfterConsoleFailure(failureReason);
+            });
+        }
+
+        private void ApplyRuntimeLaunchVerificationFailure(
+            PowerShellRuntimeInfo runtime,
+            string failureReason,
+            string source,
+            bool showWarning)
+        {
+            var failedPath = NormalizeStoredRuntimePath(runtime.LaunchExecutablePath);
+            if (string.IsNullOrWhiteSpace(failedPath))
+            {
+                failedPath = runtime.LaunchExecutablePath;
+            }
+
+            for (var index = DetectedRuntimes.Count - 1; index >= 0; index--)
+            {
+                var runtimeItemPath = NormalizeStoredRuntimePath(DetectedRuntimes[index].RuntimeInfo.LaunchExecutablePath);
+                if (string.Equals(runtimeItemPath, failedPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    DetectedRuntimes.RemoveAt(index);
+                }
+            }
+
+            if (SelectedRuntimeItem is not null &&
+                string.Equals(NormalizeStoredRuntimePath(SelectedRuntimeItem.RuntimeInfo.LaunchExecutablePath), failedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                SelectedRuntimeItem = null;
+            }
+
+            if (_preferredRuntimeItem is not null &&
+                string.Equals(NormalizeStoredRuntimePath(_preferredRuntimeItem.RuntimeInfo.LaunchExecutablePath), failedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _preferredRuntimeItem = null;
+            }
+
+            if (string.Equals(NormalizeStoredRuntimePath(_selectedRuntimeExecutablePathToRestore), failedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _selectedRuntimeExecutablePathToRestore = null;
+            }
+
+            RuntimeText = "Runtime: PowerShell 7 runtime could not be launched";
+            StatusText = "PowerShell 7 runtime could not be launched. Refresh runtimes or choose a valid pwsh.exe.";
+            AppendOutputLine($"{source} The saved PowerShell runtime was marked invalid: {runtime.DisplayName}");
+            AppendOutputLine($"Runtime path: {runtime.LaunchExecutablePath}");
+            AppendOutputLine($"Reason: {failureReason}");
+            AppendOutputLine("Use Refresh Runtimes to perform a full launch validation scan, or restart the app to choose a valid PowerShell 7 pwsh.exe path.");
+
+            StartupTimingLogger.Log(
+                "MainWindowViewModel",
+                $"Runtime marked invalid after launch verification failure. Path='{runtime.LaunchExecutablePath}', Source='{source}', Reason='{failureReason}'.");
+
+            OnPropertyChanged(nameof(RuntimeCountText));
+            OnPropertyChanged(nameof(PreferredRuntimeText));
+            OnPropertyChanged(nameof(RuntimeListHeaderText));
+            OnPropertyChanged(nameof(RuntimeDetailsText));
+            OnPropertyChanged(nameof(RuntimePathText));
+            OnPropertyChanged(nameof(SelectedRuntimeCompactText));
+            OnPropertyChanged(nameof(SelectedRuntimePathOnlyText));
+            OnPropertyChanged(nameof(EffectiveRuntimeItem));
+            OnPropertyChanged(nameof(EffectiveRuntimeInfo));
+            OnPropertyChanged(nameof(EffectiveRuntimeExecutablePath));
+            RefreshCommandStates();
+            UpdateConsoleSessionPresentation();
+
+            if (showWarning && !_runtimeLaunchVerificationWarningShown)
+            {
+                _runtimeLaunchVerificationWarningShown = true;
+                _userPromptService.ShowWarningMessage(
+                    "PowerShell 7 runtime could not be launched",
+                    "PS7 ScriptDesk started quickly using saved pwsh.exe file metadata, but a later launch verification failed." + Environment.NewLine + Environment.NewLine +
+                    $"Runtime path:" + Environment.NewLine + runtime.LaunchExecutablePath + Environment.NewLine + Environment.NewLine +
+                    $"Reason:" + Environment.NewLine + failureReason + Environment.NewLine + Environment.NewLine +
+                    "Use Refresh Runtimes to run a full validation scan. If PowerShell 7 was moved, removed, blocked, or corrupted, restart PS7 ScriptDesk and browse to a valid PowerShell 7 pwsh.exe.");
+            }
+        }
+
+        private void PromptForReplacementRuntimeAfterConsoleFailure(string failureReason)
+        {
+            if (_runtimeReplacementPromptShown)
+            {
+                return;
+            }
+
+            _runtimeReplacementPromptShown = true;
+
+            var replacementPath = _userPromptService.ShowOpenPowerShellExecutableDialog();
+            if (string.IsNullOrWhiteSpace(replacementPath))
+            {
+                _runtimeReplacementPromptShown = false;
+                StatusText = "PowerShell 7 runtime selection canceled";
+                return;
+            }
+
+            StatusText = "Validating selected PowerShell 7 runtime...";
+            AppendOutputLine($"Validating replacement PowerShell runtime: {replacementPath}");
+
+            _ = Task.Run(() =>
+            {
+                RuntimeValidationResult validationResult;
+                try
+                {
+                    validationResult = _runtimeService.ValidateRuntimePath(replacementPath, "Replacement runtime selected after console launch failure");
+                }
+                catch (Exception ex)
+                {
+                    PostToUi(() =>
+                    {
+                        StatusText = "Replacement PowerShell runtime validation failed";
+                        AppendOutputLine($"Replacement runtime validation failed: {ex.Message}");
+                        _userPromptService.ShowWarningMessage(
+                            "Replacement PowerShell runtime validation failed",
+                            "The selected PowerShell runtime could not be validated." + Environment.NewLine + Environment.NewLine + ex.Message);
+                    });
+                    return;
+                }
 
                 PostToUi(() =>
                 {
-                    UpdateConsoleSessionPresentation();
-                    StatusText = $"PowerShell terminal ready: {runtime.DisplayName}";
-                    AppLogger.Info("Console", $"PowerShell terminal ready using {runtime.DisplayName}; CurrentDirectory={_liveConsoleService.CurrentWorkingDirectory ?? startupDirectory}");
+                    if (validationResult.RuntimeInfo is null || !validationResult.RuntimeInfo.IsPowerShell7OrLater)
+                    {
+                        StatusText = "Selected PowerShell runtime was not valid";
+                        AppendOutputLine($"Selected replacement runtime was rejected: {validationResult.FailureReason}");
+                        _userPromptService.ShowWarningMessage(
+                            "Selected PowerShell runtime was not valid",
+                            "PS7 ScriptDesk requires PowerShell 7.0 or newer." + Environment.NewLine + Environment.NewLine +
+                            $"Selected path:" + Environment.NewLine + replacementPath + Environment.NewLine + Environment.NewLine +
+                            $"Reason:" + Environment.NewLine + validationResult.FailureReason);
+                        _runtimeReplacementPromptShown = false;
+                        return;
+                    }
+
+                    ApplyValidatedReplacementRuntime(validationResult.RuntimeInfo);
+                    AppendOutputLine($"Replacement PowerShell runtime accepted: {validationResult.RuntimeInfo.DisplayName} -> {validationResult.RuntimeInfo.LaunchExecutablePath}");
+                    StatusText = $"PowerShell runtime updated - {validationResult.RuntimeInfo.DisplayName}";
                 });
-            }
-            else
+            });
+        }
+
+        private void ApplyValidatedReplacementRuntime(PowerShellRuntimeInfo runtime)
+        {
+            var runtimeItem = new RuntimeItemViewModel(runtime);
+            var runtimePath = NormalizeStoredRuntimePath(runtime.LaunchExecutablePath);
+
+            for (var index = DetectedRuntimes.Count - 1; index >= 0; index--)
             {
-                PostToUi(UpdateConsoleSessionPresentation);
+                var existingPath = NormalizeStoredRuntimePath(DetectedRuntimes[index].RuntimeInfo.LaunchExecutablePath);
+                if (string.Equals(existingPath, runtimePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    DetectedRuntimes.RemoveAt(index);
+                }
             }
+
+            DetectedRuntimes.Insert(0, runtimeItem);
+            _preferredRuntimeItem = runtimeItem;
+            SelectedRuntimeItem = runtimeItem;
+            _selectedRuntimeExecutablePathToRestore = runtime.LaunchExecutablePath;
+            _runtimeLaunchVerificationWarningShown = false;
+            _runtimeReplacementPromptShown = false;
+
+            RuntimeText = $"Runtime: {runtime.DisplayName}";
+            OnPropertyChanged(nameof(RuntimeCountText));
+            OnPropertyChanged(nameof(PreferredRuntimeText));
+            OnPropertyChanged(nameof(RuntimeListHeaderText));
+            OnPropertyChanged(nameof(RuntimeDetailsText));
+            OnPropertyChanged(nameof(RuntimePathText));
+            OnPropertyChanged(nameof(SelectedRuntimeCompactText));
+            OnPropertyChanged(nameof(SelectedRuntimePathOnlyText));
+            OnPropertyChanged(nameof(EffectiveRuntimeItem));
+            OnPropertyChanged(nameof(EffectiveRuntimeInfo));
+            OnPropertyChanged(nameof(EffectiveRuntimeExecutablePath));
+            RefreshCommandStates();
+            UpdateConsoleSessionPresentation();
         }
 
         private string GetConsoleStartupDirectory()

@@ -214,6 +214,9 @@ namespace PS7ScriptDesk.Shell
         private DateTimeOffset _lastDebugOutputWrittenAtUtc = DateTimeOffset.MinValue;
         private readonly Dictionary<TextEditor, BraceMatchingRenderer> _braceMatchingRenderers = new();
         private bool _terminalIsReady;
+        private bool _terminalHostAttached;
+        private Task? _consoleWarmStartTask;
+        private readonly object _consoleWarmStartLock = new();
         private bool _terminalIsActive;
         private EditorMetadataWarmupPhase _lastEditorMetadataWarmupPhase = EditorMetadataWarmupPhase.Idle;
         private PowerShellRuntimeInfo? _pendingEditorMetadataWarmupRuntime;
@@ -396,17 +399,18 @@ namespace PS7ScriptDesk.Shell
                     ViewModel?.ResizeConsole(cols, rows);
                 };
 
-                // When xterm.js signals ready, start the ConPTY session so the
-                // terminal is live as soon as the user can see it.
-                TerminalConsole.TerminalReady += async () =>
+                // When xterm.js signals ready, flush any warm-started PowerShell
+                // output that arrived before the WebView terminal finished loading.
+                // The ConPTY session is requested as soon as the host is attached below
+                // so pwsh.exe startup can overlap with WebView2/xterm.js initialization.
+                TerminalConsole.TerminalReady += () =>
                 {
                     _terminalIsReady = true;
                     AppLogger.Debug("Terminal", "MainWindow received terminal-ready signal.");
                     DeveloperDiagnostics.LogStateTransition("Terminal", "TerminalReady", "Initializing", "Ready", "Terminal ready signal received.");
                     // Apply the current app theme to the terminal colour scheme.
                     TerminalConsole.ApplyAppTheme(_themeService.CurrentTheme);
-                    if (ViewModel is not null)
-                        await ViewModel.EnsureConsoleRestoredAsync().ConfigureAwait(false);
+                    RequestConsoleWarmStart("TerminalReadyFallback");
                 };
 
                 // When the app theme changes, update the terminal colour scheme to match.
@@ -416,12 +420,14 @@ namespace PS7ScriptDesk.Shell
                 // Notify the service that a host is attached (triggers session bookkeeping).
                 var hostAttachStopwatch = Stopwatch.StartNew();
                 await ViewModel.InitializeTerminalHostAsync(IntPtr.Zero, 120, 30);
+                _terminalHostAttached = true;
                 DeveloperDiagnostics.LogOperationStop(
                     "Startup",
                     "InitializeTerminalHost",
                     "Terminal host initialization completed.",
                     hostAttachStopwatch.ElapsedMilliseconds);
                 StartupTimingLogger.Log("MainWindow", $"Terminal host attached in {hostAttachStopwatch.ElapsedMilliseconds} ms");
+                RequestConsoleWarmStart("TerminalHostAttached");
 
                 _ = ViewModel.InitializeAsync();
                 DeveloperDiagnostics.LogAsyncBoundary("Startup", "InitializeAsync", "Deferred ViewModel initialization launched.", "AsyncStart");
@@ -441,6 +447,81 @@ namespace PS7ScriptDesk.Shell
                     "Startup Error",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
+            }
+        }
+
+        private void RequestConsoleWarmStart(string reason)
+        {
+            if (!_terminalHostAttached)
+            {
+                DeveloperDiagnostics.LogInfo(
+                    "Startup",
+                    "Console warm-start request deferred because the terminal host has not been attached yet.",
+                    new Dictionary<string, object?> { ["reason"] = reason });
+                return;
+            }
+
+            var viewModel = ViewModel;
+            if (viewModel is null)
+            {
+                DeveloperDiagnostics.LogInfo(
+                    "Startup",
+                    "Console warm-start request skipped because no view model is available.",
+                    new Dictionary<string, object?> { ["reason"] = reason });
+                return;
+            }
+
+            lock (_consoleWarmStartLock)
+            {
+                if (_consoleWarmStartTask is { IsCompleted: false })
+                {
+                    DeveloperDiagnostics.LogInfo(
+                        "Startup",
+                        "Console warm-start request skipped because a console start is already in progress.",
+                        new Dictionary<string, object?> { ["reason"] = reason });
+                    return;
+                }
+
+                _consoleWarmStartTask = Task.Run(async () =>
+                {
+                    var stopwatch = Stopwatch.StartNew();
+                    var runtime = viewModel.EffectiveRuntimeInfo;
+                    DeveloperDiagnostics.LogAsyncBoundary(
+                        "Startup",
+                        "ConsoleWarmStart",
+                        "Console warm-start launched.",
+                        "AsyncStart",
+                        new Dictionary<string, object?>
+                        {
+                            ["reason"] = reason,
+                            ["runtimeDisplayName"] = runtime?.DisplayName,
+                            ["runtimePath"] = runtime?.ExecutablePath,
+                            ["terminalIsReady"] = _terminalIsReady
+                        });
+                    StartupTimingLogger.Log("MainWindow", $"Console warm-start requested. Reason={reason}; Runtime={runtime?.DisplayName ?? "(none)"}; TerminalReady={_terminalIsReady}.");
+
+                    try
+                    {
+                        await viewModel.EnsureConsoleRestoredAsync().ConfigureAwait(false);
+                        DeveloperDiagnostics.LogOperationStop(
+                            "Startup",
+                            "ConsoleWarmStart",
+                            "Console warm-start completed.",
+                            stopwatch.ElapsedMilliseconds,
+                            new Dictionary<string, object?>
+                            {
+                                ["reason"] = reason,
+                                ["runtimeDisplayName"] = viewModel.EffectiveRuntimeInfo?.DisplayName,
+                                ["terminalIsReady"] = _terminalIsReady
+                            });
+                        StartupTimingLogger.Log("MainWindow", $"Console warm-start completed in {stopwatch.ElapsedMilliseconds} ms. Reason={reason}.");
+                    }
+                    catch (Exception ex)
+                    {
+                        DeveloperDiagnostics.LogException("Startup", ex, $"Console warm-start failed. Reason={reason}.");
+                        StartupTimingLogger.Log("MainWindow", $"Console warm-start failed after {stopwatch.ElapsedMilliseconds} ms. Reason={reason}; Error={ex}");
+                    }
+                });
             }
         }
 
@@ -5103,11 +5184,10 @@ namespace PS7ScriptDesk.Shell
                 RescheduleDiagnosticsForAllEditors();
                 StartEditorMetadataWarmup();
                 UpdateRefreshEditorMetadataCommandAvailability();
-                // If xterm.js is already ready and the runtime just became available,
-                // start the ConPTY session now (handles the race where runtime discovery
-                // completes after the terminal fires its ready event).
-                if (_terminalIsReady)
-                    _ = ViewModel?.EnsureConsoleRestoredAsync();
+                // If runtime discovery changes the selected runtime after startup,
+                // request a background console warm-start/revalidation. The view model
+                // serializes actual session starts so duplicate requests are harmless.
+                RequestConsoleWarmStart("EffectiveRuntimeChanged");
                 return;
             }
 

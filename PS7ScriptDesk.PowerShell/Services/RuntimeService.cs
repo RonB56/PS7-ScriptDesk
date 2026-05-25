@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security;
 using PS7ScriptDesk.Application.Diagnostics;
@@ -34,9 +35,23 @@ namespace PS7ScriptDesk.PowerShell.Services
 
         public RuntimeDiscoveryResult DiscoverRuntimes()
         {
+            return DiscoverRuntimes(requireLaunchValidation: false);
+        }
+
+        public RuntimeDiscoveryResult DiscoverRuntimes(bool requireLaunchValidation)
+        {
             var discoveryStopwatch = Stopwatch.StartNew();
-            StartupTimingLogger.Log("RuntimeService", "DiscoverRuntimes started.");
-            DeveloperDiagnostics.LogOperationStart("Runtime", "DiscoverRuntimes", "PowerShell runtime discovery started.");
+            StartupTimingLogger.Log(
+                "RuntimeService",
+                requireLaunchValidation
+                    ? "DiscoverRuntimes started. Mode=LaunchValidation"
+                    : "DiscoverRuntimes started. Mode=MetadataFastPath");
+            DeveloperDiagnostics.LogOperationStart(
+                "Runtime",
+                "DiscoverRuntimes",
+                requireLaunchValidation
+                    ? "PowerShell runtime discovery started with launch validation required."
+                    : "PowerShell runtime discovery started with metadata fast path allowed.");
 
             var candidateResults = new List<RuntimeDiscoveryCandidateInfo>();
             var detectedRuntimes = new List<PowerShellRuntimeInfo>();
@@ -59,6 +74,23 @@ namespace PS7ScriptDesk.PowerShell.Services
             foreach (var candidate in candidates)
             {
                 StartupTimingLogger.Log("RuntimeService", $"Considering runtime candidate '{candidate.Path}' from {candidate.Source}.");
+
+                if (!requireLaunchValidation)
+                {
+                    var metadataResult = TryBuildRuntimeFromFileMetadata(candidate.Path, candidate.Source);
+                    if (metadataResult.RuntimeInfo is not null)
+                    {
+                        candidateResults.Add(metadataResult.CandidateInfo);
+                        detectedRuntimes.Add(metadataResult.RuntimeInfo);
+                        LogAcceptedCandidate(metadataResult.RuntimeInfo, metadataResult.CandidateInfo);
+                        continue;
+                    }
+                }
+
+                // Unqualified command-resolution candidates such as "pwsh.exe" cannot be
+                // trusted from file metadata because Windows resolves them only at launch
+                // time.  Manual refresh and background safety verification require a real
+                // launch probe so stale/corrupt/blocked pwsh.exe paths are not trusted forever.
                 var probeResult = ProbeRuntimeCandidate(candidate.Path, candidate.Source);
                 candidateResults.Add(probeResult.CandidateInfo);
 
@@ -104,7 +136,9 @@ namespace PS7ScriptDesk.PowerShell.Services
             var finalizedPreferredRuntime = finalizedRuntimes.FirstOrDefault(runtime => runtime.IsPreferred);
             var summaryText = BuildSummaryText(finalizedRuntimes, finalizedPreferredRuntime);
 
-            StartupTimingLogger.Log("RuntimeService", $"DiscoverRuntimes completed in {discoveryStopwatch.ElapsedMilliseconds} ms with {finalizedRuntimes.Count} validated runtime(s).");
+            StartupTimingLogger.Log(
+                "RuntimeService",
+                $"DiscoverRuntimes completed in {discoveryStopwatch.ElapsedMilliseconds} ms with {finalizedRuntimes.Count} validated runtime(s). Mode={(requireLaunchValidation ? "LaunchValidation" : "MetadataFastPath")}");
             DeveloperDiagnostics.LogOperationStop(
                 "Runtime",
                 "DiscoverRuntimes",
@@ -117,7 +151,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                     ["candidateCount"] = candidateResults.Count,
                     ["validatedRuntimeCount"] = finalizedRuntimes.Count,
                     ["preferredRuntimePath"] = finalizedPreferredRuntime?.ExecutablePath,
-                    ["preferredRuntimeVersion"] = finalizedPreferredRuntime?.VersionText
+                    ["preferredRuntimeVersion"] = finalizedPreferredRuntime?.VersionText,
+                    ["requireLaunchValidation"] = requireLaunchValidation
                 });
             return new RuntimeDiscoveryResult(finalizedRuntimes, finalizedPreferredRuntime, summaryText, candidateResults);
         }
@@ -131,6 +166,17 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             var normalizedRuntimePath = NormalizeExecutablePath(executablePath);
             var stopwatch = Stopwatch.StartNew();
+
+            var metadataResult = TryBuildRuntimeFromFileMetadata(normalizedRuntimePath, "Persisted runtime selection");
+            if (metadataResult.RuntimeInfo is not null)
+            {
+                stopwatch.Stop();
+                StartupTimingLogger.Log(
+                    "RuntimeService",
+                    $"Persisted runtime identity resolved from file metadata in {stopwatch.ElapsedMilliseconds} ms: {metadataResult.RuntimeInfo.DisplayName} ({normalizedRuntimePath})");
+                return CreatePreferredRuntimeCopy(metadataResult.RuntimeInfo);
+            }
+
             var probeResult = ProbeRuntimeCandidate(normalizedRuntimePath, "Persisted runtime selection");
             stopwatch.Stop();
 
@@ -144,22 +190,7 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
 
             StartupTimingLogger.Log("RuntimeService", $"Persisted runtime identity resolved in {stopwatch.ElapsedMilliseconds} ms: {probeResult.RuntimeInfo.DisplayName} ({normalizedRuntimePath})");
-            return new PowerShellRuntimeInfo(
-                probeResult.RuntimeInfo.DisplayName,
-                probeResult.RuntimeInfo.Edition,
-                probeResult.RuntimeInfo.VersionText,
-                probeResult.RuntimeInfo.Version,
-                probeResult.RuntimeInfo.Architecture,
-                probeResult.RuntimeInfo.LaunchExecutablePath,
-                probeResult.RuntimeInfo.DiscoverySource,
-                probeResult.RuntimeInfo.IsPowerShell7OrLater,
-                probeResult.RuntimeInfo.IsWindowsPowerShell,
-                isPreferred: probeResult.RuntimeInfo.IsPowerShell7OrLater && probeResult.RuntimeInfo.IsValidated,
-                probeResult.RuntimeInfo.IsValidated,
-                probeResult.RuntimeInfo.IsWindowsAppsAlias,
-                probeResult.RuntimeInfo.ResolvedExecutablePath,
-                probeResult.RuntimeInfo.PsHome,
-                probeResult.RuntimeInfo.ValidationMessage);
+            return CreatePreferredRuntimeCopy(probeResult.RuntimeInfo);
         }
 
         public RuntimeValidationResult ValidateRuntimePath(string executablePath, string source)
@@ -176,6 +207,42 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
 
             return new RuntimeValidationResult(probeResult.RuntimeInfo, probeResult.CandidateInfo);
+        }
+
+        public RuntimeValidationResult ValidateRuntimePathFromFileMetadata(string executablePath, string source)
+        {
+            var metadataResult = TryBuildRuntimeFromFileMetadata(executablePath, source);
+
+            if (metadataResult.RuntimeInfo is null)
+            {
+                LogRejectedCandidate(metadataResult.CandidateInfo);
+            }
+            else
+            {
+                LogAcceptedCandidate(metadataResult.RuntimeInfo, metadataResult.CandidateInfo);
+            }
+
+            return new RuntimeValidationResult(metadataResult.RuntimeInfo, metadataResult.CandidateInfo);
+        }
+
+        private static PowerShellRuntimeInfo CreatePreferredRuntimeCopy(PowerShellRuntimeInfo runtime)
+        {
+            return new PowerShellRuntimeInfo(
+                runtime.DisplayName,
+                runtime.Edition,
+                runtime.VersionText,
+                runtime.Version,
+                runtime.Architecture,
+                runtime.LaunchExecutablePath,
+                runtime.DiscoverySource,
+                runtime.IsPowerShell7OrLater,
+                runtime.IsWindowsPowerShell,
+                isPreferred: runtime.IsPowerShell7OrLater && runtime.IsValidated,
+                runtime.IsValidated,
+                runtime.IsWindowsAppsAlias,
+                runtime.ResolvedExecutablePath,
+                runtime.PsHome,
+                runtime.ValidationMessage);
         }
 
         private static IReadOnlyList<PowerShellRuntimeInfo> ConsolidateDuplicateRuntimes(IReadOnlyList<PowerShellRuntimeInfo> detectedRuntimes)
@@ -332,27 +399,36 @@ namespace PS7ScriptDesk.PowerShell.Services
                 }
             }
 
-            foreach (var candidate in GetCommandResolutionCandidates())
-            {
-                if (seenPaths.Add(candidate.Path))
-                {
-                    yield return candidate;
-                }
-            }
+            var hasExistingQualifiedCandidate = seenPaths.Any(path => !IsUnqualifiedExecutableName(path) && File.Exists(path));
 
-            foreach (var candidate in GetWindowsAppsAliasCandidates())
+            // Only fall back to command resolution/where.exe when no existing direct pwsh.exe
+            // path was found.  If Program Files, registry, PATH, or the configured path already
+            // produced a concrete executable, launching an extra "pwsh.exe" probe only adds
+            // startup latency and usually resolves to the same file anyway.
+            if (!hasExistingQualifiedCandidate)
             {
-                if (seenPaths.Add(candidate.Path))
+                foreach (var candidate in GetCommandResolutionCandidates())
                 {
-                    yield return candidate;
+                    if (seenPaths.Add(candidate.Path))
+                    {
+                        yield return candidate;
+                    }
                 }
-            }
 
-            foreach (var candidate in GetWhereCommandCandidates())
-            {
-                if (seenPaths.Add(candidate.Path))
+                foreach (var candidate in GetWindowsAppsAliasCandidates())
                 {
-                    yield return candidate;
+                    if (seenPaths.Add(candidate.Path))
+                    {
+                        yield return candidate;
+                    }
+                }
+
+                foreach (var candidate in GetWhereCommandCandidates())
+                {
+                    if (seenPaths.Add(candidate.Path))
+                    {
+                        yield return candidate;
+                    }
                 }
             }
         }
@@ -618,6 +694,197 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
         }
 
+        private static RuntimeProbeResult TryBuildRuntimeFromFileMetadata(string executablePath, string discoverySource)
+        {
+            var normalizedRuntimePath = NormalizeExecutablePath(executablePath);
+            var isCommandResolutionCandidate = IsUnqualifiedExecutableName(normalizedRuntimePath);
+            var isWindowsAppsAlias = IsWindowsAppsAliasPath(normalizedRuntimePath);
+            var exists = !string.IsNullOrWhiteSpace(normalizedRuntimePath) &&
+                         !isCommandResolutionCandidate &&
+                         File.Exists(normalizedRuntimePath);
+
+            var fileVersion = string.Empty;
+            var productVersion = string.Empty;
+            TryReadVersionInfo(normalizedRuntimePath, out fileVersion, out productVersion);
+
+            if (!exists)
+            {
+                return RuntimeProbeResult.Failure(
+                    normalizedRuntimePath,
+                    discoverySource,
+                    exists,
+                    isWindowsAppsAlias,
+                    fileVersion,
+                    productVersion,
+                    isCommandResolutionCandidate
+                        ? "Command-resolution candidates require a launch probe."
+                        : "Candidate path did not exist.");
+            }
+
+            if (!string.Equals(Path.GetFileName(normalizedRuntimePath), "pwsh.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return RuntimeProbeResult.Failure(
+                    normalizedRuntimePath,
+                    discoverySource,
+                    exists,
+                    isWindowsAppsAlias,
+                    fileVersion,
+                    productVersion,
+                    "PS7 ScriptDesk requires pwsh.exe from PowerShell 7.0 or newer. powershell.exe is not supported.");
+            }
+
+            if (!TryExtractPowerShellFileVersion(productVersion, fileVersion, out var parsedVersion, out var versionText, out var failureReason))
+            {
+                return RuntimeProbeResult.Failure(
+                    normalizedRuntimePath,
+                    discoverySource,
+                    exists,
+                    isWindowsAppsAlias,
+                    fileVersion,
+                    productVersion,
+                    failureReason);
+            }
+
+            if (parsedVersion.Major < 7)
+            {
+                return RuntimeProbeResult.Failure(
+                    normalizedRuntimePath,
+                    discoverySource,
+                    exists,
+                    isWindowsAppsAlias,
+                    fileVersion,
+                    productVersion,
+                    $"File metadata reported PowerShell version {versionText}; PS7 or later is required.",
+                    edition: "Core",
+                    versionText: versionText,
+                    architecture: InferRuntimeArchitecture(normalizedRuntimePath));
+            }
+
+            var runtimeInfo = CreateRuntimeInfo(
+                normalizedRuntimePath,
+                discoverySource,
+                "Core",
+                versionText,
+                InferRuntimeArchitecture(normalizedRuntimePath),
+                parsedVersion.Major,
+                parsedVersion.Minor,
+                parsedVersion.Build < 0 ? 0 : parsedVersion.Build,
+                parsedVersion.Revision,
+                isValidated: true,
+                resolvedExecutablePath: normalizedRuntimePath,
+                psHome: Path.GetDirectoryName(normalizedRuntimePath) ?? string.Empty,
+                validationMessage: "Trusted from pwsh.exe file metadata; launch verification is deferred until the console starts.");
+
+            StartupTimingLogger.Log(
+                "RuntimeService",
+                $"Runtime built from file metadata: {runtimeInfo.DisplayName} ({normalizedRuntimePath})");
+
+            return RuntimeProbeResult.MetadataSuccess(
+                runtimeInfo,
+                normalizedRuntimePath,
+                discoverySource,
+                exists,
+                isWindowsAppsAlias,
+                fileVersion,
+                productVersion);
+        }
+
+        private static bool TryExtractPowerShellFileVersion(
+            string productVersion,
+            string fileVersion,
+            out Version parsedVersion,
+            out string versionText,
+            out string failureReason)
+        {
+            if (TryParseLeadingVersion(productVersion, out parsedVersion))
+            {
+                versionText = FormatPowerShellVersionText(parsedVersion);
+                failureReason = string.Empty;
+                return true;
+            }
+
+            if (TryParseLeadingVersion(fileVersion, out parsedVersion))
+            {
+                versionText = FormatPowerShellVersionText(parsedVersion);
+                failureReason = string.Empty;
+                return true;
+            }
+
+            parsedVersion = new Version(0, 0, 0);
+            versionText = string.Empty;
+            failureReason = "PowerShell version could not be read from pwsh.exe file metadata.";
+            return false;
+        }
+
+        private static bool TryParseLeadingVersion(string? value, out Version parsedVersion)
+        {
+            parsedVersion = new Version(0, 0, 0);
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            var trimmed = value.Trim();
+            var end = 0;
+            while (end < trimmed.Length && (char.IsDigit(trimmed[end]) || trimmed[end] == '.'))
+            {
+                end++;
+            }
+
+            var versionCandidate = trimmed.Substring(0, end).Trim('.');
+            if (string.IsNullOrWhiteSpace(versionCandidate))
+            {
+                return false;
+            }
+
+            var parts = versionCandidate.Split('.', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2)
+            {
+                return false;
+            }
+
+            if (!int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var major) ||
+                !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var minor))
+            {
+                return false;
+            }
+
+            var build = 0;
+            var revision = -1;
+            if (parts.Length >= 3)
+            {
+                _ = int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out build);
+            }
+
+            if (parts.Length >= 4)
+            {
+                _ = int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out revision);
+            }
+
+            parsedVersion = CreateVersion(major, minor, build, revision);
+            return true;
+        }
+
+        private static string FormatPowerShellVersionText(Version version)
+        {
+            if (version.Build > 0)
+            {
+                return $"{version.Major}.{version.Minor}.{version.Build}";
+            }
+
+            return $"{version.Major}.{version.Minor}";
+        }
+
+        private static string InferRuntimeArchitecture(string executablePath)
+        {
+            if (executablePath.Contains(@"\Program Files (x86)", StringComparison.OrdinalIgnoreCase))
+            {
+                return "X86";
+            }
+
+            return RuntimeInformation.OSArchitecture.ToString();
+        }
+
         private static RuntimeProbeResult ProbeRuntimeCandidate(string executablePath, string discoverySource)
         {
             var normalizedRuntimePath = NormalizeExecutablePath(executablePath);
@@ -665,7 +932,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                     StartInfo = new ProcessStartInfo
                     {
                         FileName = normalizedRuntimePath,
-                        Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$v=$PSVersionTable.PSVersion; $edition=$PSVersionTable.PSEdition; $arch=[System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture; $psHome=$PSHOME; try { $processPath=[System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { $processPath='' }; [Console]::Out.WriteLine($edition + '|' + $v.ToString() + '|' + $v.Major + '|' + $v.Minor + '|' + $v.Build + '|' + $v.Revision + '|' + $arch.ToString() + '|' + $psHome + '|' + $processPath)\"",
+                        Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$v=$PSVersionTable.PSVersion; $edition=$PSVersionTable.PSEdition; $arch=[System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture; $runtimePsHome=$PSHOME; try { $processPath=[System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { $processPath='' }; [Console]::Out.WriteLine($edition + '|' + $v.ToString() + '|' + $v.Major + '|' + $v.Minor + '|' + $v.Build + '|' + $v.Revision + '|' + $arch.ToString() + '|' + $runtimePsHome + '|' + $processPath)\"",
                         UseShellExecute = false,
                         RedirectStandardOutput = true,
                         RedirectStandardError = true,
@@ -1213,6 +1480,39 @@ namespace PS7ScriptDesk.PowerShell.Services
                         runtimeInfo.PsHome,
                         stdoutSummary,
                         stderrSummary,
+                        fileVersion,
+                        productVersion,
+                        string.Empty));
+            }
+
+            public static RuntimeProbeResult MetadataSuccess(
+                PowerShellRuntimeInfo runtimeInfo,
+                string candidatePath,
+                string source,
+                bool exists,
+                bool isWindowsAppsAlias,
+                string fileVersion,
+                string productVersion)
+            {
+                return new RuntimeProbeResult(
+                    runtimeInfo,
+                    new RuntimeDiscoveryCandidateInfo(
+                        candidatePath,
+                        source,
+                        exists,
+                        isWindowsAppsAlias,
+                        validationAttempted: false,
+                        launchSucceeded: false,
+                        validationSucceeded: true,
+                        timedOut: false,
+                        exitCode: null,
+                        runtimeInfo.Edition,
+                        runtimeInfo.VersionText,
+                        runtimeInfo.Architecture,
+                        runtimeInfo.ResolvedExecutablePath,
+                        runtimeInfo.PsHome,
+                        "File metadata fast path",
+                        string.Empty,
                         fileVersion,
                         productVersion,
                         string.Empty));

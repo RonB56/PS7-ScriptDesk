@@ -1,4 +1,4 @@
-using PS7ScriptDesk.Application.Interfaces;
+﻿using PS7ScriptDesk.Application.Interfaces;
 using Forms = System.Windows.Forms;
 
 namespace PS7ScriptDesk.Shell.Services
@@ -63,6 +63,22 @@ namespace PS7ScriptDesk.Shell.Services
                 title,
                 System.Windows.MessageBoxButton.OK,
                 System.Windows.MessageBoxImage.Warning);
+        }
+
+
+        public string? ShowOpenPowerShellExecutableDialog()
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Select PowerShell 7 pwsh.exe",
+                Filter = "PowerShell 7 executable (pwsh.exe)|pwsh.exe|Executable files (*.exe)|*.exe|All files (*.*)|*.*",
+                CheckFileExists = true,
+                CheckPathExists = true,
+                Multiselect = false,
+                FileName = "pwsh.exe"
+            };
+
+            return dialog.ShowDialog() == true ? dialog.FileName : null;
         }
 
         public string? ShowOpenFolderDialog()

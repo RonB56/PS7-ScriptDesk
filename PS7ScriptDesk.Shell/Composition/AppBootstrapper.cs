@@ -10,7 +10,7 @@ namespace PS7ScriptDesk.Shell.Composition
 {
     public static class AppBootstrapper
     {
-        public static MainWindow CreateMainWindow(ApplicationSettingsService applicationSettingsService, ApplicationSettings applicationSettings)
+        public static MainWindow CreateMainWindow(ApplicationSettingsService applicationSettingsService, ApplicationSettings applicationSettings, PowerShellRuntimeInfo? startupRuntimeInfo)
         {
             var workspaceService = new WorkspaceService();
             var fileDocumentService = new FileDocumentService();
@@ -37,7 +37,8 @@ namespace PS7ScriptDesk.Shell.Composition
                 userPromptService,
                 liveConsoleService,
                 exeExportService,
-                applicationSettings);
+                applicationSettings,
+                startupRuntimeInfo);
 
             var window = new MainWindow(applicationSettingsService, applicationSettings)
             {

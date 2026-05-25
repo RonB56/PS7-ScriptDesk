@@ -60,7 +60,7 @@ namespace PS7ScriptDesk.Shell
 
             try
             {
-                var discoveryResult = _runtimeService.DiscoverRuntimes();
+                var discoveryResult = _runtimeService.DiscoverRuntimes(requireLaunchValidation: true);
                 if (discoveryResult.PreferredRuntime is not null)
                 {
                     SelectedRuntime = discoveryResult.PreferredRuntime;

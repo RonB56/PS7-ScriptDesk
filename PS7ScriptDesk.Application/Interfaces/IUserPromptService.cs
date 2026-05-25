@@ -6,6 +6,7 @@
         string? ShowSaveFileDialog(string suggestedFileName);
         string? ShowSaveExecutableDialog(string suggestedFileName);
         string? ShowOpenFolderDialog();
+        string? ShowOpenPowerShellExecutableDialog();
         void ShowWarningMessage(string title, string message);
     }
 }

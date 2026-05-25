@@ -114,7 +114,7 @@ namespace PS7ScriptDesk.Shell
             applicationSettings.SelectedRuntimeExecutablePath = startupRuntime.LaunchExecutablePath;
             SafeSaveSettings(applicationSettingsService, applicationSettings, startupRuntime);
 
-            var shellWindow = AppBootstrapper.CreateMainWindow(applicationSettingsService, applicationSettings);
+            var shellWindow = AppBootstrapper.CreateMainWindow(applicationSettingsService, applicationSettings, startupRuntime);
             MainWindow = shellWindow;
             AppLogger.Info("App", "Main window created.");
             DeveloperDiagnostics.LogInfo("Startup", "Main window created by AppBootstrapper.");
@@ -269,7 +269,56 @@ namespace PS7ScriptDesk.Shell
                 operationId: operationId);
 
             var runtimeService = new RuntimeService(applicationSettings.SelectedRuntimeExecutablePath);
-            var discoveryResult = runtimeService.DiscoverRuntimes();
+            var savedRuntimePath = applicationSettings.SelectedRuntimeExecutablePath;
+
+            // Fast path: when the previous session already saved a valid pwsh.exe path,
+            // validate only that executable instead of performing a full runtime scan.
+            // Full discovery can probe PATH, registry, WindowsApps aliases, and where.exe,
+            // which is useful when no valid runtime is known but unnecessarily delays
+            // normal startup on machines that already have a validated runtime saved.
+            if (!string.IsNullOrWhiteSpace(savedRuntimePath))
+            {
+                var savedRuntimeValidation = runtimeService.ValidateRuntimePathFromFileMetadata(savedRuntimePath, "Saved startup runtime metadata fast path");
+                var savedRuntime = savedRuntimeValidation.RuntimeInfo;
+                if (savedRuntime is not null && savedRuntime.IsPowerShell7OrLater && savedRuntime.IsValidated)
+                {
+                    StartupTimingLogger.Log(
+                        "App",
+                        $"Startup runtime accepted from file metadata without launching pwsh.exe: {savedRuntime.DisplayName} ({savedRuntime.LaunchExecutablePath}).");
+                    AppLogger.Info(
+                        "App",
+                        $"Startup runtime metadata fast-path selected: {savedRuntime.DisplayName}. DisplayPath='{savedRuntime.ExecutablePath}', LaunchPath='{savedRuntime.LaunchExecutablePath}', Version='{savedRuntime.VersionText}', PSHOME='{savedRuntime.PsHome}'.");
+                    DeveloperDiagnostics.LogDecision(
+                        "Startup",
+                        "ResolveStartupRuntime",
+                        "Saved startup runtime was accepted from pwsh.exe file metadata without launching PowerShell during startup.",
+                        "TrustedSavedRuntimeMetadata",
+                        new Dictionary<string, object?>
+                        {
+                            ["runtimePath"] = savedRuntime.LaunchExecutablePath,
+                            ["displayPath"] = savedRuntime.ExecutablePath,
+                            ["runtimeVersion"] = savedRuntime.VersionText,
+                            ["savedRuntimePath"] = savedRuntimePath
+                        });
+                    return savedRuntime;
+                }
+
+                AppLogger.Info(
+                    "App",
+                    $"Saved startup runtime metadata fast-path was rejected. SavedPath='{savedRuntimePath}', Reason='{savedRuntimeValidation.CandidateInfo.FailureReason}'. Falling back to full discovery.");
+                DeveloperDiagnostics.LogDecision(
+                    "Startup",
+                    "ResolveStartupRuntime",
+                    "Saved startup runtime could not be trusted from file metadata. Falling back to full discovery.",
+                    "SavedRuntimeMetadataRejected",
+                    new Dictionary<string, object?>
+                    {
+                        ["savedRuntimePath"] = savedRuntimePath,
+                        ["failureReason"] = savedRuntimeValidation.CandidateInfo.FailureReason
+                    });
+            }
+
+            var discoveryResult = runtimeService.DiscoverRuntimes(requireLaunchValidation: true);
             var preferredRuntime = discoveryResult.PreferredRuntime;
             AppLogger.Info(
                 "App",
