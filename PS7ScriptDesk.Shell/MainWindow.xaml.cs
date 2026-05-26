@@ -3942,11 +3942,30 @@ namespace PS7ScriptDesk.Shell
                         return;
                     }
 
-                    TraceDebugShell("DebugSession.BreakpointHit", $"scriptPathPresent={!string.IsNullOrWhiteSpace(scriptPath)}; lineNumber={lineNumber}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
+                    var currentState = debugSession.CurrentState;
+                    TraceDebugShell("DebugSession.BreakpointHit", $"scriptPathPresent={!string.IsNullOrWhiteSpace(scriptPath)}; lineNumber={lineNumber}; sessionState={currentState}; {DescribeDebugUiState()}");
+                    if (currentState != DebugSessionState.Paused)
+                    {
+                        TraceDebugShell("DebugSession.BreakpointHit", $"Ignored stale breakpoint notification because the session is no longer paused; currentState={currentState}; {DescribeDebugUiState()}");
+                        DeveloperDiagnostics.LogDecision(
+                            "Debugger",
+                            "BreakpointHit",
+                            "Breakpoint hit notification was ignored because the active debug session was no longer paused.",
+                            "IgnoredStaleBreakpointHit",
+                            new Dictionary<string, object?>
+                            {
+                                ["scriptPath"] = scriptPath,
+                                ["lineNumber"] = lineNumber,
+                                ["currentState"] = currentState.ToString()
+                            });
+                        RefreshDebugCommandAvailability(false);
+                        return;
+                    }
+
                     DeveloperDiagnostics.LogStateTransition(
                         "Debugger",
                         "BreakpointHit",
-                        debugSession.CurrentState.ToString(),
+                        currentState.ToString(),
                         DebugSessionState.Paused.ToString(),
                         "Breakpoint hit received from debug session.",
                         new Dictionary<string, object?>
@@ -4363,20 +4382,38 @@ namespace PS7ScriptDesk.Shell
 
         private void RefreshDebugCommandAvailability(bool paused)
         {
-            var hasSession = _debugSession is not null && _debugSession.CurrentState != DebugSessionState.Stopped;
+            var sessionState = _debugSession?.CurrentState;
+            var hasSession = _debugSession is not null && sessionState != DebugSessionState.Stopped;
+            var isPaused = hasSession && sessionState == DebugSessionState.Paused;
             var canStart = !hasSession && CanStartDebugSession();
+
+            if (paused != isPaused)
+            {
+                TraceDebugShell("RefreshDebugCommandAvailability", $"Ignoring stale paused argument; pausedArgument={paused}; actualPaused={isPaused}; sessionState={sessionState?.ToString() ?? "(null)"}; {DescribeDebugUiState()}");
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "RefreshDebugCommandAvailability",
+                    "Debug command availability used the active session state instead of a stale caller-supplied paused value.",
+                    "UseActualDebugSessionState",
+                    new Dictionary<string, object?>
+                    {
+                        ["pausedArgument"] = paused,
+                        ["actualPaused"] = isPaused,
+                        ["sessionState"] = sessionState?.ToString()
+                    });
+            }
 
             StartDebugMenuItem.IsEnabled  = canStart;
             DebugToggleButton.IsEnabled   = canStart || hasSession;
-            StepIntoMenuItem.IsEnabled    = hasSession && paused;
-            StepOverMenuItem.IsEnabled    = hasSession && paused;
-            StepOutMenuItem.IsEnabled     = hasSession && paused;
-            ContinueMenuItem.IsEnabled    = hasSession && paused;
+            StepIntoMenuItem.IsEnabled    = isPaused;
+            StepOverMenuItem.IsEnabled    = isPaused;
+            StepOutMenuItem.IsEnabled     = isPaused;
+            ContinueMenuItem.IsEnabled    = isPaused;
             StopDebugMenuItem.IsEnabled   = hasSession;
-            StepIntoButton.IsEnabled      = hasSession && paused;
-            StepOverButton.IsEnabled      = hasSession && paused;
-            StepOutButton.IsEnabled       = hasSession && paused;
-            ContinueButton.IsEnabled      = hasSession && paused;
+            StepIntoButton.IsEnabled      = isPaused;
+            StepOverButton.IsEnabled      = isPaused;
+            StepOutButton.IsEnabled       = isPaused;
+            ContinueButton.IsEnabled      = isPaused;
 
             // Keep the ViewModel in sync so CanRunScript() can block the Run button
             // while a debug session is active.
@@ -4385,7 +4422,7 @@ namespace PS7ScriptDesk.Shell
                 ViewModel.IsDebugSessionActive = hasSession;
             }
 
-            TraceDebugShell("RefreshDebugCommandAvailability", $"pausedArgument={paused}; hasSession={hasSession}; canStart={canStart}; {DescribeDebugUiState()}");
+            TraceDebugShell("RefreshDebugCommandAvailability", $"pausedArgument={paused}; actualPaused={isPaused}; sessionState={sessionState?.ToString() ?? "(null)"}; hasSession={hasSession}; canStart={canStart}; {DescribeDebugUiState()}");
             if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseUiEnabled())
             {
                 DeveloperDiagnostics.LogDebug(
@@ -4393,7 +4430,9 @@ namespace PS7ScriptDesk.Shell
                     "Debug command availability refreshed.",
                     new Dictionary<string, object?>
                     {
-                        ["paused"] = paused,
+                        ["pausedArgument"] = paused,
+                        ["actualPaused"] = isPaused,
+                        ["sessionState"] = sessionState?.ToString(),
                         ["hasSession"] = hasSession,
                         ["canStart"] = canStart,
                         ["startEnabled"] = StartDebugMenuItem.IsEnabled,
@@ -4448,15 +4487,31 @@ namespace PS7ScriptDesk.Shell
 
         private void HandleDebugSessionStateChanged(IDebugSession debugSession, DebugSessionState state)
         {
+            var actualState = debugSession.CurrentState;
             var currentSessionState = _debugSession?.CurrentState.ToString() ?? "(null)";
-            TraceDebugShell("HandleDebugSessionStateChanged", $"Received state change; incomingState={state}; sessionMatches={ReferenceEquals(_debugSession, debugSession)}; currentSessionState={currentSessionState}; {DescribeDebugUiState()}");
-            DeveloperDiagnostics.LogStateTransition("Debugger", "DebugSessionStateChanged", currentSessionState, state.ToString(), "Debug session state changed.");
+            TraceDebugShell("HandleDebugSessionStateChanged", $"Received state change; incomingState={state}; actualState={actualState}; sessionMatches={ReferenceEquals(_debugSession, debugSession)}; currentSessionState={currentSessionState}; {DescribeDebugUiState()}");
+            DeveloperDiagnostics.LogStateTransition("Debugger", "DebugSessionStateChanged", currentSessionState, actualState.ToString(), "Debug session state changed.");
             if (!ReferenceEquals(_debugSession, debugSession))
             {
                 return;
             }
 
-            if (state == DebugSessionState.Stopped)
+            if (state != actualState)
+            {
+                TraceDebugShell("HandleDebugSessionStateChanged", $"Using current session state instead of stale queued state event; incomingState={state}; actualState={actualState}; {DescribeDebugUiState()}");
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "HandleDebugSessionStateChanged",
+                    "A queued debug state notification was stale by the time it reached the UI thread, so the shell used the session's current state.",
+                    "UseActualDebugSessionState",
+                    new Dictionary<string, object?>
+                    {
+                        ["incomingState"] = state.ToString(),
+                        ["actualState"] = actualState.ToString()
+                    });
+            }
+
+            if (actualState == DebugSessionState.Stopped)
             {
                 TearDownDebugSession(DebugTeardownReason.SessionStoppedState);
                 if (ViewModel is not null)
@@ -4468,7 +4523,7 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            var isPaused = state == DebugSessionState.Paused;
+            var isPaused = actualState == DebugSessionState.Paused;
             RefreshDebugCommandAvailability(isPaused);
 
             if (isPaused && ViewModel is not null)
@@ -4478,7 +4533,7 @@ namespace PS7ScriptDesk.Shell
             }
             else
             {
-                ClearLiveDebugVariableCache($"Debug session state changed to {state}");
+                ClearLiveDebugVariableCache($"Debug session state changed to {actualState}");
             }
         }
 
@@ -8120,6 +8175,28 @@ namespace PS7ScriptDesk.Shell
                         return;
                     }
 
+                    if (!HasActiveDebugCurrentLocation())
+                    {
+                        var fallbackFrame = callStack.FirstOrDefault(frame => !string.IsNullOrWhiteSpace(frame.ScriptName) && frame.LineNumber > 0);
+                        if (fallbackFrame is not null)
+                        {
+                            TraceDebugShell("RefreshDebugPanelsAsync", $"Applying fallback source location from call stack; reason={reason}; refreshVersion={refreshVersion}; scriptPresent={!string.IsNullOrWhiteSpace(fallbackFrame.ScriptName)}; lineNumber={fallbackFrame.LineNumber}; {DescribeDebugUiState()}");
+                            DeveloperDiagnostics.LogDecision(
+                                "Debugger",
+                                "RefreshDebugPanelsAsync",
+                                "Debug source location was recovered from the call stack because no breakpoint location had been applied yet.",
+                                "ApplyCallStackFallbackLocation",
+                                new Dictionary<string, object?>
+                                {
+                                    ["reason"] = reason,
+                                    ["refreshVersion"] = refreshVersion,
+                                    ["scriptName"] = fallbackFrame.ScriptName,
+                                    ["lineNumber"] = fallbackFrame.LineNumber
+                                });
+                            SetDebugCurrentLocation(fallbackFrame.ScriptName, fallbackFrame.LineNumber);
+                        }
+                    }
+
                     ApplyDebugVariablesItemsSource(filteredVariables, reason, refreshVersion);
                     ApplyDebugCallStackItemsSource(callStack, reason, refreshVersion);
                     UpdateLiveDebugVariableCache(filteredVariables, reason, refreshVersion);
@@ -8170,12 +8247,12 @@ namespace PS7ScriptDesk.Shell
                 return false;
             }
 
-            if (!snapshot.HasCurrentDebugLocation)
-            {
-                reason = "No active paused source location is available yet.";
-                return false;
-            }
-
+            // Do not require an editor source-location highlight before refreshing the
+            // Variables and Call Stack panes. Some PowerShell hosts/versions can pause
+            // successfully without emitting a parseable "At <script>:<line>" line before
+            // the first UI refresh. In that case the debugger controls and panes should
+            // still become usable, and the call stack refresh below can provide a fallback
+            // source location.
             reason = "Ready";
             return true;
         }

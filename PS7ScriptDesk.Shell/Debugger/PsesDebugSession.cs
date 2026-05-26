@@ -26,10 +26,26 @@ namespace PS7ScriptDesk.Shell.Debug
         private const string VariablesEndMarker = "__PSS_VARIABLES_END__";
         private const string CallStackStartMarker = "__PSS_CALLSTACK_BEGIN__";
         private const string CallStackEndMarker = "__PSS_CALLSTACK_END__";
+        private const int DebugRequestTimeoutSeconds = 20;
+        private const int OrphanedRequestOutputSuppressionMilliseconds = 30000;
+        private static readonly string[] InternalRequestStartMarkers =
+        {
+            CurrentFrameStartMarker,
+            VariablesStartMarker,
+            CallStackStartMarker
+        };
+        private static readonly string[] InternalRequestEndMarkers =
+        {
+            CurrentFrameEndMarker,
+            VariablesEndMarker,
+            CallStackEndMarker
+        };
         private static readonly Regex DebugBreakpointOutputRegex = new(@"^Hit .+ breakpoint on ", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        private static readonly Regex DebugLocationOutputRegex = new(@"^At\s+.+(?:(?:\s+line\s+\d+\s+char:\d+)|(?::\d+\s+char:\d+))", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        private static readonly Regex DebugLocationColonCaptureRegex = new(@"^At\s+(?<path>.+):(?<line>\d+)\s+char:\d+", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        private static readonly Regex DebugLocationWordCaptureRegex = new(@"^At\s+(?<path>.+)\s+line\s+(?<line>\d+)\s+char:\d+", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex DebugLocationOutputRegex = new(@"^At\s+.+(?:(?:\s+line\s+\d+\s+char:\s*\d+)|(?::\d+\s+char:\s*\d+))", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex DebugLocationColonCaptureRegex = new(@"^At\s+(?<path>.+):(?<line>\d+)\s+char:\s*\d+", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex DebugLocationWordCaptureRegex = new(@"^At\s+(?<path>.+)\s+line\s+(?<line>\d+)\s+char:\s*\d+", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex AnsiControlSequenceRegex = new(@"\x1B\[[0-?]*[ -/]*[@-~]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex OscControlSequenceRegex = new(@"\x1B\].*?(\x07|\x1B\\)", RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -56,6 +72,8 @@ namespace PS7ScriptDesk.Shell.Debug
         private bool _sessionEndedRaised;
         private bool _disposed;
         private long _lastLocationNotificationTicks;
+        private string? _orphanedRequestOutputEndMarker;
+        private long _orphanedRequestOutputSuppressUntilTicks;
 
         public DebugSessionState CurrentState { get; private set; } = DebugSessionState.Stopped;
 
@@ -140,6 +158,8 @@ namespace PS7ScriptDesk.Shell.Debug
                 _suppressNextDebugPromptCount = 0;
                 _currentFrameQueryInProgress = 0;
                 _lastLocationNotificationTicks = 0;
+                _orphanedRequestOutputEndMarker = null;
+                _orphanedRequestOutputSuppressUntilTicks = 0;
                 _capturingBreakpointPayload = false;
                 _breakpointPayloadBuffer.Clear();
                 SetCurrentState(DebugSessionState.Starting);
@@ -287,6 +307,8 @@ namespace PS7ScriptDesk.Shell.Debug
                 _suppressNextDebugPromptCount = 0;
                 _currentFrameQueryInProgress = 0;
                 _lastLocationNotificationTicks = 0;
+                _orphanedRequestOutputEndMarker = null;
+                _orphanedRequestOutputSuppressUntilTicks = 0;
                 SetCurrentState(DebugSessionState.Stopped);
             }
 
@@ -427,9 +449,10 @@ namespace PS7ScriptDesk.Shell.Debug
             bool suppressNextDebugPrompt,
             CancellationToken cancellationToken)
         {
-            Trace("SendRequestAsync", $"Entry; startMarker='{startMarker}'; endMarker='{endMarker}'; suppressNextDebugPrompt={suppressNextDebugPrompt}; {DescribeSessionState()}");
+            Trace("SendRequestAsync", $"Entry; startMarker='{startMarker}'; endMarker='{endMarker}'; suppressNextDebugPrompt={suppressNextDebugPrompt}; timeoutSeconds={DebugRequestTimeoutSeconds}; {DescribeSessionState()}");
             await _requestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             var request = new ActiveRequest(startMarker, endMarker);
+            var completed = false;
 
             try
             {
@@ -450,9 +473,10 @@ namespace PS7ScriptDesk.Shell.Debug
 
                 await SendCommandAsync(command, cancellationToken).ConfigureAwait(false);
 
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(DebugRequestTimeoutSeconds));
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
                 var payload = await request.CompletionSource.Task.WaitAsync(linked.Token).ConfigureAwait(false);
+                completed = true;
                 Trace("SendRequestAsync", $"Completed; startMarker='{startMarker}'; endMarker='{endMarker}'; payloadLength={payload.Length}; {DescribeSessionState()}");
                 return payload;
             }
@@ -464,6 +488,11 @@ namespace PS7ScriptDesk.Shell.Debug
                     {
                         _activeRequest = null;
                     }
+                }
+
+                if (!completed)
+                {
+                    BeginOrphanedRequestOutputSuppression(endMarker, $"Request did not complete normally; startMarker='{startMarker}'");
                 }
 
                 _requestGate.Release();
@@ -541,15 +570,20 @@ namespace PS7ScriptDesk.Shell.Debug
 
         private void ProcessIncomingLine(string line, bool isErrorStream)
         {
-            Trace("ProcessIncomingLine", $"Line received; isErrorStream={isErrorStream}; lineLength={line.Length}; classification={ClassifyLine(line)}; {DescribeSessionState()}");
+            var normalizedLine = NormalizeDebuggerOutputLine(line);
+            Trace("ProcessIncomingLine", $"Line received; isErrorStream={isErrorStream}; lineLength={line.Length}; normalizedLength={normalizedLine.Length}; classification={ClassifyLine(normalizedLine)}; {DescribeSessionState()}");
             if (isErrorStream)
             {
-                TryHandleObservedDebugPauseOutput(line, "stderr");
+                if (TryHandleObservedDebugPauseOutput(normalizedLine, "stderr"))
+                {
+                    return;
+                }
+
                 PublishOutputLine(line);
                 return;
             }
 
-            if (string.Equals(line.Trim(), ReadyMarker, StringComparison.Ordinal))
+            if (IsMarkerLine(normalizedLine, ReadyMarker))
             {
                 TaskCompletionSource<bool>? readyCompletionSource;
                 lock (_syncRoot)
@@ -563,13 +597,13 @@ namespace PS7ScriptDesk.Shell.Debug
                 return;
             }
 
-            if (line.Contains(SessionEndedMarker, StringComparison.Ordinal))
+            if (LineContainsMarker(normalizedLine, SessionEndedMarker))
             {
                 Trace("ProcessIncomingLine", $"Session-ended marker observed in line; lineLength={line.Length}; processId={TryGetProcessId(_process)}");
                 HandleSessionEndedMarker();
 
-                var remaining = line.Replace(SessionEndedMarker, string.Empty, StringComparison.Ordinal).Trim();
-                if (!string.IsNullOrWhiteSpace(remaining))
+                var remaining = RemoveMarker(normalizedLine, SessionEndedMarker).Trim();
+                if (!string.IsNullOrWhiteSpace(remaining) && !IsInternalDebuggerNoiseLine(remaining))
                 {
                     PublishOutputLine(remaining);
                 }
@@ -577,16 +611,17 @@ namespace PS7ScriptDesk.Shell.Debug
                 return;
             }
 
-            if (string.Equals(line, BreakpointHitStartMarker, StringComparison.Ordinal))
+            if (LineContainsMarker(normalizedLine, BreakpointHitStartMarker))
             {
                 _capturingBreakpointPayload = true;
                 _breakpointPayloadBuffer.Clear();
+                Trace("ProcessIncomingLine", "Breakpoint payload capture started.");
                 return;
             }
 
             if (_capturingBreakpointPayload)
             {
-                if (string.Equals(line, BreakpointHitEndMarker, StringComparison.Ordinal))
+                if (LineContainsMarker(normalizedLine, BreakpointHitEndMarker))
                 {
                     _capturingBreakpointPayload = false;
                     HandleBreakpointPayload(_breakpointPayloadBuffer.ToString());
@@ -594,7 +629,7 @@ namespace PS7ScriptDesk.Shell.Debug
                     return;
                 }
 
-                _breakpointPayloadBuffer.AppendLine(line);
+                _breakpointPayloadBuffer.AppendLine(normalizedLine);
                 return;
             }
 
@@ -606,40 +641,192 @@ namespace PS7ScriptDesk.Shell.Debug
 
             if (activeRequest is not null)
             {
-                if (!activeRequest.IsCapturing && string.Equals(line, activeRequest.StartMarker, StringComparison.Ordinal))
+                if (!activeRequest.IsCapturing && LineContainsMarker(normalizedLine, activeRequest.StartMarker))
                 {
                     activeRequest.IsCapturing = true;
                     activeRequest.Capture.Clear();
+                    Trace("ProcessIncomingLine", $"Active request capture started; startMarker='{activeRequest.StartMarker}'.");
                     return;
                 }
 
                 if (activeRequest.IsCapturing)
                 {
-                    if (string.Equals(line, activeRequest.EndMarker, StringComparison.Ordinal))
+                    if (LineContainsMarker(normalizedLine, activeRequest.EndMarker))
                     {
                         activeRequest.IsCapturing = false;
                         activeRequest.CompletionSource.TrySetResult(activeRequest.Capture.ToString().Trim());
+                        Trace("ProcessIncomingLine", $"Active request capture completed; endMarker='{activeRequest.EndMarker}'; payloadLength={activeRequest.Capture.Length}.");
                         return;
                     }
 
-                    activeRequest.Capture.AppendLine(line);
+                    if (!IsInternalDebuggerNoiseLine(normalizedLine))
+                    {
+                        activeRequest.Capture.AppendLine(normalizedLine);
+                    }
+
                     return;
                 }
             }
 
-            if (string.Equals(line, DebugPromptMarker, StringComparison.Ordinal))
+            if (TrySuppressInternalRequestOutput(normalizedLine))
+            {
+                return;
+            }
+
+            if (LineContainsMarker(normalizedLine, DebugPromptMarker))
             {
                 HandleDebugPromptMarker();
                 return;
             }
 
-            if (line.Length == 0)
+            if (normalizedLine.Length == 0)
             {
                 return;
             }
 
-            TryHandleObservedDebugPauseOutput(line, "stdout");
+            if (TryHandleObservedDebugPauseOutput(normalizedLine, "stdout"))
+            {
+                return;
+            }
+
             PublishOutputLine(line);
+        }
+
+        private bool TrySuppressInternalRequestOutput(string normalizedLine)
+        {
+            if (string.IsNullOrWhiteSpace(normalizedLine))
+            {
+                return false;
+            }
+
+            string? orphanedEndMarker;
+            var now = Stopwatch.GetTimestamp();
+            lock (_syncRoot)
+            {
+                orphanedEndMarker = _orphanedRequestOutputEndMarker;
+                if (!string.IsNullOrWhiteSpace(orphanedEndMarker) && now > _orphanedRequestOutputSuppressUntilTicks)
+                {
+                    Trace("TrySuppressInternalRequestOutput", $"Expired orphaned request output suppression; endMarker='{orphanedEndMarker}'.");
+                    _orphanedRequestOutputEndMarker = null;
+                    _orphanedRequestOutputSuppressUntilTicks = 0;
+                    orphanedEndMarker = null;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(orphanedEndMarker))
+            {
+                if (LineContainsMarker(normalizedLine, orphanedEndMarker))
+                {
+                    lock (_syncRoot)
+                    {
+                        if (string.Equals(_orphanedRequestOutputEndMarker, orphanedEndMarker, StringComparison.Ordinal))
+                        {
+                            _orphanedRequestOutputEndMarker = null;
+                            _orphanedRequestOutputSuppressUntilTicks = 0;
+                        }
+                    }
+
+                    Trace("TrySuppressInternalRequestOutput", $"Suppressed orphaned request end marker; endMarker='{orphanedEndMarker}'.");
+                    return true;
+                }
+
+                Trace("TrySuppressInternalRequestOutput", $"Suppressed orphaned request output; waitingForEndMarker='{orphanedEndMarker}'; classification={ClassifyLine(normalizedLine)}.");
+                return true;
+            }
+
+            for (var index = 0; index < InternalRequestStartMarkers.Length; index++)
+            {
+                var startMarker = InternalRequestStartMarkers[index];
+                if (LineContainsMarker(normalizedLine, startMarker))
+                {
+                    var endMarker = InternalRequestEndMarkers[index];
+                    BeginOrphanedRequestOutputSuppression(endMarker, $"Observed internal request start marker without an active request; startMarker='{startMarker}'");
+                    Trace("TrySuppressInternalRequestOutput", $"Suppressed unmatched internal request start marker; startMarker='{startMarker}'; endMarker='{endMarker}'.");
+                    return true;
+                }
+            }
+
+            foreach (var endMarker in InternalRequestEndMarkers)
+            {
+                if (LineContainsMarker(normalizedLine, endMarker))
+                {
+                    Trace("TrySuppressInternalRequestOutput", $"Suppressed unmatched internal request end marker; endMarker='{endMarker}'.");
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void BeginOrphanedRequestOutputSuppression(string endMarker, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(endMarker))
+            {
+                return;
+            }
+
+            var suppressUntil = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (OrphanedRequestOutputSuppressionMilliseconds / 1000.0));
+            lock (_syncRoot)
+            {
+                _orphanedRequestOutputEndMarker = endMarker;
+                _orphanedRequestOutputSuppressUntilTicks = suppressUntil;
+            }
+
+            Trace("BeginOrphanedRequestOutputSuppression", $"Started; endMarker='{endMarker}'; durationMs={OrphanedRequestOutputSuppressionMilliseconds}; reason={reason}; {DescribeSessionState()}");
+            DeveloperDiagnostics.LogDecision(
+                "Debugger",
+                "DebugRequestOutputSuppression",
+                "Internal debug request output suppression was started to prevent helper JSON/markers from reaching the user console.",
+                "SuppressOrphanedInternalRequestOutput",
+                new Dictionary<string, object?>
+                {
+                    ["endMarker"] = endMarker,
+                    ["durationMs"] = OrphanedRequestOutputSuppressionMilliseconds,
+                    ["reason"] = reason
+                });
+        }
+
+        private static bool IsInternalDebuggerNoiseLine(string normalizedLine)
+        {
+            if (string.IsNullOrWhiteSpace(normalizedLine))
+            {
+                return true;
+            }
+
+            if (LineContainsMarker(normalizedLine, DebugPromptMarker) ||
+                LineContainsMarker(normalizedLine, CurrentFrameStartMarker) ||
+                LineContainsMarker(normalizedLine, CurrentFrameEndMarker) ||
+                LineContainsMarker(normalizedLine, VariablesStartMarker) ||
+                LineContainsMarker(normalizedLine, VariablesEndMarker) ||
+                LineContainsMarker(normalizedLine, CallStackStartMarker) ||
+                LineContainsMarker(normalizedLine, CallStackEndMarker) ||
+                LineContainsMarker(normalizedLine, BreakpointHitStartMarker) ||
+                LineContainsMarker(normalizedLine, BreakpointHitEndMarker))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsMarkerLine(string normalizedLine, string marker)
+        {
+            return string.Equals(normalizedLine, marker, StringComparison.Ordinal) ||
+                   LineContainsMarker(normalizedLine, marker);
+        }
+
+        private static bool LineContainsMarker(string normalizedLine, string marker)
+        {
+            return !string.IsNullOrEmpty(normalizedLine) &&
+                   !string.IsNullOrEmpty(marker) &&
+                   normalizedLine.IndexOf(marker, StringComparison.Ordinal) >= 0;
+        }
+
+        private static string RemoveMarker(string normalizedLine, string marker)
+        {
+            return string.IsNullOrEmpty(normalizedLine)
+                ? string.Empty
+                : normalizedLine.Replace(marker, string.Empty, StringComparison.Ordinal);
         }
 
         private void PublishOutputLine(string line)
@@ -664,8 +851,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 _ignoreNextDebugPrompt = false;
                 SetCurrentState(DebugSessionState.Paused);
                 AppLogger.Info("Debug", "DebugPausedDetected via prompt marker.");
-                Trace("HandleDebugPromptMarker", $"Ignored-next prompt consumed; wasPaused={wasPaused}; {DescribeSessionState()}");
-                QueueCurrentFrameQueryIfNoRecentLocation("ignored-next prompt marker");
+                Trace("HandleDebugPromptMarker", $"Ignored-next prompt consumed without scheduling another helper query; wasPaused={wasPaused}; {DescribeSessionState()}");
                 return;
             }
 
@@ -674,8 +860,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 _suppressNextDebugPromptCount--;
                 SetCurrentState(DebugSessionState.Paused);
                 AppLogger.Info("Debug", "DebugPausedDetected via suppressed prompt marker.");
-                Trace("HandleDebugPromptMarker", $"Suppressed prompt consumed; wasPaused={wasPaused}; {DescribeSessionState()}");
-                QueueCurrentFrameQueryIfNoRecentLocation("suppressed prompt marker");
+                Trace("HandleDebugPromptMarker", $"Suppressed helper prompt consumed without scheduling another helper query; wasPaused={wasPaused}; {DescribeSessionState()}");
                 return;
             }
 
@@ -698,19 +883,20 @@ namespace PS7ScriptDesk.Shell.Debug
             BreakpointHit?.Invoke(location?.ScriptPath, location?.LineNumber ?? 0);
         }
 
-        private void TryHandleObservedDebugPauseOutput(string line, string source)
+        private bool TryHandleObservedDebugPauseOutput(string line, string source)
         {
             if (string.IsNullOrWhiteSpace(line))
             {
-                return;
+                return false;
             }
 
-            var trimmed = line.Trim();
+            var trimmed = NormalizeDebuggerOutputLine(line);
             if (!string.Equals(trimmed, "Entering debug mode. Use h or ? for help.", StringComparison.OrdinalIgnoreCase) &&
                 !DebugBreakpointOutputRegex.IsMatch(trimmed) &&
-                !DebugLocationOutputRegex.IsMatch(trimmed))
+                !DebugLocationOutputRegex.IsMatch(trimmed) &&
+                !trimmed.StartsWith("[DBG]:", StringComparison.OrdinalIgnoreCase))
             {
-                return;
+                return false;
             }
 
             var wasPaused = CurrentState == DebugSessionState.Paused;
@@ -718,18 +904,17 @@ namespace PS7ScriptDesk.Shell.Debug
             AppLogger.Info("Debug", $"DebugPausedDetected via {source} output: {trimmed}");
             Trace("TryHandleObservedDebugPauseOutput", $"Matched pause output; source={source}; wasPaused={wasPaused}; classification={ClassifyLine(trimmed)}; {DescribeSessionState()}");
 
-            // Do not inject current-frame/variable/call-stack request scripts while
-            // the native PowerShell debugger is paused.  Those helper scripts run
-            // through the same debug prompt and can themselves be stepped/traced,
-            // which created the observed runaway line-by-line execution.  Instead,
-            // use the native "At <script>:<line> char:<n>" location text to update
-            // the editor highlight without sending another PowerShell command.
+            // Native debugger pause/status lines are control information for the app,
+            // not script output.  Consume them here so they do not appear in the user's
+            // console transcript as noisy [debug] lines.
             if (TryParseDebugLocation(trimmed, out var scriptPath, out var lineNumber))
             {
                 MarkLocationNotificationObserved();
                 Trace("TryHandleObservedDebugPauseOutput", $"Raising BreakpointHit from parsed debug location; scriptPathPresent={!string.IsNullOrWhiteSpace(scriptPath)}; lineNumber={lineNumber}; {DescribeSessionState()}");
                 BreakpointHit?.Invoke(scriptPath, lineNumber);
             }
+
+            return true;
         }
 
         private static bool TryParseDebugLocation(string line, out string? scriptPath, out int lineNumber)
@@ -742,10 +927,11 @@ namespace PS7ScriptDesk.Shell.Debug
                 return false;
             }
 
-            var match = DebugLocationColonCaptureRegex.Match(line.Trim());
+            var normalizedLine = NormalizeDebuggerOutputLine(line);
+            var match = DebugLocationColonCaptureRegex.Match(normalizedLine);
             if (!match.Success)
             {
-                match = DebugLocationWordCaptureRegex.Match(line.Trim());
+                match = DebugLocationWordCaptureRegex.Match(normalizedLine);
             }
 
             if (!match.Success)
@@ -850,6 +1036,11 @@ namespace PS7ScriptDesk.Shell.Debug
                     CancellationToken.None).ConfigureAwait(false);
 
                 var location = DeserializeSingle<BreakpointLocation>(payload);
+                if (location is not null && location.LineNumber > 0)
+                {
+                    MarkLocationNotificationObserved();
+                }
+
                 Trace("QueryCurrentFrameAndRaiseBreakpointAsync", $"Raising BreakpointHit; scriptPathPresent={!string.IsNullOrWhiteSpace(location?.ScriptPath)}; lineNumber={location?.LineNumber ?? 0}; {DescribeSessionState()}");
                 BreakpointHit?.Invoke(location?.ScriptPath, location?.LineNumber ?? 0);
             }
@@ -983,7 +1174,7 @@ namespace PS7ScriptDesk.Shell.Debug
 
         private string DescribeSessionState()
         {
-            return $"currentState={CurrentState}; disposed={_disposed}; sessionEndedRaised={_sessionEndedRaised}; processNull={(_process is null)}; processId={TryGetProcessId(_process)}; hasExited={SafeHasExited(_process)}; activeRequest={(_activeRequest is not null)}; capturingBreakpointPayload={_capturingBreakpointPayload}; currentFrameQueryInProgress={Volatile.Read(ref _currentFrameQueryInProgress)}; ignoreNextPrompt={_ignoreNextDebugPrompt}; suppressNextPromptCount={_suppressNextDebugPromptCount}";
+            return $"currentState={CurrentState}; disposed={_disposed}; sessionEndedRaised={_sessionEndedRaised}; processNull={(_process is null)}; processId={TryGetProcessId(_process)}; hasExited={SafeHasExited(_process)}; activeRequest={(_activeRequest is not null)}; capturingBreakpointPayload={_capturingBreakpointPayload}; currentFrameQueryInProgress={Volatile.Read(ref _currentFrameQueryInProgress)}; ignoreNextPrompt={_ignoreNextDebugPrompt}; suppressNextPromptCount={_suppressNextDebugPromptCount}; orphanedRequestEndMarker={_orphanedRequestOutputEndMarker ?? "(none)"}";
         }
 
         private static int TryGetProcessId(Process? process)
@@ -1037,6 +1228,18 @@ namespace PS7ScriptDesk.Shell.Debug
             }
         }
 
+        private static string NormalizeDebuggerOutputLine(string line)
+        {
+            if (string.IsNullOrEmpty(line))
+            {
+                return string.Empty;
+            }
+
+            var normalized = OscControlSequenceRegex.Replace(line, string.Empty);
+            normalized = AnsiControlSequenceRegex.Replace(normalized, string.Empty);
+            return normalized.Trim();
+        }
+
         private static string ClassifyLine(string line)
         {
             if (string.IsNullOrEmpty(line))
@@ -1044,32 +1247,34 @@ namespace PS7ScriptDesk.Shell.Debug
                 return "Empty";
             }
 
-            if (string.Equals(line, ReadyMarker, StringComparison.Ordinal))
+            var normalizedLine = NormalizeDebuggerOutputLine(line);
+
+            if (string.Equals(normalizedLine, ReadyMarker, StringComparison.Ordinal))
             {
                 return "ReadyMarker";
             }
 
-            if (string.Equals(line, SessionEndedMarker, StringComparison.Ordinal))
+            if (string.Equals(normalizedLine, SessionEndedMarker, StringComparison.Ordinal))
             {
                 return "SessionEndedMarker";
             }
 
-            if (string.Equals(line, DebugPromptMarker, StringComparison.Ordinal))
+            if (string.Equals(normalizedLine, DebugPromptMarker, StringComparison.Ordinal))
             {
                 return "DebugPromptMarker";
             }
 
-            if (string.Equals(line, BreakpointHitStartMarker, StringComparison.Ordinal))
+            if (string.Equals(normalizedLine, BreakpointHitStartMarker, StringComparison.Ordinal))
             {
                 return "BreakpointHitStartMarker";
             }
 
-            if (string.Equals(line, BreakpointHitEndMarker, StringComparison.Ordinal))
+            if (string.Equals(normalizedLine, BreakpointHitEndMarker, StringComparison.Ordinal))
             {
                 return "BreakpointHitEndMarker";
             }
 
-            var trimmed = line.Trim();
+            var trimmed = normalizedLine;
             if (string.Equals(trimmed, "Entering debug mode. Use h or ? for help.", StringComparison.OrdinalIgnoreCase))
             {
                 return "EnteringDebugMode";
@@ -1202,26 +1407,50 @@ namespace PS7ScriptDesk.Shell.Debug
             builder.AppendLine("$__pssInvocation = $null");
             builder.AppendLine("if ($null -ne $PSDebugContext -and $null -ne $PSDebugContext.InvocationInfo) { $__pssInvocation = $PSDebugContext.InvocationInfo }");
             builder.AppendLine("$__pssFrame = if ($null -eq $__pssInvocation) { Get-PSCallStack | Select-Object -First 1 } else { $null }");
-            builder.Append("Write-Output '").Append(CurrentFrameStartMarker).AppendLine("'");
             builder.AppendLine("$payload = if ($null -ne $__pssInvocation) { [pscustomobject]@{ ScriptPath = [string]$__pssInvocation.ScriptName; LineNumber = [int]$__pssInvocation.ScriptLineNumber } } elseif ($null -ne $__pssFrame) { [pscustomobject]@{ ScriptPath = [string]$__pssFrame.ScriptName; LineNumber = [int]$__pssFrame.ScriptLineNumber } } else { [pscustomobject]@{ ScriptPath = ''; LineNumber = 0 } }");
-            builder.AppendLine("$payload | ConvertTo-Json -Compress -Depth 4");
-            builder.Append("Write-Output '").Append(CurrentFrameEndMarker).AppendLine("'");
+            builder.AppendLine("$json = $payload | ConvertTo-Json -Compress -Depth 4");
+            builder.Append("[Console]::Out.WriteLine('").Append(CurrentFrameStartMarker).AppendLine("')");
+            builder.AppendLine("[Console]::Out.WriteLine($json)");
+            builder.Append("[Console]::Out.WriteLine('").Append(CurrentFrameEndMarker).AppendLine("')");
+            builder.AppendLine("[Console]::Out.Flush()");
             return builder.ToString();
         }
 
         private static string BuildVariablesRequestScript()
         {
             var builder = new StringBuilder();
+            builder.AppendLine("function __PSS_FormatDebugValueText {");
+            builder.AppendLine("    param($Value)");
+            builder.AppendLine("    try {");
+            builder.AppendLine("        if ($null -eq $Value) { return '' }");
+            builder.AppendLine("        if ($Value -is [string]) { return $Value }");
+            builder.AppendLine("        if ($Value -is [char]) { return [string]$Value }");
+            builder.AppendLine("        if ($Value -is [bool]) { return [string]$Value }");
+            builder.AppendLine("        if ($Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or $Value -is [uint16] -or $Value -is [int] -or $Value -is [uint32] -or $Value -is [long] -or $Value -is [uint64] -or $Value -is [single] -or $Value -is [double] -or $Value -is [decimal]) { return [string]$Value }");
+            builder.AppendLine("        if ($Value -is [datetime]) { return $Value.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture) }");
+            builder.AppendLine("        if ($Value -is [guid]) { return [string]$Value }");
+            builder.AppendLine("        if ($Value -is [System.Collections.IDictionary]) { return ('Dictionary Count=' + $Value.Count) }");
+            builder.AppendLine("        if ($Value -is [System.Collections.ICollection]) { return ('Collection Count=' + $Value.Count + ' Type=' + $Value.GetType().Name) }");
+            builder.AppendLine("        if ($Value -is [System.Collections.IEnumerable]) { return ('Enumerable Type=' + $Value.GetType().Name) }");
+            builder.AppendLine("        $text = [string]$Value");
+            builder.AppendLine("        if ([string]::IsNullOrWhiteSpace($text)) { return ('<' + $Value.GetType().Name + '>') }");
+            builder.AppendLine("        return $text");
+            builder.AppendLine("    } catch { return '<unavailable>' }");
+            builder.AppendLine("}");
             builder.AppendLine("$items = @(Get-Variable | Sort-Object Name | ForEach-Object {");
             builder.AppendLine("    $value = $_.Value");
             builder.AppendLine("    $typeName = if ($null -eq $value) { 'null' } else { $value.GetType().Name }");
-            builder.AppendLine("    $valueText = try { ($value | Out-String).Trim() } catch { '<unavailable>' }");
-            builder.AppendLine("    [pscustomobject]@{ Name = $_.Name; Type = [string]$typeName; Value = [string]$valueText }");
+            builder.AppendLine("    $valueText = __PSS_FormatDebugValueText $value");
+            builder.AppendLine("    if ($null -eq $valueText) { $valueText = '' }");
+            builder.AppendLine("    $valueText = [string]$valueText");
+            builder.AppendLine("    if ($valueText.Length -gt 500) { $valueText = $valueText.Substring(0, 500) + '...' }");
+            builder.AppendLine("    [pscustomobject]@{ Name = [string]$_.Name; Type = [string]$typeName; Value = [string]$valueText }");
             builder.AppendLine("})");
-            builder.Append("Write-Output '").Append(VariablesStartMarker).AppendLine("'");
             builder.AppendLine("$json = $items | ConvertTo-Json -Compress -Depth 5");
-            builder.AppendLine("Write-Output $json");
-            builder.Append("Write-Output '").Append(VariablesEndMarker).AppendLine("'");
+            builder.Append("[Console]::Out.WriteLine('").Append(VariablesStartMarker).AppendLine("')");
+            builder.AppendLine("[Console]::Out.WriteLine($json)");
+            builder.Append("[Console]::Out.WriteLine('").Append(VariablesEndMarker).AppendLine("')");
+            builder.AppendLine("[Console]::Out.Flush()");
             return builder.ToString();
         }
 
@@ -1235,10 +1464,11 @@ namespace PS7ScriptDesk.Shell.Debug
             builder.AppendLine("        LineNumber = [int]$_.ScriptLineNumber");
             builder.AppendLine("    }");
             builder.AppendLine("})");
-            builder.Append("Write-Output '").Append(CallStackStartMarker).AppendLine("'");
             builder.AppendLine("$json = $items | ConvertTo-Json -Compress -Depth 5");
-            builder.AppendLine("Write-Output $json");
-            builder.Append("Write-Output '").Append(CallStackEndMarker).AppendLine("'");
+            builder.Append("[Console]::Out.WriteLine('").Append(CallStackStartMarker).AppendLine("')");
+            builder.AppendLine("[Console]::Out.WriteLine($json)");
+            builder.Append("[Console]::Out.WriteLine('").Append(CallStackEndMarker).AppendLine("')");
+            builder.AppendLine("[Console]::Out.Flush()");
             return builder.ToString();
         }
 
