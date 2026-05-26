@@ -5409,27 +5409,36 @@ namespace PS7ScriptDesk.Shell
 
         private void ApplyEditorMetadataBadgeColors(System.Windows.Media.Brush background, System.Windows.Media.Brush border, System.Windows.Media.Brush foreground)
         {
-            EditorMetadataStatusBadge.Background = background;
-            EditorMetadataStatusBadge.BorderBrush = border;
+            _ = background;
+            _ = border;
+
+            EditorMetadataStatusBadge.Background = System.Windows.Media.Brushes.Transparent;
+            EditorMetadataStatusBadge.BorderBrush = System.Windows.Media.Brushes.Transparent;
             EditorMetadataStatusGlyph.Foreground = foreground;
             EditorMetadataStatusTextBlock.Foreground = foreground;
         }
 
-        private static System.Windows.Media.Brush GetLoadingBadgeBackgroundBrush() => CreateFrozenBrush(0xF5, 0x7C, 0x00);
-        private static System.Windows.Media.Brush GetLoadingBadgeBorderBrush() => CreateFrozenBrush(0xE6, 0x51, 0x00);
-        private static System.Windows.Media.Brush GetLoadingBadgeForegroundBrush() => CreateFrozenBrush(0xFF, 0xFF, 0xFF);
-        private static System.Windows.Media.Brush GetRefreshBadgeBackgroundBrush() => CreateFrozenBrush(0x2F, 0x85, 0x3A);
-        private static System.Windows.Media.Brush GetRefreshBadgeBorderBrush() => CreateFrozenBrush(0x14, 0x53, 0x2D);
-        private static System.Windows.Media.Brush GetRefreshBadgeForegroundBrush() => CreateFrozenBrush(0xFF, 0xFF, 0xFF);
-        private static System.Windows.Media.Brush GetWarningBadgeBackgroundBrush() => CreateFrozenBrush(0xEF, 0xA8, 0x2C);
-        private static System.Windows.Media.Brush GetWarningBadgeBorderBrush() => CreateFrozenBrush(0xB7, 0x79, 0x1F);
-        private static System.Windows.Media.Brush GetWarningBadgeForegroundBrush() => CreateFrozenBrush(0x22, 0x22, 0x22);
-        private static System.Windows.Media.Brush GetReadyBadgeBackgroundBrush() => CreateFrozenBrush(0x2E, 0x7D, 0x32);
-        private static System.Windows.Media.Brush GetReadyBadgeBorderBrush() => CreateFrozenBrush(0x1B, 0x5E, 0x20);
-        private static System.Windows.Media.Brush GetReadyBadgeForegroundBrush() => CreateFrozenBrush(0xFF, 0xFF, 0xFF);
-        private static System.Windows.Media.Brush GetFailureBadgeBackgroundBrush() => CreateFrozenBrush(0xC6, 0x28, 0x28);
-        private static System.Windows.Media.Brush GetFailureBadgeBorderBrush() => CreateFrozenBrush(0x8E, 0x00, 0x00);
-        private static System.Windows.Media.Brush GetFailureBadgeForegroundBrush() => CreateFrozenBrush(0xFF, 0xFF, 0xFF);
+        private System.Windows.Media.Brush GetThemeBrush(string resourceKey, byte fallbackRed, byte fallbackGreen, byte fallbackBlue)
+        {
+            return TryFindResource(resourceKey) as System.Windows.Media.Brush
+                ?? CreateFrozenBrush(fallbackRed, fallbackGreen, fallbackBlue);
+        }
+
+        private static System.Windows.Media.Brush GetLoadingBadgeBackgroundBrush() => System.Windows.Media.Brushes.Transparent;
+        private static System.Windows.Media.Brush GetLoadingBadgeBorderBrush() => System.Windows.Media.Brushes.Transparent;
+        private System.Windows.Media.Brush GetLoadingBadgeForegroundBrush() => GetThemeBrush("Theme.Icon.Warning", 0xD9, 0x77, 0x06);
+        private static System.Windows.Media.Brush GetRefreshBadgeBackgroundBrush() => System.Windows.Media.Brushes.Transparent;
+        private static System.Windows.Media.Brush GetRefreshBadgeBorderBrush() => System.Windows.Media.Brushes.Transparent;
+        private System.Windows.Media.Brush GetRefreshBadgeForegroundBrush() => GetThemeBrush("Theme.Icon.Accent", 0x25, 0x63, 0xEB);
+        private static System.Windows.Media.Brush GetWarningBadgeBackgroundBrush() => System.Windows.Media.Brushes.Transparent;
+        private static System.Windows.Media.Brush GetWarningBadgeBorderBrush() => System.Windows.Media.Brushes.Transparent;
+        private System.Windows.Media.Brush GetWarningBadgeForegroundBrush() => GetThemeBrush("Theme.Icon.Warning", 0xD9, 0x77, 0x06);
+        private static System.Windows.Media.Brush GetReadyBadgeBackgroundBrush() => System.Windows.Media.Brushes.Transparent;
+        private static System.Windows.Media.Brush GetReadyBadgeBorderBrush() => System.Windows.Media.Brushes.Transparent;
+        private System.Windows.Media.Brush GetReadyBadgeForegroundBrush() => GetThemeBrush("Theme.Icon.Success", 0x16, 0xA3, 0x4A);
+        private static System.Windows.Media.Brush GetFailureBadgeBackgroundBrush() => System.Windows.Media.Brushes.Transparent;
+        private static System.Windows.Media.Brush GetFailureBadgeBorderBrush() => System.Windows.Media.Brushes.Transparent;
+        private System.Windows.Media.Brush GetFailureBadgeForegroundBrush() => GetThemeBrush("Theme.Icon.Danger", 0xDC, 0x26, 0x26);
 
         private void UpdateMetadataToast(EditorMetadataWarmupStatus status)
         {

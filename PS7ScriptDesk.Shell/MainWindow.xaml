@@ -669,45 +669,49 @@
                            help:ContextHelp.Key="Editor.Metadata"
                            Visibility="Collapsed">
                 <Border x:Name="EditorMetadataStatusBadge"
-                        Background="#FFF59D"
-                        BorderBrush="#FFE65100"
-                        BorderThickness="2.5"
-                        CornerRadius="999"
-                        Padding="14,5"
-                        MinWidth="320"
+                        Background="Transparent"
+                        BorderBrush="Transparent"
+                        BorderThickness="0"
+                        Padding="4,0"
                         ToolTip="PowerShell editor metadata is still loading in the background.">
-                    <StackPanel Orientation="Horizontal">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                         <TextBlock x:Name="EditorMetadataStatusGlyph"
                                    Text="⏳"
-                                   Margin="0,0,8,0"
-                                   FontSize="15"
-                                   FontWeight="Bold"
-                                   VerticalAlignment="Center" />
+                                   Margin="0,0,5,0"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center"
+                                   Foreground="{DynamicResource Theme.Icon.Warning}" />
                         <TextBlock x:Name="EditorMetadataStatusTextBlock"
                                    Text="Editor metadata loading..."
-                                   FontWeight="Bold"
-                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   FontSize="{StaticResource Theme.FontSize.Caption}"
                                    VerticalAlignment="Center"
-                                   TextWrapping="NoWrap" />
+                                   TextWrapping="NoWrap"
+                                   Foreground="{DynamicResource Theme.Text.Secondary}" />
                     </StackPanel>
                 </Border>
             </StatusBarItem>
             <Separator />
             <StatusBarItem help:ContextHelp.Key="Help.Context">
-                <ToggleButton Style="{StaticResource StatusPillToggleButtonStyle}"
-                              ToolTip="Toggle all context help UI on or off"
-                              IsChecked="{Binding IsContextHelpEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}"
-                              MinWidth="120"
-                              Padding="14,4">
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="Help" FontWeight="SemiBold" />
-                        <TextBlock Margin="8,0,0,0" FontWeight="Bold">
+                <ToggleButton Style="{StaticResource StatusBarHelpToggleButtonStyle}"
+                              ToolTip="Turn advanced context help on or off"
+                              IsChecked="{Binding IsContextHelpEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="?"
+                                   Margin="0,0,5,0"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center"
+                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}" />
+                        <TextBlock FontWeight="SemiBold"
+                                   VerticalAlignment="Center"
+                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}">
                             <TextBlock.Style>
                                 <Style TargetType="TextBlock">
-                                    <Setter Property="Text" Value="OFF" />
+                                    <Setter Property="Text" Value="Help off" />
                                     <Style.Triggers>
                                         <DataTrigger Binding="{Binding IsChecked, RelativeSource={RelativeSource AncestorType=ToggleButton}}" Value="True">
-                                            <Setter Property="Text" Value="ON" />
+                                            <Setter Property="Text" Value="Help on" />
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
