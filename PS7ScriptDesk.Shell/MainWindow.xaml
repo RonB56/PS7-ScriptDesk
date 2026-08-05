@@ -630,6 +630,11 @@
             <StatusBarItem help:ContextHelp.Key="Status.General">
                 <TextBlock Text="{Binding StatusText}" />
             </StatusBarItem>
+            <Separator Visibility="{Binding HasSessionRestoreNotice, Converter={StaticResource BooleanToVisibilityConverter}}" />
+            <StatusBarItem Visibility="{Binding HasSessionRestoreNotice, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <TextBlock Text="{Binding SessionRestoreNoticeText}"
+                           ToolTip="{Binding SessionRestoreNoticeToolTip}" />
+            </StatusBarItem>
             <Separator />
             <StatusBarItem help:ContextHelp.Key="Status.Caret">
                 <TextBlock Text="{Binding SelectedTab.CaretDisplayText, TargetNullValue='Ln 1, Col 1'}" />
@@ -1307,10 +1312,18 @@
 
                             <ToggleButton x:Name="DiagnosticsBottomPaneTab"
                                           MinWidth="82"
+                                          Margin="0,0,18,0"
                                           Content="Problems"
                                           Style="{StaticResource BottomPaneTabToggleButtonStyle}"
                                           Click="DiagnosticsBottomPaneTab_Click"
                                           help:ContextHelp.Key="Editor.SyntaxPanel" />
+
+                            <ToggleButton x:Name="ActivityBottomPaneTab"
+                                          MinWidth="72"
+                                          Content="Activity"
+                                          ToolTip="Application messages and operation details"
+                                          Style="{StaticResource BottomPaneTabToggleButtonStyle}"
+                                          Click="ActivityBottomPaneTab_Click" />
                         </StackPanel>
 
                         <StackPanel Grid.Column="1"
@@ -1363,6 +1376,9 @@
                                     <Setter Property="Visibility" Value="Visible" />
                                     <Style.Triggers>
                                         <DataTrigger Binding="{Binding IsChecked, ElementName=DiagnosticsBottomPaneTab}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=ActivityBottomPaneTab}" Value="True">
                                             <Setter Property="Visibility" Value="Collapsed" />
                                         </DataTrigger>
                                     </Style.Triggers>
@@ -1497,6 +1513,39 @@
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                             </ScrollViewer>
+                        </Grid>
+
+                        <Grid x:Name="ActivityBottomPane"
+                              Margin="4">
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=ActivityBottomPaneTab}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Text="Application Activity"
+                                       Margin="0,0,0,6"
+                                       Style="{StaticResource SectionHeaderTextStyle}" />
+
+                            <TextBox Grid.Row="1"
+                                     Text="{Binding ApplicationActivityText, Mode=OneWay}"
+                                     IsReadOnly="True"
+                                     AcceptsReturn="True"
+                                     TextWrapping="NoWrap"
+                                     VerticalScrollBarVisibility="Auto"
+                                     HorizontalScrollBarVisibility="Auto"
+                                     FontFamily="Consolas"
+                                     ToolTip="Application notifications, warnings, and operation details. Interactive PowerShell output remains in Console." />
                         </Grid>
                     </Grid>
                 </Grid>

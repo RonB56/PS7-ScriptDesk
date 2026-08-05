@@ -231,6 +231,8 @@ namespace PS7ScriptDesk.Shell.Help
                     Section("Shortcut", false, "Ctrl+S"),
                     Section("Related topics", false,
                         "Use Save As when you want a new file name or location.",
+                        "If the file changed outside PS7 ScriptDesk, Save asks whether to reload the disk version, overwrite it, save the editor content elsewhere, or cancel.",
+                        "Document saves are completed through a same-folder temporary file so a failed write does not first truncate the previous disk version.",
                         "If a clean tab's disk file changed behind the editor, the tab is marked stale so Run and Debug use the visible editor content instead of stale disk text.",
                         "Save failures are surfaced in the status/output areas and logged."),
                     related: new[] { "Command.SaveAs", "Command.StartDebug" }),

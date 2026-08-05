@@ -18,4 +18,8 @@
     <Folder Include="Runtime\" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="PS7ScriptDesk.Tests" />
+  </ItemGroup>
+
 </Project>

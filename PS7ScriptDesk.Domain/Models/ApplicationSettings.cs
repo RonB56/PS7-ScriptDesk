@@ -42,6 +42,12 @@ namespace PS7ScriptDesk.Domain.Models
 
         public List<string> ReopenFilePaths { get; set; } = new();
 
+        /// <summary>
+        /// Rich restore information for the editor tabs that were open during the previous session.
+        /// ReopenFilePaths is kept for backward compatibility with settings written by older versions.
+        /// </summary>
+        public List<OpenDocumentState> ReopenDocuments { get; set; } = new();
+
         /// <summary>Name of the active UI theme ("Dark", "Light", "IseBlue"). Null = default Dark.</summary>
         public string? Theme { get; set; }
 

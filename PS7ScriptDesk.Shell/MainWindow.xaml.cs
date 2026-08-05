@@ -356,15 +356,20 @@ namespace PS7ScriptDesk.Shell
                 StartupTimingLogger.Log("MainWindow", $"View model hookup completed in {startupStopwatch.ElapsedMilliseconds} ms");
 
                 // ── Wire up xterm.js terminal control ────────────────────────────
-                // Register sinks so ViewModel output routes to xterm.js.
-                ViewModel.SetTerminalSinks(
-                    writeText:     text => Dispatcher.BeginInvoke(() => TerminalConsole.WriteText(text)),
+                // Session controls do not expose a generic text-write delegate.
+                ViewModel.SetTerminalSessionControls(
                     clearTerminal: ()   => Dispatcher.BeginInvoke(() =>
                     {
                         TerminalConsole.Clear();
                         TerminalConsole.FocusTerminal();
                     }),
                     focusTerminal: ()   => Dispatcher.BeginInvoke(() => TerminalConsole.FocusTerminal()));
+
+                // The separate debugger process retains its current visible behavior
+                // through an explicitly classified compatibility route. Full debugger
+                // display separation remains a later terminal architecture phase.
+                ViewModel.SetDebuggerOutputSink(
+                    text => Dispatcher.BeginInvoke(() => TerminalConsole.WriteDebuggerOutput(text)));
 
                 // Forward raw (ANSI-intact) ConPTY output to xterm.js.
                 ViewModel.SubscribeRawOutput(
@@ -373,12 +378,12 @@ namespace PS7ScriptDesk.Shell
                 // Forward xterm.js keystrokes to ConPTY stdin.
                 TerminalConsole.UserInput += async data =>
                 {
-                    AppLogger.Debug("Terminal", $"MainWindow received terminal input for forwarding. Length={data.Length}, Data='{FormatTerminalTextForLog(data)}'.");
+                    AppLogger.Debug("Terminal", $"MainWindow received terminal input for forwarding. Length={data.Length}, ContentOmitted=True.");
                     DeveloperDiagnostics.LogUserAction(
                         "Terminal",
                         "TerminalInput",
                         "Terminal input received for forwarding to the view model.",
-                        new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data))
+                        new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data))
                         {
                             ["focusedElement"] = DescribeFocusedElement()
                         });
@@ -1432,6 +1437,7 @@ namespace PS7ScriptDesk.Shell
         {
             ConsoleBottomPaneTab.IsChecked = true;
             DiagnosticsBottomPaneTab.IsChecked = false;
+            ActivityBottomPaneTab.IsChecked = false;
             DeveloperDiagnostics.LogUserAction("UI", "BottomPaneConsoleTabSelected", "Console bottom pane tab selected.");
             Dispatcher.BeginInvoke(new Action(() => TerminalConsole.FocusTerminal()), System.Windows.Threading.DispatcherPriority.Loaded);
         }
@@ -1440,6 +1446,7 @@ namespace PS7ScriptDesk.Shell
         {
             ConsoleBottomPaneTab.IsChecked = false;
             DiagnosticsBottomPaneTab.IsChecked = true;
+            ActivityBottomPaneTab.IsChecked = false;
 
             var errorCount = ViewModel?.SelectedTab?.DiagnosticErrorCount ?? 0;
             var warningCount = ViewModel?.SelectedTab?.DiagnosticWarningCount ?? 0;
@@ -1451,6 +1458,21 @@ namespace PS7ScriptDesk.Shell
                 {
                     ["errorCount"] = errorCount,
                     ["warningCount"] = warningCount
+                });
+        }
+
+        private void ActivityBottomPaneTab_Click(object sender, RoutedEventArgs e)
+        {
+            ConsoleBottomPaneTab.IsChecked = false;
+            DiagnosticsBottomPaneTab.IsChecked = false;
+            ActivityBottomPaneTab.IsChecked = true;
+            DeveloperDiagnostics.LogUserAction(
+                "UI",
+                "BottomPaneActivityTabSelected",
+                "Application activity bottom pane tab selected.",
+                new Dictionary<string, object?>
+                {
+                    ["activityLength"] = ViewModel?.ApplicationActivityText?.Length ?? 0
                 });
         }
 
@@ -2590,36 +2612,6 @@ namespace PS7ScriptDesk.Shell
                 : Keyboard.FocusedElement.GetType().Name;
         }
 
-        private static string FormatTerminalTextForLog(string text, int maxLength = 80)
-        {
-            if (string.IsNullOrEmpty(text))
-            {
-                return string.Empty;
-            }
-
-            var builder = new System.Text.StringBuilder(Math.Min(text.Length * 2, maxLength + 8));
-            foreach (var ch in text)
-            {
-                _ = ch switch
-                {
-                    '\r' => builder.Append("\\r"),
-                    '\n' => builder.Append("\\n"),
-                    '\t' => builder.Append("\\t"),
-                    '\x1b' => builder.Append("\\x1b"),
-                    _ when char.IsControl(ch) => builder.Append($"\\u{(int)ch:x4}"),
-                    _ => builder.Append(ch)
-                };
-
-                if (builder.Length >= maxLength)
-                {
-                    builder.Append("...");
-                    break;
-                }
-            }
-
-            return builder.ToString();
-        }
-
         private void ForceCompletionNow(TextEditor editorTextEditor, string invocationSource)
         {
             AppLogger.Debug(
@@ -3084,7 +3076,7 @@ namespace PS7ScriptDesk.Shell
                 "Execution",
                 "RunSelectionRequested",
                 "Run Selection requested from the editor.",
-                new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(selectedText))
+                new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(selectedText))
                 {
                     ["filePath"] = (editorTextEditor.DataContext as EditorTabViewModel)?.FilePath,
                     ["caretOffset"] = editorTextEditor.CaretOffset
@@ -3442,6 +3434,8 @@ namespace PS7ScriptDesk.Shell
             var selectionBackgroundColor = GetEffectiveSelectionBackgroundColor();
             var selectionBackgroundBrush = CreateFrozenBrush(selectionBackgroundColor);
             SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionBrush", selectionBackgroundBrush);
+            SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionBorder", null);
+            SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionCornerRadius", 0d);
 
             if (ViewModel?.ForceHighContrastSelectedText ?? true)
             {
@@ -4015,7 +4009,7 @@ namespace PS7ScriptDesk.Shell
                         DeveloperDiagnostics.LogDebug(
                             "Debugger",
                             "Debug output chunk received.",
-                            new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(chunk))
+                            new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(chunk))
                             {
                                 ["containsPromptMarker"] = containsPromptMarker,
                                 ["containsEndedMarker"] = containsEndedMarker,
@@ -4603,13 +4597,13 @@ namespace PS7ScriptDesk.Shell
                         $"Debug teardown prompt restore; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}");
                     TraceDebugShell(
                         "TearDownDebugSession",
-                        $"Requested non-destructive visible prompt restore; promptPreview='{DeveloperDiagnostics.SanitizePreview(promptText)}'; reason={reason}; endedNaturally={endedNaturally};");
+                        $"Requested non-destructive visible prompt restore; promptLength={promptText.Length}; contentOmitted=true; reason={reason}; endedNaturally={endedNaturally};");
                     DeveloperDiagnostics.LogDecision(
                         "Debugger",
                         "TearDownDebugSession",
                         "Non-destructive visible prompt restoration was requested after natural debug completion.",
                         "RequestVisiblePromptRestoreAfterDebug",
-                        new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(promptText))
+                        new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(promptText))
                         {
                             ["reason"] = reason.ToString(),
                             ["endedNaturally"] = endedNaturally,

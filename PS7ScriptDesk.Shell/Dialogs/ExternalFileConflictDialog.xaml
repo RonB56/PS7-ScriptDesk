@@ -1,0 +1,60 @@
+<Window x:Class="PS7ScriptDesk.Shell.Dialogs.ExternalFileConflictDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="File Changed Outside PS7 ScriptDesk"
+        Width="640"
+        SizeToContent="Height"
+        MaxHeight="520"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   FontSize="16"
+                   FontWeight="SemiBold"
+                   Text="This script changed outside PS7 ScriptDesk."
+                   Margin="0,0,0,12" />
+
+        <StackPanel Grid.Row="1" Margin="0,0,0,18">
+            <TextBlock TextWrapping="Wrap"
+                       Text="Saving normally would overwrite the version currently on disk." />
+            <TextBlock x:Name="FilePathText"
+                       Margin="0,10,0,0"
+                       FontWeight="SemiBold"
+                       TextWrapping="Wrap" />
+            <TextBlock x:Name="ConflictReasonText"
+                       Margin="0,6,0,0"
+                       TextWrapping="Wrap" />
+        </StackPanel>
+
+        <UniformGrid Grid.Row="2" Rows="1" Columns="4">
+            <Button Content="Reload from Disk"
+                    Margin="0,0,6,0"
+                    Padding="10,7"
+                    Click="ReloadButton_Click"
+                    ToolTip="Discard the editor changes and load the current file from disk." />
+            <Button Content="Overwrite Disk"
+                    Margin="2,0,4,0"
+                    Padding="10,7"
+                    Click="OverwriteButton_Click"
+                    ToolTip="Replace the current disk version with the editor content." />
+            <Button Content="Save As..."
+                    Margin="4,0,2,0"
+                    Padding="10,7"
+                    Click="SaveAsButton_Click"
+                    ToolTip="Keep the changed disk file and save the editor content to another path." />
+            <Button Content="Cancel"
+                    Margin="6,0,0,0"
+                    Padding="10,7"
+                    IsDefault="True"
+                    IsCancel="True"
+                    Click="CancelButton_Click" />
+        </UniformGrid>
+    </Grid>
+</Window>

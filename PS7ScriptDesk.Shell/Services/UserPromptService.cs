@@ -1,4 +1,5 @@
 ﻿using PS7ScriptDesk.Application.Interfaces;
+using PS7ScriptDesk.Shell.Dialogs;
 using Forms = System.Windows.Forms;
 
 namespace PS7ScriptDesk.Shell.Services
@@ -19,6 +20,17 @@ namespace PS7ScriptDesk.Shell.Services
                 System.Windows.MessageBoxResult.No => UnsavedChangesDecision.Discard,
                 _ => UnsavedChangesDecision.Cancel
             };
+        }
+
+        public ExternalFileConflictDecision ShowExternalFileConflictPrompt(string filePath, string conflictReason)
+        {
+            var dialog = new ExternalFileConflictDialog(filePath, conflictReason)
+            {
+                Owner = System.Windows.Application.Current?.MainWindow
+            };
+
+            _ = dialog.ShowDialog();
+            return dialog.Decision;
         }
 
         public string? ShowSaveFileDialog(string suggestedFileName)

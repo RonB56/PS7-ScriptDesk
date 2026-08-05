@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PS7ScriptDesk.Application\PS7ScriptDesk.Application.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.Domain\PS7ScriptDesk.Domain.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.Infrastructure\PS7ScriptDesk.Infrastructure.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.PowerShell\PS7ScriptDesk.PowerShell.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.Shell\PS7ScriptDesk.Shell.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.UI\PS7ScriptDesk.UI.csproj" />
+  </ItemGroup>
+
+</Project>

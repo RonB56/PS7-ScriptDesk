@@ -366,11 +366,9 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private readonly object        _queueLock   = new();
         private readonly List<string>  _outputQueue = new();
-        private readonly object        _pendingOutputLock = new();
-        private readonly StringBuilder _pendingOutputBuffer = new();
+        private readonly TerminalOutputBatchBuffer _outputBatchBuffer = new();
         private volatile bool          _isReady;
         private bool                   _webView2Available = true;
-        private bool                   _outputFlushScheduled;
         private bool                   _firstOutputQueuedLogged;
         private bool                   _firstOutputPostedLogged;
         private bool                   _firstInputReceivedLogged;
@@ -524,13 +522,13 @@ namespace PS7ScriptDesk.Shell.Controls
 
             if (ShouldSuppressPromptRedrawChunk(data, out var suppressionReason))
             {
-                AppLogger.Info("Terminal", $"Suppressed terminal output chunk during transcript preservation. Reason={suppressionReason}, Preview='{FormatForLog(data)}'.");
+                AppLogger.Info("Terminal", $"Suppressed terminal output chunk during transcript preservation. Reason={suppressionReason}, Length={data.Length}.");
                 DeveloperDiagnostics.LogDecision(
                     "Terminal",
                     "WriteRaw",
                     "Terminal output chunk was suppressed during transcript preservation.",
                     "SuppressPromptRedrawChunk",
-                    new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data))
+                    new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data))
                     {
                         ["reason"] = suppressionReason,
                         ["preservationReason"] = _transcriptPreservationReason,
@@ -546,7 +544,7 @@ namespace PS7ScriptDesk.Shell.Controls
                     "WriteRaw",
                     "Terminal output chunk was allowed during transcript preservation.",
                     "AllowOutputDuringPreservation",
-                    new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data))
+                    new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data))
                     {
                         ["reason"] = "Chunk did not match prompt-redraw suppression heuristics.",
                         ["preservationReason"] = _transcriptPreservationReason,
@@ -559,7 +557,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 DeveloperDiagnostics.LogDebug(
                     "Terminal",
                     "Terminal output received for WebView dispatch.",
-                    new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data))
+                    new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data))
                     {
                         ["isReady"] = _isReady,
                         ["queuedOutputCount"] = _outputQueue.Count
@@ -593,10 +591,11 @@ namespace PS7ScriptDesk.Shell.Controls
         }
 
         /// <summary>
-        /// Writes plain text to xterm.js. Newlines are passed as-is; no ANSI escaping is applied.
-        /// App diagnostics should generally go to the application log, not the visible terminal.
+        /// Compatibility route for output produced by the separate debugger process.
+        /// Application notifications must never call this method. Full debugger display
+        /// separation is intentionally deferred to a later terminal architecture phase.
         /// </summary>
-        public void WriteText(string text)
+        public void WriteDebuggerOutput(string text)
         {
             WriteRaw(text);
         }
@@ -693,7 +692,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 DeveloperDiagnostics.LogInfo(
                     "Terminal",
                     "Visible prompt restoration requested after debug completion.",
-                    new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(normalizedPromptText))
+                    new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(normalizedPromptText))
                     {
                         ["reason"] = reason,
                         ["preservationActive"] = IsTranscriptPreservationActive(),
@@ -733,16 +732,9 @@ namespace PS7ScriptDesk.Shell.Controls
 
             _lastVisibleOutputEndedWithLineBreak = data.EndsWith('\n') || data.EndsWith('\r');
 
-            lock (_pendingOutputLock)
+            if (!_outputBatchBuffer.Enqueue(data))
             {
-                _pendingOutputBuffer.Append(data);
-
-                if (_outputFlushScheduled)
-                {
-                    return;
-                }
-
-                _outputFlushScheduled = true;
+                return;
             }
 
             Dispatcher.BeginInvoke(
@@ -752,20 +744,8 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void FlushPendingOutputToWebView()
         {
-            string data;
-
-            lock (_pendingOutputLock)
-            {
-                if (_pendingOutputBuffer.Length == 0)
-                {
-                    _outputFlushScheduled = false;
-                    return;
-                }
-
-                data = _pendingOutputBuffer.ToString();
-                _pendingOutputBuffer.Clear();
-                _outputFlushScheduled = false;
-            }
+            var data = _outputBatchBuffer.Drain();
+            if (string.IsNullOrEmpty(data)) return;
 
             PostToWebView("output", data);
         }
@@ -784,20 +764,12 @@ namespace PS7ScriptDesk.Shell.Controls
                         DeveloperDiagnostics.LogDebug(
                             "Terminal",
                             $"Posting host message to terminal. Type={type}.",
-                            type == "output"
-                                ? new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data))
-                                : new Dictionary<string, object?> { ["type"] = type, ["data"] = DeveloperDiagnostics.SanitizePreview(data) });
+                            new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data))
+                            {
+                                ["type"] = type
+                            });
                     }
-                    var msg = type switch
-                    {
-                        "output" => JsonSerializer.Serialize(new
-                        {
-                            type = "output_b64",
-                            data = Convert.ToBase64String(Encoding.UTF8.GetBytes(data ?? string.Empty))
-                        }),
-                        "clear" or "focus" => JsonSerializer.Serialize(new { type }),
-                        _ => JsonSerializer.Serialize(new { type, data })
-                    };
+                    var msg = TerminalWebMessageSerializer.Serialize(type, data);
                     WebView.CoreWebView2.PostWebMessageAsString(msg);
                 }
                 catch (Exception ex)
@@ -1008,20 +980,20 @@ namespace PS7ScriptDesk.Shell.Controls
                                 if (!_firstInputReceivedLogged)
                                 {
                                     _firstInputReceivedLogged = true;
-                                    AppLogger.Info("Terminal", $"Received first xterm.js input message from WebView2. Length={data.Length}, Data='{FormatForLog(data)}'.");
+                                    AppLogger.Info("Terminal", $"Received first xterm.js input message from WebView2. Length={data.Length}, ContentOmitted=True.");
                                 }
                                 else if (_inputInfoLogCount < 4)
                                 {
                                     _inputInfoLogCount++;
-                                    AppLogger.Info("Terminal", $"Received additional xterm.js input message from WebView2. Index={_inputInfoLogCount + 1}, Length={data.Length}, Data='{FormatForLog(data)}'.");
+                                    AppLogger.Info("Terminal", $"Received additional xterm.js input message from WebView2. Index={_inputInfoLogCount + 1}, Length={data.Length}, ContentOmitted=True.");
                                 }
 
-                                AppLogger.Debug("Terminal", $"xterm input received from WebView2. Length={data.Length}, Data='{FormatForLog(data)}'.");
+                                AppLogger.Debug("Terminal", $"xterm input received from WebView2. Length={data.Length}, ContentOmitted=True.");
                                 DeveloperDiagnostics.LogUserAction(
                                     "Terminal",
                                     "TerminalInput",
                                     "xterm input received from WebView2.",
-                                    new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(data)));
+                                    new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data)));
                                 RaiseTerminalActivated("xterm.onData");
                                 UserInput?.Invoke(data);
                             }
@@ -1337,13 +1309,13 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             var output = (_lastVisibleOutputEndedWithLineBreak ? string.Empty : "\r\n") + "\x1b[?25h" + promptText;
             _lastVisibleOutputEndedWithLineBreak = false;
-            AppLogger.Info("Terminal", $"Showing non-destructive visible prompt after debug completion. Prompt='{FormatForLog(promptText)}', Reason={reason}, TriggerReason={triggerReason}.");
+            AppLogger.Info("Terminal", $"Showing non-destructive visible prompt after debug completion. PromptLength={promptText.Length}, ContentOmitted=True, Reason={reason}, TriggerReason={triggerReason}.");
             DeveloperDiagnostics.LogDecision(
                 "Terminal",
                 "ShowNonDestructivePrompt",
                 "Non-destructive visible prompt restoration was posted to xterm after debug completion.",
                 "ShowVisiblePromptAfterDebug",
-                new Dictionary<string, object?>(DeveloperDiagnostics.CreateTextMetadata(promptText))
+                new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(promptText))
                 {
                     ["reason"] = reason,
                     ["triggerReason"] = triggerReason,
@@ -1393,34 +1365,5 @@ namespace PS7ScriptDesk.Shell.Controls
                    string.Equals(source, "terminal.click", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static string FormatForLog(string? text, int maxLength = 80)
-        {
-            if (string.IsNullOrEmpty(text))
-            {
-                return string.Empty;
-            }
-
-            var builder = new StringBuilder(Math.Min(text.Length * 2, maxLength + 8));
-            foreach (var ch in text)
-            {
-                _ = ch switch
-                {
-                    '\r' => builder.Append("\\r"),
-                    '\n' => builder.Append("\\n"),
-                    '\t' => builder.Append("\\t"),
-                    '\x1b' => builder.Append("\\x1b"),
-                    _ when char.IsControl(ch) => builder.Append($"\\u{(int)ch:x4}"),
-                    _ => builder.Append(ch)
-                };
-
-                if (builder.Length >= maxLength)
-                {
-                    builder.Append("...");
-                    break;
-                }
-            }
-
-            return builder.ToString();
-        }
     }
 }

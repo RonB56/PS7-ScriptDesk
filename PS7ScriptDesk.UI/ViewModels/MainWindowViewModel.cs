@@ -7,6 +7,8 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Security;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -50,11 +52,15 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private string _runtimeText;
         private string _statusText;
+        private string _sessionRestoreNoticeText = string.Empty;
+        private string _sessionRestoreNoticeToolTip = string.Empty;
+        private bool _hasSessionRestoreNotice;
         private string _terminalDisplayText;
+        private string _applicationActivityText = string.Empty;
 
-        // Sinks registered by the Shell layer to route output to the xterm.js control.
-        // When set, AppendTerminalTextFragment writes here instead of TerminalDisplayText.
-        private Action<string>? _writeTextSink;
+        // The debugger currently remains visible in xterm.js for compatibility, but it
+        // has an explicit route so application messages cannot share its display sink.
+        private Action<string>? _debuggerOutputSink;
         private Action?         _clearTerminalSink;
         private Action?         _focusTerminalSink;
         private bool _isDebugSessionActive;
@@ -241,6 +247,45 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
         }
 
+        public string SessionRestoreNoticeText
+        {
+            get => _sessionRestoreNoticeText;
+            private set
+            {
+                if (_sessionRestoreNoticeText != value)
+                {
+                    _sessionRestoreNoticeText = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        public string SessionRestoreNoticeToolTip
+        {
+            get => _sessionRestoreNoticeToolTip;
+            private set
+            {
+                if (_sessionRestoreNoticeToolTip != value)
+                {
+                    _sessionRestoreNoticeToolTip = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        public bool HasSessionRestoreNotice
+        {
+            get => _hasSessionRestoreNotice;
+            private set
+            {
+                if (_hasSessionRestoreNotice != value)
+                {
+                    _hasSessionRestoreNotice = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
         /// <summary>
         /// True while a debug session is active (running or paused at a breakpoint).
         /// Set by the Shell layer via <c>RefreshDebugCommandAvailability</c>.
@@ -268,6 +313,19 @@ namespace PS7ScriptDesk.UI.ViewModels
                 if (_terminalDisplayText != value)
                 {
                     _terminalDisplayText = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        public string ApplicationActivityText
+        {
+            get => _applicationActivityText;
+            private set
+            {
+                if (_applicationActivityText != value)
+                {
+                    _applicationActivityText = value;
                     OnPropertyChanged();
                 }
             }
@@ -933,14 +991,23 @@ namespace PS7ScriptDesk.UI.ViewModels
         }
 
         /// <summary>
-        /// Registers the xterm.js terminal control's output sinks. Called once by
-        /// the Shell layer after the TerminalControl is wired up.
+        /// Registers terminal session controls. Visible session output is wired
+        /// separately through SubscribeRawOutput so arbitrary strings cannot be
+        /// written to xterm.js through this API.
         /// </summary>
-        public void SetTerminalSinks(Action<string> writeText, Action clearTerminal, Action? focusTerminal = null)
+        public void SetTerminalSessionControls(Action clearTerminal, Action? focusTerminal = null)
         {
-            _writeTextSink      = writeText;
             _clearTerminalSink  = clearTerminal;
             _focusTerminalSink  = focusTerminal;
+        }
+
+        /// <summary>
+        /// Registers the compatibility display route for output from the separate
+        /// debugger process. This is intentionally distinct from application output.
+        /// </summary>
+        public void SetDebuggerOutputSink(Action<string> debuggerOutput)
+        {
+            _debuggerOutputSink = debuggerOutput;
         }
 
         /// <summary>
@@ -1031,12 +1098,14 @@ namespace PS7ScriptDesk.UI.ViewModels
         public ApplicationSettings CreateApplicationSettingsSnapshot()
         {
             var reopenFilePaths = new List<string>();
+            var reopenDocuments = new List<OpenDocumentState>();
 
             foreach (var tab in OpenTabs)
             {
                 if (!string.IsNullOrWhiteSpace(tab.FilePath) && File.Exists(tab.FilePath))
                 {
                     reopenFilePaths.Add(tab.FilePath);
+                    reopenDocuments.Add(CreateOpenDocumentState(tab));
                 }
             }
 
@@ -1049,7 +1118,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 SelectedRuntimeExecutablePath = SelectedRuntimeItem?.RuntimeInfo.LaunchExecutablePath ?? _preferredRuntimeItem?.RuntimeInfo.LaunchExecutablePath,
                 SelectedTabFilePath = SelectedTab?.FilePath,
                 RecentFilePaths = new List<string>(_recentFilePaths),
-                ReopenFilePaths = reopenFilePaths
+                ReopenFilePaths = reopenFilePaths,
+                ReopenDocuments = reopenDocuments
             };
 
             TrySetOptionalProperty(settings, "Theme", _currentThemeName);
@@ -1106,10 +1176,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 OnPropertyChanged(nameof(SelectedWorkspacePathText));
             }
 
-            foreach (var reopenFilePath in settings.ReopenFilePaths)
-            {
-                _ = TryOpenFileFromPathCore(reopenFilePath, addToRecentFiles: false, logOperation: false, out _);
-            }
+            var restoreSummary = RestoreReopenDocuments(settings);
 
             if (!string.IsNullOrWhiteSpace(_selectedTabFilePathToRestore))
             {
@@ -1124,10 +1191,316 @@ namespace PS7ScriptDesk.UI.ViewModels
                 }
             }
 
-            if (OpenTabs.Count > 0)
+            ApplySessionRestoreNotice(restoreSummary);
+        }
+
+        private sealed class FileMetadataSnapshot
+        {
+            public FileMetadataSnapshot(DateTime lastWriteTimeUtc, long length)
             {
-                StatusText = "Session restored";
+                LastWriteTimeUtc = lastWriteTimeUtc;
+                Length = length;
             }
+
+            public DateTime LastWriteTimeUtc { get; }
+
+            public long Length { get; }
+        }
+
+        private sealed class SessionRestoreSummary
+        {
+            public int RestoredCount { get; set; }
+
+            public int ChangedCount { get; set; }
+
+            public int MissingCount { get; set; }
+
+            public int FailedCount { get; set; }
+
+            public int UntrackedCount { get; set; }
+
+            public List<string> Details { get; } = new();
+
+            public int AttemptedCount => RestoredCount + MissingCount + FailedCount;
+        }
+
+        private SessionRestoreSummary RestoreReopenDocuments(ApplicationSettings settings)
+        {
+            var summary = new SessionRestoreSummary();
+
+            foreach (var reopenDocument in BuildReopenDocumentStates(settings))
+            {
+                RestoreReopenDocument(reopenDocument, summary);
+            }
+
+            return summary;
+        }
+
+        private void RestoreReopenDocument(OpenDocumentState reopenDocument, SessionRestoreSummary summary)
+        {
+            var normalizedFilePath = NormalizeStoredPath(reopenDocument.FilePath);
+            if (normalizedFilePath is null)
+            {
+                summary.FailedCount++;
+                summary.Details.Add("Skipped a saved editor tab because its file path was empty or invalid.");
+                return;
+            }
+
+            if (!File.Exists(normalizedFilePath))
+            {
+                summary.MissingCount++;
+                summary.Details.Add($"Could not restore missing file: {normalizedFilePath}");
+                AppLogger.Warning("Startup", $"Could not restore missing file: {normalizedFilePath}");
+                return;
+            }
+
+            var currentMetadata = TryGetFileMetadata(normalizedFilePath);
+            var hasComparableMetadata = HasComparableRestoreMetadata(reopenDocument);
+            var changedSinceLastSession = hasComparableMetadata &&
+                                          currentMetadata is not null &&
+                                          DoesRestoreMetadataDiffer(reopenDocument, currentMetadata);
+
+            if (TryOpenFileFromPathCore(normalizedFilePath, addToRecentFiles: false, logOperation: false, out var failureReason, out var restoredTab))
+            {
+                summary.RestoredCount++;
+
+                if (restoredTab is not null && currentMetadata is not null)
+                {
+                    restoredTab.SetLastKnownFileMetadata(currentMetadata.LastWriteTimeUtc, currentMetadata.Length);
+                }
+
+                if (changedSinceLastSession)
+                {
+                    summary.ChangedCount++;
+                    summary.Details.Add($"Reloaded changed file from disk: {normalizedFilePath}");
+                    AppLogger.Info("Startup", $"Restored file changed since the last tracked session and was reloaded from disk: {normalizedFilePath}");
+                }
+                else if (!hasComparableMetadata)
+                {
+                    summary.UntrackedCount++;
+                    summary.Details.Add($"Restored file from disk; previous metadata was not available yet: {normalizedFilePath}");
+                }
+
+                return;
+            }
+
+            summary.FailedCount++;
+            summary.Details.Add($"Could not restore file: {normalizedFilePath}. {failureReason ?? "The file could not be read."}");
+            AppLogger.Warning("Startup", $"Could not restore file: {normalizedFilePath}. {failureReason ?? "The file could not be read."}");
+        }
+
+        private static List<OpenDocumentState> BuildReopenDocumentStates(ApplicationSettings settings)
+        {
+            var result = new List<OpenDocumentState>();
+            var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (settings.ReopenDocuments is not null)
+            {
+                foreach (var reopenDocument in settings.ReopenDocuments)
+                {
+                    if (reopenDocument is null)
+                    {
+                        continue;
+                    }
+
+                    var normalizedPath = NormalizeStoredPath(reopenDocument.FilePath);
+                    if (normalizedPath is null || !seenPaths.Add(normalizedPath))
+                    {
+                        continue;
+                    }
+
+                    result.Add(new OpenDocumentState
+                    {
+                        FilePath = normalizedPath,
+                        LastKnownWriteTimeUtc = reopenDocument.LastKnownWriteTimeUtc,
+                        LastKnownLength = reopenDocument.LastKnownLength
+                    });
+                }
+            }
+
+            if (settings.ReopenFilePaths is not null)
+            {
+                foreach (var reopenFilePath in settings.ReopenFilePaths)
+                {
+                    var normalizedPath = NormalizeStoredPath(reopenFilePath);
+                    if (normalizedPath is null || !seenPaths.Add(normalizedPath))
+                    {
+                        continue;
+                    }
+
+                    result.Add(new OpenDocumentState { FilePath = normalizedPath });
+                }
+            }
+
+            return result;
+        }
+
+        private static OpenDocumentState CreateOpenDocumentState(EditorTabViewModel tab)
+        {
+            var state = new OpenDocumentState
+            {
+                FilePath = tab.FilePath ?? string.Empty,
+                LastKnownWriteTimeUtc = tab.LastKnownFileWriteTimeUtc,
+                LastKnownLength = tab.LastKnownFileLength
+            };
+
+            if (!state.LastKnownWriteTimeUtc.HasValue && !state.LastKnownLength.HasValue && !string.IsNullOrWhiteSpace(tab.FilePath))
+            {
+                var currentMetadata = TryGetFileMetadata(tab.FilePath);
+                if (currentMetadata is not null)
+                {
+                    state.LastKnownWriteTimeUtc = currentMetadata.LastWriteTimeUtc;
+                    state.LastKnownLength = currentMetadata.Length;
+                }
+            }
+
+            return state;
+        }
+
+        private static bool HasComparableRestoreMetadata(OpenDocumentState documentState)
+        {
+            return documentState.LastKnownWriteTimeUtc.HasValue || documentState.LastKnownLength.HasValue;
+        }
+
+        private static bool DoesRestoreMetadataDiffer(OpenDocumentState previousState, FileMetadataSnapshot currentMetadata)
+        {
+            if (previousState.LastKnownWriteTimeUtc.HasValue &&
+                previousState.LastKnownWriteTimeUtc.Value != currentMetadata.LastWriteTimeUtc)
+            {
+                return true;
+            }
+
+            if (previousState.LastKnownLength.HasValue &&
+                previousState.LastKnownLength.Value != currentMetadata.Length)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static FileMetadataSnapshot? TryGetFileMetadata(string? filePath)
+        {
+            var normalizedFilePath = NormalizeStoredPath(filePath);
+            if (normalizedFilePath is null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var fileInfo = new FileInfo(normalizedFilePath);
+                if (!fileInfo.Exists)
+                {
+                    return null;
+                }
+
+                return new FileMetadataSnapshot(fileInfo.LastWriteTimeUtc, fileInfo.Length);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void ApplyCurrentFileMetadataToTab(EditorTabViewModel tab, string filePath, string knownContent)
+        {
+            var currentMetadata = TryGetFileMetadata(filePath);
+            if (currentMetadata is null)
+            {
+                tab.ClearLastKnownFileMetadata();
+                return;
+            }
+
+            tab.SetLastKnownFileState(
+                currentMetadata.LastWriteTimeUtc,
+                currentMetadata.Length,
+                ComputeContentSha256(knownContent));
+        }
+
+        private void ApplySessionRestoreNotice(SessionRestoreSummary summary)
+        {
+            if (summary.AttemptedCount == 0)
+            {
+                ClearSessionRestoreNotice();
+                return;
+            }
+
+            var parts = new List<string>();
+
+            if (summary.RestoredCount > 0)
+            {
+                parts.Add($"{FormatCount(summary.RestoredCount, "file", "files")} restored from disk");
+            }
+
+            if (summary.ChangedCount > 0)
+            {
+                parts.Add($"{FormatCount(summary.ChangedCount, "file", "files")} changed since last session and reloaded");
+            }
+
+            if (summary.MissingCount > 0)
+            {
+                parts.Add($"{FormatCount(summary.MissingCount, "file", "files")} missing");
+            }
+
+            if (summary.FailedCount > 0)
+            {
+                parts.Add($"{FormatCount(summary.FailedCount, "file", "files")} could not be restored");
+            }
+
+            var notice = parts.Count == 0
+                ? "Session restored from disk"
+                : "Session restored: " + string.Join("; ", parts) + ".";
+
+            if (summary.UntrackedCount > 0 && summary.ChangedCount == 0)
+            {
+                notice += " Change tracking starts now.";
+            }
+
+            var toolTipLines = new List<string>
+            {
+                "PS7 ScriptDesk loads restored editor tabs from the current files on disk."
+            };
+
+            if (summary.ChangedCount > 0)
+            {
+                toolTipLines.Add("One or more restored files changed since the last tracked session, so the current disk version was loaded.");
+            }
+
+            if (summary.UntrackedCount > 0)
+            {
+                toolTipLines.Add("Some restored files were saved by an older settings format, so previous file metadata was not available for comparison.");
+            }
+
+            if (summary.Details.Count > 0)
+            {
+                toolTipLines.Add(string.Empty);
+                toolTipLines.AddRange(summary.Details);
+            }
+
+            var toolTip = string.Join(Environment.NewLine, toolTipLines);
+            SetSessionRestoreNotice(notice, toolTip);
+            StatusText = notice;
+            AppLogger.Info("Startup", notice);
+        }
+
+        private void SetSessionRestoreNotice(string noticeText, string toolTip)
+        {
+            SessionRestoreNoticeText = noticeText;
+            SessionRestoreNoticeToolTip = string.IsNullOrWhiteSpace(toolTip) ? noticeText : toolTip;
+            HasSessionRestoreNotice = !string.IsNullOrWhiteSpace(noticeText);
+        }
+
+        private void ClearSessionRestoreNotice()
+        {
+            SessionRestoreNoticeText = string.Empty;
+            SessionRestoreNoticeToolTip = string.Empty;
+            HasSessionRestoreNotice = false;
+        }
+
+        private static string FormatCount(int count, string singular, string plural)
+        {
+            return count == 1 ? $"1 {singular}" : $"{count} {plural}";
         }
 
         private void SeedValidatedStartupRuntime(PowerShellRuntimeInfo runtime)
@@ -1295,7 +1668,13 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private bool TryOpenFileFromPathCore(string filePath, bool addToRecentFiles, bool logOperation, out string? failureReason)
         {
+            return TryOpenFileFromPathCore(filePath, addToRecentFiles, logOperation, out failureReason, out _);
+        }
+
+        private bool TryOpenFileFromPathCore(string filePath, bool addToRecentFiles, bool logOperation, out string? failureReason, out EditorTabViewModel? openedTab)
+        {
             failureReason = null;
+            openedTab = null;
 
             var normalizedFilePath = NormalizeStoredPath(filePath);
             if (normalizedFilePath is null)
@@ -1318,6 +1697,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                         string.Equals(existingTab.FilePath, normalizedFilePath, StringComparison.OrdinalIgnoreCase))
                     {
                         SelectedTab = existingTab;
+                        openedTab = existingTab;
 
                         if (addToRecentFiles)
                         {
@@ -1351,9 +1731,11 @@ namespace PS7ScriptDesk.UI.ViewModels
 
                 var tab = new EditorTabViewModel(title, content, normalizedFilePath);
                 tab.MarkSaved();
+                ApplyCurrentFileMetadataToTab(tab, normalizedFilePath, content);
 
                 OpenTabs.Add(tab);
                 SelectedTab = tab;
+                openedTab = tab;
 
                 if (addToRecentFiles)
                 {
@@ -1472,169 +1854,549 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
         }
 
+        private enum SaveOperationOutcome
+        {
+            Saved,
+            Reloaded,
+            Canceled,
+            Failed
+        }
+
+        private sealed record ExternalChangeCheck(
+            bool HasConflict,
+            string Reason,
+            DocumentFileState? CurrentState);
+
         private bool SaveTabCore(EditorTabViewModel tab)
+        {
+            return SaveTabCoreWithOutcome(tab) == SaveOperationOutcome.Saved;
+        }
+
+        private SaveOperationOutcome SaveTabCoreWithOutcome(EditorTabViewModel tab)
         {
             var normalizedFilePath = NormalizeStoredPath(tab.FilePath);
             if (normalizedFilePath is null)
             {
                 StatusText = "Save failed";
-                AppendOutputLine("Save failed: the current file path is invalid.");
                 AppLogger.Warning("Save", $"Save rejected for {tab.Title} because the current file path was invalid. OriginalPath='{tab.FilePath ?? "<null>"}'.");
-                return false;
+                DeveloperDiagnostics.LogDecision(
+                    "Save",
+                    "DocumentSaveValidation",
+                    "Document Save was rejected because the current file path was invalid.",
+                    "RejectedInvalidPath",
+                    new Dictionary<string, object?>
+                    {
+                        ["sourcePath"] = tab.FilePath,
+                        ["result"] = "Failed",
+                        ["userNotificationDestination"] = "StatusText",
+                        ["terminalNotificationEnabled"] = false
+                    });
+                return SaveOperationOutcome.Failed;
             }
 
-            var directoryExists = DoesSaveTargetDirectoryExist(normalizedFilePath);
-            var fileExistedBeforeWrite = File.Exists(normalizedFilePath);
+            var operationId = $"DocumentSave-{Guid.NewGuid():N}";
+            var stopwatch = Stopwatch.StartNew();
+            DeveloperDiagnostics.LogOperationStart(
+                "Save",
+                "DocumentSave",
+                "Document Save started.",
+                operationId,
+                BuildSaveDiagnostics(tab, normalizedFilePath, "Save"));
 
-            try
+            for (var attempt = 1; attempt <= 3; attempt++)
             {
-                _fileDocumentService.WriteAllText(normalizedFilePath, tab.Content);
-                if (!string.Equals(tab.FilePath, normalizedFilePath, StringComparison.OrdinalIgnoreCase))
+                ExternalChangeCheck changeCheck;
+                try
                 {
-                    tab.SetFilePath(normalizedFilePath);
-                    OnPropertyChanged(nameof(ActiveDocumentText));
+                    changeCheck = CheckForExternalChange(tab, normalizedFilePath, operationId);
+                }
+                catch (Exception ex)
+                {
+                    return CompleteSaveFailure(tab, normalizedFilePath, "Save", operationId, stopwatch, ex);
                 }
 
-                tab.MarkSaved();
-                AddRecentFilePath(normalizedFilePath);
+                if (changeCheck.HasConflict)
+                {
+                    return ResolveExternalSaveConflict(tab, normalizedFilePath, changeCheck, operationId, stopwatch, attempt);
+                }
 
-                StatusText = $"{tab.Title} saved";
-                AppendOutputLine($"{normalizedFilePath} saved");
+                try
+                {
+                    WriteAndFinalizeSave(tab, normalizedFilePath, changeCheck.CurrentState, operationId, isSaveAs: false);
+                    CompleteSaveSuccess(tab, normalizedFilePath, "Save", operationId, stopwatch);
+                    return SaveOperationOutcome.Saved;
+                }
+                catch (DocumentFileChangedException ex) when (attempt < 3)
+                {
+                    DeveloperDiagnostics.LogDecision(
+                        "Save",
+                        "DocumentSaveRevalidation",
+                        "The destination changed after the pre-save check; conflict resolution will run again.",
+                        "RecheckConflict",
+                        BuildStateDiagnostics(operationId, normalizedFilePath, ex.ExpectedState, ex.CurrentState));
+                }
+                catch (Exception ex)
+                {
+                    return CompleteSaveFailure(tab, normalizedFilePath, "Save", operationId, stopwatch, ex);
+                }
+            }
 
-                return true;
-            }
-            catch (DirectoryNotFoundException ex)
-            {
-                var message = $"Save failed: the folder for {normalizedFilePath} does not exist.";
-                StatusText = "Save failed";
-                AppendOutputLine(message);
-                _userPromptService.ShowWarningMessage("Save failed", "The folder does not exist.");
-                AppLogger.Error("Save", $"Save failed for {tab.Title}; Path={normalizedFilePath}", ex);
-                return false;
-            }
-            catch (FileNotFoundException ex)
-            {
-                var message = BuildSaveFileNotFoundMessage(normalizedFilePath, directoryExists, fileExistedBeforeWrite);
-                StatusText = "Save failed";
-                AppendOutputLine(message);
-                _userPromptService.ShowWarningMessage("Save failed", message);
-                AppLogger.Error("Save", $"Save failed for {tab.Title}; Path={normalizedFilePath}; DirectoryExists={directoryExists}; FileExistsBeforeWrite={fileExistedBeforeWrite}", ex);
-                return false;
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                var message = BuildSavePermissionDeniedMessage(normalizedFilePath);
-                StatusText = "Save failed";
-                AppendOutputLine(message);
-                _userPromptService.ShowWarningMessage("Save failed", message);
-                AppLogger.Error("Save", $"Save failed for {tab.Title}; Path={normalizedFilePath}", ex);
-                return false;
-            }
-            catch (SecurityException ex)
-            {
-                var message = BuildSavePermissionDeniedMessage(normalizedFilePath);
-                StatusText = "Save failed";
-                AppendOutputLine(message);
-                _userPromptService.ShowWarningMessage("Save failed", message);
-                AppLogger.Error("Save", $"Save failed for {tab.Title}; Path={normalizedFilePath}", ex);
-                return false;
-            }
-            catch (IOException ex)
-            {
-                StatusText = "Save failed";
-                AppendOutputLine($"Save failed: {ex.Message}");
-                _userPromptService.ShowWarningMessage("Save failed", ex.Message);
-                AppLogger.Error("Save", $"Save failed for {tab.Title}; Path={normalizedFilePath}", ex);
-                return false;
-            }
-            catch (Exception ex)
-            {
-                StatusText = "Save failed";
-                AppendOutputLine($"Save failed: {ex.Message}");
-                AppLogger.Error("Save", $"Save failed for {tab.Title}; Path={normalizedFilePath}", ex);
-                return false;
-            }
+            return CompleteSaveFailure(
+                tab,
+                normalizedFilePath,
+                "Save",
+                operationId,
+                stopwatch,
+                new IOException("The file kept changing while the save was being prepared. Try again when external edits have stopped."));
         }
 
         private bool SaveTabAsCore(EditorTabViewModel tab, string filePath)
+        {
+            return SaveTabAsCoreWithOutcome(tab, filePath) == SaveOperationOutcome.Saved;
+        }
+
+        private SaveOperationOutcome SaveTabAsCoreWithOutcome(EditorTabViewModel tab, string filePath)
         {
             var normalizedFilePath = NormalizeStoredPath(NormalizeScriptSavePath(filePath));
             if (normalizedFilePath is null)
             {
                 StatusText = "Save As failed";
-                AppendOutputLine("Save As failed: the selected file path was invalid.");
                 AppLogger.Warning("Save", $"Save As rejected for {tab.Title} because the selected path was invalid. OriginalPath='{filePath ?? "<null>"}'.");
-                return false;
+                DeveloperDiagnostics.LogDecision(
+                    "Save",
+                    "DocumentSaveAsValidation",
+                    "Document Save As was rejected because the selected file path was invalid.",
+                    "RejectedInvalidPath",
+                    new Dictionary<string, object?>
+                    {
+                        ["targetPath"] = filePath,
+                        ["result"] = "Failed",
+                        ["userNotificationDestination"] = "StatusText",
+                        ["terminalNotificationEnabled"] = false
+                    });
+                return SaveOperationOutcome.Failed;
             }
 
-            var directoryExists = DoesSaveTargetDirectoryExist(normalizedFilePath);
-            var fileExistedBeforeWrite = File.Exists(normalizedFilePath);
+            if (!string.IsNullOrWhiteSpace(tab.FilePath) &&
+                string.Equals(NormalizeStoredPath(tab.FilePath), normalizedFilePath, StringComparison.OrdinalIgnoreCase))
+            {
+                return SaveTabCoreWithOutcome(tab);
+            }
+
+            var operationId = $"DocumentSaveAs-{Guid.NewGuid():N}";
+            var stopwatch = Stopwatch.StartNew();
+            DeveloperDiagnostics.LogOperationStart(
+                "Save",
+                "DocumentSaveAs",
+                "Document Save As started.",
+                operationId,
+                BuildSaveDiagnostics(tab, normalizedFilePath, "SaveAs"));
 
             try
             {
-                _fileDocumentService.WriteAllText(normalizedFilePath, tab.Content);
-                tab.SetFilePath(normalizedFilePath);
-                tab.MarkSaved();
-                AddRecentFilePath(normalizedFilePath);
-
-                OnPropertyChanged(nameof(ActiveDocumentText));
-
-                StatusText = $"{tab.Title} saved";
-                AppendOutputLine($"{normalizedFilePath} saved");
-
-                return true;
+                var expectedDestinationState = _fileDocumentService.GetFileState(normalizedFilePath);
+                WriteAndFinalizeSave(tab, normalizedFilePath, expectedDestinationState, operationId, isSaveAs: true);
+                CompleteSaveSuccess(tab, normalizedFilePath, "Save As", operationId, stopwatch);
+                return SaveOperationOutcome.Saved;
             }
-            catch (DirectoryNotFoundException ex)
+            catch (DocumentFileChangedException ex)
             {
-                var message = $"Save As failed: the folder for {normalizedFilePath} does not exist.";
-                StatusText = "Save As failed";
-                AppendOutputLine(message);
-                _userPromptService.ShowWarningMessage("Save As failed", "The folder does not exist.");
-                AppLogger.Error("Save", $"Save As failed for {tab.Title}; Path={normalizedFilePath}", ex);
-                return false;
-            }
-            catch (FileNotFoundException ex)
-            {
-                var message = BuildSaveFileNotFoundMessage(normalizedFilePath, directoryExists, fileExistedBeforeWrite);
-                StatusText = "Save As failed";
-                AppendOutputLine(message);
-                _userPromptService.ShowWarningMessage("Save As failed", message);
-                AppLogger.Error("Save", $"Save As failed for {tab.Title}; Path={normalizedFilePath}; DirectoryExists={directoryExists}; FileExistsBeforeWrite={fileExistedBeforeWrite}", ex);
-                return false;
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                var message = BuildSavePermissionDeniedMessage(normalizedFilePath);
-                StatusText = "Save As failed";
-                AppendOutputLine(message);
-                _userPromptService.ShowWarningMessage("Save As failed", message);
-                AppLogger.Error("Save", $"Save As failed for {tab.Title}; Path={normalizedFilePath}", ex);
-                return false;
-            }
-            catch (SecurityException ex)
-            {
-                var message = BuildSavePermissionDeniedMessage(normalizedFilePath);
-                StatusText = "Save As failed";
-                AppendOutputLine(message);
-                _userPromptService.ShowWarningMessage("Save As failed", message);
-                AppLogger.Error("Save", $"Save As failed for {tab.Title}; Path={normalizedFilePath}", ex);
-                return false;
-            }
-            catch (IOException ex)
-            {
-                StatusText = "Save As failed";
-                AppendOutputLine($"Save As failed: {ex.Message}");
-                _userPromptService.ShowWarningMessage("Save As failed", ex.Message);
-                AppLogger.Error("Save", $"Save As failed for {tab.Title}; Path={normalizedFilePath}", ex);
-                return false;
+                var message = "The Save As destination changed after overwrite confirmation. Nothing was overwritten. Choose Save As again to review the current destination.";
+                StatusText = "Save As canceled - destination changed";
+                _userPromptService.ShowWarningMessage("Save As destination changed", message);
+                DeveloperDiagnostics.LogDecision(
+                    "Save",
+                    "DocumentSaveAsRevalidation",
+                    message,
+                    "DestinationChanged",
+                    BuildStateDiagnostics(operationId, normalizedFilePath, ex.ExpectedState, ex.CurrentState));
+                DeveloperDiagnostics.LogOperationStop(
+                    "Save",
+                    "DocumentSaveAs",
+                    "Document Save As stopped because the destination changed during the operation.",
+                    stopwatch.ElapsedMilliseconds,
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = operationId,
+                        ["targetPath"] = normalizedFilePath,
+                        ["result"] = "CanceledDestinationChanged",
+                        ["userNotificationDestination"] = "StatusTextAndWarningDialog",
+                        ["terminalNotificationEnabled"] = false
+                    });
+                return SaveOperationOutcome.Canceled;
             }
             catch (Exception ex)
             {
-                StatusText = "Save As failed";
-                AppendOutputLine($"Save As failed: {ex.Message}");
-                AppLogger.Error("Save", $"Save As failed for {tab.Title}; Path={normalizedFilePath}", ex);
-                return false;
+                return CompleteSaveFailure(tab, normalizedFilePath, "Save As", operationId, stopwatch, ex);
             }
+        }
+
+        private ExternalChangeCheck CheckForExternalChange(EditorTabViewModel tab, string filePath, string operationId)
+        {
+            DocumentFileState currentState;
+            try
+            {
+                currentState = _fileDocumentService.GetFileState(filePath);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is SecurityException)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Save",
+                    "ExternalFileChangeCheck",
+                    "The current disk state could not be read safely.",
+                    "DiskStateUnavailable",
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = operationId,
+                        ["targetPath"] = filePath,
+                        ["exceptionType"] = ex.GetType().Name
+                    });
+                return new ExternalChangeCheck(
+                    true,
+                    "The current disk version could not be read or verified. It may be locked or inaccessible.",
+                    null);
+            }
+
+            if (!currentState.Exists)
+            {
+                return new ExternalChangeCheck(
+                    true,
+                    "The file was deleted or moved after it was opened or last saved.",
+                    currentState);
+            }
+
+            var metadataChanged =
+                !tab.LastKnownFileWriteTimeUtc.HasValue ||
+                !tab.LastKnownFileLength.HasValue ||
+                string.IsNullOrWhiteSpace(tab.LastKnownFileContentSha256) ||
+                tab.LastKnownFileWriteTimeUtc.Value != currentState.LastWriteTimeUtc ||
+                tab.LastKnownFileLength.Value != currentState.Length;
+
+            if (!metadataChanged)
+            {
+                return new ExternalChangeCheck(false, string.Empty, currentState);
+            }
+
+            var snapshot = _fileDocumentService.ReadSnapshot(filePath);
+            var contentMatchesKnownState =
+                !string.IsNullOrWhiteSpace(tab.LastKnownFileContentSha256) &&
+                string.Equals(tab.LastKnownFileContentSha256, snapshot.ContentSha256, StringComparison.Ordinal);
+
+            DeveloperDiagnostics.LogDecision(
+                "Save",
+                "ExternalFileChangeCheck",
+                contentMatchesKnownState
+                    ? "Disk metadata changed, but disk content still matches the last known editor baseline."
+                    : "Disk metadata and content indicate an external change.",
+                contentMatchesKnownState ? "MetadataOnlyChange" : "ConfirmedExternalChange",
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["targetPath"] = filePath,
+                    ["knownLastWriteTimeUtc"] = tab.LastKnownFileWriteTimeUtc,
+                    ["knownLength"] = tab.LastKnownFileLength,
+                    ["currentLastWriteTimeUtc"] = snapshot.State.LastWriteTimeUtc,
+                    ["currentLength"] = snapshot.State.Length,
+                    ["contentMatchesKnownState"] = contentMatchesKnownState
+                });
+
+            if (contentMatchesKnownState)
+            {
+                return new ExternalChangeCheck(false, string.Empty, snapshot.State);
+            }
+
+            return new ExternalChangeCheck(
+                true,
+                "The file's contents changed after this editor tab loaded or last saved it.",
+                snapshot.State);
+        }
+
+        private SaveOperationOutcome ResolveExternalSaveConflict(
+            EditorTabViewModel tab,
+            string filePath,
+            ExternalChangeCheck changeCheck,
+            string operationId,
+            Stopwatch stopwatch,
+            int attempt)
+        {
+            var decision = _userPromptService.ShowExternalFileConflictPrompt(filePath, changeCheck.Reason);
+            DeveloperDiagnostics.LogDecision(
+                "Save",
+                "ExternalFileConflictDecision",
+                "The user selected an external-file conflict outcome.",
+                decision.ToString(),
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["targetPath"] = filePath,
+                    ["attempt"] = attempt,
+                    ["currentExists"] = changeCheck.CurrentState?.Exists,
+                    ["currentLastWriteTimeUtc"] = changeCheck.CurrentState?.LastWriteTimeUtc,
+                    ["currentLength"] = changeCheck.CurrentState?.Length
+                });
+
+            switch (decision)
+            {
+                case ExternalFileConflictDecision.ReloadFromDisk:
+                    return ReloadTabFromDisk(tab, filePath, operationId, stopwatch);
+
+                case ExternalFileConflictDecision.OverwriteDisk:
+                    try
+                    {
+                        var authorizedState = _fileDocumentService.GetFileState(filePath);
+                        WriteAndFinalizeSave(tab, filePath, authorizedState, operationId, isSaveAs: false);
+                        CompleteSaveSuccess(tab, filePath, "Save", operationId, stopwatch);
+                        return SaveOperationOutcome.Saved;
+                    }
+                    catch (DocumentFileChangedException)
+                    {
+                        return CompleteSaveFailure(
+                            tab,
+                            filePath,
+                            "Save",
+                            operationId,
+                            stopwatch,
+                            new IOException("The file changed again after overwrite was confirmed. Nothing was overwritten."));
+                    }
+                    catch (Exception ex)
+                    {
+                        return CompleteSaveFailure(tab, filePath, "Save", operationId, stopwatch, ex);
+                    }
+
+                case ExternalFileConflictDecision.SaveAs:
+                    var saveAsPath = _userPromptService.ShowSaveFileDialog(GetSuggestedSaveFileName(tab));
+                    if (string.IsNullOrWhiteSpace(saveAsPath))
+                    {
+                        StatusText = "Save As canceled";
+                        CompleteSaveWithoutWrite(filePath, operationId, stopwatch, "CanceledSaveAsDialog");
+                        return SaveOperationOutcome.Canceled;
+                    }
+
+                    CompleteSaveWithoutWrite(filePath, operationId, stopwatch, "DelegatedToSaveAs");
+                    return SaveTabAsCoreWithOutcome(tab, saveAsPath);
+
+                default:
+                    StatusText = "Save canceled";
+                    CompleteSaveWithoutWrite(filePath, operationId, stopwatch, "CanceledByUser");
+                    return SaveOperationOutcome.Canceled;
+            }
+        }
+
+        private SaveOperationOutcome ReloadTabFromDisk(
+            EditorTabViewModel tab,
+            string filePath,
+            string operationId,
+            Stopwatch stopwatch)
+        {
+            try
+            {
+                var snapshot = _fileDocumentService.ReadSnapshot(filePath);
+                tab.Content = snapshot.Content;
+                tab.SetLastKnownFileState(
+                    snapshot.State.LastWriteTimeUtc,
+                    snapshot.State.Length,
+                    snapshot.ContentSha256);
+                tab.MarkSaved();
+                StatusText = $"{tab.Title} reloaded from disk";
+                DeveloperDiagnostics.LogOperationStop(
+                    "Save",
+                    "DocumentSave",
+                    "Document was reloaded from disk; the original save did not continue.",
+                    stopwatch.ElapsedMilliseconds,
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = operationId,
+                        ["targetPath"] = filePath,
+                        ["result"] = "Reloaded",
+                        ["diskLength"] = snapshot.State.Length,
+                        ["userNotificationDestination"] = "StatusText",
+                        ["terminalNotificationEnabled"] = false
+                    });
+                return SaveOperationOutcome.Reloaded;
+            }
+            catch (Exception ex)
+            {
+                return CompleteSaveFailure(tab, filePath, "Reload", operationId, stopwatch, ex);
+            }
+        }
+
+        private void WriteAndFinalizeSave(
+            EditorTabViewModel tab,
+            string filePath,
+            DocumentFileState? expectedDestinationState,
+            string operationId,
+            bool isSaveAs)
+        {
+            var content = tab.Content ?? string.Empty;
+            _fileDocumentService.WriteAllText(filePath, content, expectedDestinationState, operationId);
+            var savedState = _fileDocumentService.GetFileState(filePath);
+
+            if (isSaveAs || !string.Equals(tab.FilePath, filePath, StringComparison.OrdinalIgnoreCase))
+            {
+                tab.SetFilePath(filePath);
+                OnPropertyChanged(nameof(ActiveDocumentText));
+            }
+
+            tab.SetLastKnownFileState(
+                savedState.LastWriteTimeUtc,
+                savedState.Length,
+                ComputeContentSha256(content));
+            tab.MarkSaved();
+            AddRecentFilePath(filePath);
+        }
+
+        private void CompleteSaveSuccess(
+            EditorTabViewModel tab,
+            string filePath,
+            string operationName,
+            string operationId,
+            Stopwatch stopwatch)
+        {
+            stopwatch.Stop();
+            StatusText = $"{tab.Title} saved";
+            DeveloperDiagnostics.LogOperationStop(
+                "Save",
+                operationName == "Save As" ? "DocumentSaveAs" : "DocumentSave",
+                $"Document {operationName} completed successfully.",
+                stopwatch.ElapsedMilliseconds,
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["targetPath"] = filePath,
+                    ["result"] = "Saved",
+                    ["savedLength"] = tab.LastKnownFileLength,
+                    ["userNotificationDestination"] = "StatusText",
+                    ["terminalNotificationEnabled"] = false
+                });
+        }
+
+        private SaveOperationOutcome CompleteSaveFailure(
+            EditorTabViewModel tab,
+            string filePath,
+            string operationName,
+            string operationId,
+            Stopwatch stopwatch,
+            Exception ex)
+        {
+            stopwatch.Stop();
+            var directoryExists = DoesSaveTargetDirectoryExist(filePath);
+            var fileExistedBeforeWrite = File.Exists(filePath);
+            string message;
+
+            if (ex is DirectoryNotFoundException)
+            {
+                message = $"The folder for {filePath} does not exist.";
+            }
+            else if (ex is FileNotFoundException)
+            {
+                message = BuildSaveFileNotFoundMessage(filePath, directoryExists, fileExistedBeforeWrite);
+            }
+            else if (ex is UnauthorizedAccessException || ex is SecurityException)
+            {
+                message = BuildSavePermissionDeniedMessage(filePath);
+            }
+            else
+            {
+                message = ex.Message;
+            }
+
+            StatusText = $"{operationName} failed";
+            _userPromptService.ShowWarningMessage($"{operationName} failed", message);
+            AppLogger.Error("Save", $"{operationName} failed for {tab.Title}; Path={filePath}; OperationId={operationId}", ex);
+            DeveloperDiagnostics.LogException(
+                "Save",
+                ex,
+                $"Document {operationName} failed.",
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["targetPath"] = filePath,
+                    ["result"] = "Failed",
+                    ["elapsedMilliseconds"] = stopwatch.ElapsedMilliseconds,
+                    ["tabStillDirty"] = tab.IsDirty,
+                    ["userNotificationDestination"] = "StatusTextAndWarningDialog",
+                    ["terminalNotificationEnabled"] = false
+                });
+            DeveloperDiagnostics.LogOperationStop(
+                "Save",
+                operationName == "Save As" ? "DocumentSaveAs" : "DocumentSave",
+                $"Document {operationName} ended without saving.",
+                stopwatch.ElapsedMilliseconds,
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["targetPath"] = filePath,
+                    ["result"] = "Failed",
+                    ["tabStillDirty"] = tab.IsDirty,
+                    ["userNotificationDestination"] = "StatusTextAndWarningDialog",
+                    ["terminalNotificationEnabled"] = false
+                });
+            return SaveOperationOutcome.Failed;
+        }
+
+        private static void CompleteSaveWithoutWrite(
+            string filePath,
+            string operationId,
+            Stopwatch stopwatch,
+            string result)
+        {
+            stopwatch.Stop();
+            DeveloperDiagnostics.LogOperationStop(
+                "Save",
+                "DocumentSave",
+                "Document Save ended without writing the current file.",
+                stopwatch.ElapsedMilliseconds,
+                new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["targetPath"] = filePath,
+                    ["result"] = result,
+                    ["userNotificationDestination"] = "StatusText",
+                    ["terminalNotificationEnabled"] = false
+                });
+        }
+
+        private static Dictionary<string, object?> BuildSaveDiagnostics(
+            EditorTabViewModel tab,
+            string targetPath,
+            string operationName)
+        {
+            return new Dictionary<string, object?>
+            {
+                ["operationName"] = operationName,
+                ["targetPath"] = targetPath,
+                ["sourcePath"] = tab.FilePath,
+                ["isDirty"] = tab.IsDirty,
+                ["contentLength"] = tab.Content?.Length ?? 0,
+                ["knownLastWriteTimeUtc"] = tab.LastKnownFileWriteTimeUtc,
+                ["knownLength"] = tab.LastKnownFileLength,
+                ["hasKnownContentHash"] = !string.IsNullOrWhiteSpace(tab.LastKnownFileContentSha256),
+                ["terminalNotificationEnabled"] = false
+            };
+        }
+
+        private static Dictionary<string, object?> BuildStateDiagnostics(
+            string operationId,
+            string targetPath,
+            DocumentFileState expectedState,
+            DocumentFileState currentState)
+        {
+            return new Dictionary<string, object?>
+            {
+                ["operationId"] = operationId,
+                ["targetPath"] = targetPath,
+                ["expectedExists"] = expectedState.Exists,
+                ["expectedLastWriteTimeUtc"] = expectedState.LastWriteTimeUtc,
+                ["expectedLength"] = expectedState.Length,
+                ["currentExists"] = currentState.Exists,
+                ["currentLastWriteTimeUtc"] = currentState.LastWriteTimeUtc,
+                ["currentLength"] = currentState.Length
+            };
+        }
+
+        private static string ComputeContentSha256(string content)
+        {
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content ?? string.Empty)));
         }
 
         private static string NormalizeScriptSavePath(string filePath)
@@ -2540,7 +3302,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     OnPropertyChanged(nameof(PreferredRuntimeText));
                     OnPropertyChanged(nameof(RuntimeListHeaderText));
 
-                    if (logOperation && (!_liveConsoleService.IsSessionRunning || _writeTextSink is null))
+                    if (logOperation)
                     {
                         AppendOutputLine("PowerShell runtime discovery complete.");
 
@@ -3649,9 +4411,21 @@ namespace PS7ScriptDesk.UI.ViewModels
                 {
                     AppLogger.Info("Console", record.Text);
 
-                    if (ShouldShowLifecycleMessageInTerminal(record.Text))
+                    if (ShouldSurfaceLifecycleMessageToUser(record.Text))
                     {
-                        AppendLifecycleOutputLine($"{ApplicationBranding.PublicName}: {record.Text}");
+                        StatusText = record.Text;
+                        AppendApplicationActivityFragmentCore(
+                            $"{ApplicationBranding.PublicName}: {record.Text}{Environment.NewLine}");
+                        DeveloperDiagnostics.LogDecision(
+                            "Console",
+                            "LifecycleMessageRouting",
+                            "Non-routine terminal lifecycle information was routed outside xterm.js.",
+                            "StatusBarAndActivityPane",
+                            new Dictionary<string, object?>
+                            {
+                                ["messageLength"] = record.Text?.Length ?? 0,
+                                ["terminalNotificationEnabled"] = false
+                            });
                     }
 
                     // Refresh session state on lifecycle events only (session start, stop,
@@ -3665,7 +4439,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             });
         }
 
-        private static bool ShouldShowLifecycleMessageInTerminal(string? text)
+        private static bool ShouldSurfaceLifecycleMessageToUser(string? text)
         {
             if (string.IsNullOrWhiteSpace(text))
             {
@@ -3697,12 +4471,12 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void AppendOutputLine(string text)
         {
-            AppendTerminalTextFragment(text + Environment.NewLine);
-        }
+            if (string.IsNullOrEmpty(text))
+            {
+                return;
+            }
 
-        private void AppendLifecycleOutputLine(string text)
-        {
-            AppendTerminalTextFragment(Environment.NewLine + text + Environment.NewLine);
+            PostToUi(() => AppendApplicationActivityFragmentCore(text + Environment.NewLine));
         }
 
         public void AppendDebugOutput(string text)
@@ -3722,26 +4496,39 @@ namespace PS7ScriptDesk.UI.ViewModels
                     continue;
                 }
 
-                AppendOutputLine($"[debug] {line.TrimEnd()}");
+                AppendDebuggerOutputFragment($"[debug] {line.TrimEnd()}{Environment.NewLine}");
             }
         }
 
-        private void AppendTerminalTextFragment(string text)
+        private void AppendApplicationActivityFragmentCore(string text)
         {
             if (string.IsNullOrEmpty(text))
             {
                 return;
             }
 
-            // Route to the xterm.js terminal control sink when wired up (normal runtime).
-            if (_writeTextSink is not null)
+            const int maxBufferLength = 500000;
+            var next = _applicationActivityText + text;
+            if (next.Length > maxBufferLength)
+                next = next[^maxBufferLength..];
+            ApplicationActivityText = next;
+        }
+
+        private void AppendDebuggerOutputFragment(string text)
+        {
+            if (string.IsNullOrEmpty(text))
             {
-                _writeTextSink(text);
                 return;
             }
 
-            // Fallback: accumulate in TerminalDisplayText (used before the terminal
-            // control is ready, or in unit-test / headless scenarios).
+            if (_debuggerOutputSink is not null)
+            {
+                _debuggerOutputSink(text);
+                return;
+            }
+
+            // Headless/test fallback only. The Shell registers an explicitly named
+            // debugger sink so this buffer is not a generic application-output route.
             const int maxBufferLength = 500000;
             var next = _terminalDisplayText + text;
             if (next.Length > maxBufferLength)

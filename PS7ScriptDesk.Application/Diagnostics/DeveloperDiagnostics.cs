@@ -30,6 +30,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
         private const int MaximumPropertyValueLength = 2048;
         private const int MaximumStoredHighLevelEvents = 200;
         private const int MaximumReadableExceptionLength = 8192;
+        private const string LegacyTerminalCaptureDirectoryName = "TerminalCaptures";
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             WriteIndented = true,
@@ -321,6 +322,36 @@ namespace PS7ScriptDesk.Application.Diagnostics
             return properties;
         }
 
+        /// <summary>
+        /// Creates diagnostics metadata for sensitive text without retaining a
+        /// preview, hash, or any other content-derived value that could disclose
+        /// terminal input or output. This is the required metadata shape for live
+        /// terminal data, pasted text, and rendered prompt content.
+        /// </summary>
+        public static Dictionary<string, object?> CreatePrivateTextMetadata(string? text)
+        {
+            var normalizedText = text ?? string.Empty;
+            var lineCount = 0;
+            if (normalizedText.Length > 0)
+            {
+                lineCount = 1;
+                foreach (var character in normalizedText)
+                {
+                    if (character == '\n')
+                    {
+                        lineCount++;
+                    }
+                }
+            }
+
+            return new Dictionary<string, object?>
+            {
+                ["length"] = normalizedText.Length,
+                ["lineCount"] = lineCount,
+                ["contentOmitted"] = true
+            };
+        }
+
         public static string BuildSummaryText()
         {
             var session = _sessionState;
@@ -451,6 +482,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 writer.WriteLine();
                 writer.WriteLine("Send this entire ZIP file to support/developer for troubleshooting.");
                 writer.WriteLine("It includes normal app logs, metadata startup/load logs, startup error logs, and the most recent developer diagnostics sessions when present.");
+                writer.WriteLine("Raw terminal capture directories are intentionally excluded. Terminal diagnostics record content-free metadata only.");
                 writer.WriteLine();
                 writer.WriteLine($"Created local time: {DateTimeOffset.Now:O}");
                 writer.WriteLine($"App data root: {ApplicationBranding.LocalApplicationDataRoot}");
@@ -707,14 +739,23 @@ namespace PS7ScriptDesk.Application.Diagnostics
             IReadOnlyDictionary<string, object?>? additionalProperties,
             string? sourceFile)
         {
-            var session = _sessionState;
-            if (session is null)
+            try
             {
-                return;
-            }
+                var session = _sessionState;
+                if (session is null)
+                {
+                    return;
+                }
 
-            var diagnosticEvent = CreateEvent(level, category, methodName, eventName, eventType, message, exception, additionalProperties, sourceFile);
-            Enqueue(session, diagnosticEvent);
+                var diagnosticEvent = CreateEvent(level, category, methodName, eventName, eventType, message, exception, additionalProperties, sourceFile);
+                Enqueue(session, diagnosticEvent);
+            }
+            catch
+            {
+                // Diagnostics are strictly best-effort and must never affect the
+                // terminal, renderer, debugger, or any application workflow.
+                Interlocked.Increment(ref _droppedEventCount);
+            }
         }
 
         private static DeveloperDiagnosticEvent CreateEvent(
@@ -1079,6 +1120,11 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 foreach (var filePath in Directory.EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories))
                 {
                     var relativePath = Path.GetRelativePath(directoryPath, filePath);
+                    if (IsLegacyTerminalCapturePath(relativePath))
+                    {
+                        continue;
+                    }
+
                     var entryPath = Path.Combine(archiveRootPath, relativePath);
                     AddFileToArchive(archive, filePath, entryPath, addedEntryPaths);
                 }
@@ -1086,6 +1132,18 @@ namespace PS7ScriptDesk.Application.Diagnostics
             catch
             {
             }
+        }
+
+        private static bool IsLegacyTerminalCapturePath(string relativePath)
+        {
+            if (string.IsNullOrWhiteSpace(relativePath))
+            {
+                return false;
+            }
+
+            return relativePath
+                .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries)
+                .Any(segment => string.Equals(segment, LegacyTerminalCaptureDirectoryName, StringComparison.OrdinalIgnoreCase));
         }
 
         private static void AddFileToArchive(ZipArchive archive, string filePath, string entryPath)

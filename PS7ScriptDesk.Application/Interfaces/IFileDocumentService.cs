@@ -3,6 +3,12 @@
     public interface IFileDocumentService
     {
         string ReadAllText(string filePath);
-        void WriteAllText(string filePath, string content);
+        DocumentFileSnapshot ReadSnapshot(string filePath);
+        DocumentFileState GetFileState(string filePath);
+        void WriteAllText(
+            string filePath,
+            string content,
+            DocumentFileState? expectedDestinationState = null,
+            string? operationId = null);
     }
 }

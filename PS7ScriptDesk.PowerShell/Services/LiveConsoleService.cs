@@ -58,8 +58,6 @@ namespace PS7ScriptDesk.PowerShell.Services
         private static readonly TimeSpan NoVisibleOutputFeedbackDelay = TimeSpan.FromSeconds(5);
         private static readonly TimeSpan ScriptStartConfirmationDelay = TimeSpan.FromSeconds(3);
         private static readonly TimeSpan CommandHealthPollInterval = TimeSpan.FromMilliseconds(250);
-        private const long MaxTerminalCaptureBytes = 4L * 1024L * 1024L;
-        private const string TerminalCaptureDirectoryName = "TerminalCaptures";
         private const string DispatchDiagnosticTokenPrefix = "##PSSTUDIO_DISPATCH_DIAG##";
 
         private readonly object _syncRoot = new();
@@ -93,7 +91,6 @@ namespace PS7ScriptDesk.PowerShell.Services
         private readonly Queue<string> _pendingSnapshotPaths = new();
         private readonly List<string> _pendingHiddenOutputFragments = new();
         private string _hiddenOutputBuffer = string.Empty;
-        private TerminalCaptureState? _terminalCaptureState;
 
         public bool IsSessionRunning
         {
@@ -149,25 +146,6 @@ namespace PS7ScriptDesk.PowerShell.Services
         public PowerShellRuntimeInfo? ActiveRuntime { get; private set; }
 
         public string? CurrentWorkingDirectory { get; private set; }
-
-        private sealed class TerminalCaptureState
-        {
-            public TerminalCaptureState(string filePath, int dispatchGeneration)
-            {
-                FilePath = filePath;
-                DispatchGeneration = dispatchGeneration;
-            }
-
-            public string FilePath { get; }
-
-            public int DispatchGeneration { get; }
-
-            public object SyncRoot { get; } = new();
-
-            public long BytesWritten { get; set; }
-
-            public bool Truncated { get; set; }
-        }
 
         private static bool IsProcessRunningNoThrow(Process? process)
         {
@@ -433,15 +411,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                     ["startTokenPrefix"] = ExecStartTokenPrefix,
                     ["completionTokenPrefix"] = ExecDoneTokenPrefix
                 });
-            StartTerminalCapture(
-                dispatchGeneration,
-                documentDisplayName,
-                scriptSnapshotPath,
-                instructionSnapshotPath,
-                ownedProcessIdAtDispatch,
-                executeInCurrentScope,
-                executionTarget.DeleteAfterRun);
-            AppLogger.Debug("LiveConsole", $"Dispatch command: {FormatDispatchCommandForLog(scriptCommand)}");
+            AppLogger.Debug("LiveConsole", $"Dispatch command prepared. Length={scriptCommand.Length}, ContentOmitted=True.");
             PublishLifecycleMessage(
                 onOutput,
                 $"Running script '{GetDisplayNameForStatus(documentDisplayName)}'. Waiting for script output...");
@@ -450,15 +420,6 @@ namespace PS7ScriptDesk.PowerShell.Services
             {
                 AppLogger.Debug("LiveConsole", $"Sending helper dispatch command to terminal stdin. ScriptSnapshotPath={scriptSnapshotPath}, InstructionSnapshotPath={instructionSnapshotPath}");
                 await WriteTerminalInputAsync(scriptCommand, cancellationToken).ConfigureAwait(false);
-                AppendTerminalCaptureEvent(
-                    dispatchGeneration,
-                    "dispatch-command-written-to-terminal-input",
-                    new Dictionary<string, object?>
-                    {
-                        ["ownedProcessId"] = ownedProcessIdAtDispatch,
-                        ["commandLength"] = scriptCommand.Length,
-                        ["endsWithEnter"] = scriptCommand.EndsWith(TerminalEnterSequence, StringComparison.Ordinal)
-                    });
                 AppLogger.Info("LiveConsole", $"Script dispatch command written to terminal input. DispatchGeneration={dispatchGeneration}, OwnedProcessId={ownedProcessIdAtDispatch?.ToString() ?? "(none)"}.");
                 DeveloperDiagnostics.LogInfo(
                     "Execution",
@@ -558,18 +519,6 @@ namespace PS7ScriptDesk.PowerShell.Services
             return ExecDoneTokenPrefix + Guid.NewGuid().ToString("N");
         }
 
-        private static string FormatDispatchCommandForLog(string commandText)
-        {
-            if (string.IsNullOrEmpty(commandText))
-            {
-                return string.Empty;
-            }
-
-            return commandText
-                .Replace("\r", "\\r", StringComparison.Ordinal)
-                .Replace("\n", "\\n", StringComparison.Ordinal);
-        }
-
         private void SetPendingExecutionTokens(string? startToken, string? completionToken)
         {
             lock (_syncRoot)
@@ -632,20 +581,6 @@ namespace PS7ScriptDesk.PowerShell.Services
             AppLogger.Info(
                 "LiveConsole",
                 $"Interrupt requested. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, SessionRunning={process is not null && !process.HasExited}, CommandInProgress={commandInProgress}, HasPseudoConsole={hasPseudoConsole}, HostAttached={hostAttached}, Runtime='{runtime?.DisplayName ?? "(none)"}', WorkingDirectory='{workingDirectory ?? "(none)"}'.");
-            AppendTerminalCaptureEvent(
-                GetCurrentCommandDispatchGeneration(),
-                "interrupt-requested",
-                new Dictionary<string, object?>
-                {
-                    ["operationId"] = operationId,
-                    ["ownedProcessId"] = ownedProcessId,
-                    ["sessionRunning"] = process is not null && !process.HasExited,
-                    ["commandInProgress"] = commandInProgress,
-                    ["hasPseudoConsole"] = hasPseudoConsole,
-                    ["hostAttached"] = hostAttached,
-                    ["runtime"] = runtime?.DisplayName,
-                    ["workingDirectory"] = workingDirectory
-                });
             DeveloperDiagnostics.LogUserAction(
                 "Terminal",
                 "InterruptRequested",
@@ -834,8 +769,6 @@ namespace PS7ScriptDesk.PowerShell.Services
 
         public async Task<bool> StopConsoleAsync(Action<ExecutionOutputRecord>? onOutput = null)
         {
-            CompleteTerminalCapture("StopConsoleAsync requested; the owned PowerShell terminal session is being stopped or restarted.");
-
             Process? processToStop;
             CancellationTokenSource? readerCancellation;
             Task? stdoutReaderTask;
@@ -1284,9 +1217,12 @@ namespace PS7ScriptDesk.PowerShell.Services
                 // Reset/Stop path that has already detached _process. If the command state
                 // is still marked busy even though _process is gone, do not ignore it; that
                 // is the exact stale/frozen state this recovery path must clear.
-                shouldIgnore = (_process is null && !trackedCommandInProgress) ||
-                               (processId.HasValue && currentProcessId.HasValue && processId.Value != currentProcessId.Value) ||
-                               (processId.HasValue && _handledTerminalExitProcessId == processId.Value);
+                shouldIgnore = TerminalSessionEventPolicy.ShouldIgnoreProcessExit(
+                    _process is not null,
+                    trackedCommandInProgress,
+                    processId,
+                    currentProcessId,
+                    _handledTerminalExitProcessId);
 
                 if (shouldIgnore)
                 {
@@ -1325,19 +1261,6 @@ namespace PS7ScriptDesk.PowerShell.Services
             AppLogger.Info(
                 "LiveConsole",
                 $"The {terminalMode} PowerShell terminal process exited. ProcessId={processId?.ToString() ?? "(unknown)"}, ExitCode={exitCode?.ToString() ?? "(unknown)"}, CommandInProgress={commandInProgress}, CurrentCommandIsScript={currentCommandIsScript}, PendingSnapshots={pendingSnapshotCount}. Clearing pending execution state and notifying the UI.");
-            AppendTerminalCaptureEvent(
-                GetCurrentCommandDispatchGeneration(),
-                "terminal-process-exited",
-                new Dictionary<string, object?>
-                {
-                    ["terminalMode"] = terminalMode,
-                    ["processId"] = processId,
-                    ["exitCode"] = exitCode,
-                    ["commandInProgress"] = commandInProgress,
-                    ["currentCommandIsScript"] = currentCommandIsScript,
-                    ["pendingSnapshotCount"] = pendingSnapshotCount
-                });
-
             // A hard pwsh.exe termination can happen before the helper sentinel is echoed.
             // Always clear pending command/snapshot state so Run, Interrupt, and Reset Console
             // cannot remain disabled after the owned terminal process is gone.
@@ -1382,14 +1305,9 @@ namespace PS7ScriptDesk.PowerShell.Services
                     if (!_firstOutputLogged)
                     {
                         _firstOutputLogged = true;
-                        var preview = new string(buffer, 0, Math.Min(charsRead, 200));
-                        var hasAnsi = preview.Contains('\x1b');
-                        var escaped = preview.Replace("\x1b", "\\x1b").Replace("\r", "\\r").Replace("\n", "\\n");
-                        // Diagnostic goes to the debug output only — NOT to the xterm.js terminal,
-                        // because the escaped string contains literal "\x1b" sequences that xterm.js
-                        // would render as visible text rather than as ANSI escape codes.
+                        var hasAnsi = Array.IndexOf(buffer, '\x1b', 0, charsRead) >= 0;
                         System.Diagnostics.Debug.WriteLine(
-                            $"[LiveConsoleService] First ConPTY chunk — {charsRead} chars, hasAnsi={hasAnsi}: {escaped}");
+                            $"[LiveConsoleService] First ConPTY chunk — {charsRead} chars, hasAnsi={hasAnsi}, contentOmitted=true");
                     }
 
                     PublishTerminalChunk(new string(buffer, 0, charsRead), ExecutionOutputStreamKind.StandardOutput, onOutput);
@@ -1458,15 +1376,13 @@ namespace PS7ScriptDesk.PowerShell.Services
                 return;
             }
 
-            var dispatchGenerationForCapture = GetCurrentCommandDispatchGeneration();
-            CaptureTerminalOutputChunk("raw-before-filter", dispatchGenerationForCapture, streamKind, rawChunk);
+            var dispatchGeneration = GetCurrentCommandDispatchGeneration();
 
             // ── Raw path (for xterm.js) ───────────────────────────────────────────
             // Strip only null bytes; preserve all ANSI/VT100 sequences so xterm.js
             // can render colors, cursor movement, progress bars, etc.
             var raw = rawChunk.Replace("\0", string.Empty, StringComparison.Ordinal);
             raw = FilterInternalTerminalOutput(raw, out var hasSentinel);
-            CaptureTerminalOutputChunk("raw-after-filter", dispatchGenerationForCapture, streamKind, raw);
 
             // ── Cleaned path (for internal tracking) ─────────────────────────────
             // Strip OSC/ANSI sequences and normalise line endings so that the
@@ -1475,21 +1391,29 @@ namespace PS7ScriptDesk.PowerShell.Services
             cleaned = AnsiRegex.Replace(cleaned, string.Empty);
             cleaned = cleaned.Replace("\r\n", "\n", StringComparison.Ordinal);
             cleaned = cleaned.Replace("\r", "\n", StringComparison.Ordinal);
-            CaptureTerminalOutputChunk("cleaned-after-filter", dispatchGenerationForCapture, streamKind, cleaned);
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseTerminalEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Terminal",
+                    "ConPTY output chunk processed with terminal content omitted.",
+                    new Dictionary<string, object?>
+                    {
+                        ["dispatchGeneration"] = dispatchGeneration,
+                        ["streamKind"] = streamKind.ToString(),
+                        ["rawBeforeFilterLength"] = rawChunk.Length,
+                        ["rawAfterFilterLength"] = raw.Length,
+                        ["cleanedAfterFilterLength"] = cleaned.Length,
+                        ["containsAnsi"] = raw.Contains('\x1b'),
+                        ["containsSentinel"] = hasSentinel,
+                        ["contentOmitted"] = true
+                    });
+            }
 
             // Fire the completion event if the sentinel was present.
             if (hasSentinel)
             {
                 AppLogger.Debug("LiveConsole", "Execution-done sentinel detected in terminal output and filtered before xterm.js.");
-                AppendTerminalCaptureEvent(
-                    dispatchGenerationForCapture,
-                    "execution-completion-sentinel-observed",
-                    new Dictionary<string, object?>
-                    {
-                        ["streamKind"] = streamKind.ToString(),
-                        ["rawAfterFilterLength"] = raw.Length,
-                        ["cleanedAfterFilterLength"] = cleaned.Length
-                    });
                 CompleteCommandExecution();
             }
 
@@ -1509,7 +1433,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _rawOutputInfoLogCount++;
                 AppLogger.Info(
                     "LiveConsole",
-                    $"ConPTY raw output chunk #{_rawOutputInfoLogCount}. Stream={streamKind}, RawLength={raw.Length}, CleanLength={cleaned.Length}, HasAnsi={raw.Contains('\x1b')}, Preview='{FormatOutputForLog(raw)}'.");
+                    $"ConPTY raw output chunk #{_rawOutputInfoLogCount}. Stream={streamKind}, RawLength={raw.Length}, CleanLength={cleaned.Length}, HasAnsi={raw.Contains('\x1b')}, ContentOmitted=True.");
             }
 
             // ── Output routing ────────────────────────────────────────────────────
@@ -1534,225 +1458,6 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
         }
 
-        private static bool ShouldWriteTerminalCapture()
-        {
-            return DeveloperDiagnostics.IsEnabled || AppLogger.IsDebugEnabled;
-        }
-
-        private void StartTerminalCapture(
-            int dispatchGeneration,
-            string displayName,
-            string scriptPath,
-            string instructionSnapshotPath,
-            int? ownedProcessId,
-            bool executeInCurrentScope,
-            bool deleteScriptAfterRun)
-        {
-            if (!ShouldWriteTerminalCapture())
-            {
-                return;
-            }
-
-            try
-            {
-                var captureDirectory = Path.Combine(AppLogger.CurrentLogDirectory, TerminalCaptureDirectoryName);
-                Directory.CreateDirectory(captureDirectory);
-
-                var timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
-                var safeName = SanitizeFileNamePart(GetDisplayNameForStatus(displayName));
-                if (safeName.Length > 80)
-                {
-                    safeName = safeName[..80];
-                }
-
-                var capturePath = Path.Combine(captureDirectory, $"terminal-capture-{timestamp}-gen{dispatchGeneration}-{safeName}.log");
-                var captureState = new TerminalCaptureState(capturePath, dispatchGeneration);
-
-                lock (_syncRoot)
-                {
-                    _terminalCaptureState = captureState;
-                }
-
-                AppendTerminalCaptureEvent(
-                    dispatchGeneration,
-                    "capture-started",
-                    new Dictionary<string, object?>
-                    {
-                        ["displayName"] = displayName,
-                        ["scriptPath"] = scriptPath,
-                        ["scriptPathExists"] = File.Exists(scriptPath),
-                        ["instructionSnapshotPath"] = instructionSnapshotPath,
-                        ["instructionSnapshotExists"] = File.Exists(instructionSnapshotPath),
-                        ["ownedProcessId"] = ownedProcessId,
-                        ["executeInCurrentScope"] = executeInCurrentScope,
-                        ["deleteScriptAfterRun"] = deleteScriptAfterRun,
-                        ["maxCaptureBytes"] = MaxTerminalCaptureBytes
-                    });
-
-                AppLogger.Info("LiveConsole", $"Terminal capture started for dispatch generation {dispatchGeneration}. Path='{capturePath}'.");
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Warning("LiveConsole", $"Terminal capture could not be started. DispatchGeneration={dispatchGeneration}, Error={ex.Message}");
-            }
-        }
-
-        private void CaptureTerminalOutputChunk(string phase, int dispatchGeneration, ExecutionOutputStreamKind streamKind, string text)
-        {
-            AppendTerminalCaptureEvent(
-                dispatchGeneration,
-                phase,
-                new Dictionary<string, object?>
-                {
-                    ["streamKind"] = streamKind.ToString(),
-                    ["length"] = text?.Length ?? 0,
-                    ["containsAnsi"] = text?.Contains('\x1b') == true,
-                    ["isEmpty"] = string.IsNullOrEmpty(text),
-                    ["data"] = text ?? string.Empty
-                });
-        }
-
-        private void AppendTerminalCaptureEvent(int dispatchGeneration, string eventName, IReadOnlyDictionary<string, object?>? properties = null)
-        {
-            TerminalCaptureState? captureState;
-            lock (_syncRoot)
-            {
-                captureState = _terminalCaptureState;
-                if (captureState is null || captureState.DispatchGeneration != dispatchGeneration)
-                {
-                    return;
-                }
-            }
-
-            try
-            {
-                var line = FormatTerminalCaptureLine(eventName, properties);
-                lock (captureState.SyncRoot)
-                {
-                    if (captureState.Truncated)
-                    {
-                        return;
-                    }
-
-                    var byteCount = Encoding.UTF8.GetByteCount(line + Environment.NewLine);
-                    if (captureState.BytesWritten + byteCount > MaxTerminalCaptureBytes)
-                    {
-                        var truncationLine = FormatTerminalCaptureLine(
-                            "capture-truncated",
-                            new Dictionary<string, object?>
-                            {
-                                ["maxCaptureBytes"] = MaxTerminalCaptureBytes,
-                                ["attemptedEvent"] = eventName
-                            });
-                        File.AppendAllText(captureState.FilePath, truncationLine + Environment.NewLine, Encoding.UTF8);
-                        captureState.Truncated = true;
-                        return;
-                    }
-
-                    File.AppendAllText(captureState.FilePath, line + Environment.NewLine, Encoding.UTF8);
-                    captureState.BytesWritten += byteCount;
-                }
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Debug("LiveConsole", $"Terminal capture write failed. Event='{eventName}', DispatchGeneration={dispatchGeneration}, Error={ex.Message}");
-            }
-        }
-
-        private void CompleteTerminalCapture(string reason)
-        {
-            TerminalCaptureState? captureState;
-            lock (_syncRoot)
-            {
-                captureState = _terminalCaptureState;
-            }
-
-            if (captureState is null)
-            {
-                return;
-            }
-
-            AppendTerminalCaptureEvent(
-                captureState.DispatchGeneration,
-                "capture-ended",
-                new Dictionary<string, object?>
-                {
-                    ["reason"] = reason,
-                    ["bytesWrittenBeforeEnd"] = captureState.BytesWritten,
-                    ["truncated"] = captureState.Truncated
-                });
-
-            lock (_syncRoot)
-            {
-                if (ReferenceEquals(_terminalCaptureState, captureState))
-                {
-                    _terminalCaptureState = null;
-                }
-            }
-
-            AppLogger.Info("LiveConsole", $"Terminal capture ended for dispatch generation {captureState.DispatchGeneration}. Path='{captureState.FilePath}'. Reason='{reason}'.");
-        }
-
-        private static string FormatTerminalCaptureLine(string eventName, IReadOnlyDictionary<string, object?>? properties)
-        {
-            var builder = new StringBuilder(512);
-            builder.Append(DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz"));
-            builder.Append(" | ").Append(eventName);
-
-            if (properties is not null)
-            {
-                foreach (var pair in properties)
-                {
-                    builder.Append(" | ").Append(pair.Key).Append('=').Append(FormatTerminalCaptureValue(pair.Value));
-                }
-            }
-
-            return builder.ToString();
-        }
-
-        private static string FormatTerminalCaptureValue(object? value)
-        {
-            if (value is null)
-            {
-                return "(null)";
-            }
-
-            if (value is DateTime dateTime)
-            {
-                return dateTime.ToString("O");
-            }
-
-            if (value is DateTimeOffset dateTimeOffset)
-            {
-                return dateTimeOffset.ToString("O");
-            }
-
-            if (value is bool boolean)
-            {
-                return boolean ? "true" : "false";
-            }
-
-            return "'" + FormatOutputForLog(Convert.ToString(value) ?? string.Empty, maxLength: 12000) + "'";
-        }
-
-        private static string SanitizeFileNamePart(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                return "script";
-            }
-
-            var invalid = Path.GetInvalidFileNameChars();
-            var builder = new StringBuilder(value.Length);
-            foreach (var ch in value.Trim())
-            {
-                builder.Append(Array.IndexOf(invalid, ch) >= 0 ? '_' : ch);
-            }
-
-            var result = builder.ToString().Trim('.', ' ');
-            return string.IsNullOrWhiteSpace(result) ? "script" : result;
-        }
-
         private bool TryLogInternalDispatchDiagnostic(string sanitizedSegment)
         {
             if (string.IsNullOrWhiteSpace(sanitizedSegment))
@@ -1768,160 +1473,15 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
 
             var message = normalized[(tokenIndex + DispatchDiagnosticTokenPrefix.Length)..].Trim();
-            AppLogger.Info("LiveConsole", $"Internal script dispatch diagnostic observed. {message}");
+            AppLogger.Info("LiveConsole", $"Internal script dispatch diagnostic observed. Length={message.Length}, ContentOmitted=True.");
             DeveloperDiagnostics.LogInfo(
                 "Execution",
                 "Internal script dispatch diagnostic observed from the hosted PowerShell process.",
-                new Dictionary<string, object?>
+                new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(message))
                 {
-                    ["message"] = message
-                });
-            AppendTerminalCaptureEvent(
-                GetCurrentCommandDispatchGeneration(),
-                "internal-dispatch-diagnostic",
-                new Dictionary<string, object?>
-                {
-                    ["message"] = message
+                    ["dispatchGeneration"] = GetCurrentCommandDispatchGeneration()
                 });
             return true;
-        }
-
-        private void CaptureRelevantProcessSnapshot(int dispatchGeneration, DateTime startedAtUtc, string reason)
-        {
-            if (!ShouldWriteTerminalCapture())
-            {
-                return;
-            }
-
-            try
-            {
-                var cutoffLocal = startedAtUtc.ToLocalTime().Subtract(TimeSpan.FromSeconds(10));
-                var capturedCount = 0;
-                foreach (var process in Process.GetProcesses())
-                {
-                    using (process)
-                    {
-                        string processName;
-                        try
-                        {
-                            processName = process.ProcessName;
-                        }
-                        catch
-                        {
-                            continue;
-                        }
-
-                        if (!IsProcessNameRelevantForTerminalDiagnostics(processName))
-                        {
-                            continue;
-                        }
-
-                        DateTime? startTime = null;
-                        try
-                        {
-                            startTime = process.StartTime;
-                        }
-                        catch
-                        {
-                            // Access can be denied for some processes. Keep the rest of the snapshot.
-                        }
-
-                        if (startTime.HasValue && startTime.Value < cutoffLocal)
-                        {
-                            continue;
-                        }
-
-                        string? path = null;
-                        try
-                        {
-                            path = process.MainModule?.FileName;
-                        }
-                        catch
-                        {
-                            // Access can be denied for some processes.
-                        }
-
-                        string? title = null;
-                        try
-                        {
-                            title = process.MainWindowTitle;
-                        }
-                        catch
-                        {
-                            // Best effort only.
-                        }
-
-                        bool? hasExited = null;
-                        try
-                        {
-                            hasExited = process.HasExited;
-                        }
-                        catch
-                        {
-                            // Best effort only.
-                        }
-
-                        AppendTerminalCaptureEvent(
-                            dispatchGeneration,
-                            "relevant-process-snapshot",
-                            new Dictionary<string, object?>
-                            {
-                                ["reason"] = reason,
-                                ["processId"] = TryGetProcessId(process),
-                                ["processName"] = processName,
-                                ["hasExited"] = hasExited,
-                                ["startTime"] = startTime,
-                                ["mainWindowTitle"] = title,
-                                ["path"] = path
-                            });
-
-                        capturedCount++;
-                        if (capturedCount >= 50)
-                        {
-                            AppendTerminalCaptureEvent(
-                                dispatchGeneration,
-                                "relevant-process-snapshot-truncated",
-                                new Dictionary<string, object?>
-                                {
-                                    ["reason"] = reason,
-                                    ["capturedCount"] = capturedCount
-                                });
-                            break;
-                        }
-                    }
-                }
-
-                if (capturedCount == 0)
-                {
-                    AppendTerminalCaptureEvent(
-                        dispatchGeneration,
-                        "relevant-process-snapshot-empty",
-                        new Dictionary<string, object?>
-                        {
-                            ["reason"] = reason,
-                            ["cutoffLocal"] = cutoffLocal
-                        });
-                }
-            }
-            catch (Exception ex)
-            {
-                AppendTerminalCaptureEvent(
-                    dispatchGeneration,
-                    "relevant-process-snapshot-failed",
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = reason,
-                        ["error"] = ex.Message
-                    });
-            }
-        }
-
-        private static bool IsProcessNameRelevantForTerminalDiagnostics(string processName)
-        {
-            return processName.Equals("pwsh", StringComparison.OrdinalIgnoreCase) ||
-                   processName.Equals("powershell", StringComparison.OrdinalIgnoreCase) ||
-                   processName.Equals("ffmpeg", StringComparison.OrdinalIgnoreCase) ||
-                   processName.Equals("ffprobe", StringComparison.OrdinalIgnoreCase);
         }
 
         private int GetCurrentCommandDispatchGeneration()
@@ -2036,31 +1596,12 @@ namespace PS7ScriptDesk.PowerShell.Services
                                     ["meaningfulOutputSeen"] = meaningfulOutputSeen,
                                     ["commandStartedUtc"] = commandStartedUtc
                                 });
-                            AppendTerminalCaptureEvent(
-                                dispatchGeneration,
-                                "health-monitor-tick",
-                                new Dictionary<string, object?>
-                                {
-                                    ["currentGeneration"] = currentGeneration,
-                                    ["isScript"] = isScript,
-                                    ["displayName"] = displayName,
-                                    ["tickCount"] = tickCount,
-                                    ["elapsedMs"] = elapsedMs,
-                                    ["commandInProgress"] = commandInProgress,
-                                    ["processId"] = processId,
-                                    ["processRunning"] = processRunning,
-                                    ["startConfirmed"] = startConfirmed,
-                                    ["meaningfulOutputSeen"] = meaningfulOutputSeen,
-                                    ["commandStartedUtc"] = commandStartedUtc
-                                });
-
-                            if (isScript && (tickCount == 4 || tickCount % 20 == 0))
-                            {
-                                CaptureRelevantProcessSnapshot(dispatchGeneration, startedAt, $"health-monitor-tick-{tickCount}");
-                            }
                         }
 
-                        if (!commandInProgress || currentGeneration != dispatchGeneration)
+                        if (!TerminalSessionEventPolicy.IsCurrentDispatch(
+                                commandInProgress,
+                                currentGeneration,
+                                dispatchGeneration))
                         {
                             DeveloperDiagnostics.LogDecision(
                                 "Terminal",
@@ -2186,8 +1727,10 @@ namespace PS7ScriptDesk.PowerShell.Services
                         startConfirmed = _currentDispatchStartConfirmed ||
                                          !isScript ||
                                          string.IsNullOrEmpty(_pendingStartToken);
-                        shouldNotify = commandInProgress &&
-                                       currentGeneration == dispatchGeneration &&
+                        shouldNotify = TerminalSessionEventPolicy.IsCurrentDispatch(
+                                           commandInProgress,
+                                           currentGeneration,
+                                           dispatchGeneration) &&
                                        !meaningfulOutputSeen &&
                                        processRunning;
                     }
@@ -2211,24 +1754,6 @@ namespace PS7ScriptDesk.PowerShell.Services
                             ["visibleWindowTitle"] = visibleWindowTitle,
                             ["shouldNotify"] = shouldNotify
                         });
-                    AppendTerminalCaptureEvent(
-                        dispatchGeneration,
-                        "no-visible-output-monitor-evaluated",
-                        new Dictionary<string, object?>
-                        {
-                            ["currentGeneration"] = currentGeneration,
-                            ["isScript"] = isScript,
-                            ["displayName"] = displayName,
-                            ["commandInProgress"] = commandInProgress,
-                            ["processId"] = processId,
-                            ["processRunning"] = processRunning,
-                            ["startConfirmed"] = startConfirmed,
-                            ["meaningfulOutputSeen"] = meaningfulOutputSeen,
-                            ["visibleWindowTitle"] = visibleWindowTitle,
-                            ["shouldNotify"] = shouldNotify
-                        });
-                    CaptureRelevantProcessSnapshot(dispatchGeneration, DateTime.UtcNow.Subtract(NoVisibleOutputFeedbackDelay), "no-visible-output-monitor");
-
                     if (!shouldNotify)
                     {
                         return;
@@ -2242,15 +1767,6 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                     if (isScript && !string.IsNullOrWhiteSpace(visibleWindowTitle))
                     {
-                        AppendTerminalCaptureEvent(
-                            dispatchGeneration,
-                            "visible-window-detected-without-console-output",
-                            new Dictionary<string, object?>
-                            {
-                                ["displayName"] = displayName,
-                                ["processId"] = processId,
-                                ["mainWindowTitle"] = visibleWindowTitle
-                            });
                         PublishLifecycleMessage(
                             onOutput,
                             $"Script '{targetName}' has not written console output yet, but a PowerShell-owned window is open: \"{visibleWindowTitle}\". This usually means the script is running a GUI or waiting on a dialog. Use that window, close it when finished, or use Interrupt if it appears stuck.");
@@ -2380,8 +1896,6 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _currentDispatchStartedUtc = null;
             }
 
-            CompleteTerminalCapture($"Command dispatch was canceled. DeleteSnapshot={deleteSnapshot}.");
-
             if (deleteSnapshot)
             {
                 foreach (var snapshotPath in snapshotPaths)
@@ -2438,10 +1952,6 @@ namespace PS7ScriptDesk.PowerShell.Services
                     ["deletedSnapshotCount"] = snapshotPaths.Count
                 });
 
-            CompleteTerminalCapture(wasScript
-                ? "Script execution completed after the hidden completion sentinel was observed."
-                : "Console command execution completed after the next prompt was observed.");
-
             if (wasScript)
             {
                 ScriptExecutionCompleted?.Invoke();
@@ -2468,8 +1978,6 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _currentDispatchStartConfirmed = false;
                 _currentDispatchStartedUtc = null;
             }
-
-            CompleteTerminalCapture($"Pending command state was reset. DeleteSnapshots={deleteSnapshots}.");
 
             if (!deleteSnapshots)
             {
@@ -2935,7 +2443,7 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            AppLogger.Debug("LiveConsole", $"Writing terminal input to ConPTY. Length={text.Length}, Data='{FormatInputForLog(text)}'.");
+            AppLogger.Debug("LiveConsole", $"Writing terminal input to ConPTY. Length={text.Length}, ContentOmitted=True.");
             await writer.WriteAsync(text.AsMemory(), cancellationToken).ConfigureAwait(false);
             await writer.FlushAsync().ConfigureAwait(false);
         }
@@ -2981,14 +2489,14 @@ namespace PS7ScriptDesk.PowerShell.Services
             {
                 if (!string.IsNullOrEmpty(data))
                 {
-                    AppLogger.Debug("LiveConsole", $"Ignoring raw terminal input because the session is not running. Length={data.Length}, Data='{FormatInputForLog(data)}'.");
+                    AppLogger.Debug("LiveConsole", $"Ignoring raw terminal input because the session is not running. Length={data.Length}, ContentOmitted=True.");
                 }
                 return;
             }
 
             try
             {
-                AppLogger.Debug("LiveConsole", $"Raw terminal input received. Length={data.Length}, Data='{FormatInputForLog(data)}'.");
+                AppLogger.Debug("LiveConsole", $"Raw terminal input received. Length={data.Length}, ContentOmitted=True.");
                 TrackManualInteractiveInput(data);
                 await WriteTerminalInputAsync(data, cancellationToken).ConfigureAwait(false);
             }
@@ -2996,36 +2504,6 @@ namespace PS7ScriptDesk.PowerShell.Services
             {
                 // Best effort — pipe may be broken if the session exited.
             }
-        }
-
-        private static string FormatInputForLog(string text, int maxLength = 80)
-        {
-            if (string.IsNullOrEmpty(text))
-            {
-                return string.Empty;
-            }
-
-            var builder = new StringBuilder(Math.Min(text.Length * 2, maxLength + 8));
-            foreach (var ch in text)
-            {
-                _ = ch switch
-                {
-                    '\r' => builder.Append("\\r"),
-                    '\n' => builder.Append("\\n"),
-                    '\t' => builder.Append("\\t"),
-                    '\x1b' => builder.Append("\\x1b"),
-                    _ when char.IsControl(ch) => builder.Append($"\\u{(int)ch:x4}"),
-                    _ => builder.Append(ch)
-                };
-
-                if (builder.Length >= maxLength)
-                {
-                    builder.Append("...");
-                    break;
-                }
-            }
-
-            return builder.ToString();
         }
 
         private void TrackManualInteractiveInput(string data)
@@ -3137,36 +2615,6 @@ namespace PS7ScriptDesk.PowerShell.Services
             {
                 return null;
             }
-        }
-
-        private static string FormatOutputForLog(string text, int maxLength = 120)
-        {
-            if (string.IsNullOrEmpty(text))
-            {
-                return string.Empty;
-            }
-
-            var builder = new StringBuilder(Math.Min(text.Length * 2, maxLength + 8));
-            foreach (var ch in text)
-            {
-                _ = ch switch
-                {
-                    '\r' => builder.Append("\\r"),
-                    '\n' => builder.Append("\\n"),
-                    '\t' => builder.Append("\\t"),
-                    '\x1b' => builder.Append("\\x1b"),
-                    _ when char.IsControl(ch) => builder.Append($"\\u{(int)ch:x4}"),
-                    _ => builder.Append(ch)
-                };
-
-                if (builder.Length >= maxLength)
-                {
-                    builder.Append("...");
-                    break;
-                }
-            }
-
-            return builder.ToString();
         }
 
         private static string NormalizeWorkingDirectory(string? path)

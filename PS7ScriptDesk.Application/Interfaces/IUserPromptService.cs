@@ -3,6 +3,7 @@
     public interface IUserPromptService
     {
         UnsavedChangesDecision ShowUnsavedChangesPrompt(string documentName);
+        ExternalFileConflictDecision ShowExternalFileConflictPrompt(string filePath, string conflictReason);
         string? ShowSaveFileDialog(string suggestedFileName);
         string? ShowSaveExecutableDialog(string suggestedFileName);
         string? ShowOpenFolderDialog();

@@ -24,6 +24,9 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly ObservableCollection<SyntaxErrorViewModel> _syntaxErrors = new();
         private readonly ObservableCollection<EditorDiagnosticSpanViewModel> _syntaxDiagnosticSpans = new();
         private string _syntaxDiagnosticsStatusText = "Syntax checking is waiting for a PowerShell runtime";
+        private DateTime? _lastKnownFileWriteTimeUtc;
+        private long? _lastKnownFileLength;
+        private string? _lastKnownFileContentSha256;
 
         public EditorTabViewModel(string title, string content, string? filePath = null)
         {
@@ -228,6 +231,31 @@ namespace PS7ScriptDesk.UI.ViewModels
         public int BreakpointVersion { get; private set; }
 
         public string DisplayTitle => IsDirty ? $"{Title}*" : Title;
+
+        public DateTime? LastKnownFileWriteTimeUtc => _lastKnownFileWriteTimeUtc;
+
+        public long? LastKnownFileLength => _lastKnownFileLength;
+
+        public string? LastKnownFileContentSha256 => _lastKnownFileContentSha256;
+
+        public bool HasLastKnownFileMetadata => LastKnownFileWriteTimeUtc.HasValue || LastKnownFileLength.HasValue;
+
+        public void SetLastKnownFileMetadata(DateTime? lastKnownWriteTimeUtc, long? lastKnownLength)
+        {
+            _lastKnownFileWriteTimeUtc = lastKnownWriteTimeUtc;
+            _lastKnownFileLength = lastKnownLength;
+        }
+
+        public void SetLastKnownFileState(DateTime? lastKnownWriteTimeUtc, long? lastKnownLength, string? contentSha256)
+        {
+            SetLastKnownFileMetadata(lastKnownWriteTimeUtc, lastKnownLength);
+            _lastKnownFileContentSha256 = string.IsNullOrWhiteSpace(contentSha256) ? null : contentSha256;
+        }
+
+        public void ClearLastKnownFileMetadata()
+        {
+            SetLastKnownFileState(null, null, null);
+        }
 
         public void SetFilePath(string filePath)
         {
