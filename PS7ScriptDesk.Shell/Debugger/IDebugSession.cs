@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using PS7ScriptDesk.Domain.Models;
 
@@ -21,5 +22,6 @@ namespace PS7ScriptDesk.Shell.Debug
         Task StepOutAsync();
         Task<IReadOnlyList<DebugVariableInfo>> GetVariablesAsync();
         Task<IReadOnlyList<DebugCallStackFrame>> GetCallStackAsync();
+        Task<bool> StopAsync(CancellationToken cancellationToken = default);
     }
 }

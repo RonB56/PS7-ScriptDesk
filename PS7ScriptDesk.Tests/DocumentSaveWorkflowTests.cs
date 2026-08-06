@@ -318,7 +318,6 @@ public sealed class DocumentSaveWorkflowTests : IDisposable
     {
         var probe = new TerminalSinkProbe();
         viewModel.SetTerminalSessionControls(probe.Clear, probe.Focus);
-        viewModel.SetDebuggerOutputSink(probe.Write);
         return probe;
     }
 
@@ -426,6 +425,7 @@ internal sealed class FakeLiveConsoleService : ILiveConsoleService
     public Task<LiveConsoleCommandResult> ExecuteConsoleCommandAsync(string commandText, Action<ExecutionOutputRecord> onOutput, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<LiveConsoleCommandResult> ExecuteScriptAsync(string documentDisplayName, string scriptContent, Action<ExecutionOutputRecord> onOutput, bool executeInCurrentScope = false, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<bool> StopConsoleAsync(Action<ExecutionOutputRecord>? onOutput = null) => Task.FromResult(true);
+    public Task<bool> ShutdownAsync(CancellationToken cancellationToken = default) => Task.FromResult(true);
     public Task SendInterruptAsync() => Task.CompletedTask;
     public Task<LiveConsoleInterruptResult> InterruptOrRestartAsync(Action<ExecutionOutputRecord>? onOutput = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public void Dispose() { }

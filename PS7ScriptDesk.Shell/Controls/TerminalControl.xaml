@@ -1,10 +1,17 @@
 <UserControl x:Class="PS7ScriptDesk.Shell.Controls.TerminalControl"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf">
+             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+             AutomationProperties.Name="Interactive PowerShell terminal"
+             AutomationProperties.HelpText="Interactive PowerShell terminal. Ctrl+Shift+F6 moves focus back to the editor."
+             KeyboardNavigation.TabNavigation="Once"
+             KeyboardNavigation.ControlTabNavigation="Once">
     <Grid>
         <wv2:WebView2 x:Name="WebView"
-                      Focusable="True" />
+                      Focusable="True"
+                      ToolTip="Interactive PowerShell terminal. Ctrl+Shift+F6 moves focus back to the editor."
+                      AutomationProperties.Name="Interactive PowerShell terminal"
+                      AutomationProperties.HelpText="Uses xterm screen-reader support when provided by WebView2. Ctrl+Shift+F6 moves focus back to the editor." />
         <!-- Shown only when WebView2 Runtime is missing -->
         <Border x:Name="FallbackBanner"
                 Visibility="Collapsed"
@@ -12,7 +19,8 @@
                 VerticalAlignment="Center"
                 HorizontalAlignment="Center"
                 Padding="24,16"
-                CornerRadius="6">
+                CornerRadius="6"
+                AutomationProperties.Name="Terminal unavailable">
             <StackPanel>
                 <TextBlock Text="WebView2 Runtime is required for the integrated terminal."
                            Foreground="#cccccc"

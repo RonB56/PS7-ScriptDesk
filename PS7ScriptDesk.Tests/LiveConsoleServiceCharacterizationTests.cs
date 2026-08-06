@@ -29,11 +29,12 @@ public sealed class LiveConsoleServiceCharacterizationTests
         using var service = new LiveConsoleService();
         const string startToken = "##PSSTUDIO_EXEC_START_characterization";
         const string completionToken = "##PSSTUDIO_EXEC_DONE_characterization";
+        const string locationToken = "##PSSTUDIO_LOCATION_characterization_";
         var rawOutput = new List<string>();
         var commandCompletions = 0;
         var scriptCompletions = 0;
 
-        ConfigureScriptDispatch(service, startToken, completionToken);
+        ConfigureScriptDispatch(service, startToken, completionToken, locationToken);
         service.RawOutputReceived += rawOutput.Add;
         service.CommandExecutionCompleted += () => commandCompletions++;
         service.ScriptExecutionCompleted += () => scriptCompletions++;
@@ -42,7 +43,8 @@ public sealed class LiveConsoleServiceCharacterizationTests
         Assert.Empty(rawOutput);
 
         Publish(service, "RT_characterization\r\nscript line one", _ => { });
-        Publish(service, "\r\nscript line two\r\n##PSSTUDIO_EXEC_DONE_char", _ => { });
+        var encodedLocation = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(@"C:\Work"));
+        Publish(service, $"\r\nscript line two\r\n{locationToken}{encodedLocation}\r\n##PSSTUDIO_EXEC_DONE_char", _ => { });
         Publish(service, "acterization\r\nPS C:\\Work>", _ => { });
 
         var visible = string.Concat(rawOutput);
@@ -58,7 +60,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
     }
 
     [Fact]
-    public void PromptRecognition_UsesLastPrompt_AndCompletesManualInteractiveTracking()
+    public void PromptRecognition_RecordsLastPromptAsHeuristicWithoutCompletingCommandState()
     {
         using var service = new LiveConsoleService();
         var commandCompletions = 0;
@@ -72,9 +74,10 @@ public sealed class LiveConsoleServiceCharacterizationTests
             "UpdateCurrentDirectoryFromPrompt",
             "noise\r\nPS C:\\First>\r\nmore\r\nPS D:\\Last>");
 
-        Assert.Equal(@"D:\Last", service.CurrentWorkingDirectory);
-        Assert.Equal(1, commandCompletions);
-        Assert.False(GetField<bool>(service, "_isCommandInProgress"));
+        Assert.Null(service.CurrentWorkingDirectory);
+        Assert.Equal(@"D:\Last", GetField<string>(service, "_lastPromptHeuristicDirectory"));
+        Assert.Equal(0, commandCompletions);
+        Assert.True(GetField<bool>(service, "_isCommandInProgress"));
     }
 
     [Fact]
@@ -89,21 +92,183 @@ public sealed class LiveConsoleServiceCharacterizationTests
 
         InvokePrivate(service, "UpdateCurrentDirectoryFromPrompt", "PS C:\\Work>");
 
-        Assert.Equal(@"C:\Work", service.CurrentWorkingDirectory);
+        Assert.Null(service.CurrentWorkingDirectory);
+        Assert.Equal(@"C:\Work", GetField<string>(service, "_lastPromptHeuristicDirectory"));
         Assert.Equal(0, commandCompletions);
         Assert.True(GetField<bool>(service, "_isCommandInProgress"));
+    }
+
+    [Fact]
+    public void StaleSessionOutput_CannotReachRendererOrMutateCurrentSessionState()
+    {
+        using var service = new LiveConsoleService();
+        var rawOutput = new List<string>();
+        SetField(service, "_terminalSessionGeneration", 8);
+        SetField(service, "_terminalSessionTeardownInProgress", false);
+        service.RawOutputReceived += rawOutput.Add;
+
+        InvokePrivate(
+            service,
+            "PublishTerminalChunkForSession",
+            "PS C:\\Stale>",
+            ExecutionOutputStreamKind.StandardOutput,
+            new Action<ExecutionOutputRecord>(_ => { }),
+            7);
+
+        Assert.Empty(rawOutput);
+        Assert.Null(service.CurrentWorkingDirectory);
+    }
+
+    [Fact]
+    public async Task RepeatedStop_IsIdempotentAndClearsAllProtocolState()
+    {
+        using var service = new LiveConsoleService();
+        SetField(service, "_terminalSessionGeneration", 4);
+        SetField(service, "_terminalSessionTeardownInProgress", false);
+        SetField(service, "_isCommandInProgress", true);
+        SetField(service, "_currentCommandIsScript", true);
+        SetField(service, "_pendingStartToken", "start");
+        SetField(service, "_pendingCompletionToken", "done");
+        SetField(service, "_hiddenOutputBuffer", "partial");
+        GetField<List<string>>(service, "_pendingHiddenOutputFragments").Add("hidden");
+
+        Assert.True(await service.StopConsoleAsync());
+        Assert.True(await service.StopConsoleAsync());
+
+        Assert.True(GetField<bool>(service, "_terminalSessionTeardownInProgress"));
+        Assert.False(GetField<bool>(service, "_isCommandInProgress"));
+        Assert.False(GetField<bool>(service, "_currentCommandIsScript"));
+        Assert.Null(GetFieldValue(service, "_pendingStartToken"));
+        Assert.Null(GetFieldValue(service, "_pendingCompletionToken"));
+        Assert.Equal(string.Empty, GetField<string>(service, "_hiddenOutputBuffer"));
+        Assert.Empty(GetField<List<string>>(service, "_pendingHiddenOutputFragments"));
+    }
+
+    [Fact]
+    public void DispatchCommand_UsesUniqueHelperSnapshotInsteadOfMutableGlobalHelper()
+    {
+        using var service = new LiveConsoleService();
+        var command = Assert.IsType<string>(InvokePrivate(
+            service,
+            "BuildScriptDispatchCommand",
+            @"C:\Temp\psh-helper.ps1",
+            @"C:\Temp\psi-instruction.ps1",
+            false));
+        var startup = Assert.IsType<string>(InvokePrivate(
+            service,
+            "BuildTerminalStartupCommand"));
+
+        Assert.Contains("psh-helper.ps1", command, StringComparison.Ordinal);
+        Assert.Contains("psi-instruction.ps1", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("__psstudioRun", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("__psstudioRun", startup, StringComparison.Ordinal);
+        Assert.DoesNotContain("__psstudioSnapshotRoot", startup, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PreStartOutputBuffer_IsCappedUntilStartAcknowledgementArrives()
+    {
+        using var service = new LiveConsoleService();
+        ConfigureScriptDispatch(
+            service,
+            "##PSSTUDIO_EXEC_START_missing",
+            "##PSSTUDIO_EXEC_DONE_missing");
+        service.RawOutputReceived += _ => { };
+
+        Publish(service, new string('x', 80 * 1024), _ => { });
+
+        Assert.Equal(64 * 1024, GetField<string>(service, "_hiddenOutputBuffer").Length);
+        Assert.True(GetField<bool>(service, "_preStartBufferTruncated"));
+    }
+
+    [Fact]
+    public void LargeAcknowledgedChunk_DoesNotLoseStartTokenOrVisibleOutput()
+    {
+        using var service = new LiveConsoleService();
+        const string startToken = "##PSSTUDIO_EXEC_START_large";
+        ConfigureScriptDispatch(
+            service,
+            startToken,
+            "##PSSTUDIO_EXEC_DONE_large");
+        var visible = new List<string>();
+        service.RawOutputReceived += visible.Add;
+        var scriptOutput = new string('x', 80 * 1024);
+
+        Publish(service, $"hidden echo\r\n{startToken}\r\n{scriptOutput}", _ => { });
+
+        Assert.Null(GetFieldValue(service, "_pendingStartToken"));
+        Assert.Equal(scriptOutput.Length + 2, string.Concat(visible).Length);
+        Assert.Contains(scriptOutput, string.Concat(visible), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PreStartRecovery_ReleasesBusyStateAndRevealsOnlyNonProtocolFailureOutput()
+    {
+        using var service = new LiveConsoleService();
+        const int dispatchGeneration = 7;
+        const int sessionGeneration = 3;
+        const string hiddenCommand = "& 'C:\\Temp\\psh.ps1' 'C:\\Temp\\psi.ps1'";
+        ConfigureScriptDispatch(
+            service,
+            "##PSSTUDIO_EXEC_START_missing",
+            "##PSSTUDIO_EXEC_DONE_missing");
+        SetField(service, "_terminalSessionGeneration", sessionGeneration);
+        SetField(service, "_terminalSessionTeardownInProgress", false);
+        SetField(service, "_hiddenOutputBuffer", $"PS C:\\> {hiddenCommand}\r\nPS7 ScriptDesk dispatch helper failed before execution started: injected failure\r\n");
+        GetField<List<string>>(service, "_pendingHiddenOutputFragments").Add(hiddenCommand);
+        var visible = new List<string>();
+        var lifecycle = new List<ExecutionOutputRecord>();
+        var completions = 0;
+        service.RawOutputReceived += visible.Add;
+        service.CommandExecutionCompleted += () => completions++;
+
+        InvokePrivate(
+            service,
+            "RecoverUnconfirmedDispatch",
+            dispatchGeneration,
+            sessionGeneration,
+            true,
+            "test.ps1",
+            new Action<ExecutionOutputRecord>(lifecycle.Add));
+
+        Assert.False(GetField<bool>(service, "_isCommandInProgress"));
+        Assert.Null(GetFieldValue(service, "_pendingStartToken"));
+        Assert.Equal(1, completions);
+        Assert.Contains("injected failure", string.Concat(visible), StringComparison.Ordinal);
+        Assert.DoesNotContain(hiddenCommand, string.Concat(visible), StringComparison.Ordinal);
+        Assert.Contains(lifecycle, record => record.Text.Contains("released", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ExplicitLocationFrame_UpdatesConfirmedDirectoryAndNeverReachesRenderer()
+    {
+        using var service = new LiveConsoleService();
+        const string startToken = "##PSSTUDIO_EXEC_START_location";
+        const string completionToken = "##PSSTUDIO_EXEC_DONE_location";
+        const string locationToken = "##PSSTUDIO_LOCATION_location_";
+        ConfigureScriptDispatch(service, startToken, completionToken, locationToken);
+        var visible = new List<string>();
+        service.RawOutputReceived += visible.Add;
+        var encodedLocation = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(@"D:\Confirmed"));
+
+        Publish(service, $"{startToken}\r\n{locationToken}{encodedLocation}\r\n{completionToken}\r\n", _ => { });
+
+        Assert.Equal(@"D:\Confirmed", service.CurrentWorkingDirectory);
+        Assert.DoesNotContain("PSSTUDIO_LOCATION", string.Concat(visible), StringComparison.Ordinal);
     }
 
     private static void ConfigureScriptDispatch(
         LiveConsoleService service,
         string startToken,
-        string completionToken)
+        string completionToken,
+        string? locationToken = null)
     {
         SetField(service, "_isCommandInProgress", true);
         SetField(service, "_currentCommandIsScript", true);
         SetField(service, "_commandDispatchGeneration", 7);
         SetField(service, "_pendingStartToken", startToken);
         SetField(service, "_pendingCompletionToken", completionToken);
+        SetField(service, "_pendingLocationToken", locationToken);
     }
 
     private static void Publish(
@@ -123,7 +288,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
     {
         var method = target.GetType().GetMethod(
             methodName,
-            BindingFlags.Instance | BindingFlags.NonPublic);
+            BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic);
         Assert.NotNull(method);
 
         try
@@ -146,6 +311,15 @@ public sealed class LiveConsoleServiceCharacterizationTests
         return Assert.IsType<T>(field.GetValue(target));
     }
 
+    private static object? GetFieldValue(object target, string fieldName)
+    {
+        var field = target.GetType().GetField(
+            fieldName,
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return field.GetValue(target);
+    }
+
     private static void SetField<T>(object target, string fieldName, T value)
     {
         var field = target.GetType().GetField(
@@ -158,6 +332,24 @@ public sealed class LiveConsoleServiceCharacterizationTests
 
 public sealed class TerminalSessionEventPolicyTests
 {
+    [Theory]
+    [InlineData(3, 3, false, true)]
+    [InlineData(3, 2, false, false)]
+    [InlineData(3, 3, true, false)]
+    public void SessionGenerationPolicy_RejectsStaleAndStoppingSessionEvents(
+        int currentGeneration,
+        int observedGeneration,
+        bool teardownInProgress,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            TerminalSessionEventPolicy.IsCurrentSession(
+                currentGeneration,
+                observedGeneration,
+                teardownInProgress));
+    }
+
     [Theory]
     [InlineData(true, 4, 4, true)]
     [InlineData(false, 4, 4, false)]

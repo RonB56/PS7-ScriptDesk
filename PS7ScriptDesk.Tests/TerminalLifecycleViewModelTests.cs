@@ -57,6 +57,27 @@ public sealed class TerminalLifecycleViewModelTests
         Assert.True(console.IsSessionRunning);
     }
 
+    [Fact]
+    public async Task ApplicationShutdown_AwaitsTheOwnedTerminalTeardown()
+    {
+        var console = new RecordingLiveConsoleService
+        {
+            IsSessionRunning = true,
+            ShutdownCompletion = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously)
+        };
+        var viewModel = await CreateViewModelAsync(console);
+
+        var shutdown = viewModel.ShutdownTerminalAsync();
+        await WaitUntilAsync(() => console.Operations.Contains("shutdown", StringComparer.Ordinal));
+
+        Assert.False(shutdown.IsCompleted);
+        console.ShutdownCompletion.TrySetResult(true);
+
+        Assert.True(await shutdown.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal("shutdown", console.Operations.Last());
+    }
+
     private static Task<MainWindowViewModel> CreateViewModelAsync(
         RecordingLiveConsoleService console,
         PowerShellRuntimeInfo? runtime = null)
@@ -120,6 +141,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource<bool> StartObserved { get; } =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource<bool>? ShutdownCompletion { get; set; }
 
     public event Action? ScriptExecutionCompleted;
     public event Action? CommandExecutionCompleted;
@@ -163,6 +185,14 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
         IsCommandInProgress = false;
         IsSessionRunning = false;
         return Task.FromResult(true);
+    }
+
+    public Task<bool> ShutdownAsync(CancellationToken cancellationToken = default)
+    {
+        Operations.Add("shutdown");
+        IsCommandInProgress = false;
+        IsSessionRunning = false;
+        return ShutdownCompletion?.Task ?? Task.FromResult(true);
     }
 
     public Task SendInterruptAsync() => Task.CompletedTask;

@@ -1318,6 +1318,15 @@
                                           Click="DiagnosticsBottomPaneTab_Click"
                                           help:ContextHelp.Key="Editor.SyntaxPanel" />
 
+                            <ToggleButton x:Name="DebugOutputBottomPaneTab"
+                                          MinWidth="98"
+                                          Margin="0,0,18,0"
+                                          Content="Debug Output"
+                                          ToolTip="Output from the separate PowerShell debugger process"
+                                          Style="{StaticResource BottomPaneTabToggleButtonStyle}"
+                                          Click="DebugOutputBottomPaneTab_Click"
+                                          help:ContextHelp.Key="Debug.Area" />
+
                             <ToggleButton x:Name="ActivityBottomPaneTab"
                                           MinWidth="72"
                                           Content="Activity"
@@ -1379,6 +1388,9 @@
                                             <Setter Property="Visibility" Value="Collapsed" />
                                         </DataTrigger>
                                         <DataTrigger Binding="{Binding IsChecked, ElementName=ActivityBottomPaneTab}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=DebugOutputBottomPaneTab}" Value="True">
                                             <Setter Property="Visibility" Value="Collapsed" />
                                         </DataTrigger>
                                     </Style.Triggers>
@@ -1513,6 +1525,41 @@
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                             </ScrollViewer>
+                        </Grid>
+
+                        <Grid x:Name="DebugOutputBottomPane"
+                              Margin="4">
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=DebugOutputBottomPaneTab}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Text="Debugger Process Output"
+                                       Margin="0,0,0,6"
+                                       Style="{StaticResource SectionHeaderTextStyle}"
+                                       help:ContextHelp.Key="Debug.Area" />
+
+                            <TextBox Grid.Row="1"
+                                     Text="{Binding DebuggerOutputText, Mode=OneWay}"
+                                     IsReadOnly="True"
+                                     AcceptsReturn="True"
+                                     TextWrapping="NoWrap"
+                                     VerticalScrollBarVisibility="Auto"
+                                     HorizontalScrollBarVisibility="Auto"
+                                     FontFamily="Consolas"
+                                     ToolTip="Output from the separate PowerShell debugger process. Interactive PowerShell remains in Console."
+                                     help:ContextHelp.Key="Debug.Area" />
                         </Grid>
 
                         <Grid x:Name="ActivityBottomPane"

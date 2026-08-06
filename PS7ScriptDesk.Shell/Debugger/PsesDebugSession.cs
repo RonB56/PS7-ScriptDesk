@@ -28,6 +28,8 @@ namespace PS7ScriptDesk.Shell.Debug
         private const string CallStackEndMarker = "__PSS_CALLSTACK_END__";
         private const int DebugRequestTimeoutSeconds = 20;
         private const int OrphanedRequestOutputSuppressionMilliseconds = 30000;
+        private static readonly TimeSpan ProcessStopTimeout = TimeSpan.FromSeconds(2);
+        private static readonly TimeSpan ReaderDrainTimeout = TimeSpan.FromSeconds(1);
         private static readonly string[] InternalRequestStartMarkers =
         {
             CurrentFrameStartMarker,
@@ -63,6 +65,7 @@ namespace PS7ScriptDesk.Shell.Debug
         private CancellationTokenSource? _lifetimeCancellationTokenSource;
         private Task? _stdoutReaderTask;
         private Task? _stderrReaderTask;
+        private Task<bool>? _stopTask;
         private TaskCompletionSource<bool>? _readyCompletionSource;
         private ActiveRequest? _activeRequest;
         private bool _capturingBreakpointPayload;
@@ -189,7 +192,7 @@ namespace PS7ScriptDesk.Shell.Debug
             catch
             {
                 Trace("StartAsync", $"Failed; processId={TryGetProcessId(process)}; {DescribeSessionState()}");
-                Dispose();
+                await StopAsync().ConfigureAwait(false);
                 throw;
             }
         }
@@ -258,18 +261,25 @@ namespace PS7ScriptDesk.Shell.Debug
 
         public void Dispose()
         {
-            Dispose(disposing: true);
+            _ = StopAsync();
             GC.SuppressFinalize(this);
         }
 
-        private void Dispose(bool disposing)
+        public async Task<bool> StopAsync(CancellationToken cancellationToken = default)
         {
-            if (!disposing)
+            Task<bool> stopTask;
+            lock (_syncRoot)
             {
-                return;
+                _stopTask ??= BeginStopCore();
+                stopTask = _stopTask;
             }
 
-            Trace("Dispose", $"Entry; {DescribeSessionState()}");
+            return await stopTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        private Task<bool> BeginStopCore()
+        {
+            Trace("StopAsync", $"Entry; {DescribeSessionState()}");
 
             Process? processToDispose = null;
             CancellationTokenSource? cancellationTokenSource = null;
@@ -278,106 +288,194 @@ namespace PS7ScriptDesk.Shell.Debug
             Task? stderrReaderTask = null;
             bool raiseSessionEnded = false;
 
-            lock (_syncRoot)
+            if (_disposed)
             {
-                if (_disposed)
-                {
-                    return;
-                }
-
-                _disposed = true;
-                raiseSessionEnded = !_sessionEndedRaised;
-                _sessionEndedRaised = true;
-
-                processToDispose = _process;
-                cancellationTokenSource = _lifetimeCancellationTokenSource;
-                stdinToDispose = _stdin;
-                stdoutReaderTask = _stdoutReaderTask;
-                stderrReaderTask = _stderrReaderTask;
-
-                _process = null;
-                _stdin = null;
-                _lifetimeCancellationTokenSource = null;
-                _stdoutReaderTask = null;
-                _stderrReaderTask = null;
-                _readyCompletionSource = null;
-                _activeRequest = null;
-                _capturingBreakpointPayload = false;
-                _ignoreNextDebugPrompt = false;
-                _suppressNextDebugPromptCount = 0;
-                _currentFrameQueryInProgress = 0;
-                _lastLocationNotificationTicks = 0;
-                _orphanedRequestOutputEndMarker = null;
-                _orphanedRequestOutputSuppressUntilTicks = 0;
-                SetCurrentState(DebugSessionState.Stopped);
+                return Task.FromResult(true);
             }
+
+            _disposed = true;
+            raiseSessionEnded = !_sessionEndedRaised;
+            _sessionEndedRaised = true;
+
+            processToDispose = _process;
+            cancellationTokenSource = _lifetimeCancellationTokenSource;
+            stdinToDispose = _stdin;
+            stdoutReaderTask = _stdoutReaderTask;
+            stderrReaderTask = _stderrReaderTask;
+
+            _process = null;
+            _stdin = null;
+            _lifetimeCancellationTokenSource = null;
+            _stdoutReaderTask = null;
+            _stderrReaderTask = null;
+            _readyCompletionSource = null;
+            _activeRequest = null;
+            _capturingBreakpointPayload = false;
+            _ignoreNextDebugPrompt = false;
+            _suppressNextDebugPromptCount = 0;
+            _currentFrameQueryInProgress = 0;
+            _lastLocationNotificationTicks = 0;
+            _orphanedRequestOutputEndMarker = null;
+            _orphanedRequestOutputSuppressUntilTicks = 0;
+            SetCurrentState(DebugSessionState.Stopped);
+
+            var teardownState = new DebugProcessTeardownState(
+                processToDispose,
+                cancellationTokenSource,
+                stdinToDispose,
+                stdoutReaderTask,
+                stderrReaderTask,
+                raiseSessionEnded);
+            return Task.Run(() => StopDetachedProcessAsync(teardownState));
+        }
+
+        private async Task<bool> StopDetachedProcessAsync(DebugProcessTeardownState teardownState)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var processStopped = teardownState.Process is null;
+            var readersDrained = true;
 
             try
             {
-                cancellationTokenSource?.Cancel();
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                stdinToDispose?.Dispose();
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                if (processToDispose is not null && !processToDispose.HasExited)
+                try
                 {
-                    processToDispose.Kill(entireProcessTree: true);
+                    teardownState.CancellationTokenSource?.Cancel();
                 }
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                var tasksToWait = new List<Task>(capacity: 2);
-                if (stdoutReaderTask is not null)
+                catch (Exception ex)
                 {
-                    tasksToWait.Add(stdoutReaderTask);
+                    DeveloperDiagnostics.LogException("Debugger", ex, "Debugger lifetime cancellation failed during teardown.");
                 }
 
-                if (stderrReaderTask is not null)
+                try
                 {
-                    tasksToWait.Add(stderrReaderTask);
+                    teardownState.StandardInput?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    DeveloperDiagnostics.LogException("Debugger", ex, "Debugger stdin disposal failed during teardown.");
                 }
 
-                if (tasksToWait.Count > 0)
+                var process = teardownState.Process;
+                if (process is not null)
                 {
-                    Task.WaitAll(tasksToWait.ToArray(), TimeSpan.FromSeconds(1));
+                    try
+                    {
+                        if (!process.HasExited)
+                        {
+                            process.Kill(entireProcessTree: true);
+                            using var processTimeout = new CancellationTokenSource(ProcessStopTimeout);
+                            await process.WaitForExitAsync(processTimeout.Token).ConfigureAwait(false);
+                        }
+
+                        processStopped = process.HasExited;
+                    }
+                    catch (Exception ex)
+                    {
+                        processStopped = SafeHasExited(process);
+                        DeveloperDiagnostics.LogException(
+                            "Debugger",
+                            ex,
+                            "Debugger process did not confirm exit during bounded teardown.",
+                            new Dictionary<string, object?>
+                            {
+                                ["processId"] = TryGetProcessId(process),
+                                ["processStopped"] = processStopped,
+                                ["timeoutMs"] = ProcessStopTimeout.TotalMilliseconds
+                            });
+                    }
+                }
+
+                var readerTasks = new List<Task>(capacity: 2);
+                if (teardownState.StandardOutputReaderTask is not null)
+                {
+                    readerTasks.Add(teardownState.StandardOutputReaderTask);
+                }
+
+                if (teardownState.StandardErrorReaderTask is not null)
+                {
+                    readerTasks.Add(teardownState.StandardErrorReaderTask);
+                }
+
+                if (readerTasks.Count > 0)
+                {
+                    try
+                    {
+                        await Task.WhenAll(readerTasks)
+                            .WaitAsync(ReaderDrainTimeout)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        readersDrained = false;
+                        DeveloperDiagnostics.LogException(
+                            "Debugger",
+                            ex,
+                            "Debugger output readers did not drain during bounded teardown.",
+                            new Dictionary<string, object?>
+                            {
+                                ["readerCount"] = readerTasks.Count,
+                                ["readersDrained"] = readersDrained,
+                                ["timeoutMs"] = ReaderDrainTimeout.TotalMilliseconds
+                            });
+                    }
                 }
             }
-            catch
+            finally
             {
+                try
+                {
+                    teardownState.Process?.Dispose();
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    teardownState.CancellationTokenSource?.Dispose();
+                }
+                catch
+                {
+                }
+
+                if (teardownState.RaiseSessionEnded)
+                {
+                    Trace("StopAsync", $"Raising SessionEnded from bounded teardown; {DescribeSessionState()}");
+                    try
+                    {
+                        SessionEnded?.Invoke();
+                    }
+                    catch (Exception ex)
+                    {
+                        DeveloperDiagnostics.LogException(
+                            "Debugger",
+                            ex,
+                            "A debugger SessionEnded subscriber failed during teardown.");
+                    }
+                }
             }
 
-            try
-            {
-                processToDispose?.Dispose();
-            }
-            catch
-            {
-            }
+            var succeeded = processStopped && readersDrained;
+            stopwatch.Stop();
+            AppLogger.Info(
+                "Debug",
+                $"Debugger teardown completed. Succeeded={succeeded}, ProcessStopped={processStopped}, ReadersDrained={readersDrained}, ElapsedMs={stopwatch.ElapsedMilliseconds}.");
+            DeveloperDiagnostics.LogStateTransition(
+                "Debugger",
+                "DebuggerProcessTeardown",
+                "Stopping",
+                succeeded ? "Stopped" : "StopIncomplete",
+                "Bounded debugger process teardown completed.",
+                new Dictionary<string, object?>
+                {
+                    ["succeeded"] = succeeded,
+                    ["processStopped"] = processStopped,
+                    ["readersDrained"] = readersDrained,
+                    ["elapsedMs"] = stopwatch.ElapsedMilliseconds
+                });
 
-            cancellationTokenSource?.Dispose();
-
-            if (raiseSessionEnded)
-            {
-                Trace("Dispose", $"Raising SessionEnded from Dispose; {DescribeSessionState()}");
-                SessionEnded?.Invoke();
-            }
-
-            Trace("Dispose", $"Completed; {DescribeSessionState()}");
+            Trace("StopAsync", $"Completed; succeeded={succeeded}; elapsedMs={stopwatch.ElapsedMilliseconds}; {DescribeSessionState()}");
+            return succeeded;
         }
 
         private async Task SendDebugControlCommandAsync(string debuggerCommand)
@@ -1491,6 +1589,14 @@ namespace PS7ScriptDesk.Shell.Debug
             public StringBuilder Capture { get; } = new();
             public TaskCompletionSource<string> CompletionSource { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
+
+        private sealed record DebugProcessTeardownState(
+            Process? Process,
+            CancellationTokenSource? CancellationTokenSource,
+            StreamWriter? StandardInput,
+            Task? StandardOutputReaderTask,
+            Task? StandardErrorReaderTask,
+            bool RaiseSessionEnded);
 
         private sealed class BreakpointLocation
         {

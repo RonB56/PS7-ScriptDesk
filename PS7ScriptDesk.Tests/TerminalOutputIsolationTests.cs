@@ -6,34 +6,49 @@ namespace PS7ScriptDesk.Tests;
 public sealed class TerminalOutputIsolationTests
 {
     [Fact]
-    public void AboutMessage_IsRoutedToApplicationActivity_NotDebuggerOrTerminalDisplay()
+    public async Task AboutMessage_IsRoutedToApplicationActivity_NotDebuggerOrTerminalDisplay()
     {
         var viewModel = CreateViewModel();
-        var debuggerWrites = new List<string>();
         var initialTerminalDisplay = viewModel.TerminalDisplayText;
+        var initialDebuggerOutput = viewModel.DebuggerOutputText;
 
         viewModel.SetTerminalSessionControls(() => { }, () => { });
-        viewModel.SetDebuggerOutputSink(debuggerWrites.Add);
 
         viewModel.AboutCommand.Execute(null);
+        await WaitUntilAsync(
+            () => viewModel.ApplicationActivityText.Contains("About requested", StringComparison.Ordinal));
 
-        Assert.Empty(debuggerWrites);
         Assert.Equal(initialTerminalDisplay, viewModel.TerminalDisplayText);
+        Assert.Equal(initialDebuggerOutput, viewModel.DebuggerOutputText);
         Assert.Contains("About requested", viewModel.ApplicationActivityText, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void DebuggerOutput_UsesExplicitDebuggerSink_NotApplicationActivity()
+    public async Task DebuggerOutput_UsesDedicatedBuffer_NotApplicationActivityOrTerminalDisplay()
     {
         var viewModel = CreateViewModel();
-        var debuggerWrites = new List<string>();
+        var initialTerminalDisplay = viewModel.TerminalDisplayText;
 
-        viewModel.SetDebuggerOutputSink(debuggerWrites.Add);
         viewModel.AppendDebugOutput("debugger text");
+        await WaitUntilAsync(
+            () => viewModel.DebuggerOutputText.Contains("debugger text", StringComparison.Ordinal));
 
-        var write = Assert.Single(debuggerWrites);
-        Assert.Contains("[debug] debugger text", write, StringComparison.Ordinal);
+        Assert.Contains("[debug] debugger text", viewModel.DebuggerOutputText, StringComparison.Ordinal);
         Assert.DoesNotContain("debugger text", viewModel.ApplicationActivityText, StringComparison.Ordinal);
+        Assert.Equal(initialTerminalDisplay, viewModel.TerminalDisplayText);
+
+        viewModel.ClearDebugOutput();
+        await WaitUntilAsync(() => viewModel.DebuggerOutputText.Length == 0);
+        Assert.Equal(string.Empty, viewModel.DebuggerOutputText);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        while (!condition())
+        {
+            await Task.Delay(10, timeout.Token);
+        }
     }
 
     private static MainWindowViewModel CreateViewModel()

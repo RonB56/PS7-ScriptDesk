@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -34,6 +33,7 @@ namespace PS7ScriptDesk.Shell.Controls
         //   xterm.css                    (xterm@5.3.0)
         //   xterm-addon-fit.min.js       (xterm-addon-fit@0.8.0)
         //   xterm-addon-web-links.min.js (xterm-addon-web-links@0.9.0)
+        // No Unicode-width addon is packaged; xterm's built-in Unicode v6 provider is used.
         private const string TerminalHtml = """
             <!DOCTYPE html>
             <html>
@@ -49,7 +49,7 @@ namespace PS7ScriptDesk.Shell.Controls
               width: 100vw;
               height: 100vh;
               overflow: hidden !important;
-              background: #000000;
+              background: var(--terminal-background, #000000);
             }
             body { display: block; }
             body::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
@@ -61,12 +61,12 @@ namespace PS7ScriptDesk.Shell.Controls
               min-width: 0;
               min-height: 0;
               overflow: hidden !important;
-              background: #000000;
+              background: var(--terminal-background, #000000);
               outline: none;
             }
             .xterm { width: 100% !important; height: 100% !important; }
-            .xterm-viewport { background: #000000 !important; }
-            .xterm-screen { background: #000000 !important; }
+            .xterm-viewport { background: var(--terminal-background, #000000) !important; }
+            .xterm-screen { background: var(--terminal-background, #000000) !important; }
             </style>
             <link rel="stylesheet" href="https://terminal.local/xterm.css">
             </head>
@@ -96,6 +96,42 @@ namespace PS7ScriptDesk.Shell.Controls
               var termApi = null;
               var readyPosted = false;
 
+              // The integrated console remains a traditional black terminal regardless
+              // of the surrounding application theme. This also keeps PowerShell's
+              // ANSI-coloured prompt and output readable when the shell is in Light mode.
+              var traditionalTerminalTheme = {
+                background: '#000000', foreground: '#F2F2F2',
+                cursor: '#00FF00', cursorAccent: '#000000',
+                selectionBackground: 'rgba(88,166,255,0.35)', selectionForeground: '#FFFFFF',
+                black: '#5C6370', brightBlack: '#9AA4B2',
+                red: '#FF5555', brightRed: '#FF7A7A',
+                green: '#50FA7B', brightGreen: '#69FF94',
+                yellow: '#F1FA8C', brightYellow: '#FFFFA5',
+                blue: '#66B2FF', brightBlue: '#99CCFF',
+                magenta: '#FF79C6', brightMagenta: '#FF99D6',
+                cyan: '#8BE9FD', brightCyan: '#A4F3FF',
+                white: '#F2F2F2', brightWhite: '#FFFFFF'
+              };
+
+              var terminalThemes = {
+                Dark: traditionalTerminalTheme,
+                Light: traditionalTerminalTheme,
+                IseBlue: traditionalTerminalTheme
+              };
+
+              function applyTerminalTheme(name) {
+                var theme = terminalThemes[name] || terminalThemes.Dark;
+                document.documentElement.style.setProperty('--terminal-background', theme.background);
+                if (termApi) term.options.theme = theme;
+                post({
+                  type: 'terminal_theme_applied',
+                  theme: terminalThemes[name] ? name : 'Dark',
+                  background: theme.background,
+                  foreground: theme.foreground,
+                  selectionBackground: theme.selectionBackground
+                });
+              }
+
               function reportFocus(type, source) {
                 var activeElement = document.activeElement;
                 var activeElementTag = activeElement ? activeElement.tagName : '';
@@ -110,22 +146,7 @@ namespace PS7ScriptDesk.Shell.Controls
 
               try {
                 var term = new Terminal({
-                  theme: {
-                    background:          '#000000',
-                    foreground:          '#F2F2F2',
-                    cursor:              '#00FF00',
-                    cursorAccent:        '#000000',
-                    selectionBackground: 'rgba(255, 255, 255, 0.3)',
-                    selectionForeground: '#FFFFFF',
-                    black:        '#5C6370', brightBlack:   '#9AA4B2',
-                    red:          '#FF5555', brightRed:     '#FF7A7A',
-                    green:        '#50FA7B', brightGreen:   '#69FF94',
-                    yellow:       '#F1FA8C', brightYellow:  '#FFFFA5',
-                    blue:         '#66B2FF', brightBlue:    '#99CCFF',
-                    magenta:      '#FF79C6', brightMagenta: '#FF99D6',
-                    cyan:         '#8BE9FD', brightCyan:    '#A4F3FF',
-                    white:        '#F2F2F2', brightWhite:   '#FFFFFF'
-                  },
+                  theme: terminalThemes.Dark,
                   fontFamily:  "'Cascadia Code','Cascadia Mono',Consolas,'Courier New',monospace",
                   fontSize:     14,
                   lineHeight:   1.2,
@@ -135,13 +156,16 @@ namespace PS7ScriptDesk.Shell.Controls
                   cursorInactiveStyle: 'outline',
                   cursorWidth:  2,
                   convertEol:   false,
-                  allowTransparency: false
+                  allowTransparency: false,
+                  minimumContrastRatio: 4.5,
+                  screenReaderMode: true
                 });
 
                 var fitAddon = new FitAddon.FitAddon();
                 var webLinksAddon = new WebLinksAddon.WebLinksAddon();
                 var terminalElement = document.getElementById('terminal');
                 terminalElement.tabIndex = 0;
+                terminalElement.setAttribute('aria-label', 'Interactive PowerShell terminal');
                 term.loadAddon(fitAddon);
                 term.loadAddon(webLinksAddon);
                 term.open(terminalElement);
@@ -189,6 +213,14 @@ namespace PS7ScriptDesk.Shell.Controls
                     clientWidth: terminalElement.clientWidth,
                     clientHeight: terminalElement.clientHeight
                   });
+                  post({
+                    type: 'terminal_compatibility',
+                    screenReaderMode: true,
+                    unicodeWidthProvider: 'built-in-v6',
+                    binaryInputBridge: false,
+                    mousePasteGesture: 'shift-right-click',
+                    leaveTerminalShortcut: 'ctrl-shift-f6'
+                  });
                 }
 
                 function initializeTerminalHost() {
@@ -212,14 +244,12 @@ namespace PS7ScriptDesk.Shell.Controls
                 terminalElement.addEventListener('mousedown', function() {
                   post({ type: 'activated', source: 'terminal.mousedown' });
                   window.setTimeout(function() {
-                    fitTerminal('terminal.mousedown');
                     focusTerminal('terminal.mousedown');
                   }, 0);
                 });
 
                 terminalElement.addEventListener('click', function() {
                   window.setTimeout(function() {
-                    fitTerminal('terminal.click');
                     focusTerminal('terminal.click');
                   }, 0);
                 });
@@ -241,25 +271,19 @@ namespace PS7ScriptDesk.Shell.Controls
                 term.onData(function (data) { post({ type: 'input', data: data }); });
                 term.onResize(function (e)  { post({ type: 'resize', cols: e.cols, rows: e.rows }); });
 
-                // ── Copy / paste via C# clipboard bridge ─────────────────────────
-                // Ctrl+C with selection → copy; without selection → SIGINT (\x03).
-                // Ctrl+V / Shift+Insert → let xterm.js handle the native textarea paste path.
-                // Ctrl+A → select all.
-                // Right-click → paste via the host clipboard bridge.
+                // ── Contextual terminal key handling ─────────────────────────────
+                // Preserve PSReadLine's Ctrl+A, Ctrl+F, and Ctrl+H bindings. Copy uses
+                // Ctrl+C only with a selection; Ctrl+Shift+A is terminal select-all.
+                // Ctrl+Shift+F6 is the documented accessibility override to leave xterm.
                 term.attachCustomKeyEventHandler(function(e) {
                   if (e.type !== 'keydown') return true;
 
-                  if (e.ctrlKey && !e.altKey && !e.metaKey && e.key && e.key.toLowerCase() === 'f') {
-                    post({ type: 'app_shortcut', command: 'find' });
+                  if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.key === 'F6') {
+                    post({ type: 'app_shortcut', command: 'leave_terminal' });
                     return false;
                   }
 
-                  if (e.ctrlKey && !e.altKey && !e.metaKey && e.key && e.key.toLowerCase() === 'h') {
-                    post({ type: 'app_shortcut', command: 'replace' });
-                    return false;
-                  }
-
-                  if (e.ctrlKey && e.key === 'c') {
+                  if (e.ctrlKey && !e.altKey && !e.metaKey && e.key && e.key.toLowerCase() === 'c') {
                     if (term.hasSelection()) {
                       post({ type: 'copy', text: term.getSelection() });
                       term.clearSelection();
@@ -267,14 +291,22 @@ namespace PS7ScriptDesk.Shell.Controls
                     }
                     return true; // no selection → pass through as \x03 (SIGINT)
                   }
-                  if (e.ctrlKey && e.key === 'a') {
+                  if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'Insert' && term.hasSelection()) {
+                    post({ type: 'copy', text: term.getSelection() });
+                    term.clearSelection();
+                    return false;
+                  }
+                  if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.key && e.key.toLowerCase() === 'a') {
                     term.selectAll();
                     return false;
                   }
                   return true;
                 });
 
-                document.addEventListener('contextmenu', function(e) {
+                // Do not turn right-click into paste: terminal mouse protocols need
+                // unmodified pointer events. Shift+right-click is the explicit paste path.
+                terminalElement.addEventListener('contextmenu', function(e) {
+                  if (!e.shiftKey) return;
                   e.preventDefault();
                   post({ type: 'paste_request' });
                 });
@@ -287,9 +319,9 @@ namespace PS7ScriptDesk.Shell.Controls
                 ro.observe(terminalElement);
 
                 termApi = {
-                  write: function (d) {
+                  write: function (d, callback) {
                     try {
-                      term.write(d);
+                      term.write(d, callback);
                     } catch (writeErr) {
                       post({ type: 'xterm_write_error', message: String(writeErr) });
                     }
@@ -308,39 +340,23 @@ namespace PS7ScriptDesk.Shell.Controls
                   },
                   focus: function ()  { focusTerminal('termApi.focus'); }
                 };
+                applyTerminalTheme('Dark');
                 initializeTerminalHost();
               } catch (initErr) {
                 post({ type: 'xterm_init_error', message: String(initErr) });
               }
-
-              // ── App-level theme integration ──────────────────────────────────────
-              var highContrastTerminalTheme = {
-                  background: '#000000', foreground: '#F2F2F2',
-                  cursor: '#00FF00', cursorAccent: '#000000',
-                  selectionBackground: 'rgba(88,166,255,0.35)',
-                  selectionForeground: '#FFFFFF',
-                  black: '#5C6370', brightBlack: '#9AA4B2',
-                  red: '#FF5555', brightRed: '#FF7A7A',
-                  green: '#50FA7B', brightGreen: '#69FF94',
-                  yellow: '#F1FA8C', brightYellow: '#FFFFA5',
-                  blue: '#66B2FF', brightBlue: '#99CCFF',
-                  magenta: '#FF79C6', brightMagenta: '#FF99D6',
-                  cyan: '#8BE9FD', brightCyan: '#A4F3FF',
-                  white: '#F2F2F2', brightWhite: '#FFFFFF'
-                };
-
-              var terminalThemes = {
-                Dark: highContrastTerminalTheme,
-                Light: highContrastTerminalTheme,
-                IseBlue: highContrastTerminalTheme
-              };
 
               // ── Receive messages from C# ─────────────────────────────────────────
               window.chrome.webview.addEventListener('message', function (e) {
                 try {
                   var msg = (typeof e.data === 'string') ? JSON.parse(e.data) : e.data;
                   if (!termApi || !msg || !msg.type) return;
-                  if      (msg.type === 'output_b64' && typeof msg.data === 'string') { termApi.write(decodeBase64Utf8(msg.data)); }
+                  if      (msg.type === 'output_b64' && typeof msg.data === 'string') {
+                    const sequence = Number.isSafeInteger(msg.sequence) ? msg.sequence : null;
+                    termApi.write(decodeBase64Utf8(msg.data), () => {
+                      if (sequence !== null) post({ type: 'output_ack', sequence: sequence });
+                    });
+                  }
                   else if (msg.type === 'output') { termApi.write(msg.data || ''); }
                   else if (msg.type === 'clear')  { termApi.clear(); }
                   else if (msg.type === 'focus')  {
@@ -349,7 +365,7 @@ namespace PS7ScriptDesk.Shell.Controls
                   }
                   else if (msg.type === 'paste' && typeof msg.data === 'string') { termApi.paste(msg.data); }
                   else if (msg.type === 'settheme' && msg.data && terminalThemes[msg.data]) {
-                    term.options.theme = terminalThemes[msg.data] || highContrastTerminalTheme;
+                    applyTerminalTheme(msg.data);
                   }
                 } catch (err) {
                   post({ type: 'xterm_host_message_error', message: String(err) });
@@ -364,33 +380,15 @@ namespace PS7ScriptDesk.Shell.Controls
 
         // ── State ────────────────────────────────────────────────────────────────
 
-        private readonly object        _queueLock   = new();
-        private readonly List<string>  _outputQueue = new();
-        private readonly TerminalOutputBatchBuffer _outputBatchBuffer = new();
+        private readonly TerminalOutputFlowController _outputFlowController = new();
         private volatile bool          _isReady;
         private bool                   _webView2Available = true;
         private bool                   _firstOutputQueuedLogged;
         private bool                   _firstOutputPostedLogged;
         private bool                   _firstInputReceivedLogged;
         private int                    _inputInfoLogCount;
-        private readonly DispatcherTimer _transcriptPreservationTimer;
-        private DateTimeOffset         _preserveTranscriptUntilUtc = DateTimeOffset.MinValue;
-        private string?                _transcriptPreservationReason;
-        private TranscriptPreservationMode _transcriptPreservationMode;
-        private bool                   _hasDeferredResize;
-        private int                    _deferredResizeCols;
-        private int                    _deferredResizeRows;
-        private string?                _pendingPromptRestoreText;
-        private string?                _pendingPromptRestoreReason;
-        private bool                   _lastVisibleOutputEndedWithLineBreak = true;
-        private static readonly Regex PromptRegex = new(@"PS\s+.+?>", RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-        private enum TranscriptPreservationMode
-        {
-            None,
-            General,
-            DebugTranscript
-        }
+        private long                   _droppedOutputCharacters;
+        private long                   _reportedDroppedOutputCharacters;
 
         // ── Events ────────────────────────────────────────────────────────────────
 
@@ -414,11 +412,6 @@ namespace PS7ScriptDesk.Shell.Controls
         public TerminalControl()
         {
             InitializeComponent();
-            _transcriptPreservationTimer = new DispatcherTimer(DispatcherPriority.Background)
-            {
-                Interval = TimeSpan.FromMilliseconds(250)
-            };
-            _transcriptPreservationTimer.Tick += TranscriptPreservationTimer_Tick;
             Loaded += OnLoaded;
             WebView.PreviewMouseDown += WebView_PreviewMouseDown;
             WebView.GotKeyboardFocus += WebView_GotKeyboardFocus;
@@ -515,41 +508,9 @@ namespace PS7ScriptDesk.Shell.Controls
         /// </summary>
         public void WriteRaw(string data)
         {
-            if (string.IsNullOrEmpty(data) || !_webView2Available)
+            if (string.IsNullOrEmpty(data))
             {
                 return;
-            }
-
-            if (ShouldSuppressPromptRedrawChunk(data, out var suppressionReason))
-            {
-                AppLogger.Info("Terminal", $"Suppressed terminal output chunk during transcript preservation. Reason={suppressionReason}, Length={data.Length}.");
-                DeveloperDiagnostics.LogDecision(
-                    "Terminal",
-                    "WriteRaw",
-                    "Terminal output chunk was suppressed during transcript preservation.",
-                    "SuppressPromptRedrawChunk",
-                    new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data))
-                    {
-                        ["reason"] = suppressionReason,
-                        ["preservationReason"] = _transcriptPreservationReason,
-                        ["preserveUntilUtc"] = _preserveTranscriptUntilUtc
-                    });
-                return;
-            }
-
-            if (IsTranscriptPreservationActive())
-            {
-                DeveloperDiagnostics.LogDecision(
-                    "Terminal",
-                    "WriteRaw",
-                    "Terminal output chunk was allowed during transcript preservation.",
-                    "AllowOutputDuringPreservation",
-                    new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data))
-                    {
-                        ["reason"] = "Chunk did not match prompt-redraw suppression heuristics.",
-                        ["preservationReason"] = _transcriptPreservationReason,
-                        ["preserveUntilUtc"] = _preserveTranscriptUntilUtc
-                    });
             }
 
             if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseTerminalEnabled())
@@ -560,44 +521,38 @@ namespace PS7ScriptDesk.Shell.Controls
                     new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data))
                     {
                         ["isReady"] = _isReady,
-                        ["queuedOutputCount"] = _outputQueue.Count
+                        ["rendererAvailable"] = _webView2Available
                     });
             }
 
-            lock (_queueLock)
+            if (!_webView2Available)
             {
-                if (!_isReady)
-                {
-                    if (!_firstOutputQueuedLogged)
-                    {
-                        _firstOutputQueuedLogged = true;
-                        AppLogger.Info("Terminal", $"Queued terminal output before xterm.js was ready. Length={data.Length}.");
-                        DeveloperDiagnostics.LogInfo("Terminal", "Terminal output queued before xterm.js was ready.", new Dictionary<string, object?> { ["length"] = data.Length });
-                    }
-
-                    _outputQueue.Add(data);
-                    return;
-                }
+                RecordDroppedTerminalOutput(data.Length);
+                return;
             }
 
-            if (!_firstOutputPostedLogged)
+            if (!_isReady && !_firstOutputQueuedLogged)
+            {
+                _firstOutputQueuedLogged = true;
+                AppLogger.Info("Terminal", $"Queued terminal output before xterm.js was ready. Length={data.Length}.");
+                DeveloperDiagnostics.LogInfo("Terminal", "Terminal output queued before xterm.js was ready.", new Dictionary<string, object?> { ["length"] = data.Length });
+            }
+
+            var enqueueResult = _outputFlowController.Enqueue(data);
+            if (enqueueResult.DroppedCharacters > 0)
+            {
+                RecordDroppedTerminalOutput(enqueueResult.DroppedCharacters);
+                return;
+            }
+
+            if (_isReady && !_firstOutputPostedLogged)
             {
                 _firstOutputPostedLogged = true;
                 AppLogger.Info("Terminal", $"Posting first terminal output chunk to xterm.js. Length={data.Length}.");
                 DeveloperDiagnostics.LogInfo("Terminal", "First terminal output chunk posted to xterm.js.", new Dictionary<string, object?> { ["length"] = data.Length });
             }
 
-            EnqueueOutputForWebView(data);
-        }
-
-        /// <summary>
-        /// Compatibility route for output produced by the separate debugger process.
-        /// Application notifications must never call this method. Full debugger display
-        /// separation is intentionally deferred to a later terminal architecture phase.
-        /// </summary>
-        public void WriteDebuggerOutput(string text)
-        {
-            WriteRaw(text);
+            RequestOutputFlush(enqueueResult.ScheduleFlush);
         }
 
         /// <summary>Clears the xterm.js terminal display and returns keyboard focus to it.</summary>
@@ -605,7 +560,6 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             if (!_webView2Available) return;
             DeveloperDiagnostics.LogUserAction("Terminal", "TerminalClearRequested", "Terminal clear requested.");
-            _lastVisibleOutputEndedWithLineBreak = true;
             PostToWebView("clear", string.Empty);
         }
 
@@ -617,104 +571,6 @@ namespace PS7ScriptDesk.Shell.Controls
             ActivateTerminalHost("FocusTerminal");
         }
 
-        public void PreserveVisibleTranscriptFor(TimeSpan duration, string reason)
-        {
-            if (duration <= TimeSpan.Zero)
-            {
-                return;
-            }
-
-            void ActivatePreservation()
-            {
-                var nowUtc = DateTimeOffset.UtcNow;
-                var requestedUntilUtc = nowUtc + duration;
-                if (requestedUntilUtc > _preserveTranscriptUntilUtc)
-                {
-                    _preserveTranscriptUntilUtc = requestedUntilUtc;
-                }
-
-                _transcriptPreservationReason = reason;
-                _transcriptPreservationMode = DetermineTranscriptPreservationMode(reason);
-                _transcriptPreservationTimer.Interval = duration < TimeSpan.FromMilliseconds(250)
-                    ? duration
-                    : TimeSpan.FromMilliseconds(250);
-                if (!_transcriptPreservationTimer.IsEnabled)
-                {
-                    _transcriptPreservationTimer.Start();
-                }
-
-                AppLogger.Info("Terminal", $"Visible transcript preservation activated. DurationMs={duration.TotalMilliseconds:F0}, Reason={reason}, UntilUtc={_preserveTranscriptUntilUtc:O}.");
-                DeveloperDiagnostics.LogInfo(
-                    "Terminal",
-                    "Visible transcript preservation activated.",
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = reason,
-                        ["mode"] = _transcriptPreservationMode.ToString(),
-                        ["durationMs"] = duration.TotalMilliseconds,
-                        ["preserveUntilUtc"] = _preserveTranscriptUntilUtc
-                    });
-            }
-
-            if (Dispatcher.CheckAccess())
-            {
-                ActivatePreservation();
-            }
-            else
-            {
-                Dispatcher.BeginInvoke((Action)ActivatePreservation);
-            }
-        }
-
-        public void RestoreVisiblePromptAfterDebug(string promptText, string reason)
-        {
-            if (string.IsNullOrWhiteSpace(promptText) || !_webView2Available)
-            {
-                DeveloperDiagnostics.LogDecision(
-                    "Terminal",
-                    "RestoreVisiblePromptAfterDebug",
-                    "Visible prompt restore was skipped because prompt text was empty or WebView2 was unavailable.",
-                    "SkipVisiblePromptRestore",
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = reason,
-                        ["webViewAvailable"] = _webView2Available,
-                        ["promptTextEmpty"] = string.IsNullOrWhiteSpace(promptText)
-                    });
-                return;
-            }
-
-            void RequestPromptRestore()
-            {
-                var normalizedPromptText = promptText.Trim();
-                _pendingPromptRestoreText = normalizedPromptText;
-                _pendingPromptRestoreReason = reason;
-                DeveloperDiagnostics.LogInfo(
-                    "Terminal",
-                    "Visible prompt restoration requested after debug completion.",
-                    new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(normalizedPromptText))
-                    {
-                        ["reason"] = reason,
-                        ["preservationActive"] = IsTranscriptPreservationActive(),
-                        ["preservationMode"] = _transcriptPreservationMode.ToString()
-                    });
-
-                if (!IsTranscriptPreservationActive())
-                {
-                    ShowPendingPromptRestore("Prompt restoration requested without an active preservation window.");
-                }
-            }
-
-            if (Dispatcher.CheckAccess())
-            {
-                RequestPromptRestore();
-            }
-            else
-            {
-                Dispatcher.BeginInvoke((Action)RequestPromptRestore);
-            }
-        }
-
         /// <summary>Updates the xterm.js colour theme to match the active application theme.</summary>
         public void ApplyAppTheme(string themeName)
         {
@@ -723,16 +579,9 @@ namespace PS7ScriptDesk.Shell.Controls
 
         // ── Private helpers ───────────────────────────────────────────────────────
 
-        private void EnqueueOutputForWebView(string data)
+        private void RequestOutputFlush(bool scheduleFlush)
         {
-            if (string.IsNullOrEmpty(data))
-            {
-                return;
-            }
-
-            _lastVisibleOutputEndedWithLineBreak = data.EndsWith('\n') || data.EndsWith('\r');
-
-            if (!_outputBatchBuffer.Enqueue(data))
+            if (!scheduleFlush)
             {
                 return;
             }
@@ -744,10 +593,80 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void FlushPendingOutputToWebView()
         {
-            var data = _outputBatchBuffer.Drain();
-            if (string.IsNullOrEmpty(data)) return;
+            ReportDroppedTerminalOutputIfNeeded();
+            var batch = _outputFlowController.TryBeginDelivery();
+            if (batch is not { } outputBatch)
+            {
+                return;
+            }
 
-            PostToWebView("output", data);
+            if (!_webView2Available || WebView.CoreWebView2 is null)
+            {
+                RecordDroppedTerminalOutput(
+                    _outputFlowController.DiscardInFlight(outputBatch.Sequence));
+                ReportDroppedTerminalOutputIfNeeded();
+                return;
+            }
+
+            try
+            {
+                WebView.CoreWebView2.PostWebMessageAsString(
+                    TerminalWebMessageSerializer.SerializeOutput(outputBatch.Sequence, outputBatch.Data));
+            }
+            catch (Exception ex)
+            {
+                RecordDroppedTerminalOutput(
+                    _outputFlowController.DiscardInFlight(outputBatch.Sequence));
+                ReportDroppedTerminalOutputIfNeeded();
+                System.Diagnostics.Debug.WriteLine(
+                    $"[TerminalControl] PostWebMessageAsString failed: {ex.Message}");
+                DeveloperDiagnostics.LogException(
+                    "Terminal",
+                    ex,
+                    "Posting terminal output batch to WebView2 failed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["sequence"] = outputBatch.Sequence,
+                        ["length"] = outputBatch.Data.Length,
+                        ["contentOmitted"] = true
+                    });
+            }
+        }
+
+        private void RecordDroppedTerminalOutput(int characterCount)
+        {
+            if (characterCount <= 0)
+            {
+                return;
+            }
+
+            System.Threading.Interlocked.Add(ref _droppedOutputCharacters, characterCount);
+        }
+
+        private void ReportDroppedTerminalOutputIfNeeded()
+        {
+            var totalDroppedCharacters = System.Threading.Interlocked.Read(ref _droppedOutputCharacters);
+            var previouslyReported = System.Threading.Interlocked.Exchange(
+                ref _reportedDroppedOutputCharacters,
+                totalDroppedCharacters);
+            var newlyDroppedCharacters = totalDroppedCharacters - previouslyReported;
+            if (newlyDroppedCharacters <= 0)
+            {
+                return;
+            }
+
+            AppLogger.Warning(
+                "Terminal",
+                $"Terminal renderer output was dropped under bounded flow control. NewlyDroppedCharacters={newlyDroppedCharacters}, TotalDroppedCharacters={totalDroppedCharacters}, ContentOmitted=True.");
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Terminal renderer output was dropped under the bounded flow-control policy.",
+                new Dictionary<string, object?>
+                {
+                    ["newlyDroppedCharacters"] = newlyDroppedCharacters,
+                    ["totalDroppedCharacters"] = totalDroppedCharacters,
+                    ["contentOmitted"] = true
+                });
         }
 
         private void PostToWebView(string type, string data)
@@ -825,6 +744,76 @@ namespace PS7ScriptDesk.Shell.Controls
                                 ["clientHeight"] = readyClientHeight
                             });
                         FlushOutputQueue();
+                        break;
+
+                    case "output_ack":
+                        if (root.TryGetProperty("sequence", out var sequenceProp) &&
+                            sequenceProp.TryGetInt64(out var sequence))
+                        {
+                            RequestOutputFlush(_outputFlowController.Acknowledge(sequence));
+                        }
+                        break;
+
+                    case "terminal_compatibility":
+                        {
+                            var screenReaderMode = root.TryGetProperty("screenReaderMode", out var screenReaderProp) &&
+                                screenReaderProp.ValueKind == JsonValueKind.True;
+                            var unicodeWidthProvider = root.TryGetProperty("unicodeWidthProvider", out var unicodeWidthProp)
+                                ? unicodeWidthProp.GetString()
+                                : "unknown";
+                            var binaryInputBridge = root.TryGetProperty("binaryInputBridge", out var binaryInputProp) &&
+                                binaryInputProp.ValueKind == JsonValueKind.True;
+                            var mousePasteGesture = root.TryGetProperty("mousePasteGesture", out var mousePasteProp)
+                                ? mousePasteProp.GetString()
+                                : "unknown";
+                            var leaveTerminalShortcut = root.TryGetProperty("leaveTerminalShortcut", out var leaveShortcutProp)
+                                ? leaveShortcutProp.GetString()
+                                : "unknown";
+                            AppLogger.Info(
+                                "Terminal",
+                                $"xterm compatibility configured. ScreenReaderMode={screenReaderMode}, UnicodeWidthProvider={unicodeWidthProvider}, BinaryInputBridge={binaryInputBridge}, MousePasteGesture={mousePasteGesture}, LeaveTerminalShortcut={leaveTerminalShortcut}.");
+                            DeveloperDiagnostics.LogInfo(
+                                "Terminal",
+                                "xterm compatibility capabilities were configured.",
+                                new Dictionary<string, object?>
+                                {
+                                    ["screenReaderMode"] = screenReaderMode,
+                                    ["unicodeWidthProvider"] = unicodeWidthProvider,
+                                    ["binaryInputBridge"] = binaryInputBridge,
+                                    ["mousePasteGesture"] = mousePasteGesture,
+                                    ["leaveTerminalShortcut"] = leaveTerminalShortcut
+                                });
+                        }
+                        break;
+
+                    case "terminal_theme_applied":
+                        {
+                            var themeName = root.TryGetProperty("theme", out var themeProp)
+                                ? themeProp.GetString()
+                                : "unknown";
+                            var background = root.TryGetProperty("background", out var backgroundProp)
+                                ? backgroundProp.GetString()
+                                : "unknown";
+                            var foreground = root.TryGetProperty("foreground", out var foregroundProp)
+                                ? foregroundProp.GetString()
+                                : "unknown";
+                            var selectionBackground = root.TryGetProperty("selectionBackground", out var selectionProp)
+                                ? selectionProp.GetString()
+                                : "unknown";
+                            AppLogger.Info(
+                                "Terminal",
+                                $"xterm visual theme applied. Theme={themeName}, Background={background}, Foreground={foreground}, SelectionBackground={selectionBackground}.");
+                            DeveloperDiagnostics.LogInfo(
+                                "Terminal",
+                                "xterm visual theme was applied.",
+                                new Dictionary<string, object?>
+                                {
+                                    ["theme"] = themeName,
+                                    ["background"] = background,
+                                    ["foreground"] = foreground,
+                                    ["selectionBackground"] = selectionBackground
+                                });
+                        }
                         break;
 
                     case "xterm_init_error":
@@ -1008,29 +997,7 @@ namespace PS7ScriptDesk.Shell.Controls
                             var rows = rowsProp.GetInt32();
                             AppLogger.Debug("Terminal", $"xterm resize reported. Cols={cols}, Rows={rows}.");
                             DeveloperDiagnostics.LogInfo("Terminal", "xterm resize reported.", new Dictionary<string, object?> { ["cols"] = cols, ["rows"] = rows });
-                            if (IsTranscriptPreservationActive())
-                            {
-                                _hasDeferredResize = true;
-                                _deferredResizeCols = cols;
-                                _deferredResizeRows = rows;
-                                AppLogger.Info("Terminal", $"Deferred xterm resize during transcript preservation. Cols={cols}, Rows={rows}, Reason={_transcriptPreservationReason}.");
-                                DeveloperDiagnostics.LogDecision(
-                                    "Terminal",
-                                    "OnWebMessageReceived",
-                                    "xterm resize was deferred during transcript preservation.",
-                                    "DeferResizeDuringTranscriptPreservation",
-                                    new Dictionary<string, object?>
-                                    {
-                                        ["cols"] = cols,
-                                        ["rows"] = rows,
-                                        ["preservationReason"] = _transcriptPreservationReason,
-                                        ["preserveUntilUtc"] = _preserveTranscriptUntilUtc
-                                    });
-                            }
-                            else
-                            {
-                                TerminalResized?.Invoke(cols, rows);
-                            }
+                            TerminalResized?.Invoke(cols, rows);
                         }
                         break;
                 }
@@ -1046,22 +1013,12 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void FlushOutputQueue()
         {
-            List<string> toFlush;
-            lock (_queueLock)
-            {
-                _isReady = true;
-                toFlush = new List<string>();
-                toFlush.AddRange(_outputQueue);
-                _outputQueue.Clear();
-            }
+            _isReady = true;
+            var scheduleFlush = _outputFlowController.SetRendererReady();
 
-            AppLogger.Info("Terminal", $"Flushing queued terminal output to xterm.js. Chunks={toFlush.Count}.");
-            DeveloperDiagnostics.LogInfo("Terminal", "Flushing queued terminal output to xterm.js.", new Dictionary<string, object?> { ["chunkCount"] = toFlush.Count });
-
-            if (toFlush.Count > 0)
-            {
-                EnqueueOutputForWebView(string.Concat(toFlush));
-            }
+            AppLogger.Info("Terminal", "xterm.js renderer is ready; bounded terminal output delivery is enabled.");
+            DeveloperDiagnostics.LogInfo("Terminal", "xterm.js renderer is ready; bounded terminal output delivery is enabled.");
+            RequestOutputFlush(scheduleFlush);
 
             // Auto-focus so the user can type immediately.
             ActivateTerminalHost("FlushOutputQueue");
@@ -1117,252 +1074,7 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void RaiseTerminalActivated(string source)
         {
-            if (ShouldEndTranscriptPreservationForActivation(source))
-            {
-                EndTranscriptPreservation("User terminal interaction resumed normal behavior.", flushDeferredResize: true);
-            }
-
             TerminalActivated?.Invoke(source);
-        }
-
-        private void TranscriptPreservationTimer_Tick(object? sender, EventArgs e)
-        {
-            if (!IsTranscriptPreservationActive())
-            {
-                EndTranscriptPreservation("Transcript preservation timer expired.", flushDeferredResize: true);
-            }
-        }
-
-        private bool IsTranscriptPreservationActive()
-        {
-            return DateTimeOffset.UtcNow < _preserveTranscriptUntilUtc;
-        }
-
-        private bool ShouldSuppressPromptRedrawChunk(string data, out string reason)
-        {
-            reason = string.Empty;
-            if (!IsTranscriptPreservationActive())
-            {
-                return false;
-            }
-
-            var containsCursorHome = data.Contains("\x1b[H", StringComparison.Ordinal);
-            var eraseLineCount = CountOccurrences(data, "\x1b[K");
-            var hasPrompt = PromptRegex.IsMatch(data);
-            var hasCarriageReturn = data.Contains('\r');
-            var containsLineFeed = data.Contains('\n');
-
-            if (!containsCursorHome)
-            {
-                reason = "Allowed because no cursor-home escape sequence was present.";
-                return false;
-            }
-
-            if (eraseLineCount < 2)
-            {
-                reason = "Allowed because erase-line count was below the prompt-redraw threshold.";
-                return false;
-            }
-
-            if (!hasPrompt)
-            {
-                reason = "Allowed because no PowerShell prompt signature was present.";
-                return false;
-            }
-
-            reason = $"Suppressed prompt redraw chunk during transcript preservation. ContainsCursorHome={containsCursorHome}, EraseLineCount={eraseLineCount}, HasPrompt={hasPrompt}, HasCarriageReturn={hasCarriageReturn}, ContainsLineFeed={containsLineFeed}.";
-            return true;
-        }
-
-        private void EndTranscriptPreservation(string reason, bool flushDeferredResize)
-        {
-            var wasActive = _preserveTranscriptUntilUtc != DateTimeOffset.MinValue;
-            var previousReason = _transcriptPreservationReason;
-            var previousMode = _transcriptPreservationMode;
-            var previousUntilUtc = _preserveTranscriptUntilUtc;
-            _transcriptPreservationTimer.Stop();
-            _preserveTranscriptUntilUtc = DateTimeOffset.MinValue;
-            _transcriptPreservationReason = null;
-            _transcriptPreservationMode = TranscriptPreservationMode.None;
-
-            if (wasActive)
-            {
-                AppLogger.Info("Terminal", $"Visible transcript preservation ended. Reason={reason}, PreviousReason={previousReason}, PreviousMode={previousMode}, FlushDeferredResize={flushDeferredResize}, HadDeferredResize={_hasDeferredResize}.");
-                DeveloperDiagnostics.LogInfo(
-                    "Terminal",
-                    "Visible transcript preservation ended.",
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = reason,
-                        ["previousReason"] = previousReason,
-                        ["previousMode"] = previousMode.ToString(),
-                        ["previousPreserveUntilUtc"] = previousUntilUtc,
-                        ["flushDeferredResize"] = flushDeferredResize,
-                        ["hadDeferredResize"] = _hasDeferredResize
-                    });
-            }
-
-            if (previousMode == TranscriptPreservationMode.DebugTranscript && _hasDeferredResize)
-            {
-                var discardedCols = _deferredResizeCols;
-                var discardedRows = _deferredResizeRows;
-                _hasDeferredResize = false;
-                _deferredResizeCols = 0;
-                _deferredResizeRows = 0;
-                AppLogger.Info("Terminal", $"Deferred resize discarded after debug transcript preservation to avoid prompt redraw wiping debug output. Cols={discardedCols}, Rows={discardedRows}, EndReason={reason}.");
-                DeveloperDiagnostics.LogDecision(
-                    "Terminal",
-                    "EndTranscriptPreservation",
-                    "Deferred resize was discarded after debug transcript preservation to avoid prompt redraw wiping visible debug output.",
-                    "DiscardDeferredResizeAfterDebugTranscriptPreservation",
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = reason,
-                        ["previousReason"] = previousReason,
-                        ["previousMode"] = previousMode.ToString(),
-                        ["cols"] = discardedCols,
-                        ["rows"] = discardedRows,
-                        ["flushDeferredResize"] = flushDeferredResize
-                    });
-            }
-            else if (flushDeferredResize && _hasDeferredResize)
-            {
-                var cols = _deferredResizeCols;
-                var rows = _deferredResizeRows;
-                _hasDeferredResize = false;
-                _deferredResizeCols = 0;
-                _deferredResizeRows = 0;
-                AppLogger.Info("Terminal", $"Applying deferred xterm resize after transcript preservation. Cols={cols}, Rows={rows}.");
-                DeveloperDiagnostics.LogInfo(
-                    "Terminal",
-                    "Applying deferred xterm resize after transcript preservation.",
-                    new Dictionary<string, object?>
-                    {
-                        ["cols"] = cols,
-                        ["rows"] = rows,
-                        ["reason"] = reason
-                    });
-                TerminalResized?.Invoke(cols, rows);
-            }
-            else if (!flushDeferredResize)
-            {
-                var hadDeferredResize = _hasDeferredResize;
-                _hasDeferredResize = false;
-                _deferredResizeCols = 0;
-                _deferredResizeRows = 0;
-                DeveloperDiagnostics.LogDecision(
-                    "Terminal",
-                    "EndTranscriptPreservation",
-                    "Deferred resize state was cleared because preservation ended without replaying deferred resize.",
-                    "ClearDeferredResizeWithoutReplay",
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = reason,
-                        ["previousReason"] = previousReason,
-                        ["previousMode"] = previousMode.ToString(),
-                        ["hadDeferredResize"] = hadDeferredResize
-                    });
-            }
-
-            if (previousMode == TranscriptPreservationMode.DebugTranscript)
-            {
-                ShowPendingPromptRestore(reason);
-            }
-        }
-
-        private static TranscriptPreservationMode DetermineTranscriptPreservationMode(string? reason)
-        {
-            if (!string.IsNullOrWhiteSpace(reason) &&
-                reason.Contains("Debug teardown", StringComparison.Ordinal))
-            {
-                return TranscriptPreservationMode.DebugTranscript;
-            }
-
-            return TranscriptPreservationMode.General;
-        }
-
-        private void ShowPendingPromptRestore(string triggerReason)
-        {
-            if (string.IsNullOrWhiteSpace(_pendingPromptRestoreText))
-            {
-                DeveloperDiagnostics.LogDecision(
-                    "Terminal",
-                    "ShowPendingPromptRestore",
-                    "Visible prompt restoration was skipped because no pending prompt text was available.",
-                    "SkipPendingPromptRestore",
-                    new Dictionary<string, object?>
-                    {
-                        ["triggerReason"] = triggerReason,
-                        ["pendingReason"] = _pendingPromptRestoreReason
-                    });
-                return;
-            }
-
-            var promptText = _pendingPromptRestoreText;
-            var promptReason = _pendingPromptRestoreReason ?? triggerReason;
-            _pendingPromptRestoreText = null;
-            _pendingPromptRestoreReason = null;
-            ShowNonDestructivePrompt(promptText, promptReason, triggerReason);
-        }
-
-        private void ShowNonDestructivePrompt(string promptText, string reason, string triggerReason)
-        {
-            var output = (_lastVisibleOutputEndedWithLineBreak ? string.Empty : "\r\n") + "\x1b[?25h" + promptText;
-            _lastVisibleOutputEndedWithLineBreak = false;
-            AppLogger.Info("Terminal", $"Showing non-destructive visible prompt after debug completion. PromptLength={promptText.Length}, ContentOmitted=True, Reason={reason}, TriggerReason={triggerReason}.");
-            DeveloperDiagnostics.LogDecision(
-                "Terminal",
-                "ShowNonDestructivePrompt",
-                "Non-destructive visible prompt restoration was posted to xterm after debug completion.",
-                "ShowVisiblePromptAfterDebug",
-                new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(promptText))
-                {
-                    ["reason"] = reason,
-                    ["triggerReason"] = triggerReason,
-                    ["cursorShowRequested"] = true,
-                    ["prependedLineBreak"] = output.StartsWith("\r\n", StringComparison.Ordinal)
-                });
-            EnqueueOutputForWebView(output);
-            DeveloperDiagnostics.LogDecision(
-                "Terminal",
-                "ShowNonDestructivePrompt",
-                "xterm cursor-show request was sent with the visible prompt restoration output.",
-                "ShowCursorWithVisiblePromptRestore",
-                new Dictionary<string, object?>
-                {
-                    ["reason"] = reason,
-                    ["triggerReason"] = triggerReason
-                });
-            ActivateTerminalHost("ShowNonDestructivePrompt");
-        }
-
-        private static int CountOccurrences(string text, string value)
-        {
-            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(value))
-            {
-                return 0;
-            }
-
-            var count = 0;
-            var searchIndex = 0;
-            while (true)
-            {
-                var foundIndex = text.IndexOf(value, searchIndex, StringComparison.Ordinal);
-                if (foundIndex < 0)
-                {
-                    return count;
-                }
-
-                count++;
-                searchIndex = foundIndex + value.Length;
-            }
-        }
-
-        private static bool ShouldEndTranscriptPreservationForActivation(string source)
-        {
-            return source.StartsWith("WebView.", StringComparison.Ordinal) ||
-                   string.Equals(source, "xterm.onData", StringComparison.Ordinal) ||
-                   string.Equals(source, "terminal.click", StringComparison.OrdinalIgnoreCase);
         }
 
     }

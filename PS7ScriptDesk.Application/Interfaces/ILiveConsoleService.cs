@@ -57,8 +57,9 @@ namespace PS7ScriptDesk.Application.Interfaces
         void FocusConsole();
 
         /// <summary>
-        /// Writes raw data directly to the ConPTY input pipe without appending a
-        /// sentinel. Used for keystroke-by-keystroke forwarding from xterm.js.
+        /// Queues raw data for ordered delivery to the current ConPTY generation
+        /// without appending a sentinel. Used for keystroke-by-keystroke forwarding
+        /// from xterm.js.
         /// </summary>
         Task WriteRawInputAsync(string data, CancellationToken cancellationToken = default);
 
@@ -81,6 +82,12 @@ namespace PS7ScriptDesk.Application.Interfaces
             CancellationToken cancellationToken = default);
 
         Task<bool> StopConsoleAsync(Action<ExecutionOutputRecord>? onOutput = null);
+
+        /// <summary>
+        /// Performs the same bounded, idempotent teardown used by stop and restart,
+        /// and reports whether all owned terminal resources drained cleanly.
+        /// </summary>
+        Task<bool> ShutdownAsync(CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Sends a Ctrl+C (ETX, <c>\x03</c>) interrupt signal to the ConPTY process.

@@ -58,7 +58,7 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        private void Window_Closed(object? sender, EventArgs e)
+        private async void Window_Closed(object? sender, EventArgs e)
         {
             _isClosing = true;
             AppLogger.Info("ConsolePrototype", "Prototype window closed.");
@@ -67,6 +67,8 @@ namespace PS7ScriptDesk.Shell
             PrototypeTerminal.TerminalResized -= OnTerminalResized;
             _liveConsoleService.SessionTerminated -= OnSessionTerminated;
             _liveConsoleService.RawOutputReceived -= OnRawOutputReceived;
+            var shutdownSucceeded = await _liveConsoleService.ShutdownAsync().ConfigureAwait(true);
+            AppLogger.Info("ConsolePrototype", $"Prototype terminal shutdown completed. Succeeded={shutdownSucceeded}.");
             _liveConsoleService.Dispose();
         }
 
@@ -92,7 +94,16 @@ namespace PS7ScriptDesk.Shell
             }
 
             AppLogger.Debug("ConsolePrototype", $"Prototype received terminal input. Length={data.Length}.");
-            await _liveConsoleService.WriteRawInputAsync(data).ConfigureAwait(false);
+            try
+            {
+                await _liveConsoleService.WriteRawInputAsync(data).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning(
+                    "ConsolePrototype",
+                    $"Prototype terminal input write failed. Length={data.Length}, ExceptionType={ex.GetType().Name}, ContentOmitted=True.");
+            }
         }
 
         private void OnTerminalResized(int cols, int rows)

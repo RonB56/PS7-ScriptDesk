@@ -2,6 +2,14 @@ namespace PS7ScriptDesk.PowerShell.Services
 {
     internal static class TerminalSessionEventPolicy
     {
+        public static bool IsCurrentSession(
+            int currentGeneration,
+            int observedGeneration,
+            bool teardownInProgress)
+        {
+            return !teardownInProgress && currentGeneration == observedGeneration;
+        }
+
         public static bool IsCurrentDispatch(
             bool commandInProgress,
             int currentGeneration,

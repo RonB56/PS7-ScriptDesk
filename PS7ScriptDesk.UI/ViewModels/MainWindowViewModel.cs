@@ -57,10 +57,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private bool _hasSessionRestoreNotice;
         private string _terminalDisplayText;
         private string _applicationActivityText = string.Empty;
-
-        // The debugger currently remains visible in xterm.js for compatibility, but it
-        // has an explicit route so application messages cannot share its display sink.
-        private Action<string>? _debuggerOutputSink;
+        private string _debuggerOutputText = string.Empty;
         private Action?         _clearTerminalSink;
         private Action?         _focusTerminalSink;
         private bool _isDebugSessionActive;
@@ -326,6 +323,19 @@ namespace PS7ScriptDesk.UI.ViewModels
                 if (_applicationActivityText != value)
                 {
                     _applicationActivityText = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        public string DebuggerOutputText
+        {
+            get => _debuggerOutputText;
+            private set
+            {
+                if (_debuggerOutputText != value)
+                {
+                    _debuggerOutputText = value;
                     OnPropertyChanged();
                 }
             }
@@ -1002,15 +1012,6 @@ namespace PS7ScriptDesk.UI.ViewModels
         }
 
         /// <summary>
-        /// Registers the compatibility display route for output from the separate
-        /// debugger process. This is intentionally distinct from application output.
-        /// </summary>
-        public void SetDebuggerOutputSink(Action<string> debuggerOutput)
-        {
-            _debuggerOutputSink = debuggerOutput;
-        }
-
-        /// <summary>
         /// Subscribes a handler to raw (ANSI-intact) ConPTY output for forwarding
         /// to xterm.js. The handler is called on the thread-pool.
         /// </summary>
@@ -1041,9 +1042,21 @@ namespace PS7ScriptDesk.UI.ViewModels
                 AppLogger.Debug("Console", $"ViewModel forwarding raw terminal input to LiveConsoleService. Length={data.Length}.");
                 await _liveConsoleService.WriteRawInputAsync(data).ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex)
             {
-                // Best effort — session may be stopped.
+                AppLogger.Warning(
+                    "Console",
+                    $"Raw terminal input could not be forwarded. Length={data.Length}, ExceptionType={ex.GetType().Name}, ContentOmitted=True.");
+                DeveloperDiagnostics.LogException(
+                    "Terminal",
+                    ex,
+                    "Raw terminal input forwarding failed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["inputLength"] = data.Length,
+                        ["contentOmitted"] = true
+                    });
+                throw;
             }
         }
 
@@ -1076,23 +1089,44 @@ namespace PS7ScriptDesk.UI.ViewModels
                 // Best effort shutdown only.
             }
 
-            // Fire-and-forget the terminal stop.  Blocking on async work from the UI
-            // thread (GetAwaiter().GetResult()) risks a deadlock and freezes the window
-            // during close.  The process will be killed by the OS when the app exits
-            // if the stop does not complete in time.
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await _liveConsoleService.StopConsoleAsync().ConfigureAwait(false);
-                }
-                catch
-                {
-                    // Best effort shutdown only.
-                }
-            });
-
             return true;
+        }
+
+        public async Task<bool> ShutdownTerminalAsync(CancellationToken cancellationToken = default)
+        {
+            var operationId = $"TerminalShutdown-{Guid.NewGuid():N}";
+            using var scope = DeveloperDiagnostics.BeginTimedOperation(
+                "Terminal",
+                "ApplicationShutdown",
+                "Awaiting bounded terminal teardown for application shutdown.",
+                operationId: operationId);
+
+            try
+            {
+                var succeeded = await _liveConsoleService
+                    .ShutdownAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                AppLogger.Info(
+                    "Console",
+                    $"Application terminal shutdown completed. OperationId={operationId}, Succeeded={succeeded}.");
+                return succeeded;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error(
+                    "Console",
+                    $"Application terminal shutdown failed. OperationId={operationId}.",
+                    ex);
+                DeveloperDiagnostics.LogException(
+                    "Terminal",
+                    ex,
+                    "Application terminal shutdown failed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = operationId
+                    });
+                return false;
+            }
         }
 
         public ApplicationSettings CreateApplicationSettingsSnapshot()
@@ -4500,6 +4534,11 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
         }
 
+        public void ClearDebugOutput()
+        {
+            PostToUi(() => DebuggerOutputText = string.Empty);
+        }
+
         private void AppendApplicationActivityFragmentCore(string text)
         {
             if (string.IsNullOrEmpty(text))
@@ -4521,19 +4560,14 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
-            if (_debuggerOutputSink is not null)
+            PostToUi(() =>
             {
-                _debuggerOutputSink(text);
-                return;
-            }
-
-            // Headless/test fallback only. The Shell registers an explicitly named
-            // debugger sink so this buffer is not a generic application-output route.
-            const int maxBufferLength = 500000;
-            var next = _terminalDisplayText + text;
-            if (next.Length > maxBufferLength)
-                next = next[^maxBufferLength..];
-            TerminalDisplayText = next;
+                const int maxBufferLength = 500000;
+                var next = _debuggerOutputText + text;
+                if (next.Length > maxBufferLength)
+                    next = next[^maxBufferLength..];
+                DebuggerOutputText = next;
+            });
         }
 
         private void PostToUi(Action action)

@@ -74,7 +74,6 @@ namespace PS7ScriptDesk.Shell
         private const int MetadataToastSuccessDismissMilliseconds = 2200;
         private const int MetadataToastWarningDismissMilliseconds = 6500;
         private const int MetadataToastFailureDismissMilliseconds = 9000;
-        private const int DebugOutputPreservationWindowMilliseconds = 2000;
         private const int DebugVariableValueMaxLength = 160;
         private const int DebugHoverValueMaxLength = 300;
         private const string RecentScriptMenuItemTagPrefix = "RecentScript:";
@@ -190,6 +189,7 @@ namespace PS7ScriptDesk.Shell
         private WpfPoint _pendingHoverPoint;
         private FindReplaceWindow? _findReplaceWindow;
         private bool _allowWindowClose;
+        private bool _terminalShutdownInProgress;
         private bool _shellLayoutApplied;
         private double _lastKnownExplorerWidth = 300;
         private string _lastFindText = string.Empty;
@@ -211,7 +211,6 @@ namespace PS7ScriptDesk.Shell
         private int _selectedDebugTabIndex;
         private bool _isSynchronizingDebugTabSelection;
         private Rect? _lastDebugPaneWindowBounds;
-        private DateTimeOffset _lastDebugOutputWrittenAtUtc = DateTimeOffset.MinValue;
         private readonly Dictionary<TextEditor, BraceMatchingRenderer> _braceMatchingRenderers = new();
         private bool _terminalIsReady;
         private bool _terminalHostAttached;
@@ -234,7 +233,8 @@ namespace PS7ScriptDesk.Shell
             PreLaunchCleanup,
             UserStop,
             SessionEndedEvent,
-            SessionStoppedState
+            SessionStoppedState,
+            ApplicationShutdown
         }
 
         public static readonly DependencyProperty IsContextHelpEnabledProperty = DependencyProperty.Register(
@@ -365,15 +365,11 @@ namespace PS7ScriptDesk.Shell
                     }),
                     focusTerminal: ()   => Dispatcher.BeginInvoke(() => TerminalConsole.FocusTerminal()));
 
-                // The separate debugger process retains its current visible behavior
-                // through an explicitly classified compatibility route. Full debugger
-                // display separation remains a later terminal architecture phase.
-                ViewModel.SetDebuggerOutputSink(
-                    text => Dispatcher.BeginInvoke(() => TerminalConsole.WriteDebuggerOutput(text)));
-
                 // Forward raw (ANSI-intact) ConPTY output to xterm.js.
+                // TerminalControl applies its own bounded dispatcher/WebView flow control,
+                // so the reader callback does not queue one dispatcher operation per chunk.
                 ViewModel.SubscribeRawOutput(
-                    raw => Dispatcher.BeginInvoke(() => TerminalConsole.WriteRaw(raw)));
+                    raw => TerminalConsole.WriteRaw(raw));
 
                 // Forward xterm.js keystrokes to ConPTY stdin.
                 TerminalConsole.UserInput += async data =>
@@ -389,9 +385,18 @@ namespace PS7ScriptDesk.Shell
                         });
                     if (ViewModel is not null)
                     {
-                        await ViewModel.WriteRawInputAsync(data).ConfigureAwait(false);
-                        AppLogger.Debug("Terminal", "MainWindow forwarded terminal input to the view model.");
-                        DeveloperDiagnostics.LogInfo("Terminal", "Terminal input forwarded to view model.");
+                        try
+                        {
+                            await ViewModel.WriteRawInputAsync(data).ConfigureAwait(false);
+                            AppLogger.Debug("Terminal", "MainWindow forwarded terminal input to the view model.");
+                            DeveloperDiagnostics.LogInfo("Terminal", "Terminal input forwarded to view model.");
+                        }
+                        catch (Exception ex)
+                        {
+                            AppLogger.Warning(
+                                "Terminal",
+                                $"MainWindow could not forward terminal input. Length={data.Length}, ExceptionType={ex.GetType().Name}, ContentOmitted=True.");
+                        }
                     }
                 };
 
@@ -562,6 +567,14 @@ namespace PS7ScriptDesk.Shell
 
             var isCtrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
             var isShift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
+
+            // xterm owns terminal-focused key combinations so PSReadLine and console
+            // applications receive their normal Ctrl/F-key input. The terminal's one
+            // documented app override (Ctrl+Shift+F6) is raised by xterm itself.
+            if (TerminalConsole.IsKeyboardFocusWithin)
+            {
+                return;
+            }
 
             // Handle the app-level find/replace shortcuts at the window level so they
             // work even when focus is not inside the AvalonEdit editor. The editor
@@ -1437,6 +1450,7 @@ namespace PS7ScriptDesk.Shell
         {
             ConsoleBottomPaneTab.IsChecked = true;
             DiagnosticsBottomPaneTab.IsChecked = false;
+            DebugOutputBottomPaneTab.IsChecked = false;
             ActivityBottomPaneTab.IsChecked = false;
             DeveloperDiagnostics.LogUserAction("UI", "BottomPaneConsoleTabSelected", "Console bottom pane tab selected.");
             Dispatcher.BeginInvoke(new Action(() => TerminalConsole.FocusTerminal()), System.Windows.Threading.DispatcherPriority.Loaded);
@@ -1446,6 +1460,7 @@ namespace PS7ScriptDesk.Shell
         {
             ConsoleBottomPaneTab.IsChecked = false;
             DiagnosticsBottomPaneTab.IsChecked = true;
+            DebugOutputBottomPaneTab.IsChecked = false;
             ActivityBottomPaneTab.IsChecked = false;
 
             var errorCount = ViewModel?.SelectedTab?.DiagnosticErrorCount ?? 0;
@@ -1461,10 +1476,32 @@ namespace PS7ScriptDesk.Shell
                 });
         }
 
+        private void DebugOutputBottomPaneTab_Click(object sender, RoutedEventArgs e)
+        {
+            SelectDebugOutputBottomPane("User selected the dedicated debugger output pane.");
+        }
+
+        private void SelectDebugOutputBottomPane(string reason)
+        {
+            ConsoleBottomPaneTab.IsChecked = false;
+            DiagnosticsBottomPaneTab.IsChecked = false;
+            DebugOutputBottomPaneTab.IsChecked = true;
+            ActivityBottomPaneTab.IsChecked = false;
+            DeveloperDiagnostics.LogUserAction(
+                "Debugger",
+                "BottomPaneDebugOutputTabSelected",
+                reason,
+                new Dictionary<string, object?>
+                {
+                    ["debugOutputLength"] = ViewModel?.DebuggerOutputText?.Length ?? 0
+                });
+        }
+
         private void ActivityBottomPaneTab_Click(object sender, RoutedEventArgs e)
         {
             ConsoleBottomPaneTab.IsChecked = false;
             DiagnosticsBottomPaneTab.IsChecked = false;
+            DebugOutputBottomPaneTab.IsChecked = false;
             ActivityBottomPaneTab.IsChecked = true;
             DeveloperDiagnostics.LogUserAction(
                 "UI",
@@ -2525,7 +2562,26 @@ namespace PS7ScriptDesk.Shell
                 {
                     OpenFindReplaceWindow(showReplace: true);
                 }
+                else if (string.Equals(command, "leave_terminal", StringComparison.OrdinalIgnoreCase))
+                {
+                    FocusEditorOrConsoleTabAfterTerminalShortcut();
+                }
             }));
+        }
+
+        private void FocusEditorOrConsoleTabAfterTerminalShortcut()
+        {
+            var editorTextEditor = FindActiveEditor();
+            if (editorTextEditor is not null)
+            {
+                SetTerminalActive(false, "TerminalShortcut:LeaveTerminal");
+                editorTextEditor.Focus();
+                editorTextEditor.TextArea?.Caret.BringCaretToView();
+                return;
+            }
+
+            SetTerminalActive(false, "TerminalShortcut:LeaveTerminalNoEditor");
+            ConsoleBottomPaneTab.Focus();
         }
 
         private void OpenConsolePrototype_Click(object sender, RoutedEventArgs e)
@@ -3891,7 +3947,7 @@ namespace PS7ScriptDesk.Shell
                             ["activeTabPresent"] = _activeDebugTab is not null,
                             ["activeSessionPresent"] = _debugSession is not null
                         });
-                    TearDownDebugSession();
+                    await TearDownDebugSessionAsync().ConfigureAwait(true);
                 }
 
                 ClearLiveDebugVariableCache("Start Debug preparing new session");
@@ -3921,11 +3977,14 @@ namespace PS7ScriptDesk.Shell
                 _debugSession = debugSession;
                 _activeDebugTab = selectedTab;
                 _activeDebugLaunchPath = launchScriptPath;
+                ViewModel.ClearDebugOutput();
+                ViewModel.AppendDebugOutput($"Starting debugger for {Path.GetFileName(launchScriptPath)}");
+                SelectDebugOutputBottomPane("Debug session started; showing output from the separate debugger process.");
                 TraceDebugShell("StartDebug_Click", $"Created PsesDebugSession; sessionHash={debugSession.GetHashCode()}; {DescribeDebugUiState()}");
                 DeveloperDiagnostics.LogInfo("Debugger", "PsesDebugSession object created.", new Dictionary<string, object?> { ["sessionHash"] = debugSession.GetHashCode() });
                 _debugSessionStateChangedHandler = state => Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    HandleDebugSessionStateChanged(debugSession, state);
+                    _ = HandleDebugSessionStateChangedAsync(debugSession, state);
                 }));
                 debugSession.StateChanged += _debugSessionStateChangedHandler;
 
@@ -3977,7 +4036,7 @@ namespace PS7ScriptDesk.Shell
                     RefreshBreakpointsList();
                 }));
 
-                debugSession.SessionEnded += () => Dispatcher.BeginInvoke(new Action(() =>
+                debugSession.SessionEnded += () => Dispatcher.BeginInvoke(new Action(async () =>
                 {
                     if (ViewModel is null || !ReferenceEquals(_debugSession, debugSession))
                     {
@@ -3986,7 +4045,8 @@ namespace PS7ScriptDesk.Shell
 
                     TraceDebugShell("DebugSession.SessionEnded", $"SessionEnded fired; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
                     DeveloperDiagnostics.LogInfo("Debugger", "Debug session ended event received.");
-                    TearDownDebugSession(DebugTeardownReason.SessionEndedEvent);
+                    ViewModel.AppendDebugOutput("Debugger session ended.");
+                    await TearDownDebugSessionAsync(DebugTeardownReason.SessionEndedEvent).ConfigureAwait(true);
                     ViewModel.StatusText = "Debug session ended";
                 }));
 
@@ -4018,10 +4078,6 @@ namespace PS7ScriptDesk.Shell
                             });
                     }
                     ViewModel.AppendDebugOutput(chunk ?? string.Empty);
-                    if (!string.IsNullOrWhiteSpace(chunk))
-                    {
-                        _lastDebugOutputWrittenAtUtc = DateTimeOffset.UtcNow;
-                    }
 
                     var condensed = string.IsNullOrWhiteSpace(chunk)
                         ? string.Empty
@@ -4076,7 +4132,8 @@ namespace PS7ScriptDesk.Shell
                 {
                     TraceDebugShell("StartDebug_Click", $"StartAsync failed; exceptionType={ex.GetType().Name}; message={ex.Message}; {DescribeDebugUiState()}");
                     DeveloperDiagnostics.LogException("Debugger", ex, "Debug session start failed.");
-                    TearDownDebugSession(DebugTeardownReason.StartFailure);
+                    ViewModel.AppendDebugOutput($"Debugger start failed: {ex.Message}");
+                    await TearDownDebugSessionAsync(DebugTeardownReason.StartFailure).ConfigureAwait(true);
                     ViewModel.StatusText = $"Debug start failed: {ex.Message}";
                 }
             }
@@ -4084,7 +4141,8 @@ namespace PS7ScriptDesk.Shell
             {
                 TraceDebugShell("StartDebug_Click", $"Preparation failed; exceptionType={ex.GetType().Name}; message={ex.Message}; {DescribeDebugUiState()}");
                 DeveloperDiagnostics.LogException("Debugger", ex, "Debug preparation failed.");
-                TearDownDebugSession(DebugTeardownReason.PreparationFailure);
+                ViewModel.AppendDebugOutput($"Debugger preparation failed: {ex.Message}");
+                await TearDownDebugSessionAsync(DebugTeardownReason.PreparationFailure).ConfigureAwait(true);
                 ViewModel.StatusText = $"Debug preparation failed: {ex.Message}";
             }
             finally
@@ -4157,7 +4215,7 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        private void StopDebug_Click(object sender, RoutedEventArgs e)
+        private async void StopDebug_Click(object sender, RoutedEventArgs e)
         {
             using var scope = DeveloperDiagnostics.BeginScope(operationId: $"StopDebug-{Guid.NewGuid():N}");
             DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Stop Debug requested.", BuildDebugActionProperties(sender));
@@ -4170,8 +4228,13 @@ namespace PS7ScriptDesk.Shell
 
             InvalidateDebugPanelRefresh("Stop Debug requested");
             ClearLiveDebugVariableCache("Stop Debug requested");
-            TearDownDebugSession(DebugTeardownReason.UserStop);
-            ViewModel.StatusText = "Debug session stopped";
+            var stopped = await TearDownDebugSessionAsync(DebugTeardownReason.UserStop).ConfigureAwait(true);
+            ViewModel.AppendDebugOutput(stopped
+                ? "Debugger session stopped."
+                : "Debugger teardown did not fully complete within the bounded shutdown window.");
+            ViewModel.StatusText = stopped
+                ? "Debug session stopped"
+                : "Debug session stop incomplete — see Debug Output and developer diagnostics";
             TraceDebugShell("StopDebug_Click", $"Completed stop request; {DescribeDebugUiState()}");
             DeveloperDiagnostics.LogInfo("Debugger", "Debug session stop request completed.");
         }
@@ -4479,7 +4542,7 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        private void HandleDebugSessionStateChanged(IDebugSession debugSession, DebugSessionState state)
+        private async Task HandleDebugSessionStateChangedAsync(IDebugSession debugSession, DebugSessionState state)
         {
             var actualState = debugSession.CurrentState;
             var currentSessionState = _debugSession?.CurrentState.ToString() ?? "(null)";
@@ -4507,7 +4570,8 @@ namespace PS7ScriptDesk.Shell
 
             if (actualState == DebugSessionState.Stopped)
             {
-                TearDownDebugSession(DebugTeardownReason.SessionStoppedState);
+                ViewModel?.AppendDebugOutput("Debugger session ended.");
+                await TearDownDebugSessionAsync(DebugTeardownReason.SessionStoppedState).ConfigureAwait(true);
                 if (ViewModel is not null)
                 {
                     ViewModel.StatusText = "Debug session ended";
@@ -4531,221 +4595,101 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        private void TearDownDebugSession(DebugTeardownReason reason = DebugTeardownReason.PreLaunchCleanup)
+        private async Task<bool> TearDownDebugSessionAsync(
+            DebugTeardownReason reason = DebugTeardownReason.PreLaunchCleanup)
         {
-            var nowUtc = DateTimeOffset.UtcNow;
-            var millisecondsSinceLastOutput = _lastDebugOutputWrittenAtUtc == DateTimeOffset.MinValue
-                ? (double?)null
-                : (nowUtc - _lastDebugOutputWrittenAtUtc).TotalMilliseconds;
-            var debugOutputRecentlyWritten =
-                millisecondsSinceLastOutput.HasValue &&
-                millisecondsSinceLastOutput.Value >= 0 &&
-                millisecondsSinceLastOutput.Value <= DebugOutputPreservationWindowMilliseconds;
-            var endedNaturally =
-                reason == DebugTeardownReason.SessionEndedEvent ||
-                reason == DebugTeardownReason.SessionStoppedState;
-            var shouldPreserveVisibleTranscript =
-                debugOutputRecentlyWritten &&
-                (endedNaturally || reason == DebugTeardownReason.UserStop);
-            var skipImmediateConsoleRestore = endedNaturally || reason == DebugTeardownReason.UserStop;
-            var skipImmediateTerminalFocus = endedNaturally || reason == DebugTeardownReason.UserStop;
-
+            var debugSession = _debugSession;
+            var operationId = $"DebugTeardown-{Guid.NewGuid():N}";
             TraceDebugShell(
-                "TearDownDebugSession",
-                $"Entry; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}; shouldPreserveVisibleTranscript={shouldPreserveVisibleTranscript}; millisecondsSinceLastOutput={(millisecondsSinceLastOutput?.ToString("F0", CultureInfo.InvariantCulture) ?? "(none)")}; skipImmediateConsoleRestore={skipImmediateConsoleRestore}; skipImmediateTerminalFocus={skipImmediateTerminalFocus}; {DescribeDebugUiState()}");
+                "TearDownDebugSessionAsync",
+                $"Entry; reason={reason}; sessionPresent={debugSession is not null}; operationId={operationId}; {DescribeDebugUiState()}");
             DeveloperDiagnostics.LogMethodEntry(
                 "Debugger",
-                "TearDownDebugSession entered.",
+                "TearDownDebugSessionAsync entered.",
                 new Dictionary<string, object?>
                 {
                     ["reason"] = reason.ToString(),
-                    ["endedNaturally"] = endedNaturally,
-                    ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
-                    ["shouldPreserveVisibleTranscript"] = shouldPreserveVisibleTranscript,
-                    ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput,
-                    ["skipImmediateConsoleRestore"] = skipImmediateConsoleRestore,
-                    ["skipImmediateTerminalFocus"] = skipImmediateTerminalFocus
+                    ["sessionPresent"] = debugSession is not null,
+                    ["operationId"] = operationId,
+                    ["terminalMutationRequested"] = false
                 });
 
-            if (shouldPreserveVisibleTranscript)
+            if (debugSession is not null && _debugSessionStateChangedHandler is not null)
             {
-                TerminalConsole.PreserveVisibleTranscriptFor(
-                    TimeSpan.FromMilliseconds(DebugOutputPreservationWindowMilliseconds),
-                    $"Debug teardown reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}");
-                TraceDebugShell(
-                    "TearDownDebugSession",
-                    $"Activated terminal transcript preservation; durationMs={DebugOutputPreservationWindowMilliseconds}; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}; millisecondsSinceLastOutput={(millisecondsSinceLastOutput?.ToString("F0", CultureInfo.InvariantCulture) ?? "(none)")};");
-                DeveloperDiagnostics.LogDecision(
-                    "Debugger",
-                    "TearDownDebugSession",
-                    "Terminal transcript preservation was activated before debug teardown completed.",
-                    "ActivateTranscriptPreservation",
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = reason.ToString(),
-                        ["endedNaturally"] = endedNaturally,
-                        ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
-                        ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput,
-                        ["durationMs"] = DebugOutputPreservationWindowMilliseconds
-                    });
-
-                if (endedNaturally && ViewModel is not null)
-                {
-                    var promptText = BuildVisiblePromptTextForDebugCompletion();
-                    TerminalConsole.RestoreVisiblePromptAfterDebug(
-                        promptText,
-                        $"Debug teardown prompt restore; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}");
-                    TraceDebugShell(
-                        "TearDownDebugSession",
-                        $"Requested non-destructive visible prompt restore; promptLength={promptText.Length}; contentOmitted=true; reason={reason}; endedNaturally={endedNaturally};");
-                    DeveloperDiagnostics.LogDecision(
-                        "Debugger",
-                        "TearDownDebugSession",
-                        "Non-destructive visible prompt restoration was requested after natural debug completion.",
-                        "RequestVisiblePromptRestoreAfterDebug",
-                        new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(promptText))
-                        {
-                            ["reason"] = reason.ToString(),
-                            ["endedNaturally"] = endedNaturally,
-                            ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
-                            ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput
-                        });
-                }
-                else
-                {
-                    DeveloperDiagnostics.LogDecision(
-                        "Debugger",
-                        "TearDownDebugSession",
-                        "Visible prompt restoration was skipped because debug completion was not natural or the view model was unavailable.",
-                        "SkipVisiblePromptRestoreAfterDebug",
-                        new Dictionary<string, object?>
-                        {
-                            ["reason"] = reason.ToString(),
-                            ["endedNaturally"] = endedNaturally,
-                            ["viewModelAvailable"] = ViewModel is not null
-                        });
-                }
-            }
-            if (_debugSession is not null && _debugSessionStateChangedHandler is not null)
-            {
-                _debugSession.StateChanged -= _debugSessionStateChangedHandler;
+                debugSession.StateChanged -= _debugSessionStateChangedHandler;
             }
 
             _debugSessionStateChangedHandler = null;
             Interlocked.Increment(ref _debugPanelRefreshVersion);
-            _debugSession?.Dispose();
             _debugSession = null;
             _activeDebugTab = null;
             _activeDebugLaunchPath = null;
             var snapshotToDelete = _activeDebugSnapshotPath;
             _activeDebugSnapshotPath = null;
-            TryDeleteTemporaryDebugSnapshot(snapshotToDelete);
             RefreshDebugCommandAvailability(false);
             ClearDebugCurrentLine();
             ClearDebugPanels();
             SetDebugPanelVisible(false);
-            if (ViewModel is not null)
+
+            var stopped = true;
+            if (debugSession is not null)
             {
-                if (skipImmediateConsoleRestore)
+                try
                 {
-                    TraceDebugShell(
-                        "TearDownDebugSession",
-                        $"Skipped EnsureConsoleRestoredAsync; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}; millisecondsSinceLastOutput={(millisecondsSinceLastOutput?.ToString("F0", CultureInfo.InvariantCulture) ?? "(none)")};");
-                    DeveloperDiagnostics.LogDecision(
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    stopped = await debugSession.StopAsync(timeout.Token).ConfigureAwait(true);
+                }
+                catch (OperationCanceledException)
+                {
+                    stopped = false;
+                    AppLogger.Warning(
+                        "Debug",
+                        $"Debugger teardown exceeded the shell timeout. OperationId={operationId}, Reason={reason}.");
+                    DeveloperDiagnostics.LogWarning(
                         "Debugger",
-                        "TearDownDebugSession",
-                        "Immediate console restore was skipped to preserve visible debug transcript output.",
-                        "SkipImmediateConsoleRestore",
+                        "Debugger teardown exceeded the shell timeout.",
                         new Dictionary<string, object?>
                         {
+                            ["operationId"] = operationId,
                             ["reason"] = reason.ToString(),
-                            ["endedNaturally"] = endedNaturally,
-                            ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
-                            ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput
+                            ["timeoutMs"] = 5000
                         });
                 }
-                else
+                catch (Exception ex)
                 {
-                    _ = ViewModel.EnsureConsoleRestoredAsync();
-                    TraceDebugShell("TearDownDebugSession", $"Requested EnsureConsoleRestoredAsync; reason={reason}; debugOutputRecentlyWritten={debugOutputRecentlyWritten};");
-                    DeveloperDiagnostics.LogDecision(
+                    stopped = false;
+                    AppLogger.Error("Debug", $"Debugger teardown failed. OperationId={operationId}, Reason={reason}.", ex);
+                    DeveloperDiagnostics.LogException(
                         "Debugger",
-                        "TearDownDebugSession",
-                        "Immediate console restore was requested during debug teardown.",
-                        "RestoreConsoleImmediately",
+                        ex,
+                        "Debugger teardown failed.",
                         new Dictionary<string, object?>
                         {
-                            ["reason"] = reason.ToString(),
-                            ["endedNaturally"] = endedNaturally,
-                            ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
-                            ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput
+                            ["operationId"] = operationId,
+                            ["reason"] = reason.ToString()
                         });
+                }
+                finally
+                {
+                    debugSession.Dispose();
                 }
             }
 
-            if (skipImmediateTerminalFocus)
-            {
-                TraceDebugShell(
-                    "TearDownDebugSession",
-                    $"Skipped TerminalConsole.FocusTerminal; reason={reason}; endedNaturally={endedNaturally}; debugOutputRecentlyWritten={debugOutputRecentlyWritten}; millisecondsSinceLastOutput={(millisecondsSinceLastOutput?.ToString("F0", CultureInfo.InvariantCulture) ?? "(none)")};");
-                DeveloperDiagnostics.LogDecision(
-                    "Debugger",
-                    "TearDownDebugSession",
-                    "Immediate terminal focus was skipped to avoid a prompt redraw overwriting recent debug output.",
-                    "SkipImmediateTerminalFocus",
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = reason.ToString(),
-                        ["endedNaturally"] = endedNaturally,
-                        ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
-                        ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput
-                    });
-            }
-            else
-            {
-                TerminalConsole.FocusTerminal();
-                TraceDebugShell("TearDownDebugSession", $"Requested TerminalConsole.FocusTerminal; reason={reason}; debugOutputRecentlyWritten={debugOutputRecentlyWritten};");
-                DeveloperDiagnostics.LogDecision(
-                    "Debugger",
-                    "TearDownDebugSession",
-                    "Immediate terminal focus was requested during debug teardown.",
-                    "FocusTerminalImmediately",
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = reason.ToString(),
-                        ["endedNaturally"] = endedNaturally,
-                        ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
-                        ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput
-                    });
-            }
-
-            TraceDebugShell("TearDownDebugSession", $"Completed; reason={reason}; {DescribeDebugUiState()}");
+            TryDeleteTemporaryDebugSnapshot(snapshotToDelete);
+            TraceDebugShell(
+                "TearDownDebugSessionAsync",
+                $"Completed; reason={reason}; stopped={stopped}; operationId={operationId}; terminalMutationRequested=false; {DescribeDebugUiState()}");
             DeveloperDiagnostics.LogMethodExit(
                 "Debugger",
-                "TearDownDebugSession completed.",
+                "TearDownDebugSessionAsync completed without writing to or focusing the interactive terminal.",
                 new Dictionary<string, object?>
                 {
                     ["reason"] = reason.ToString(),
-                    ["endedNaturally"] = endedNaturally,
-                    ["debugOutputRecentlyWritten"] = debugOutputRecentlyWritten,
-                    ["shouldPreserveVisibleTranscript"] = shouldPreserveVisibleTranscript,
-                    ["millisecondsSinceLastOutput"] = millisecondsSinceLastOutput,
-                    ["skipImmediateConsoleRestore"] = skipImmediateConsoleRestore,
-                    ["skipImmediateTerminalFocus"] = skipImmediateTerminalFocus
+                    ["stopped"] = stopped,
+                    ["operationId"] = operationId,
+                    ["terminalMutationRequested"] = false
                 });
-        }
-
-        private string BuildVisiblePromptTextForDebugCompletion()
-        {
-            var promptText = ViewModel?.ConsolePromptText?.Trim();
-            if (string.IsNullOrWhiteSpace(promptText))
-            {
-                return "PS>";
-            }
-
-            return string.Equals(promptText, "PS >", StringComparison.Ordinal)
-                ? "PS>"
-                : promptText;
+            return stopped;
         }
 
         private void TraceDebugShell(string source, string message)
@@ -5031,36 +4975,20 @@ namespace PS7ScriptDesk.Shell
 
         private void Exit_Click(object sender, RoutedEventArgs e)
         {
-            if (!TryPrepareForWindowClose())
-            {
-                return;
-            }
-
-            DisposeLiveSyntaxPumps();
-            DisposeAuthoringDiagnosticsPumps();
-            _liveSyntaxDiagnosticsService.Dispose();
-            _diagnosticsService.Dispose();
-            _intelliSenseService.Dispose();
-            _activeCompletionCts?.Cancel();
-            _activeCompletionCts?.Dispose();
-            CancelActiveQuickInfoRequest();
-            CloseActiveEditorToolTip();
-            _allowWindowClose = true;
             Close();
         }
 
-        private void Window_Closing(object? sender, CancelEventArgs e)
+        private async void Window_Closing(object? sender, CancelEventArgs e)
         {
             DeveloperDiagnostics.LogEventHandlerEntry("UI", "Window_Closing", "Window_Closing entered.");
-            if (ViewModel is not null)
-            {
-                ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
-            }
-
-            _intelliSenseService.MetadataWarmupStatusChanged -= IntelliSenseService_MetadataWarmupStatusChanged;
-
             if (_allowWindowClose)
             {
+                if (ViewModel is not null)
+                {
+                    ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
+                }
+
+                _intelliSenseService.MetadataWarmupStatusChanged -= IntelliSenseService_MetadataWarmupStatusChanged;
                 _debugPaneWindow?.CloseForOwnerShutdown();
                 DisposeLiveSyntaxPumps();
                 DisposeAuthoringDiagnosticsPumps();
@@ -5075,14 +5003,61 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            if (!TryPrepareForWindowClose())
+            e.Cancel = true;
+            if (_terminalShutdownInProgress)
             {
-                e.Cancel = true;
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "Window_Closing",
+                    "A duplicate close request was deferred while terminal teardown was already running.",
+                    "AwaitExistingShutdown");
                 return;
             }
 
-            _allowWindowClose = true;
-            DeveloperDiagnostics.LogEventHandlerExit("UI", "Window_Closing", "Window_Closing prepared app for close.");
+            if (!TryPrepareForWindowClose())
+            {
+                return;
+            }
+
+            _terminalShutdownInProgress = true;
+            DeveloperDiagnostics.LogStateTransition(
+                "Terminal",
+                "Window_Closing",
+                "Running",
+                "Stopping",
+                "Window close is awaiting bounded terminal teardown.");
+
+            try
+            {
+                var debuggerStopped = await TearDownDebugSessionAsync(
+                    DebugTeardownReason.ApplicationShutdown).ConfigureAwait(true);
+                if (!debuggerStopped)
+                {
+                    AppLogger.Warning(
+                        "Debug",
+                        "Application close is continuing after bounded debugger teardown reported incomplete cleanup.");
+                }
+
+                var terminalStopped = ViewModel is null ||
+                    await ViewModel.ShutdownTerminalAsync().ConfigureAwait(true);
+                if (!terminalStopped)
+                {
+                    AppLogger.Warning(
+                        "Terminal",
+                        "Application close is continuing after bounded terminal teardown reported incomplete cleanup.");
+                }
+            }
+            finally
+            {
+                _terminalShutdownInProgress = false;
+                _allowWindowClose = true;
+            }
+
+            DeveloperDiagnostics.LogEventHandlerExit(
+                "UI",
+                "Window_Closing",
+                "Bounded terminal teardown completed; issuing the final close request.");
+            Close();
         }
 
         private bool TryPrepareForWindowClose()
@@ -5097,14 +5072,6 @@ namespace PS7ScriptDesk.Shell
             if (!ViewModel.TryPrepareForApplicationClose())
             {
                 return false;
-            }
-
-            // Ensure an owned debug PowerShell process cannot continue after a
-            // normal user-initiated app close.  This deliberately runs only after
-            // unsaved-work prompts have allowed the close to proceed.
-            if (_debugSession is not null)
-            {
-                TearDownDebugSession();
             }
 
             try
