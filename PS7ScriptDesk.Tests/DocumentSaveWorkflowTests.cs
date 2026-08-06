@@ -411,7 +411,9 @@ internal sealed class FakeLiveConsoleService : ILiveConsoleService
     public event Action? ScriptExecutionCompleted { add { } remove { } }
     public event Action? CommandExecutionCompleted { add { } remove { } }
     public event Action? SessionTerminated { add { } remove { } }
-    public event Action<string>? RawOutputReceived { add { } remove { } }
+    public event Action<int>? TerminalSessionStarted { add { } remove { } }
+    public event Action<int>? TerminalSessionStopping { add { } remove { } }
+    public event Action<int, string>? RawOutputReceived { add { } remove { } }
     public void AttachHost(IntPtr hostHandle, int width, int height) { }
     public void ResizeHost(int width, int height) { }
     public void ResizeConsole(int cols, int rows) { }

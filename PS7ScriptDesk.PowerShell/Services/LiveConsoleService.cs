@@ -145,7 +145,11 @@ namespace PS7ScriptDesk.PowerShell.Services
         public event Action? SessionTerminated;
 
         /// <inheritdoc />
-        public event Action<string>? RawOutputReceived;
+        public event Action<int>? TerminalSessionStarted;
+
+        public event Action<int>? TerminalSessionStopping;
+
+        public event Action<int, string>? RawOutputReceived;
 
         public bool IsHostAttached
         {
@@ -320,6 +324,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 CleanupStaleExecutionSnapshots();
                 var workingDirectory = NormalizeWorkingDirectory(startupWorkingDirectory);
                 var sessionGeneration = BeginTerminalSessionGeneration();
+                NotifyTerminalSessionStarted(sessionGeneration);
 
                 try
                 {
@@ -348,6 +353,7 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                     cancellationToken.ThrowIfCancellationRequested();
                     sessionGeneration = BeginTerminalSessionGeneration();
+                    NotifyTerminalSessionStarted(sessionGeneration);
                     try
                     {
                         StartRedirectedSession(runtime, workingDirectory, onOutput, sessionGeneration);
@@ -387,6 +393,38 @@ namespace PS7ScriptDesk.PowerShell.Services
             finally
             {
                 _sessionLifecycleGate.Release();
+            }
+        }
+
+        private void NotifyTerminalSessionStarted(int sessionGeneration)
+        {
+            NotifyTerminalSessionLifecycleHandler(TerminalSessionStarted, "TerminalSessionStarted", sessionGeneration);
+        }
+
+        private void NotifyTerminalSessionStopping(int sessionGeneration)
+        {
+            NotifyTerminalSessionLifecycleHandler(TerminalSessionStopping, "TerminalSessionStopping", sessionGeneration);
+        }
+
+        private static void NotifyTerminalSessionLifecycleHandler(Action<int>? handler, string eventName, int sessionGeneration)
+        {
+            if (handler is null)
+            {
+                return;
+            }
+
+            try
+            {
+                handler(sessionGeneration);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("LiveConsole", $"Terminal lifecycle subscriber failed. Event={eventName}, SessionGeneration={sessionGeneration}, Error={ex.Message}");
+                DeveloperDiagnostics.LogException("Terminal", ex, "Terminal lifecycle subscriber failed.", new Dictionary<string, object?>
+                {
+                    ["event"] = eventName,
+                    ["sessionGeneration"] = sessionGeneration
+                });
             }
         }
 
@@ -987,6 +1025,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _terminalSessionTeardownInProgress = true;
                 _commandDispatchGeneration++;
             }
+
+            NotifyTerminalSessionStopping(sessionGeneration);
 
             AppLogger.Info(
                 "LiveConsole",
@@ -1867,7 +1907,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                     var rawHandler = RawOutputReceived;
                     if (rawHandler is not null)
                     {
-                        rawHandler(raw);
+                        rawHandler(observedSessionGeneration ?? _terminalSessionGeneration, raw);
                     }
                     else if (!string.IsNullOrEmpty(cleaned))
                     {

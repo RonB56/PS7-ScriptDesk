@@ -15,7 +15,7 @@ namespace PS7ScriptDesk.Shell.Controls
     /// control, providing full VT100/ANSI rendering of ConPTY output.
     ///
     /// Data flow:
-    ///   ConPTY → LiveConsoleService.RawOutputReceived → WriteRaw() → xterm.js
+    ///   ConPTY → LiveConsoleService.RawOutputReceived (generation, output) → WriteRaw() → xterm.js
     ///   xterm.js onData → UserInput event → ILiveConsoleService.WriteRawInputAsync()
     ///   xterm.js onResize → TerminalResized event → ILiveConsoleService.ResizeConsole()
     /// </summary>
@@ -352,9 +352,10 @@ namespace PS7ScriptDesk.Shell.Controls
                   var msg = (typeof e.data === 'string') ? JSON.parse(e.data) : e.data;
                   if (!termApi || !msg || !msg.type) return;
                   if      (msg.type === 'output_b64' && typeof msg.data === 'string') {
+                    const generation = Number.isSafeInteger(msg.generation) ? msg.generation : null;
                     const sequence = Number.isSafeInteger(msg.sequence) ? msg.sequence : null;
                     termApi.write(decodeBase64Utf8(msg.data), () => {
-                      if (sequence !== null) post({ type: 'output_ack', sequence: sequence });
+                      if (generation !== null && sequence !== null) post({ type: 'output_ack', generation: generation, sequence: sequence });
                     });
                   }
                   else if (msg.type === 'output') { termApi.write(msg.data || ''); }
@@ -506,7 +507,20 @@ namespace PS7ScriptDesk.Shell.Controls
         /// preserved so xterm.js renders colors, cursor movement, etc.
         /// Thread-safe — may be called from any thread.
         /// </summary>
-        public void WriteRaw(string data)
+        public void BeginTerminalOutputGeneration(int generation)
+        {
+            var result = _outputFlowController.ActivateGeneration(generation);
+            ReportDiscardedTerminalOutput(result, "session-start");
+        }
+
+        /// <summary>Invalidates pending output from a terminal session that is stopping.</summary>
+        public void InvalidateTerminalOutputGeneration(int generation)
+        {
+            var result = _outputFlowController.InvalidateGeneration(generation);
+            ReportDiscardedTerminalOutput(result, "session-stop");
+        }
+
+        public void WriteRaw(int generation, string data)
         {
             if (string.IsNullOrEmpty(data))
             {
@@ -521,7 +535,8 @@ namespace PS7ScriptDesk.Shell.Controls
                     new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data))
                     {
                         ["isReady"] = _isReady,
-                        ["rendererAvailable"] = _webView2Available
+                        ["rendererAvailable"] = _webView2Available,
+                        ["sessionGeneration"] = generation
                     });
             }
 
@@ -538,7 +553,17 @@ namespace PS7ScriptDesk.Shell.Controls
                 DeveloperDiagnostics.LogInfo("Terminal", "Terminal output queued before xterm.js was ready.", new Dictionary<string, object?> { ["length"] = data.Length });
             }
 
-            var enqueueResult = _outputFlowController.Enqueue(data);
+            var enqueueResult = _outputFlowController.Enqueue(generation, data);
+            if (enqueueResult.RejectedStaleCharacters > 0)
+            {
+                DeveloperDiagnostics.LogDebug("Terminal", "Stale terminal output was rejected before WebView dispatch.", new Dictionary<string, object?>
+                {
+                    ["sessionGeneration"] = generation,
+                    ["length"] = enqueueResult.RejectedStaleCharacters,
+                    ["contentOmitted"] = true
+                });
+                return;
+            }
             if (enqueueResult.DroppedCharacters > 0)
             {
                 RecordDroppedTerminalOutput(enqueueResult.DroppedCharacters);
@@ -603,7 +628,7 @@ namespace PS7ScriptDesk.Shell.Controls
             if (!_webView2Available || WebView.CoreWebView2 is null)
             {
                 RecordDroppedTerminalOutput(
-                    _outputFlowController.DiscardInFlight(outputBatch.Sequence));
+                    _outputFlowController.DiscardInFlight(outputBatch.Generation, outputBatch.Sequence));
                 ReportDroppedTerminalOutputIfNeeded();
                 return;
             }
@@ -611,12 +636,12 @@ namespace PS7ScriptDesk.Shell.Controls
             try
             {
                 WebView.CoreWebView2.PostWebMessageAsString(
-                    TerminalWebMessageSerializer.SerializeOutput(outputBatch.Sequence, outputBatch.Data));
+                    TerminalWebMessageSerializer.SerializeOutput(outputBatch.Generation, outputBatch.Sequence, outputBatch.Data));
             }
             catch (Exception ex)
             {
                 RecordDroppedTerminalOutput(
-                    _outputFlowController.DiscardInFlight(outputBatch.Sequence));
+                    _outputFlowController.DiscardInFlight(outputBatch.Generation, outputBatch.Sequence));
                 ReportDroppedTerminalOutputIfNeeded();
                 System.Diagnostics.Debug.WriteLine(
                     $"[TerminalControl] PostWebMessageAsString failed: {ex.Message}");
@@ -626,6 +651,7 @@ namespace PS7ScriptDesk.Shell.Controls
                     "Posting terminal output batch to WebView2 failed.",
                     new Dictionary<string, object?>
                     {
+                        ["generation"] = outputBatch.Generation,
                         ["sequence"] = outputBatch.Sequence,
                         ["length"] = outputBatch.Data.Length,
                         ["contentOmitted"] = true
@@ -641,6 +667,25 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             System.Threading.Interlocked.Add(ref _droppedOutputCharacters, characterCount);
+        }
+
+        private static void ReportDiscardedTerminalOutput(
+            TerminalOutputGenerationInvalidationResult result,
+            string reason)
+        {
+            if (result.DiscardedCharacters <= 0)
+            {
+                return;
+            }
+
+            AppLogger.Info("Terminal", $"Discarded queued terminal output during generation transition. Reason={reason}, SessionGeneration={result.Generation}, Length={result.DiscardedCharacters}, ContentOmitted=True.");
+            DeveloperDiagnostics.LogInfo("Terminal", "Queued terminal output discarded during generation transition.", new Dictionary<string, object?>
+            {
+                ["reason"] = reason,
+                ["sessionGeneration"] = result.Generation,
+                ["length"] = result.DiscardedCharacters,
+                ["contentOmitted"] = true
+            });
         }
 
         private void ReportDroppedTerminalOutputIfNeeded()
@@ -747,10 +792,12 @@ namespace PS7ScriptDesk.Shell.Controls
                         break;
 
                     case "output_ack":
-                        if (root.TryGetProperty("sequence", out var sequenceProp) &&
+                        if (root.TryGetProperty("generation", out var generationProp) &&
+                            generationProp.TryGetInt32(out var generation) &&
+                            root.TryGetProperty("sequence", out var sequenceProp) &&
                             sequenceProp.TryGetInt64(out var sequence))
                         {
-                            RequestOutputFlush(_outputFlowController.Acknowledge(sequence));
+                            RequestOutputFlush(_outputFlowController.Acknowledge(generation, sequence));
                         }
                         break;
 

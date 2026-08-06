@@ -13,7 +13,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         using var service = new LiveConsoleService();
         var rawOutput = new List<string>();
         var fallbackOutput = new List<ExecutionOutputRecord>();
-        service.RawOutputReceived += rawOutput.Add;
+        service.RawOutputReceived += (_, output) => rawOutput.Add(output);
 
         Publish(service, "first\0", fallbackOutput.Add);
         Publish(service, "\x1b[31msecond\x1b[0m", fallbackOutput.Add);
@@ -35,7 +35,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         var scriptCompletions = 0;
 
         ConfigureScriptDispatch(service, startToken, completionToken, locationToken);
-        service.RawOutputReceived += rawOutput.Add;
+        service.RawOutputReceived += (_, output) => rawOutput.Add(output);
         service.CommandExecutionCompleted += () => commandCompletions++;
         service.ScriptExecutionCompleted += () => scriptCompletions++;
 
@@ -105,7 +105,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         var rawOutput = new List<string>();
         SetField(service, "_terminalSessionGeneration", 8);
         SetField(service, "_terminalSessionTeardownInProgress", false);
-        service.RawOutputReceived += rawOutput.Add;
+        service.RawOutputReceived += (_, output) => rawOutput.Add(output);
 
         InvokePrivate(
             service,
@@ -173,7 +173,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
             service,
             "##PSSTUDIO_EXEC_START_missing",
             "##PSSTUDIO_EXEC_DONE_missing");
-        service.RawOutputReceived += _ => { };
+        service.RawOutputReceived += (_, _) => { };
 
         Publish(service, new string('x', 80 * 1024), _ => { });
 
@@ -191,7 +191,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
             startToken,
             "##PSSTUDIO_EXEC_DONE_large");
         var visible = new List<string>();
-        service.RawOutputReceived += visible.Add;
+        service.RawOutputReceived += (_, output) => visible.Add(output);
         var scriptOutput = new string('x', 80 * 1024);
 
         Publish(service, $"hidden echo\r\n{startToken}\r\n{scriptOutput}", _ => { });
@@ -219,7 +219,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         var visible = new List<string>();
         var lifecycle = new List<ExecutionOutputRecord>();
         var completions = 0;
-        service.RawOutputReceived += visible.Add;
+        service.RawOutputReceived += (_, output) => visible.Add(output);
         service.CommandExecutionCompleted += () => completions++;
 
         InvokePrivate(
@@ -248,7 +248,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         const string locationToken = "##PSSTUDIO_LOCATION_location_";
         ConfigureScriptDispatch(service, startToken, completionToken, locationToken);
         var visible = new List<string>();
-        service.RawOutputReceived += visible.Add;
+        service.RawOutputReceived += (_, output) => visible.Add(output);
         var encodedLocation = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(@"D:\Confirmed"));
 
         Publish(service, $"{startToken}\r\n{locationToken}{encodedLocation}\r\n{completionToken}\r\n", _ => { });

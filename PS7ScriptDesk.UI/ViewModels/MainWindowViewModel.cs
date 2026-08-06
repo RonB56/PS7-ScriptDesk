@@ -60,6 +60,8 @@ namespace PS7ScriptDesk.UI.ViewModels
         private string _debuggerOutputText = string.Empty;
         private Action?         _clearTerminalSink;
         private Action?         _focusTerminalSink;
+        private Action<int>?    _beginTerminalOutputGenerationSink;
+        private Action<int>?    _invalidateTerminalOutputGenerationSink;
         private bool _isDebugSessionActive;
         private string _workspaceText;
         private string _workspaceFilterText = string.Empty;
@@ -180,6 +182,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             // the user called 'exit' before the sentinel was echoed).
             _liveConsoleService.CommandExecutionCompleted += OnTerminalCommandCompleted;
             _liveConsoleService.SessionTerminated       += OnSessionTerminated;
+            _liveConsoleService.TerminalSessionStarted   += OnTerminalSessionStarted;
+            _liveConsoleService.TerminalSessionStopping  += OnTerminalSessionStopping;
 
             RestorePersistedState(initialSettings);
             if (_startupRuntimeInfo is not null)
@@ -1005,23 +1009,29 @@ namespace PS7ScriptDesk.UI.ViewModels
         /// separately through SubscribeRawOutput so arbitrary strings cannot be
         /// written to xterm.js through this API.
         /// </summary>
-        public void SetTerminalSessionControls(Action clearTerminal, Action? focusTerminal = null)
+        public void SetTerminalSessionControls(
+            Action clearTerminal,
+            Action? focusTerminal = null,
+            Action<int>? beginTerminalOutputGeneration = null,
+            Action<int>? invalidateTerminalOutputGeneration = null)
         {
             _clearTerminalSink  = clearTerminal;
             _focusTerminalSink  = focusTerminal;
+            _beginTerminalOutputGenerationSink = beginTerminalOutputGeneration;
+            _invalidateTerminalOutputGenerationSink = invalidateTerminalOutputGeneration;
         }
 
         /// <summary>
         /// Subscribes a handler to raw (ANSI-intact) ConPTY output for forwarding
-        /// to xterm.js. The handler is called on the thread-pool.
+        /// to xterm.js with its session generation. The handler is called on the thread-pool.
         /// </summary>
-        public void SubscribeRawOutput(Action<string> handler)
+        public void SubscribeRawOutput(Action<int, string> handler)
         {
             _liveConsoleService.RawOutputReceived += handler;
         }
 
         /// <summary>Unsubscribes a handler previously added via SubscribeRawOutput.</summary>
-        public void UnsubscribeRawOutput(Action<string> handler)
+        public void UnsubscribeRawOutput(Action<int, string> handler)
         {
             _liveConsoleService.RawOutputReceived -= handler;
         }
@@ -4300,6 +4310,16 @@ namespace PS7ScriptDesk.UI.ViewModels
         // -------------------------------------------------------------------------
         // Execution completion event handlers (1A)
         // -------------------------------------------------------------------------
+
+        private void OnTerminalSessionStarted(int generation)
+        {
+            _beginTerminalOutputGenerationSink?.Invoke(generation);
+        }
+
+        private void OnTerminalSessionStopping(int generation)
+        {
+            _invalidateTerminalOutputGenerationSink?.Invoke(generation);
+        }
 
         private void OnTerminalCommandCompleted()
         {

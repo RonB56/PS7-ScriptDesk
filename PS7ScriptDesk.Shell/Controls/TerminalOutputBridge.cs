@@ -20,6 +20,7 @@ namespace PS7ScriptDesk.Shell.Controls
         private readonly int _maximumBatchCharacters;
         private bool _rendererReady;
         private bool _flushScheduled;
+        private int? _activeGeneration;
         private long _nextSequence;
         private TerminalOutputBatch? _inFlightBatch;
         private int _pendingCharacters;
@@ -42,7 +43,32 @@ namespace PS7ScriptDesk.Shell.Controls
             _maximumBatchCharacters = maximumBatchCharacters;
         }
 
-        public TerminalOutputEnqueueResult Enqueue(string data)
+        public TerminalOutputGenerationInvalidationResult ActivateGeneration(int generation)
+        {
+            lock (_syncRoot)
+            {
+                var discardedCharacters = DiscardAllOutput();
+                _activeGeneration = generation;
+                return new TerminalOutputGenerationInvalidationResult(generation, discardedCharacters);
+            }
+        }
+
+        public TerminalOutputGenerationInvalidationResult InvalidateGeneration(int generation)
+        {
+            lock (_syncRoot)
+            {
+                if (_activeGeneration != generation)
+                {
+                    return default;
+                }
+
+                var discardedCharacters = DiscardAllOutput();
+                _activeGeneration = null;
+                return new TerminalOutputGenerationInvalidationResult(generation, discardedCharacters);
+            }
+        }
+
+        public TerminalOutputEnqueueResult Enqueue(int generation, string data)
         {
             if (string.IsNullOrEmpty(data))
             {
@@ -51,6 +77,16 @@ namespace PS7ScriptDesk.Shell.Controls
 
             lock (_syncRoot)
             {
+                if (_activeGeneration != generation)
+                {
+                    return new TerminalOutputEnqueueResult(
+                        ScheduleFlush: false,
+                        AcceptedCharacters: 0,
+                        DroppedCharacters: 0,
+                        PendingCharacters: _pendingCharacters,
+                        RejectedStaleCharacters: data.Length);
+                }
+
                 if (data.Length > _maximumPendingCharacters - _pendingCharacters)
                 {
                     return new TerminalOutputEnqueueResult(
@@ -106,17 +142,23 @@ namespace PS7ScriptDesk.Shell.Controls
                     }
                 }
 
-                var outputBatch = new TerminalOutputBatch(++_nextSequence, batch.ToString());
+                if (_activeGeneration is not { } generation)
+                {
+                    return null;
+                }
+
+                var outputBatch = new TerminalOutputBatch(generation, ++_nextSequence, batch.ToString());
                 _inFlightBatch = outputBatch;
                 return outputBatch;
             }
         }
 
-        public bool Acknowledge(long sequence)
+        public bool Acknowledge(int generation, long sequence)
         {
             lock (_syncRoot)
             {
-                if (_inFlightBatch is not { } batch || batch.Sequence != sequence)
+                if (_activeGeneration != generation || _inFlightBatch is not { } batch ||
+                    batch.Generation != generation || batch.Sequence != sequence)
                 {
                     return false;
                 }
@@ -127,11 +169,12 @@ namespace PS7ScriptDesk.Shell.Controls
             }
         }
 
-        public int DiscardInFlight(long sequence)
+        public int DiscardInFlight(int generation, long sequence)
         {
             lock (_syncRoot)
             {
-                if (_inFlightBatch is not { } batch || batch.Sequence != sequence)
+                if (_activeGeneration != generation || _inFlightBatch is not { } batch ||
+                    batch.Generation != generation || batch.Sequence != sequence)
                 {
                     return 0;
                 }
@@ -152,23 +195,37 @@ namespace PS7ScriptDesk.Shell.Controls
             _flushScheduled = true;
             return true;
         }
+
+        private int DiscardAllOutput()
+        {
+            var discardedCharacters = _pendingCharacters;
+            _pendingChunks.Clear();
+            _pendingCharacters = 0;
+            _inFlightBatch = null;
+            _flushScheduled = false;
+            return discardedCharacters;
+        }
     }
 
     internal readonly record struct TerminalOutputEnqueueResult(
         bool ScheduleFlush,
         int AcceptedCharacters,
         int DroppedCharacters,
-        int PendingCharacters);
+        int PendingCharacters,
+        int RejectedStaleCharacters = 0);
 
-    internal readonly record struct TerminalOutputBatch(long Sequence, string Data);
+    internal readonly record struct TerminalOutputGenerationInvalidationResult(int Generation, int DiscardedCharacters);
+
+    internal readonly record struct TerminalOutputBatch(int Generation, long Sequence, string Data);
 
     internal static class TerminalWebMessageSerializer
     {
-        public static string SerializeOutput(long sequence, string data)
+        public static string SerializeOutput(int generation, long sequence, string data)
         {
             return JsonSerializer.Serialize(new
             {
                 type = "output_b64",
+                generation,
                 sequence,
                 data = Convert.ToBase64String(Encoding.UTF8.GetBytes(data ?? string.Empty))
             });
@@ -178,7 +235,7 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             return type switch
             {
-                "output" => SerializeOutput(0, data),
+                "output" => SerializeOutput(0, 0, data),
                 "clear" or "focus" => JsonSerializer.Serialize(new { type }),
                 _ => JsonSerializer.Serialize(new { type, data })
             };

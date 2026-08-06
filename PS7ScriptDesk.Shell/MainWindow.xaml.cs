@@ -363,13 +363,15 @@ namespace PS7ScriptDesk.Shell
                         TerminalConsole.Clear();
                         TerminalConsole.FocusTerminal();
                     }),
-                    focusTerminal: ()   => Dispatcher.BeginInvoke(() => TerminalConsole.FocusTerminal()));
+                    focusTerminal: ()   => Dispatcher.BeginInvoke(() => TerminalConsole.FocusTerminal()),
+                    beginTerminalOutputGeneration: TerminalConsole.BeginTerminalOutputGeneration,
+                    invalidateTerminalOutputGeneration: TerminalConsole.InvalidateTerminalOutputGeneration);
 
                 // Forward raw (ANSI-intact) ConPTY output to xterm.js.
                 // TerminalControl applies its own bounded dispatcher/WebView flow control,
                 // so the reader callback does not queue one dispatcher operation per chunk.
                 ViewModel.SubscribeRawOutput(
-                    raw => TerminalConsole.WriteRaw(raw));
+                    (generation, raw) => TerminalConsole.WriteRaw(generation, raw));
 
                 // Forward xterm.js keystrokes to ConPTY stdin.
                 TerminalConsole.UserInput += async data =>

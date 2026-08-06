@@ -146,7 +146,9 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public event Action? ScriptExecutionCompleted;
     public event Action? CommandExecutionCompleted;
     public event Action? SessionTerminated;
-    public event Action<string>? RawOutputReceived;
+    public event Action<int>? TerminalSessionStarted;
+    public event Action<int>? TerminalSessionStopping;
+    public event Action<int, string>? RawOutputReceived;
 
     public void AttachHost(IntPtr hostHandle, int width, int height) { }
     public void ResizeHost(int width, int height) { }
@@ -161,6 +163,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
         CancellationToken cancellationToken = default)
     {
         Operations.Add("start");
+        TerminalSessionStarted?.Invoke(1);
         ActiveRuntime = runtime;
         IsSessionRunning = true;
         StartObserved.TrySetResult(true);
@@ -182,6 +185,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public Task<bool> StopConsoleAsync(Action<ExecutionOutputRecord>? onOutput = null)
     {
         Operations.Add("stop");
+        TerminalSessionStopping?.Invoke(1);
         IsCommandInProgress = false;
         IsSessionRunning = false;
         return Task.FromResult(true);
@@ -190,6 +194,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public Task<bool> ShutdownAsync(CancellationToken cancellationToken = default)
     {
         Operations.Add("shutdown");
+        TerminalSessionStopping?.Invoke(1);
         IsCommandInProgress = false;
         IsSessionRunning = false;
         return ShutdownCompletion?.Task ?? Task.FromResult(true);
@@ -212,5 +217,5 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public void RaiseScriptCompleted() => ScriptExecutionCompleted?.Invoke();
     public void RaiseCommandCompleted() => CommandExecutionCompleted?.Invoke();
     public void RaiseSessionTerminated() => SessionTerminated?.Invoke();
-    public void RaiseRawOutput(string text) => RawOutputReceived?.Invoke(text);
+    public void RaiseRawOutput(string text) => RawOutputReceived?.Invoke(1, text);
 }

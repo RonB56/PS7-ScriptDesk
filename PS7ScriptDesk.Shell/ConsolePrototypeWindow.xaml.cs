@@ -26,6 +26,8 @@ namespace PS7ScriptDesk.Shell
             PrototypeTerminal.UserInput += OnTerminalUserInput;
             PrototypeTerminal.TerminalResized += OnTerminalResized;
             _liveConsoleService.RawOutputReceived += OnRawOutputReceived;
+            _liveConsoleService.TerminalSessionStarted += OnTerminalSessionStarted;
+            _liveConsoleService.TerminalSessionStopping += OnTerminalSessionStopping;
             _liveConsoleService.SessionTerminated += OnSessionTerminated;
         }
 
@@ -67,6 +69,8 @@ namespace PS7ScriptDesk.Shell
             PrototypeTerminal.TerminalResized -= OnTerminalResized;
             _liveConsoleService.SessionTerminated -= OnSessionTerminated;
             _liveConsoleService.RawOutputReceived -= OnRawOutputReceived;
+            _liveConsoleService.TerminalSessionStarted -= OnTerminalSessionStarted;
+            _liveConsoleService.TerminalSessionStopping -= OnTerminalSessionStopping;
             var shutdownSucceeded = await _liveConsoleService.ShutdownAsync().ConfigureAwait(true);
             AppLogger.Info("ConsolePrototype", $"Prototype terminal shutdown completed. Succeeded={shutdownSucceeded}.");
             _liveConsoleService.Dispose();
@@ -112,7 +116,17 @@ namespace PS7ScriptDesk.Shell
             _liveConsoleService.ResizeConsole(cols, rows);
         }
 
-        private void OnRawOutputReceived(string raw)
+        private void OnTerminalSessionStarted(int generation)
+        {
+            PrototypeTerminal.BeginTerminalOutputGeneration(generation);
+        }
+
+        private void OnTerminalSessionStopping(int generation)
+        {
+            PrototypeTerminal.InvalidateTerminalOutputGeneration(generation);
+        }
+
+        private void OnRawOutputReceived(int generation, string raw)
         {
             if (_outputInfoLogCount < 5)
             {
@@ -120,7 +134,7 @@ namespace PS7ScriptDesk.Shell
                 AppLogger.Info("ConsolePrototype", $"Prototype received raw terminal output #{_outputInfoLogCount}. Length={raw.Length}.");
             }
 
-            Dispatcher.BeginInvoke(new Action(() => PrototypeTerminal.WriteRaw(raw)));
+            Dispatcher.BeginInvoke(new Action(() => PrototypeTerminal.WriteRaw(generation, raw)));
         }
 
         private void OnSessionTerminated()

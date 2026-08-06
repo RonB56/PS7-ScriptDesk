@@ -35,13 +35,19 @@ namespace PS7ScriptDesk.Application.Interfaces
         /// </summary>
         event Action? SessionTerminated;
 
+        /// <summary>Raised when a terminal session generation becomes active.</summary>
+        event Action<int>? TerminalSessionStarted;
+
+        /// <summary>Raised before a terminal session generation is torn down.</summary>
+        event Action<int>? TerminalSessionStopping;
+
         /// <summary>
         /// Fires on the thread-pool with raw (ANSI/VT100-intact) terminal output after
-        /// the execution-done sentinel has been stripped. Subscribe to this event to
-        /// forward ConPTY output directly to an xterm.js terminal emulator. When at
-        /// least one handler is subscribed, the cleaned-text fallback path is skipped.
+        /// the execution-done sentinel has been stripped, together with its source generation.
+        /// Subscribe to forward ConPTY output directly to xterm.js. When at least one handler
+        /// is subscribed, the cleaned-text fallback path is skipped.
         /// </summary>
-        event Action<string>? RawOutputReceived;
+        event Action<int, string>? RawOutputReceived;
 
         void AttachHost(IntPtr hostHandle, int width, int height);
 

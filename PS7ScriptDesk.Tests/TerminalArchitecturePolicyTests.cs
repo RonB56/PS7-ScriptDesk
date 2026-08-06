@@ -24,12 +24,14 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.DoesNotContain("_writeTextSink", viewModelSource, StringComparison.Ordinal);
         Assert.DoesNotContain("SetDebuggerOutputSink", viewModelSource, StringComparison.Ordinal);
         Assert.Contains("SetTerminalSessionControls", shellSource, StringComparison.Ordinal);
-        Assert.Contains("TerminalConsole.WriteRaw(raw)", shellSource, StringComparison.Ordinal);
+        Assert.Contains("TerminalConsole.WriteRaw(generation, raw)", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("raw => Dispatcher.BeginInvoke(() => TerminalConsole.WriteRaw(raw))", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("TerminalConsole.WriteDebuggerOutput", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("WriteDebuggerOutput", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("TerminalOutputFlowController", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("output_ack", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("BeginTerminalOutputGeneration", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("Acknowledge(generation, sequence)", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("write: function (d, callback)", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("term.write(d, callback)", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("DebuggerOutputText", viewModelSource, StringComparison.Ordinal);
