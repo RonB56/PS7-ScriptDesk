@@ -4,6 +4,10 @@ obj/
 [Bb]in/
 [Oo]bj/
 [Dd]ebug/
+# The Shell Debug pane is application source, not a configuration-output directory.
+!PS7ScriptDesk.Shell/Debug/
+!PS7ScriptDesk.Shell/Debug/DebugPaneWindow.xaml
+!PS7ScriptDesk.Shell/Debug/DebugPaneWindow.xaml.cs
 [Rr]elease/
 x64/
 x86/

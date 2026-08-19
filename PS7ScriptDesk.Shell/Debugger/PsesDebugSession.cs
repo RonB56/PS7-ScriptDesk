@@ -77,13 +77,40 @@ namespace PS7ScriptDesk.Shell.Debug
         private long _lastLocationNotificationTicks;
         private string? _orphanedRequestOutputEndMarker;
         private long _orphanedRequestOutputSuppressUntilTicks;
+        private Action<DebugSessionState>? _stateChanged;
+        private Action<string?, int>? _breakpointHit;
+        private Action? _sessionEnded;
+        private Action<string>? _outputReceived;
+        private int _stateChangedSubscriberCount;
+        private int _breakpointHitSubscriberCount;
+        private int _sessionEndedSubscriberCount;
+        private int _outputReceivedSubscriberCount;
 
         public DebugSessionState CurrentState { get; private set; } = DebugSessionState.Stopped;
 
-        public event Action<DebugSessionState>? StateChanged;
-        public event Action<string?, int>? BreakpointHit;
-        public event Action? SessionEnded;
-        public event Action<string>? OutputReceived;
+        public event Action<DebugSessionState>? StateChanged
+        {
+            add => AddSubscriber(ref _stateChanged, ref _stateChangedSubscriberCount, value);
+            remove => RemoveSubscriber(ref _stateChanged, ref _stateChangedSubscriberCount, value);
+        }
+
+        public event Action<string?, int>? BreakpointHit
+        {
+            add => AddSubscriber(ref _breakpointHit, ref _breakpointHitSubscriberCount, value);
+            remove => RemoveSubscriber(ref _breakpointHit, ref _breakpointHitSubscriberCount, value);
+        }
+
+        public event Action? SessionEnded
+        {
+            add => AddSubscriber(ref _sessionEnded, ref _sessionEndedSubscriberCount, value);
+            remove => RemoveSubscriber(ref _sessionEnded, ref _sessionEndedSubscriberCount, value);
+        }
+
+        public event Action<string>? OutputReceived
+        {
+            add => AddSubscriber(ref _outputReceived, ref _outputReceivedSubscriberCount, value);
+            remove => RemoveSubscriber(ref _outputReceived, ref _outputReceivedSubscriberCount, value);
+        }
 
         public async Task StartAsync(PowerShellRuntimeInfo runtime, string launchScriptPath, IReadOnlyList<DebugBreakpointInfo> breakpoints)
         {
@@ -237,7 +264,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 return Array.Empty<DebugVariableInfo>();
             }
 
-            return DeserializeList<DebugVariableInfo>(payload);
+            return DeserializeList<DebugVariableInfo>(payload, "VariablesRequest");
         }
 
         public async Task<IReadOnlyList<DebugCallStackFrame>> GetCallStackAsync()
@@ -256,7 +283,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 return Array.Empty<DebugCallStackFrame>();
             }
 
-            return DeserializeList<DebugCallStackFrame>(payload);
+            return DeserializeList<DebugCallStackFrame>(payload, "CallStackRequest");
         }
 
         public void Dispose()
@@ -441,17 +468,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 if (teardownState.RaiseSessionEnded)
                 {
                     Trace("StopAsync", $"Raising SessionEnded from bounded teardown; {DescribeSessionState()}");
-                    try
-                    {
-                        SessionEnded?.Invoke();
-                    }
-                    catch (Exception ex)
-                    {
-                        DeveloperDiagnostics.LogException(
-                            "Debugger",
-                            ex,
-                            "A debugger SessionEnded subscriber failed during teardown.");
-                    }
+                    RaiseSessionEnded("BoundedTeardown", streamSource: null);
                 }
             }
 
@@ -600,6 +617,7 @@ namespace PS7ScriptDesk.Shell.Debug
         private async Task ReadLoopAsync(Process owningProcess, TextReader reader, bool isErrorStream, CancellationToken cancellationToken)
         {
             var buffer = new char[2048];
+            var terminationReason = ReaderTerminationReason.EndOfStream;
             Trace("ReadLoopAsync", $"Started; isErrorStream={isErrorStream}; processId={TryGetProcessId(owningProcess)}");
 
             try
@@ -609,23 +627,72 @@ namespace PS7ScriptDesk.Shell.Debug
                     var read = await reader.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
                     if (read == 0)
                     {
+                        terminationReason = ReaderTerminationReason.EndOfStream;
                         break;
                     }
 
                     ProcessIncomingChunk(new string(buffer, 0, read), isErrorStream);
                 }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    terminationReason = ReaderTerminationReason.Cancellation;
+                }
             }
             catch (OperationCanceledException)
             {
+                terminationReason = ReaderTerminationReason.Cancellation;
             }
             catch (ObjectDisposedException)
             {
+                terminationReason = ReaderTerminationReason.Disposed;
+            }
+            catch (Exception ex)
+            {
+                terminationReason = ReaderTerminationReason.UnexpectedFailure;
+                ReportUnexpectedReaderFailure(owningProcess, isErrorStream, "ReadLoop", ex);
             }
             finally
             {
-                FlushPendingLineBuffer(isErrorStream);
-                Trace("ReadLoopAsync", $"Exiting; isErrorStream={isErrorStream}; processId={TryGetProcessId(owningProcess)}");
-                HandleProcessExited(owningProcess);
+                if (terminationReason != ReaderTerminationReason.UnexpectedFailure)
+                {
+                    try
+                    {
+                        FlushPendingLineBuffer(isErrorStream);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        terminationReason = ReaderTerminationReason.Cancellation;
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        terminationReason = ReaderTerminationReason.Disposed;
+                    }
+                    catch (Exception ex)
+                    {
+                        terminationReason = ReaderTerminationReason.UnexpectedFailure;
+                        ReportUnexpectedReaderFailure(owningProcess, isErrorStream, "FlushPendingLineBuffer", ex);
+                    }
+                }
+
+                if (terminationReason == ReaderTerminationReason.EndOfStream)
+                {
+                    if (SafeHasExited(owningProcess))
+                    {
+                        HandleProcessExited(owningProcess);
+                    }
+                    else
+                    {
+                        terminationReason = ReaderTerminationReason.UnexpectedFailure;
+                        ReportUnexpectedReaderFailure(
+                            owningProcess,
+                            isErrorStream,
+                            "EndOfStreamBeforeProcessExit",
+                            new IOException("Debugger output stream reached end-of-stream while the debugger process was still alive."));
+                    }
+                }
+
+                Trace("ReadLoopAsync", $"Exiting; isErrorStream={isErrorStream}; terminationReason={terminationReason}; processId={TryGetProcessId(owningProcess)}");
             }
         }
 
@@ -677,7 +744,7 @@ namespace PS7ScriptDesk.Shell.Debug
                     return;
                 }
 
-                PublishOutputLine(line);
+                PublishOutputLine(line, "ProcessIncomingLine", "stderr");
                 return;
             }
 
@@ -703,7 +770,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 var remaining = RemoveMarker(normalizedLine, SessionEndedMarker).Trim();
                 if (!string.IsNullOrWhiteSpace(remaining) && !IsInternalDebuggerNoiseLine(remaining))
                 {
-                    PublishOutputLine(remaining);
+                    PublishOutputLine(remaining, "SessionEndedMarkerRemainder", "stdout");
                 }
 
                 return;
@@ -773,7 +840,7 @@ namespace PS7ScriptDesk.Shell.Debug
 
             if (LineContainsMarker(normalizedLine, DebugPromptMarker))
             {
-                HandleDebugPromptMarker();
+                HandleDebugPromptMarker("stdout");
                 return;
             }
 
@@ -787,7 +854,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 return;
             }
 
-            PublishOutputLine(line);
+            PublishOutputLine(line, "ProcessIncomingLine", "stdout");
         }
 
         private bool TrySuppressInternalRequestOutput(string normalizedLine)
@@ -927,7 +994,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 : normalizedLine.Replace(marker, string.Empty, StringComparison.Ordinal);
         }
 
-        private void PublishOutputLine(string line)
+        private void PublishOutputLine(string line, string publicationOrigin, string? streamSource)
         {
             if (string.IsNullOrEmpty(line))
             {
@@ -935,10 +1002,10 @@ namespace PS7ScriptDesk.Shell.Debug
             }
 
             Trace("PublishOutputLine", $"Forwarding output; lineLength={line.Length}; classification={ClassifyLine(line)}");
-            OutputReceived?.Invoke(line + Environment.NewLine);
+            RaiseOutputReceived(line + Environment.NewLine, publicationOrigin, streamSource);
         }
 
-        private void HandleDebugPromptMarker()
+        private void HandleDebugPromptMarker(string streamSource)
         {
             Trace("HandleDebugPromptMarker", $"Entry; ignoreNext={_ignoreNextDebugPrompt}; suppressNextCount={_suppressNextDebugPromptCount}; {DescribeSessionState()}");
 
@@ -947,7 +1014,7 @@ namespace PS7ScriptDesk.Shell.Debug
             if (_ignoreNextDebugPrompt)
             {
                 _ignoreNextDebugPrompt = false;
-                SetCurrentState(DebugSessionState.Paused);
+                SetCurrentState(DebugSessionState.Paused, "DebugPromptMarker", streamSource);
                 AppLogger.Info("Debug", "DebugPausedDetected via prompt marker.");
                 Trace("HandleDebugPromptMarker", $"Ignored-next prompt consumed without scheduling another helper query; wasPaused={wasPaused}; {DescribeSessionState()}");
                 return;
@@ -956,13 +1023,13 @@ namespace PS7ScriptDesk.Shell.Debug
             if (_suppressNextDebugPromptCount > 0)
             {
                 _suppressNextDebugPromptCount--;
-                SetCurrentState(DebugSessionState.Paused);
+                SetCurrentState(DebugSessionState.Paused, "DebugPromptMarker", streamSource);
                 AppLogger.Info("Debug", "DebugPausedDetected via suppressed prompt marker.");
                 Trace("HandleDebugPromptMarker", $"Suppressed helper prompt consumed without scheduling another helper query; wasPaused={wasPaused}; {DescribeSessionState()}");
                 return;
             }
 
-            SetCurrentState(DebugSessionState.Paused);
+            SetCurrentState(DebugSessionState.Paused, "DebugPromptMarker", streamSource);
             AppLogger.Info("Debug", "DebugPausedDetected via prompt marker.");
             Trace("HandleDebugPromptMarker", $"Paused prompt observed; wasPaused={wasPaused}; {DescribeSessionState()}");
             QueueCurrentFrameQueryIfNoRecentLocation("prompt marker");
@@ -971,14 +1038,21 @@ namespace PS7ScriptDesk.Shell.Debug
         private void HandleBreakpointPayload(string payload)
         {
             Trace("HandleBreakpointPayload", $"Entry; payloadLength={payload.Length}; {DescribeSessionState()}");
-            SetCurrentState(DebugSessionState.Paused);
-            _ignoreNextDebugPrompt = true;
+            SetCurrentState(DebugSessionState.Paused, "LegacyBreakpointPayload", "stdout");
             AppLogger.Info("Debug", "DebugPausedDetected via breakpoint payload.");
 
-            var location = DeserializeSingle<BreakpointLocation>(payload);
+            var location = DeserializeSingle<BreakpointLocation>(payload, "LegacyBreakpointPayload", requiresPayload: true, out var malformedPayload);
+            if (malformedPayload || location is null || !HasResolvableLocation(location))
+            {
+                _ignoreNextDebugPrompt = false;
+                Trace("HandleBreakpointPayload", $"Location unavailable; malformedPayload={malformedPayload}; {DescribeSessionState()}");
+                return;
+            }
+
+            _ignoreNextDebugPrompt = true;
             MarkLocationNotificationObserved();
-            Trace("HandleBreakpointPayload", $"Raising BreakpointHit; scriptPathPresent={!string.IsNullOrWhiteSpace(location?.ScriptPath)}; lineNumber={location?.LineNumber ?? 0}; {DescribeSessionState()}");
-            BreakpointHit?.Invoke(location?.ScriptPath, location?.LineNumber ?? 0);
+            Trace("HandleBreakpointPayload", $"Raising BreakpointHit; scriptPathPresent={!string.IsNullOrWhiteSpace(location.ScriptPath)}; lineNumber={location.LineNumber}; {DescribeSessionState()}");
+            RaiseBreakpointHit(location.ScriptPath, location.LineNumber, "LegacyBreakpointPayload", "stdout");
         }
 
         private bool TryHandleObservedDebugPauseOutput(string line, string source)
@@ -998,7 +1072,7 @@ namespace PS7ScriptDesk.Shell.Debug
             }
 
             var wasPaused = CurrentState == DebugSessionState.Paused;
-            SetCurrentState(DebugSessionState.Paused);
+            SetCurrentState(DebugSessionState.Paused, "ObservedDebugPauseOutput", source);
             AppLogger.Info("Debug", $"DebugPausedDetected via {source} output: {trimmed}");
             Trace("TryHandleObservedDebugPauseOutput", $"Matched pause output; source={source}; wasPaused={wasPaused}; classification={ClassifyLine(trimmed)}; {DescribeSessionState()}");
 
@@ -1009,7 +1083,7 @@ namespace PS7ScriptDesk.Shell.Debug
             {
                 MarkLocationNotificationObserved();
                 Trace("TryHandleObservedDebugPauseOutput", $"Raising BreakpointHit from parsed debug location; scriptPathPresent={!string.IsNullOrWhiteSpace(scriptPath)}; lineNumber={lineNumber}; {DescribeSessionState()}");
-                BreakpointHit?.Invoke(scriptPath, lineNumber);
+                RaiseBreakpointHit(scriptPath, lineNumber, "ObservedDebugPauseOutput", source);
             }
 
             return true;
@@ -1133,19 +1207,18 @@ namespace PS7ScriptDesk.Shell.Debug
                     suppressNextDebugPrompt: true,
                     CancellationToken.None).ConfigureAwait(false);
 
-                var location = DeserializeSingle<BreakpointLocation>(payload);
-                if (location is not null && location.LineNumber > 0)
+                var location = DeserializeSingle<BreakpointLocation>(payload, "CurrentFrameRequest", requiresPayload: true, out var malformedPayload);
+                if (!malformedPayload && location is not null && HasResolvableLocation(location))
                 {
                     MarkLocationNotificationObserved();
+                    Trace("QueryCurrentFrameAndRaiseBreakpointAsync", $"Raising BreakpointHit; scriptPathPresent={!string.IsNullOrWhiteSpace(location.ScriptPath)}; lineNumber={location.LineNumber}; {DescribeSessionState()}");
+                    RaiseBreakpointHit(location.ScriptPath, location.LineNumber, "CurrentFrameRequest", streamSource: null);
                 }
-
-                Trace("QueryCurrentFrameAndRaiseBreakpointAsync", $"Raising BreakpointHit; scriptPathPresent={!string.IsNullOrWhiteSpace(location?.ScriptPath)}; lineNumber={location?.LineNumber ?? 0}; {DescribeSessionState()}");
-                BreakpointHit?.Invoke(location?.ScriptPath, location?.LineNumber ?? 0);
             }
             catch (Exception ex)
             {
                 Trace("QueryCurrentFrameAndRaiseBreakpointAsync", $"Failed; exceptionType={ex.GetType().Name}; message={ex.Message}; {DescribeSessionState()}");
-                OutputReceived?.Invoke($"Unable to query the paused debug location: {ex.Message}{Environment.NewLine}");
+                RaiseOutputReceived($"Unable to query the paused debug location: {ex.Message}{Environment.NewLine}", "CurrentFrameQueryFailure", streamSource: null);
             }
         }
 
@@ -1162,14 +1235,14 @@ namespace PS7ScriptDesk.Shell.Debug
                 }
 
                 _sessionEndedRaised = true;
-                SetCurrentState(DebugSessionState.Stopped);
+                SetCurrentState(DebugSessionState.Stopped, "SessionEndedMarker", "stdout");
                 raiseSessionEnded = true;
             }
 
             if (raiseSessionEnded)
             {
                 Trace("HandleSessionEndedMarker", $"Raising SessionEnded; {DescribeSessionState()}");
-                SessionEnded?.Invoke();
+                RaiseSessionEnded("SessionEndedMarker", "stdout");
             }
         }
 
@@ -1191,23 +1264,24 @@ namespace PS7ScriptDesk.Shell.Debug
                     shouldRaiseSessionEnded = true;
                 }
 
-                SetCurrentState(DebugSessionState.Stopped);
+                SetCurrentState(DebugSessionState.Stopped, "ConfirmedProcessExit", streamSource: null);
             }
 
             if (shouldRaiseSessionEnded)
             {
                 Trace("HandleProcessExited", $"Raising SessionEnded after process exit; exitedProcessId={TryGetProcessId(exitedProcess)}; {DescribeSessionState()}");
-                SessionEnded?.Invoke();
+                RaiseSessionEnded("ConfirmedProcessExit", streamSource: null);
             }
         }
 
-        private static IReadOnlyList<T> DeserializeList<T>(string payload)
+        private IReadOnlyList<T> DeserializeList<T>(string payload, string requestSource)
         {
             if (string.IsNullOrWhiteSpace(payload))
             {
                 return Array.Empty<T>();
             }
 
+            JsonException? collectionException = null;
             try
             {
                 var list = JsonSerializer.Deserialize<List<T>>(payload, JsonOptions);
@@ -1216,8 +1290,9 @@ namespace PS7ScriptDesk.Shell.Debug
                     return list;
                 }
             }
-            catch (JsonException)
+            catch (JsonException ex)
             {
+                collectionException = ex;
             }
 
             try
@@ -1225,30 +1300,66 @@ namespace PS7ScriptDesk.Shell.Debug
                 var single = JsonSerializer.Deserialize<T>(payload, JsonOptions);
                 return single is null ? Array.Empty<T>() : new[] { single };
             }
-            catch (JsonException)
+            catch (JsonException ex)
             {
+                ReportProtocolParseFailure(
+                    payload,
+                    requestSource,
+                    typeof(T),
+                    ex,
+                    new Dictionary<string, object?>
+                    {
+                        ["collectionParseFailed"] = collectionException is not null,
+                        ["collectionExceptionType"] = collectionException?.GetType().Name
+                    });
                 return Array.Empty<T>();
             }
         }
 
-        private static T? DeserializeSingle<T>(string payload) where T : class
+        private T? DeserializeSingle<T>(string payload, string requestSource, bool requiresPayload, out bool malformedPayload) where T : class
         {
+            malformedPayload = false;
             if (string.IsNullOrWhiteSpace(payload))
             {
+                if (requiresPayload)
+                {
+                    malformedPayload = true;
+                    ReportProtocolParseFailure(
+                        payload,
+                        requestSource,
+                        typeof(T),
+                        new InvalidDataException("Debugger protocol response did not contain the required JSON payload."),
+                        additionalProperties: null);
+                }
+
                 return null;
             }
 
             try
             {
-                return JsonSerializer.Deserialize<T>(payload, JsonOptions);
+                var result = JsonSerializer.Deserialize<T>(payload, JsonOptions);
+                if (result is null && requiresPayload)
+                {
+                    malformedPayload = true;
+                    ReportProtocolParseFailure(
+                        payload,
+                        requestSource,
+                        typeof(T),
+                        new InvalidDataException("Debugger protocol response contained a null JSON payload."),
+                        additionalProperties: null);
+                }
+
+                return result;
             }
-            catch (JsonException)
+            catch (JsonException ex)
             {
+                malformedPayload = true;
+                ReportProtocolParseFailure(payload, requestSource, typeof(T), ex, additionalProperties: null);
                 return null;
             }
         }
 
-        private void SetCurrentState(DebugSessionState newState)
+        private void SetCurrentState(DebugSessionState newState, string publicationOrigin = "StateTransition", string? streamSource = null)
         {
             if (CurrentState == newState)
             {
@@ -1262,8 +1373,162 @@ namespace PS7ScriptDesk.Shell.Debug
             DeveloperDiagnostics.LogStateTransition("Debugger", "DebugSessionStateChanged", oldState.ToString(), newState.ToString(), "PsesDebugSession state changed.", new Dictionary<string, object?> { ["processId"] = TryGetProcessId(_process) });
             Trace("SetCurrentState", $"Transition; oldState={oldState}; newState={newState}; processId={TryGetProcessId(_process)}; sessionEndedRaised={_sessionEndedRaised}");
             Trace("SetCurrentState", $"Raising StateChanged; newState={newState}; processId={TryGetProcessId(_process)}");
-            StateChanged?.Invoke(newState);
+            RaiseStateChanged(newState, publicationOrigin, streamSource);
         }
+
+        private void RaiseBreakpointHit(string? scriptPath, int lineNumber, string publicationOrigin, string? streamSource)
+        {
+            Action<string?, int>? subscribers;
+            int subscriberCount;
+            lock (_syncRoot)
+            {
+                subscribers = _breakpointHit;
+                subscriberCount = _breakpointHitSubscriberCount;
+            }
+
+            InvokeEventSafely(nameof(BreakpointHit), subscribers, () => subscribers?.Invoke(scriptPath, lineNumber), publicationOrigin, streamSource, subscriberCount);
+        }
+
+        private void RaiseStateChanged(DebugSessionState state, string publicationOrigin, string? streamSource)
+        {
+            Action<DebugSessionState>? subscribers;
+            int subscriberCount;
+            lock (_syncRoot)
+            {
+                subscribers = _stateChanged;
+                subscriberCount = _stateChangedSubscriberCount;
+            }
+
+            InvokeEventSafely(nameof(StateChanged), subscribers, () => subscribers?.Invoke(state), publicationOrigin, streamSource, subscriberCount);
+        }
+
+        private void RaiseSessionEnded(string publicationOrigin, string? streamSource)
+        {
+            Action? subscribers;
+            int subscriberCount;
+            lock (_syncRoot)
+            {
+                subscribers = _sessionEnded;
+                subscriberCount = _sessionEndedSubscriberCount;
+            }
+
+            InvokeEventSafely(nameof(SessionEnded), subscribers, () => subscribers?.Invoke(), publicationOrigin, streamSource, subscriberCount);
+        }
+
+        private void RaiseOutputReceived(string output, string publicationOrigin, string? streamSource)
+        {
+            Action<string>? subscribers;
+            int subscriberCount;
+            lock (_syncRoot)
+            {
+                subscribers = _outputReceived;
+                subscriberCount = _outputReceivedSubscriberCount;
+            }
+
+            InvokeEventSafely(nameof(OutputReceived), subscribers, () => subscribers?.Invoke(output), publicationOrigin, streamSource, subscriberCount);
+        }
+
+        private void InvokeEventSafely(string eventName, Delegate? subscribers, Action invoke, string publicationOrigin, string? streamSource, int subscriberCount)
+        {
+            if (subscribers is null)
+            {
+                return;
+            }
+
+            try
+            {
+                invoke();
+            }
+            catch (Exception ex)
+            {
+                var properties = new Dictionary<string, object?>
+                {
+                    ["eventName"] = eventName,
+                    ["publicationOrigin"] = publicationOrigin,
+                    ["streamSource"] = streamSource,
+                    ["debuggerState"] = CurrentState.ToString(),
+                    ["processId"] = TryGetProcessId(_process),
+                    ["subscriberCount"] = subscriberCount
+                };
+                AppLogger.Error("Debugger", $"Debugger {eventName} subscriber failed. Origin={publicationOrigin}; Stream={streamSource ?? "(none)"}; State={CurrentState}; ProcessId={TryGetProcessId(_process)}; Subscribers={subscriberCount}.", ex);
+                DeveloperDiagnostics.LogException("Debugger", ex, $"Debugger {eventName} subscriber failed.", properties);
+            }
+        }
+
+        private void AddSubscriber<TDelegate>(ref TDelegate? subscribers, ref int subscriberCount, TDelegate? subscriber)
+            where TDelegate : Delegate
+        {
+            if (subscriber is null)
+            {
+                return;
+            }
+
+            lock (_syncRoot)
+            {
+                subscribers = (TDelegate?)Delegate.Combine(subscribers, subscriber);
+                subscriberCount++;
+            }
+        }
+
+        private void RemoveSubscriber<TDelegate>(ref TDelegate? subscribers, ref int subscriberCount, TDelegate? subscriber)
+            where TDelegate : Delegate
+        {
+            if (subscriber is null)
+            {
+                return;
+            }
+
+            lock (_syncRoot)
+            {
+                var updatedSubscribers = (TDelegate?)Delegate.Remove(subscribers, subscriber);
+                if (!Equals(updatedSubscribers, subscribers))
+                {
+                    subscribers = updatedSubscribers;
+                    subscriberCount--;
+                }
+            }
+        }
+
+        private void ReportUnexpectedReaderFailure(Process owningProcess, bool isErrorStream, string phase, Exception exception)
+        {
+            var streamSource = isErrorStream ? "stderr" : "stdout";
+            var properties = new Dictionary<string, object?>
+            {
+                ["readerStream"] = streamSource,
+                ["readerPhase"] = phase,
+                ["debuggerState"] = CurrentState.ToString(),
+                ["processId"] = TryGetProcessId(owningProcess),
+                ["processHasExited"] = SafeHasExited(owningProcess)
+            };
+            AppLogger.Error("Debugger", $"Debugger {streamSource} reader failed unexpectedly during {phase}.", exception);
+            DeveloperDiagnostics.LogException("Debugger", exception, "Debugger transport reader failed unexpectedly; bounded teardown was initiated.", properties);
+            _ = StopAsync();
+        }
+
+        private void ReportProtocolParseFailure(string payload, string requestSource, Type parserTargetType, Exception exception, IReadOnlyDictionary<string, object?>? additionalProperties)
+        {
+            var properties = new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(payload))
+            {
+                ["requestSource"] = requestSource,
+                ["parserTargetType"] = parserTargetType.Name,
+                ["debuggerState"] = CurrentState.ToString(),
+                ["processId"] = TryGetProcessId(_process)
+            };
+
+            if (additionalProperties is not null)
+            {
+                foreach (var property in additionalProperties)
+                {
+                    properties[property.Key] = property.Value;
+                }
+            }
+
+            AppLogger.Error("Debugger", $"Debugger protocol payload could not be parsed. Source={requestSource}; Target={parserTargetType.Name}; State={CurrentState}; ProcessId={TryGetProcessId(_process)}.", exception);
+            DeveloperDiagnostics.LogException("Debugger", exception, "Debugger protocol payload could not be parsed.", properties);
+        }
+
+        private static bool HasResolvableLocation(BreakpointLocation? location)
+            => location is not null && !string.IsNullOrWhiteSpace(location.ScriptPath) && location.LineNumber > 0;
 
         private void Trace(string source, string message)
         {
@@ -1602,6 +1867,14 @@ namespace PS7ScriptDesk.Shell.Debug
         {
             public string? ScriptPath { get; set; }
             public int LineNumber { get; set; }
+        }
+
+        private enum ReaderTerminationReason
+        {
+            EndOfStream,
+            Cancellation,
+            Disposed,
+            UnexpectedFailure
         }
     }
 }

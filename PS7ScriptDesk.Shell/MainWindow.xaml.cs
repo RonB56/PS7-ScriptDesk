@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -188,8 +189,11 @@ namespace PS7ScriptDesk.Shell
         private TextView? _pendingHoverTextView;
         private WpfPoint _pendingHoverPoint;
         private FindReplaceWindow? _findReplaceWindow;
+        private AboutWindow? _aboutWindow;
+        private readonly AdministratorModeBannerState _administratorModeBannerState;
         private bool _allowWindowClose;
         private bool _terminalShutdownInProgress;
+        private Task? _deferredInitializationTask;
         private bool _shellLayoutApplied;
         private double _lastKnownExplorerWidth = 300;
         private string _lastFindText = string.Empty;
@@ -249,6 +253,10 @@ namespace PS7ScriptDesk.Shell
             set => SetValue(IsContextHelpEnabledProperty, value);
         }
 
+        public Visibility AdministratorModeBannerVisibility => _administratorModeBannerState.Visibility;
+
+        public string AdministratorModeBannerDetail => _administratorModeBannerState.Detail;
+
         private static void OnIsContextHelpEnabledChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
         {
             if (d is not MainWindow window)
@@ -270,6 +278,18 @@ namespace PS7ScriptDesk.Shell
             DeveloperDiagnostics.LogMethodEntry("UI", "MainWindow constructor entry.");
             _applicationSettingsService = applicationSettingsService;
             _loadedSettings = loadedSettings ?? new ApplicationSettings();
+            var processElevation = CurrentProcessElevation.TryGetIsElevated();
+            _administratorModeBannerState = AdministratorModeBannerState.Create(processElevation == true);
+            DeveloperDiagnostics.LogDecision(
+                "Startup",
+                "AdministratorModeBanner",
+                "Administrator-mode banner visibility was determined from the current process token.",
+                processElevation == true ? "Visible" : processElevation == false ? "Collapsed" : "Unavailable",
+                new Dictionary<string, object?>
+                {
+                    ["isElevated"] = processElevation,
+                    ["bannerVisibility"] = _administratorModeBannerState.Visibility.ToString()
+                });
 
             if (IsUsableLength(_loadedSettings.ExplorerWidth, MinimumExplorerWidth))
             {
@@ -364,8 +384,13 @@ namespace PS7ScriptDesk.Shell
                         TerminalConsole.FocusTerminal();
                     }),
                     focusTerminal: ()   => Dispatcher.BeginInvoke(() => TerminalConsole.FocusTerminal()),
+                    normalizeTerminalInteractiveState: () => Dispatcher.BeginInvoke(() => TerminalConsole.NormalizeInteractiveState()),
                     beginTerminalOutputGeneration: TerminalConsole.BeginTerminalOutputGeneration,
-                    invalidateTerminalOutputGeneration: TerminalConsole.InvalidateTerminalOutputGeneration);
+                    invalidateTerminalOutputGeneration: TerminalConsole.InvalidateTerminalOutputGeneration,
+                    isTerminalFocused: () => TerminalConsole.IsKeyboardFocusWithin,
+                    terminalFocusRestoreReadiness: GetTerminalFocusRestoreReadiness,
+                    restoreTerminalFocus: (generation, cancellationToken) =>
+                        TerminalConsole.RestoreTerminalFocusAsync(generation, cancellationToken));
 
                 // Forward raw (ANSI-intact) ConPTY output to xterm.js.
                 // TerminalControl applies its own bounded dispatcher/WebView flow control,
@@ -422,6 +447,7 @@ namespace PS7ScriptDesk.Shell
                     DeveloperDiagnostics.LogStateTransition("Terminal", "TerminalReady", "Initializing", "Ready", "Terminal ready signal received.");
                     // Apply the current app theme to the terminal colour scheme.
                     TerminalConsole.ApplyAppTheme(_themeService.CurrentTheme);
+                    ViewModel?.NotifyTerminalRendererReady();
                     RequestConsoleWarmStart("TerminalReadyFallback");
                 };
 
@@ -441,7 +467,7 @@ namespace PS7ScriptDesk.Shell
                 StartupTimingLogger.Log("MainWindow", $"Terminal host attached in {hostAttachStopwatch.ElapsedMilliseconds} ms");
                 RequestConsoleWarmStart("TerminalHostAttached");
 
-                _ = ViewModel.InitializeAsync();
+                StartDeferredInitialization(ViewModel);
                 DeveloperDiagnostics.LogAsyncBoundary("Startup", "InitializeAsync", "Deferred ViewModel initialization launched.", "AsyncStart");
                 StartupTimingLogger.Log("MainWindow", $"Deferred initialization launched at {startupStopwatch.ElapsedMilliseconds} ms");
 
@@ -459,6 +485,30 @@ namespace PS7ScriptDesk.Shell
                     "Startup Error",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
+            }
+        }
+
+        private void StartDeferredInitialization(MainWindowViewModel viewModel)
+        {
+            if (_deferredInitializationTask is not null)
+            {
+                return;
+            }
+
+            _deferredInitializationTask = viewModel.InitializeAsync();
+            _ = ObserveDeferredInitializationAsync(_deferredInitializationTask);
+        }
+
+        private static async Task ObserveDeferredInitializationAsync(Task initializationTask)
+        {
+            try
+            {
+                await initializationTask.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Startup", "Deferred ViewModel initialization faulted outside its expected recovery boundary.", ex);
+                DeveloperDiagnostics.LogException("Startup", ex, "Deferred ViewModel initialization faulted outside its expected recovery boundary.");
             }
         }
 
@@ -541,6 +591,44 @@ namespace PS7ScriptDesk.Shell
         {
             DeveloperDiagnostics.LogEventHandlerEntry("UI", "Window_ContentRendered", "Window content rendered.");
             DeveloperDiagnostics.LogEventHandlerExit("UI", "Window_ContentRendered", "Window content rendered handler completed.");
+        }
+
+        private void ResetConsoleButton_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            // Capture this before WPF transfers focus from the WebView2/xterm host to
+            // the button. The ViewModel will consume it only for this replacement session.
+            ViewModel?.PrepareTerminalFocusRestoreForReset();
+        }
+
+        private void Window_PreviewGotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+        {
+            if (ViewModel is null || IsResetConsoleFocusTarget(e.NewFocus))
+            {
+                return;
+            }
+
+            ViewModel.NotifyTerminalFocusOwnershipChanged(IsTerminalFocusTarget(e.NewFocus));
+        }
+
+        private TerminalFocusRestoreReadiness GetTerminalFocusRestoreReadiness()
+        {
+            return new TerminalFocusRestoreReadiness(
+                RendererReady: _terminalIsReady,
+                ConsoleVisible: ConsoleBottomPaneTab.IsChecked == true && TerminalConsole.IsVisible,
+                ApplicationActive: IsActive && !_allowWindowClose && !_terminalShutdownInProgress,
+                ModalDialogOpen: System.Windows.Interop.ComponentDispatcher.IsThreadModal);
+        }
+
+        private bool IsTerminalFocusTarget(IInputElement? focusedElement)
+        {
+            return focusedElement is DependencyObject dependencyObject &&
+                   (ReferenceEquals(dependencyObject, TerminalConsole) || TerminalConsole.IsAncestorOf(dependencyObject));
+        }
+
+        private bool IsResetConsoleFocusTarget(IInputElement? focusedElement)
+        {
+            return focusedElement is DependencyObject dependencyObject &&
+                   (ReferenceEquals(dependencyObject, ResetConsoleButton) || ResetConsoleButton.IsAncestorOf(dependencyObject));
         }
 
 
@@ -1223,7 +1311,15 @@ namespace PS7ScriptDesk.Shell
 
             if (ch == '(' || ch == ',' || ch == ' ' || ch == '-')
             {
-                ObserveFireAndForget(ShowEditorQuickInfoAtCaretAsync(editorTextEditor, updateStatusOnly: true), "editor quick-info update");
+                var registrationVersion = _editorRegistrationVersions.TryGetValue(editorTextEditor, out var version) ? version : 0;
+                _ = ObserveFireAndForget(
+                    ShowEditorQuickInfoAtCaretAsync(editorTextEditor, updateStatusOnly: true),
+                    "editor quick-info update",
+                    new Dictionary<string, object?>
+                    {
+                        ["editorRegistrationVersion"] = registrationVersion,
+                        ["editorIdentity"] = RuntimeHelpers.GetHashCode(editorTextEditor)
+                    });
             }
 
             // Trigger IntelliSense. When a completion window is already open, let
@@ -1441,6 +1537,47 @@ namespace PS7ScriptDesk.Shell
         private void HelpOverview_Click(object sender, RoutedEventArgs e)
         {
             ContextHelp.OpenOverview(this);
+        }
+
+        private void About_Click(object sender, RoutedEventArgs e)
+        {
+            DeveloperDiagnostics.LogUserAction("Help", "AboutRequested", "About window requested.");
+
+            try
+            {
+                if (_aboutWindow is { IsLoaded: true })
+                {
+                    _aboutWindow.Activate();
+                    DeveloperDiagnostics.LogDecision("Help", "AboutRequested", "Existing About window activated.", "ReuseExistingWindow");
+                    return;
+                }
+
+                var aboutWindow = new AboutWindow
+                {
+                    Owner = this
+                };
+                aboutWindow.Closed += AboutWindow_Closed;
+                _aboutWindow = aboutWindow;
+                aboutWindow.Show();
+                aboutWindow.Activate();
+                DeveloperDiagnostics.LogDecision("Help", "AboutRequested", "About window created and shown.", "CreateWindow");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Help", "Failed to show the About window.", ex);
+                DeveloperDiagnostics.LogException("Help", ex, "Failed to show the About window.");
+                ViewModel?.StatusText = "Unable to open About";
+            }
+        }
+
+        private void AboutWindow_Closed(object? sender, EventArgs e)
+        {
+            if (ReferenceEquals(sender, _aboutWindow))
+            {
+                _aboutWindow = null;
+            }
+
+            DeveloperDiagnostics.LogInfo("Help", "About window closed.");
         }
 
         private void ContextHelp_Click(object sender, RoutedEventArgs e)
@@ -2220,7 +2357,7 @@ namespace PS7ScriptDesk.Shell
             _foldingCancellationSources[editorTextEditor] = cts;
             var registrationVersion = _editorRegistrationVersions.TryGetValue(editorTextEditor, out var version) ? version : 0;
 
-            ObserveFireAndForget(Task.Run(async () =>
+            _ = ObserveFireAndForget(Task.Run(async () =>
             {
                 try
                 {
@@ -2260,7 +2397,11 @@ namespace PS7ScriptDesk.Shell
                     }
                     catch { /* Application is closing or dispatcher is unavailable. */ }
                 }
-            }, token), "editor folding update");
+            }, token), "editor folding update", new Dictionary<string, object?>
+            {
+                ["editorRegistrationVersion"] = registrationVersion,
+                ["editorIdentity"] = RuntimeHelpers.GetHashCode(editorTextEditor)
+            });
         }
 
         private static void EnsureBackgroundRendererAttached(TextEditor editorTextEditor, IBackgroundRenderer renderer)
@@ -2931,13 +3072,37 @@ namespace PS7ScriptDesk.Shell
             // operation.
         }
 
-        private static void ObserveFireAndForget(Task task, string operationName)
+        private static Task ObserveFireAndForget(
+            Task task,
+            string operationName,
+            IReadOnlyDictionary<string, object?>? operationMetadata = null)
         {
-            _ = task.ContinueWith(
+            return task.ContinueWith(
                 completedTask =>
                 {
-                    _ = completedTask.Exception;
-                    System.Diagnostics.Debug.WriteLine($"[MainWindow] Background {operationName} failed: {completedTask.Exception}");
+                    var aggregateException = completedTask.Exception;
+                    if (aggregateException is null)
+                    {
+                        return;
+                    }
+
+                    var metadata = operationMetadata is null
+                        ? new Dictionary<string, object?>()
+                        : new Dictionary<string, object?>(operationMetadata);
+                    var innerExceptions = aggregateException.Flatten().InnerExceptions;
+                    metadata["operationName"] = operationName;
+                    metadata["aggregateInnerExceptionCount"] = innerExceptions.Count;
+                    metadata["aggregateInnerExceptionTypes"] = string.Join(
+                        ",",
+                        innerExceptions.Take(5).Select(exception => exception.GetType().Name));
+                    metadata["aggregateInnerExceptionTypesTruncated"] = innerExceptions.Count > 5;
+
+                    AppLogger.Error("Editor", $"Detached editor task failed. Operation={operationName}.", aggregateException);
+                    DeveloperDiagnostics.LogException(
+                        "Editor",
+                        aggregateException,
+                        "Detached editor task failed.",
+                        metadata);
                 },
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted,
@@ -5058,8 +5223,20 @@ namespace PS7ScriptDesk.Shell
             DeveloperDiagnostics.LogEventHandlerExit(
                 "UI",
                 "Window_Closing",
-                "Bounded terminal teardown completed; issuing the final close request.");
-            Close();
+                "Bounded terminal teardown completed; queuing the final close request.");
+
+            // Window_Closing is an async-void WPF event handler. Even though the
+            // original close request was cancelled above, WPF still considers the
+            // Window to be inside its Closing operation until this handler returns.
+            // Calling Close() directly from this continuation can therefore throw:
+            // "Cannot ... call ... Close ... while a Window is closing."
+            //
+            // Queue the final Close() so the current Closing handler can return first.
+            // _allowWindowClose is already true, so the queued close takes the final
+            // cleanup path without starting terminal/debug teardown again.
+            Dispatcher.BeginInvoke(
+                new Action(Close),
+                DispatcherPriority.Normal);
         }
 
         private bool TryPrepareForWindowClose()

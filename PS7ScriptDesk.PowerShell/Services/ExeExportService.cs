@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Application.Interfaces;
 using PS7ScriptDesk.Domain.Models;
@@ -56,19 +57,24 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             var projectDirectory = Path.Combine(tempRoot, "project");
             var publishDirectory = Path.Combine(tempRoot, "publish");
-            Directory.CreateDirectory(projectDirectory);
-            Directory.CreateDirectory(publishDirectory);
+            var failureStage = ExeExportFailureStage.CreateTemporaryDirectories;
+            string? runtimeIdentifier = null;
 
             try
             {
+                Directory.CreateDirectory(projectDirectory);
+                Directory.CreateDirectory(publishDirectory);
+
                 var assemblyName = BuildSafeAssemblyName(Path.GetFileNameWithoutExtension(request.OutputExecutablePath));
                 var projectFilePath = Path.Combine(projectDirectory, $"{assemblyName}.csproj");
                 var programFilePath = Path.Combine(projectDirectory, "Program.cs");
-                var runtimeIdentifier = GetRuntimeIdentifier();
+                runtimeIdentifier = GetRuntimeIdentifier();
 
+                failureStage = ExeExportFailureStage.WriteGeneratedProject;
                 File.WriteAllText(projectFilePath, BuildProjectFile(assemblyName), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 File.WriteAllText(programFilePath, BuildProgramSource(request), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
+                failureStage = ExeExportFailureStage.RunDotNetPublish;
                 var publishResult = await RunDotNetPublishAsync(
                     projectFilePath,
                     publishDirectory,
@@ -77,6 +83,8 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                 if (!publishResult.Started)
                 {
+                    LogExportResultFailure(request, failureStage, runtimeIdentifier, publishResult,
+                        "The local dotnet publish process could not be started.");
                     return BuildFailureResult(
                         request.OutputExecutablePath,
                         "Export as EXE requires the local .NET SDK 'dotnet' command.",
@@ -85,12 +93,15 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                 if (publishResult.ExitCode != 0)
                 {
+                    LogExportResultFailure(request, failureStage, runtimeIdentifier, publishResult,
+                        "The local dotnet publish process returned a non-zero exit code.");
                     return BuildFailureResult(
                         request.OutputExecutablePath,
                         "The local wrapper build failed while publishing the exported executable.",
                         publishResult.LogText);
                 }
 
+                failureStage = ExeExportFailureStage.LocatePublishedExecutable;
                 var publishedExecutablePath = Path.Combine(publishDirectory, $"{assemblyName}.exe");
                 if (!File.Exists(publishedExecutablePath))
                 {
@@ -100,6 +111,8 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                     if (string.IsNullOrWhiteSpace(discoveredExecutablePath))
                     {
+                        LogExportResultFailure(request, failureStage, runtimeIdentifier, publishResult,
+                            "dotnet publish completed without producing an executable.");
                         return BuildFailureResult(
                             request.OutputExecutablePath,
                             "The export completed without producing an executable file.",
@@ -118,7 +131,10 @@ namespace PS7ScriptDesk.PowerShell.Services
                         $"Invalid output path: {request.OutputExecutablePath}");
                 }
 
+                failureStage = ExeExportFailureStage.CreateOutputDirectory;
                 Directory.CreateDirectory(outputDirectory);
+
+                failureStage = ExeExportFailureStage.CopyExecutable;
                 File.Copy(publishedExecutablePath, request.OutputExecutablePath, overwrite: true);
 
                 var successLog = new StringBuilder();
@@ -140,6 +156,7 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
             catch (Exception ex)
             {
+                LogExportException(request, failureStage, runtimeIdentifier, ex);
                 return BuildFailureResult(
                     request.OutputExecutablePath,
                     "Export as EXE failed unexpectedly.",
@@ -541,7 +558,11 @@ internal static class Program
             }
             catch (Win32Exception ex)
             {
-                return new DotNetPublishResult(false, -1, $"The local 'dotnet' command was not found or could not be started. {ex.Message}");
+                return new DotNetPublishResult(
+                    false,
+                    -1,
+                    $"The local 'dotnet' command was not found or could not be started. {ex.Message}",
+                    ex);
             }
 
             var standardOutputTask = process.StandardOutput.ReadToEndAsync();
@@ -624,6 +645,64 @@ internal static class Program
                 detailedLog: detailedLog);
         }
 
+        private static void LogExportResultFailure(
+            ExeExportRequest request,
+            ExeExportFailureStage failureStage,
+            string? runtimeIdentifier,
+            DotNetPublishResult publishResult,
+            string message)
+        {
+            var metadata = CreateExportDiagnosticMetadata(request, failureStage, runtimeIdentifier);
+            metadata["publishStarted"] = publishResult.Started;
+            metadata["publishExitCode"] = publishResult.ExitCode;
+            foreach (var entry in DeveloperDiagnostics.CreatePrivateTextMetadata(publishResult.LogText))
+            {
+                metadata[$"publish{char.ToUpperInvariant(entry.Key[0])}{entry.Key[1..]}"] = entry.Value;
+            }
+
+            if (publishResult.StartupException is not null)
+            {
+                metadata["startupExceptionType"] = publishResult.StartupException.GetType().FullName;
+                AppLogger.Error("ExeExport", message, publishResult.StartupException);
+                DeveloperDiagnostics.LogException("ExeExport", publishResult.StartupException, message, metadata);
+                return;
+            }
+
+            AppLogger.Error("ExeExport", message);
+            DeveloperDiagnostics.LogError("ExeExport", message, metadata);
+        }
+
+        private static void LogExportException(
+            ExeExportRequest request,
+            ExeExportFailureStage failureStage,
+            string? runtimeIdentifier,
+            Exception exception)
+        {
+            var metadata = CreateExportDiagnosticMetadata(request, failureStage, runtimeIdentifier);
+            metadata["exceptionType"] = exception.GetType().FullName;
+            AppLogger.Error("ExeExport", $"Export as EXE failed unexpectedly during {failureStage}.", exception);
+            DeveloperDiagnostics.LogException(
+                "ExeExport",
+                exception,
+                "Export as EXE failed unexpectedly.",
+                metadata);
+        }
+
+        private static Dictionary<string, object?> CreateExportDiagnosticMetadata(
+            ExeExportRequest request,
+            ExeExportFailureStage failureStage,
+            string? runtimeIdentifier)
+        {
+            return new Dictionary<string, object?>
+            {
+                ["stage"] = failureStage.ToString(),
+                ["sourceFileName"] = Path.GetFileName(request.SourceScriptPath),
+                ["destinationFileName"] = Path.GetFileName(request.OutputExecutablePath),
+                ["runtimeDisplayName"] = request.RuntimeInfo?.DisplayName,
+                ["runtimeIdentifier"] = runtimeIdentifier
+            };
+        }
+
         private static void TryDeleteDirectory(string directoryPath)
         {
             if (string.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath))
@@ -642,11 +721,12 @@ internal static class Program
 
         private sealed class DotNetPublishResult
         {
-            public DotNetPublishResult(bool started, int exitCode, string logText)
+            public DotNetPublishResult(bool started, int exitCode, string logText, Exception? startupException = null)
             {
                 Started = started;
                 ExitCode = exitCode;
                 LogText = logText;
+                StartupException = startupException;
             }
 
             public bool Started { get; }
@@ -654,6 +734,18 @@ internal static class Program
             public int ExitCode { get; }
 
             public string LogText { get; }
+
+            public Exception? StartupException { get; }
+        }
+
+        private enum ExeExportFailureStage
+        {
+            CreateTemporaryDirectories,
+            WriteGeneratedProject,
+            RunDotNetPublish,
+            LocatePublishedExecutable,
+            CreateOutputDirectory,
+            CopyExecutable
         }
     }
 }

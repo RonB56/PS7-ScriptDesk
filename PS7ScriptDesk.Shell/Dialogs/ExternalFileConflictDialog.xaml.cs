@@ -1,5 +1,7 @@
 using System.Windows;
+using System.Windows.Input;
 using PS7ScriptDesk.Application.Interfaces;
+using PS7ScriptDesk.Shell.Help;
 
 namespace PS7ScriptDesk.Shell.Dialogs
 {
@@ -13,6 +15,22 @@ namespace PS7ScriptDesk.Shell.Dialogs
         }
 
         public ExternalFileConflictDecision Decision { get; private set; } = ExternalFileConflictDecision.Cancel;
+
+        private void Window_Loaded(object sender, RoutedEventArgs e)
+        {
+            ContextHelp.ValidateWindowTopics(this);
+        }
+
+        private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (e.Key != Key.F1)
+            {
+                return;
+            }
+
+            e.Handled = true;
+            ContextHelp.OpenForFocusedElement(this);
+        }
 
         private void ReloadButton_Click(object sender, RoutedEventArgs e) => Complete(ExternalFileConflictDecision.ReloadFromDisk);
 

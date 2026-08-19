@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Input;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.PowerShell.Services;
+using PS7ScriptDesk.Shell.Help;
 
 namespace PS7ScriptDesk.Shell
 {
@@ -23,6 +25,22 @@ namespace PS7ScriptDesk.Shell
         }
 
         public PowerShellRuntimeInfo? SelectedRuntime { get; private set; }
+
+        private void Window_Loaded(object sender, RoutedEventArgs e)
+        {
+            ContextHelp.ValidateWindowTopics(this);
+        }
+
+        private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (e.Key != Key.F1)
+            {
+                return;
+            }
+
+            e.Handled = true;
+            ContextHelp.OpenForFocusedElement(this);
+        }
 
         private void BrowseButton_Click(object sender, RoutedEventArgs e)
         {

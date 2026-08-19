@@ -7,6 +7,8 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using PS7ScriptDesk.Application.Diagnostics;
+using PS7ScriptDesk.Application.Utilities;
 using MediaColor = System.Windows.Media.Color;
 using WpfContextMenu = System.Windows.Controls.ContextMenu;
 using WpfMenuItem = System.Windows.Controls.MenuItem;
@@ -18,6 +20,7 @@ namespace PS7ScriptDesk.Shell.Help
     public static class ContextHelp
     {
         private const string HelpMenuItemTag = "PS7ScriptDesk.ContextHelpMenuItem";
+        internal const string DisabledContextHelpMessage = "Context Help is currently disabled. Enable ‘Help Enabled’ from the Help menu to use this feature.";
         private static readonly Dictionary<Window, ContextHelpWindow> OpenWindows = new();
         private static readonly Dictionary<Window, WeakReference<DependencyObject>> LastHelpTargets = new();
         private static bool _isEnabled = true;
@@ -65,18 +68,36 @@ namespace PS7ScriptDesk.Shell.Help
 
             if (!enabled)
             {
-                foreach (var window in OpenWindows.Values.ToList())
+                foreach (var entry in OpenWindows.ToArray())
                 {
+                    var owner = entry.Key;
+                    var window = entry.Value;
                     try
                     {
-                        window.Close();
+                        if (window.IsLoaded)
+                        {
+                            window.Close();
+                        }
                     }
-                    catch
+                    catch (Exception ex)
                     {
+                        AppLogger.Error("Help", "Failed to close a context Help window while Help was disabled.", ex);
+                        DeveloperDiagnostics.LogException(
+                            "Help",
+                            ex,
+                            "Failed to close a context Help window while Help was disabled.",
+                            new Dictionary<string, object?>
+                            {
+                                ["ownerWindowType"] = owner.GetType().Name,
+                                ["helpWindowLoaded"] = window.IsLoaded
+                            });
+                    }
+
+                    if (!window.IsLoaded)
+                    {
+                        OpenWindows.Remove(owner);
                     }
                 }
-
-                OpenWindows.Clear();
             }
 
             RefreshAllAttachedHelp();
@@ -94,13 +115,32 @@ namespace PS7ScriptDesk.Shell.Help
 
         public static void OpenOverview(Window owner)
         {
-            OpenTopic(owner, HelpTopicCatalog.OverviewKey);
+            if (!IsEnabled)
+            {
+                ShowDisabledContextHelpMessage(owner);
+                return;
+            }
+
+            if (!OpenWindows.TryGetValue(owner, out var window) || !window.IsLoaded)
+            {
+                window = new ContextHelpWindow(HelpTopicCatalog.Get(HelpTopicCatalog.OverviewKey, "ContextHelp.OpenOverview"))
+                {
+                    Owner = owner
+                };
+                window.Closed += (_, _) => OpenWindows.Remove(owner);
+                OpenWindows[owner] = window;
+            }
+
+            window.ShowHome();
+            window.Show();
+            window.Activate();
         }
 
         public static bool OpenForFocusedElement(Window owner)
         {
             if (!IsEnabled)
             {
+                ShowDisabledContextHelpMessage(owner);
                 return false;
             }
 
@@ -122,6 +162,7 @@ namespace PS7ScriptDesk.Shell.Help
         {
             if (!IsEnabled)
             {
+                ShowDisabledContextHelpMessage(owner);
                 return;
             }
 
@@ -141,6 +182,18 @@ namespace PS7ScriptDesk.Shell.Help
             window.ShowTopic(topic);
             window.Show();
             window.Activate();
+        }
+
+        private static void ShowDisabledContextHelpMessage(Window owner)
+        {
+            AppLogger.Info("Help", "A deliberate Context Help action was requested while Context Help was disabled.");
+            DeveloperDiagnostics.LogUserAction("Help", "ContextHelpDisabled", "Context Help was requested while disabled.");
+            System.Windows.MessageBox.Show(
+                owner,
+                DisabledContextHelpMessage,
+                "Context Help Disabled",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
         }
 
         public static IReadOnlyList<string> ValidateWindowTopics(Window window)

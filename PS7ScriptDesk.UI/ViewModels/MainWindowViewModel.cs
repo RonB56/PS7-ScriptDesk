@@ -32,6 +32,8 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly IExeExportService _exeExportService;
         private SynchronizationContext? _uiSynchronizationContext;
         private readonly SemaphoreSlim _consoleSessionGate = new(1, 1);
+        private readonly SemaphoreSlim _consoleRecoveryGate = new(1, 1);
+        private readonly TerminalFocusRestorePolicy _terminalFocusRestorePolicy = new();
         private CancellationTokenSource? _runtimeLaunchVerificationCancellationTokenSource;
         private int _runtimeLaunchVerificationGeneration;
         private bool _runtimeLaunchVerificationWarningShown;
@@ -60,8 +62,15 @@ namespace PS7ScriptDesk.UI.ViewModels
         private string _debuggerOutputText = string.Empty;
         private Action?         _clearTerminalSink;
         private Action?         _focusTerminalSink;
+        private Action?         _normalizeTerminalInteractiveStateSink;
+        private Func<int, CancellationToken, Task<TerminalFocusRestoreResult>>? _restoreTerminalFocusSink;
+        private Func<bool>?     _isTerminalFocusedSink;
+        private Func<TerminalFocusRestoreReadiness>? _terminalFocusRestoreReadinessSink;
         private Action<int>?    _beginTerminalOutputGenerationSink;
         private Action<int>?    _invalidateTerminalOutputGenerationSink;
+        private TerminalFocusRestoreIntent _preparedTerminalFocusIntent;
+        private int _currentTerminalGeneration;
+        private int _resetConsoleInProgress;
         private bool _isDebugSessionActive;
         private string _workspaceText;
         private string _workspaceFilterText = string.Empty;
@@ -156,7 +165,6 @@ namespace PS7ScriptDesk.UI.ViewModels
             RunCommand = _runCommand;
             _stopCommand = new RelayCommand(async () => await OnStopAsync(), CanStopScript);
             StopCommand = _stopCommand;
-            AboutCommand = new RelayCommand(OnAbout);
             ClearConsoleCommand = new RelayCommand(async () => await OnClearConsoleAsync());
             _refreshRuntimesCommand = new RelayCommand(async () => await OnRefreshRuntimesAsync(), CanRefreshRuntimes);
             RefreshRuntimesCommand = _refreshRuntimesCommand;
@@ -749,8 +757,6 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public ICommand StopCommand { get; }
 
-        public ICommand AboutCommand { get; }
-
         public ICommand ClearConsoleCommand { get; }
 
         public ICommand RefreshRuntimesCommand { get; }
@@ -780,10 +786,10 @@ namespace PS7ScriptDesk.UI.ViewModels
         {
             BindToCurrentSynchronizationContext();
             var startupStopwatch = Stopwatch.StartNew();
-            StartupTimingLogger.Log("MainWindowViewModel", "Deferred initialization started.");
 
             try
             {
+                StartupTimingLogger.Log("MainWindowViewModel", "Deferred initialization started.");
                 Task? runtimeDiscoveryTask = null;
                 if (_startupRuntimeSeeded)
                 {
@@ -813,13 +819,15 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
             catch (Exception ex)
             {
-                StartupTimingLogger.Log("MainWindowViewModel", $"Deferred initialization failed after {startupStopwatch.ElapsedMilliseconds} ms: {ex}");
+                AppLogger.Error("Startup", "Deferred ViewModel initialization failed; UI recovery is being applied.", ex);
+                DeveloperDiagnostics.LogException("Startup", ex, "Deferred MainWindowViewModel initialization failed.");
                 PostToUi(() =>
                 {
                     StatusText = "Startup initialization failed";
                     AppendOutputLine($"Startup initialization failed: {ex.Message}");
                     UpdateConsoleSessionPresentation();
                 });
+                StartupTimingLogger.Log("MainWindowViewModel", $"Deferred initialization failed after {startupStopwatch.ElapsedMilliseconds} ms: {ex}");
             }
         }
 
@@ -1013,12 +1021,68 @@ namespace PS7ScriptDesk.UI.ViewModels
             Action clearTerminal,
             Action? focusTerminal = null,
             Action<int>? beginTerminalOutputGeneration = null,
-            Action<int>? invalidateTerminalOutputGeneration = null)
+            Action<int>? invalidateTerminalOutputGeneration = null,
+            Func<bool>? isTerminalFocused = null,
+            Func<TerminalFocusRestoreReadiness>? terminalFocusRestoreReadiness = null,
+            Func<int, CancellationToken, Task<TerminalFocusRestoreResult>>? restoreTerminalFocus = null,
+            Action? normalizeTerminalInteractiveState = null)
         {
             _clearTerminalSink  = clearTerminal;
             _focusTerminalSink  = focusTerminal;
+            _normalizeTerminalInteractiveStateSink = normalizeTerminalInteractiveState;
             _beginTerminalOutputGenerationSink = beginTerminalOutputGeneration;
             _invalidateTerminalOutputGenerationSink = invalidateTerminalOutputGeneration;
+            _isTerminalFocusedSink = isTerminalFocused;
+            _terminalFocusRestoreReadinessSink = terminalFocusRestoreReadiness;
+            _restoreTerminalFocusSink = restoreTerminalFocus;
+        }
+
+        /// <summary>
+        /// Captures terminal focus before a Reset Console button click moves focus to the
+        /// button. The request is consumed only by the replacement terminal generation.
+        /// </summary>
+        public void PrepareTerminalFocusRestoreForReset()
+        {
+            var terminalHadFocus = _isTerminalFocusedSink?.Invoke() == true;
+            _preparedTerminalFocusIntent = _terminalFocusRestorePolicy.Capture(
+                terminalHadFocus,
+                Volatile.Read(ref _currentTerminalGeneration));
+            AppLogger.Info(
+                "Terminal",
+                $"Reset Console focus intent captured. Requested={_preparedTerminalFocusIntent.IsRequested}, PreviousGeneration={_preparedTerminalFocusIntent.PreviousGeneration}.");
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "ResetConsoleFocusIntent",
+                "Captured pre-reset terminal focus ownership.",
+                terminalHadFocus ? "Created" : "NotTerminalFocused",
+                new Dictionary<string, object?>
+                {
+                    ["previousGeneration"] = _preparedTerminalFocusIntent.PreviousGeneration,
+                    ["terminalHadFocus"] = terminalHadFocus
+                });
+        }
+
+        /// <summary>Called by the shell when focus moves outside the terminal during reset.</summary>
+        public void NotifyTerminalFocusOwnershipChanged(bool terminalHasFocus)
+        {
+            if (terminalHasFocus || !_terminalFocusRestorePolicy.Cancel())
+            {
+                return;
+            }
+
+            _preparedTerminalFocusIntent = TerminalFocusRestoreIntent.None;
+            AppLogger.Info("Terminal", "Reset Console focus intent canceled because focus moved outside the terminal.");
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "ResetConsoleFocusIntent",
+                "Canceled pending terminal focus restoration because the user selected another control.",
+                "UserFocusMoved");
+        }
+
+        /// <summary>Called after xterm/WebView2 renderer readiness is reported by the shell.</summary>
+        public void NotifyTerminalRendererReady()
+        {
+            RequestTerminalFocusAfterReset(Volatile.Read(ref _currentTerminalGeneration), "RendererReady");
         }
 
         /// <summary>
@@ -1104,6 +1168,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public async Task<bool> ShutdownTerminalAsync(CancellationToken cancellationToken = default)
         {
+            CancelPendingTerminalFocusRestore("ApplicationShutdown");
             var operationId = $"TerminalShutdown-{Guid.NewGuid():N}";
             using var scope = DeveloperDiagnostics.BeginTimedOperation(
                 "Terminal",
@@ -2654,6 +2719,19 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
             catch (Exception ex)
             {
+                AppLogger.Error("ExeExport", "Export as EXE failed outside the service-owned failure boundary.", ex);
+                DeveloperDiagnostics.LogException(
+                    "ExeExport",
+                    ex,
+                    "Export as EXE failed outside the service-owned failure boundary.",
+                    new Dictionary<string, object?>
+                    {
+                        ["operation"] = "ExportAsExe",
+                        ["sourceFileName"] = Path.GetFileName(selectedFilePath),
+                        ["destinationFileName"] = Path.GetFileName(outputExecutablePath),
+                        ["runtimeDisplayName"] = runtimeToUse.DisplayName,
+                        ["exceptionType"] = ex.GetType().FullName
+                    });
                 StatusText = "Export as EXE failed";
                 AppendOutputLine($"Export as EXE failed unexpectedly: {ex.Message}");
             }
@@ -3092,11 +3170,28 @@ namespace PS7ScriptDesk.UI.ViewModels
                 });
             IsStopInProgress = true;
 
+            if (!await _consoleRecoveryGate.WaitAsync(0).ConfigureAwait(false))
+            {
+                PostToUi(() =>
+                {
+                    IsStopInProgress = false;
+                    StatusText = "Another console recovery operation is already in progress";
+                    RefreshCommandStates();
+                });
+                AppLogger.Info("Console", $"Duplicate Interrupt request rejected because another console recovery operation owns the recovery gate. OperationId={operationId}.");
+                return;
+            }
+
             try
             {
                 var interruptResult = await _liveConsoleService
                     .InterruptOrRestartAsync(AppendExecutionOutput)
                     .ConfigureAwait(false);
+
+                var executionResolved = interruptResult.CompletedGracefully ||
+                                        interruptResult.SessionRestarted ||
+                                        !_liveConsoleService.IsSessionRunning ||
+                                        !_liveConsoleService.IsCommandInProgress;
 
                 PostToUi(() =>
                 {
@@ -3110,24 +3205,42 @@ namespace PS7ScriptDesk.UI.ViewModels
                     }
                     else if (interruptResult.InterruptAttempted)
                     {
-                        StatusText = "Interrupt attempted";
+                        StatusText = executionResolved
+                            ? "Interrupt attempted"
+                            : "Interrupt recovery did not complete; use Reset Console";
                     }
                     else
                     {
                         StatusText = "Interrupt was not needed";
                     }
 
-                    IsExecutionRunning = false;
+                    IsExecutionRunning = !executionResolved;
                     UpdateConsoleSessionPresentation();
                 });
 
+                if (executionResolved)
+                {
+                    RequestTerminalInteractiveStateNormalization("InterruptCompleted");
+                }
+
+                var diagnosticOutcome = interruptResult.SessionRestarted
+                    ? "ForcedRestart"
+                    : interruptResult.CompletedGracefully
+                        ? "GracefulCompletion"
+                        : executionResolved
+                            ? "ResolvedWithoutRestart"
+                            : "RecoveryIncomplete";
                 DeveloperDiagnostics.LogDecision(
                     "Terminal",
                     "InterruptRequested",
                     interruptResult.SessionRestarted
                         ? "Interrupt escalated to a forced owned-session restart."
-                        : "Interrupt completed without a forced restart.",
-                    interruptResult.SessionRestarted ? "ForcedRestart" : "GracefulOrNoOp",
+                        : interruptResult.CompletedGracefully
+                            ? "Interrupt completed without a forced restart."
+                            : executionResolved
+                                ? "Interrupt target ended or was replaced without a forced restart."
+                                : "Interrupt recovery did not resolve the active managed operation.",
+                    diagnosticOutcome,
                     new Dictionary<string, object?>
                     {
                         ["operationId"] = operationId,
@@ -3148,16 +3261,21 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ex,
                     "Interrupt or restart failed.",
                     new Dictionary<string, object?> { ["operationId"] = operationId });
+                var executionResolved = !_liveConsoleService.IsSessionRunning ||
+                                        !_liveConsoleService.IsCommandInProgress;
                 PostToUi(() =>
                 {
-                    StatusText = "Interrupt recovery failed";
+                    StatusText = executionResolved
+                        ? "Interrupt recovery failed after the previous operation ended"
+                        : "Interrupt recovery failed; use Reset Console";
                     AppendOutputLine($"Interrupt recovery failed: {ex.Message}");
-                    IsExecutionRunning = false;
+                    IsExecutionRunning = !executionResolved;
                     UpdateConsoleSessionPresentation();
                 });
             }
             finally
             {
+                _consoleRecoveryGate.Release();
                 PostToUi(() =>
                 {
                     IsStopInProgress = false;
@@ -3168,49 +3286,73 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task OnRestartConsoleAsync()
         {
-            if (IsExecutionRunning && !_liveConsoleService.IsSessionRunning)
+            if (!await _consoleRecoveryGate.WaitAsync(0).ConfigureAwait(false))
             {
-                AppLogger.Info("Console", "Reset Console requested while the UI still showed execution running but the PowerShell terminal process was already stopped. Clearing stale execution state before restart.");
-                IsExecutionRunning = false;
-                IsStopInProgress = false;
-                RefreshCommandStates();
-            }
-
-            if (IsExecutionRunning)
-            {
-                StatusText = "Wait for the current command to finish before restarting the console";
+                CancelPendingTerminalFocusRestore("RecoveryGateBusy");
+                PostToUi(() => StatusText = "Wait for the current Interrupt or Reset Console operation to finish");
+                AppLogger.Info("Console", "Reset Console request rejected because another console recovery operation is still in progress.");
                 return;
             }
-
-            var runtimeToUse = EffectiveRuntimeInfo;
-            if (runtimeToUse is null)
-            {
-                StatusText = "No PowerShell runtime is available to start the ConPTY terminal";
-                return;
-            }
-
-            StatusText = "Restarting PowerShell terminal...";
-            AppLogger.Info("Console", $"Restarting PowerShell terminal using {runtimeToUse.DisplayName}.");
 
             try
             {
-                await EnsureConsoleSessionAsync(runtimeToUse, forceRestart: true, logOperation: true).ConfigureAwait(false);
-                PostToUi(() => StatusText = $"ConPTY terminal restarted with {runtimeToUse.DisplayName}");
+                Interlocked.Exchange(ref _resetConsoleInProgress, 1);
+                PostToUi(() => IsStopInProgress = true);
+
+                if (!_preparedTerminalFocusIntent.IsRequested)
+                {
+                    PrepareTerminalFocusRestoreForReset();
+                }
+
+                if (IsExecutionRunning && !_liveConsoleService.IsSessionRunning)
+                {
+                    AppLogger.Info("Console", "Reset Console requested while the UI still showed execution running but the PowerShell terminal process was already stopped. Clearing stale execution state before restart.");
+                    IsExecutionRunning = false;
+                    RefreshCommandStates();
+                }
+
+                var runtimeToUse = EffectiveRuntimeInfo;
+                if (runtimeToUse is null)
+                {
+                    StatusText = "No PowerShell runtime is available to start the ConPTY terminal";
+                    return;
+                }
+
+                StatusText = "Restarting PowerShell terminal...";
+                AppLogger.Info("Console", $"Restarting PowerShell terminal using {runtimeToUse.DisplayName}. ActiveExecution={IsExecutionRunning}, CommandInProgress={_liveConsoleService.IsCommandInProgress}.");
+
+                try
+                {
+                    await EnsureConsoleSessionAsync(runtimeToUse, forceRestart: true, logOperation: true).ConfigureAwait(false);
+                    PostToUi(() =>
+                    {
+                        IsExecutionRunning = false;
+                        StatusText = $"ConPTY terminal restarted with {runtimeToUse.DisplayName}";
+                        RefreshCommandStates();
+                    });
+                    RequestTerminalFocusAfterReset(Volatile.Read(ref _currentTerminalGeneration), "ReplacementStarted");
+                }
+                catch (Exception ex)
+                {
+                    CancelPendingTerminalFocusRestore("ReplacementFailed");
+                    PostToUi(() =>
+                    {
+                        StatusText = "ConPTY terminal restart failed";
+                        AppendOutputLine($"ConPTY terminal restart failed: {ex.Message}");
+                        UpdateConsoleSessionPresentation();
+                    });
+                }
             }
-            catch (Exception ex)
+            finally
             {
+                Interlocked.Exchange(ref _resetConsoleInProgress, 0);
+                _consoleRecoveryGate.Release();
                 PostToUi(() =>
                 {
-                    StatusText = "ConPTY terminal restart failed";
-                    AppendOutputLine($"ConPTY terminal restart failed: {ex.Message}");
+                    IsStopInProgress = false;
+                    RefreshCommandStates();
                 });
             }
-        }
-
-        private void OnAbout()
-        {
-            StatusText = $"{ApplicationBranding.PublicName} {_applicationVersionText} - ConPTY PowerShell terminal host";
-            AppendOutputLine($"About requested - running {_applicationVersionText}");
         }
 
         private async Task OnClearConsoleAsync()
@@ -3413,6 +3555,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
+            var startupAttempted = false;
             await _consoleSessionGate.WaitAsync().ConfigureAwait(false);
             try
             {
@@ -3422,7 +3565,12 @@ namespace PS7ScriptDesk.UI.ViewModels
 
                 if (forceRestart && _liveConsoleService.IsSessionRunning)
                 {
-                    await _liveConsoleService.StopConsoleAsync(AppendExecutionOutput).ConfigureAwait(false);
+                    var stopped = await _liveConsoleService.StopConsoleAsync(AppendExecutionOutput).ConfigureAwait(false);
+                    if (!stopped || _liveConsoleService.IsSessionRunning)
+                    {
+                        throw new InvalidOperationException("The existing PowerShell terminal session did not reach a clean teardown boundary.");
+                    }
+
                     sessionIsCurrent = false;
                 }
 
@@ -3430,6 +3578,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 {
                     var startupDirectory = GetConsoleStartupDirectory();
                     AppLogger.Info("Console", $"Starting PowerShell terminal using {runtime.DisplayName}; StartupDirectory={startupDirectory}; ForceRestart={forceRestart}; LogOperation={logOperation}");
+                    startupAttempted = true;
                     await _liveConsoleService.StartSessionAsync(runtime, AppendExecutionOutput, startupDirectory).ConfigureAwait(false);
 
                     PostToUi(() =>
@@ -3446,7 +3595,24 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
             catch (Exception ex)
             {
-                await HandleConsoleRuntimeLaunchFailureAsync(runtime, ex).ConfigureAwait(false);
+                if (startupAttempted)
+                {
+                    await HandleConsoleRuntimeLaunchFailureAsync(runtime, ex).ConfigureAwait(false);
+                }
+                else
+                {
+                    AppLogger.Error("Console", "PowerShell terminal replacement failed before a new runtime launch was attempted.", ex);
+                    DeveloperDiagnostics.LogException(
+                        "Terminal",
+                        ex,
+                        "Console replacement failed before runtime startup.",
+                        new Dictionary<string, object?>
+                        {
+                            ["forceRestart"] = forceRestart,
+                            ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                            ["commandInProgress"] = _liveConsoleService.IsCommandInProgress
+                        });
+                }
                 throw;
             }
             finally
@@ -3566,6 +3732,22 @@ namespace PS7ScriptDesk.UI.ViewModels
             var failureReason = validationResult?.RuntimeInfo is null
                 ? validationResult?.CandidateInfo.FailureReason ?? exception.Message
                 : exception.Message;
+
+            if (validationResult?.RuntimeInfo is not null)
+            {
+                AppLogger.Warning("Console", $"PowerShell terminal startup failed, but the configured runtime passed an independent launch validation. RuntimePath='{runtimePath}', FailureType={exception.GetType().Name}.");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "ConsoleStartupFailure",
+                    "The runtime remained valid; the failure was classified as a terminal-session startup failure.",
+                    "RuntimeValidated",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtimePath"] = runtimePath,
+                        ["failureType"] = exception.GetType().Name
+                    });
+                return;
+            }
 
             PostToUi(() =>
             {
@@ -4314,6 +4496,36 @@ namespace PS7ScriptDesk.UI.ViewModels
         private void OnTerminalSessionStarted(int generation)
         {
             _beginTerminalOutputGenerationSink?.Invoke(generation);
+            var previousGeneration = Volatile.Read(ref _currentTerminalGeneration);
+            if (generation < previousGeneration)
+            {
+                AppLogger.Warning("Terminal", $"Ignored stale terminal-session start for focus restoration. Generation={generation}, CurrentGeneration={previousGeneration}.");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "ResetConsoleFocusRestore",
+                    "Ignored a stale terminal-session start callback.",
+                    "StaleGeneration",
+                    new Dictionary<string, object?>
+                    {
+                        ["generation"] = generation,
+                        ["currentGeneration"] = previousGeneration
+                    });
+                return;
+            }
+
+            Volatile.Write(ref _currentTerminalGeneration, generation);
+            var bound = _terminalFocusRestorePolicy.BindReplacementGeneration(generation);
+            if (bound)
+            {
+                AppLogger.Info("Terminal", $"Reset Console focus intent bound to replacement terminal generation {generation}.");
+                DeveloperDiagnostics.LogStateTransition(
+                    "Terminal",
+                    "ResetConsoleFocusRestore",
+                    "FocusIntentPending",
+                    "ReplacementGenerationBound",
+                    "Replacement terminal session started.",
+                    new Dictionary<string, object?> { ["replacementGeneration"] = generation });
+            }
         }
 
         private void OnTerminalSessionStopping(int generation)
@@ -4333,7 +4545,12 @@ namespace PS7ScriptDesk.UI.ViewModels
                 UpdateConsoleSessionPresentation();
             });
 
-            RequestTerminalFocusAfterExecutionCompletion();
+            RequestTerminalInteractiveStateNormalization("CommandCompleted");
+
+            if (Volatile.Read(ref _resetConsoleInProgress) == 0)
+            {
+                RequestTerminalFocusAfterExecutionCompletion();
+            }
         }
 
         private void OnSessionTerminated()
@@ -4357,7 +4574,197 @@ namespace PS7ScriptDesk.UI.ViewModels
                 UpdateConsoleSessionPresentation();
             });
 
-            RequestTerminalFocusAfterExecutionCompletion();
+            if (Volatile.Read(ref _resetConsoleInProgress) == 0)
+            {
+                RequestTerminalFocusAfterExecutionCompletion();
+            }
+        }
+
+        private void RequestTerminalFocusAfterReset(int generation, string source)
+        {
+            if (!_preparedTerminalFocusIntent.IsRequested)
+            {
+                return;
+            }
+
+            var readiness = _terminalFocusRestoreReadinessSink?.Invoke() ??
+                new TerminalFocusRestoreReadiness(
+                    RendererReady: false,
+                    ConsoleVisible: false,
+                    ApplicationActive: false,
+                    ModalDialogOpen: false);
+            var decision = _terminalFocusRestorePolicy.TryBeginFocusAttempt(generation, readiness);
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "ResetConsoleFocusRestore",
+                "Evaluated one-time focus restoration for the replacement terminal.",
+                decision.ToString(),
+                new Dictionary<string, object?>
+                {
+                    ["source"] = source,
+                    ["generation"] = generation,
+                    ["rendererReady"] = readiness.RendererReady,
+                    ["consoleVisible"] = readiness.ConsoleVisible,
+                    ["applicationActive"] = readiness.ApplicationActive,
+                    ["modalDialogOpen"] = readiness.ModalDialogOpen
+                });
+
+            if (decision == TerminalFocusRestoreDecision.Restore)
+            {
+                AppLogger.Info("Terminal", $"Starting verified terminal focus restoration after Reset Console. Generation={generation}, Source={source}.");
+                _ = RestoreTerminalFocusAfterResetAsync(generation, source);
+                return;
+            }
+
+            if (decision is TerminalFocusRestoreDecision.WaitingForReplacementGeneration or
+                TerminalFocusRestoreDecision.RendererNotReady or
+                TerminalFocusRestoreDecision.StaleGeneration)
+            {
+                return;
+            }
+
+            _preparedTerminalFocusIntent = TerminalFocusRestoreIntent.None;
+            AppLogger.Info("Terminal", $"Skipped Reset Console terminal focus restoration. Decision={decision}, Generation={generation}, Source={source}.");
+        }
+
+        private async Task RestoreTerminalFocusAfterResetAsync(int generation, string source)
+        {
+            var restoreFocus = _restoreTerminalFocusSink;
+            if (restoreFocus is null)
+            {
+                _focusTerminalSink?.Invoke();
+                _terminalFocusRestorePolicy.CompleteFocusAttempt(generation, succeeded: true);
+                _preparedTerminalFocusIntent = TerminalFocusRestoreIntent.None;
+                return;
+            }
+
+            try
+            {
+                var result = await restoreFocus(generation, CancellationToken.None).ConfigureAwait(false);
+                var retryAllowed = _terminalFocusRestorePolicy.CompleteFocusAttempt(generation, result.Succeeded);
+                LogTerminalFocusRestoreResult(generation, source, attempt: 1, result, retryAllowed);
+                if (result.Succeeded)
+                {
+                    _preparedTerminalFocusIntent = TerminalFocusRestoreIntent.None;
+                    return;
+                }
+
+                if (!retryAllowed)
+                {
+                    CancelPendingTerminalFocusRestore("BrowserFocusVerificationFailed");
+                    return;
+                }
+
+                // The first focus operation already ran at the host input priority. Yielding
+                // once lets WebView2 apply that activation before the bounded same-generation retry.
+                await Task.Yield();
+                var readiness = _terminalFocusRestoreReadinessSink?.Invoke();
+                var retryDecision = readiness is null
+                    ? TerminalFocusRestoreDecision.NoPendingIntent
+                    : _terminalFocusRestorePolicy.TryBeginFocusAttempt(generation, readiness.Value);
+                if (retryDecision != TerminalFocusRestoreDecision.Restore)
+                {
+                    AppLogger.Info("Terminal", $"Skipped retrying Reset Console focus restoration. Decision={retryDecision}, Generation={generation}.");
+                    return;
+                }
+
+                var retryResult = await restoreFocus(generation, CancellationToken.None).ConfigureAwait(false);
+                _terminalFocusRestorePolicy.CompleteFocusAttempt(generation, retryResult.Succeeded);
+                LogTerminalFocusRestoreResult(generation, source, attempt: 2, retryResult, retryAllowed: false);
+                if (retryResult.Succeeded)
+                {
+                    _preparedTerminalFocusIntent = TerminalFocusRestoreIntent.None;
+                }
+                else
+                {
+                    CancelPendingTerminalFocusRestore("BrowserFocusVerificationFailedAfterRetry");
+                }
+            }
+            catch (Exception ex)
+            {
+                _terminalFocusRestorePolicy.CompleteFocusAttempt(generation, succeeded: false);
+                DeveloperDiagnostics.LogException(
+                    "Terminal",
+                    ex,
+                    "Verified Reset Console terminal focus restoration failed.",
+                    new Dictionary<string, object?> { ["generation"] = generation, ["source"] = source });
+                CancelPendingTerminalFocusRestore("BrowserFocusException");
+            }
+        }
+
+        private static void LogTerminalFocusRestoreResult(
+            int generation,
+            string source,
+            int attempt,
+            TerminalFocusRestoreResult result,
+            bool retryAllowed)
+        {
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "ResetConsoleFocusRestore",
+                "Verified WPF, WebView2, and xterm focus result.",
+                result.Succeeded ? "Succeeded" : "Failed",
+                new Dictionary<string, object?>
+                {
+                    ["generation"] = generation,
+                    ["source"] = source,
+                    ["attempt"] = attempt,
+                    ["wpfHostFocused"] = result.WpfHostFocused,
+                    ["webViewFocused"] = result.WebViewFocused,
+                    ["browserFocusCommandExecuted"] = result.BrowserFocusCommandExecuted,
+                    ["xtermInputActive"] = result.XtermInputActive,
+                    ["activeElement"] = result.ActiveElement,
+                    ["failureReason"] = result.FailureReason,
+                    ["retryAllowed"] = retryAllowed
+                });
+        }
+
+        private void CancelPendingTerminalFocusRestore(string reason)
+        {
+            if (!_terminalFocusRestorePolicy.Cancel())
+            {
+                return;
+            }
+
+            _preparedTerminalFocusIntent = TerminalFocusRestoreIntent.None;
+            AppLogger.Info("Terminal", $"Canceled pending Reset Console terminal focus restoration. Reason={reason}.");
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "ResetConsoleFocusIntent",
+                "Canceled pending terminal focus restoration.",
+                reason);
+        }
+
+        /// <summary>
+        /// Repaints xterm's cursor layer after a completed or interrupted command without
+        /// moving keyboard focus away from the editor. The delayed repeats cover the final
+        /// ConPTY prompt/output chunk reaching WebView2 after the lifecycle event.
+        /// </summary>
+        private void RequestTerminalInteractiveStateNormalization(string source)
+        {
+            var normalizeTerminal = _normalizeTerminalInteractiveStateSink;
+            if (normalizeTerminal is null)
+            {
+                return;
+            }
+
+            PostToUi(normalizeTerminal);
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(75).ConfigureAwait(false);
+                    PostToUi(normalizeTerminal);
+
+                    await Task.Delay(175).ConfigureAwait(false);
+                    PostToUi(normalizeTerminal);
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Debug("Console", $"Deferred terminal interactive-state normalization failed. Source={source}, Reason={ex.Message}");
+                }
+            });
         }
 
         /// <summary>
@@ -4643,12 +5050,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private bool CanRestartConsole()
         {
-            var sessionRunning = _liveConsoleService.IsSessionRunning;
-            var commandInProgress = _liveConsoleService.IsCommandInProgress;
-
-            return (!IsExecutionRunning || !sessionRunning) &&
-                   (!commandInProgress || !sessionRunning) &&
-                   !IsStopInProgress &&
+            return !IsStopInProgress &&
                    !IsRuntimeDiscoveryInProgress &&
                    (SelectedRuntimeItem is not null || _preferredRuntimeItem is not null);
         }

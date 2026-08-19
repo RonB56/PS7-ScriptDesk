@@ -6,24 +6,6 @@ namespace PS7ScriptDesk.Tests;
 public sealed class TerminalOutputIsolationTests
 {
     [Fact]
-    public async Task AboutMessage_IsRoutedToApplicationActivity_NotDebuggerOrTerminalDisplay()
-    {
-        var viewModel = CreateViewModel();
-        var initialTerminalDisplay = viewModel.TerminalDisplayText;
-        var initialDebuggerOutput = viewModel.DebuggerOutputText;
-
-        viewModel.SetTerminalSessionControls(() => { }, () => { });
-
-        viewModel.AboutCommand.Execute(null);
-        await WaitUntilAsync(
-            () => viewModel.ApplicationActivityText.Contains("About requested", StringComparison.Ordinal));
-
-        Assert.Equal(initialTerminalDisplay, viewModel.TerminalDisplayText);
-        Assert.Equal(initialDebuggerOutput, viewModel.DebuggerOutputText);
-        Assert.Contains("About requested", viewModel.ApplicationActivityText, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public async Task DebuggerOutput_UsesDedicatedBuffer_NotApplicationActivityOrTerminalDisplay()
     {
         var viewModel = CreateViewModel();

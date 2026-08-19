@@ -19,6 +19,7 @@ namespace PS7ScriptDesk.Shell.Controls
         private readonly int _maximumPendingCharacters;
         private readonly int _maximumBatchCharacters;
         private bool _rendererReady;
+        private bool _rendererUnavailable;
         private bool _flushScheduled;
         private int? _activeGeneration;
         private long _nextSequence;
@@ -77,6 +78,15 @@ namespace PS7ScriptDesk.Shell.Controls
 
             lock (_syncRoot)
             {
+                if (_rendererUnavailable)
+                {
+                    return new TerminalOutputEnqueueResult(
+                        ScheduleFlush: false,
+                        AcceptedCharacters: 0,
+                        DroppedCharacters: data.Length,
+                        PendingCharacters: _pendingCharacters);
+                }
+
                 if (_activeGeneration != generation)
                 {
                     return new TerminalOutputEnqueueResult(
@@ -110,8 +120,27 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             lock (_syncRoot)
             {
+                if (_rendererUnavailable)
+                {
+                    return false;
+                }
+
                 _rendererReady = true;
                 return TryScheduleFlush();
+            }
+        }
+
+        /// <summary>
+        /// Permanently disables renderer delivery for this controller lifetime and discards
+        /// any output that can no longer be rendered after terminal bootstrap failure.
+        /// </summary>
+        public TerminalOutputRendererUnavailableResult MarkRendererUnavailable()
+        {
+            lock (_syncRoot)
+            {
+                _rendererUnavailable = true;
+                _rendererReady = false;
+                return new TerminalOutputRendererUnavailableResult(DiscardAllOutput());
             }
         }
 
@@ -215,6 +244,8 @@ namespace PS7ScriptDesk.Shell.Controls
         int RejectedStaleCharacters = 0);
 
     internal readonly record struct TerminalOutputGenerationInvalidationResult(int Generation, int DiscardedCharacters);
+
+    internal readonly record struct TerminalOutputRendererUnavailableResult(int DiscardedCharacters);
 
     internal readonly record struct TerminalOutputBatch(int Generation, long Sequence, string Data);
 

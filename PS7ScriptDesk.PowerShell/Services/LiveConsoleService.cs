@@ -57,6 +57,9 @@ namespace PS7ScriptDesk.PowerShell.Services
         // Interactive terminals submit Enter as carriage return (\r). Do not send CRLF into ConPTY/PSReadLine.
         private const string TerminalEnterSequence = "\r";
         private static readonly TimeSpan InterruptGracefulTimeout = TimeSpan.FromSeconds(2);
+        private static readonly TimeSpan InterruptInputWriteTimeout = TimeSpan.FromSeconds(1);
+        private static readonly TimeSpan InterruptRecoveryPollInterval = TimeSpan.FromMilliseconds(50);
+        private static readonly TimeSpan InterruptLifecycleGateTimeout = TimeSpan.FromSeconds(5);
         private static readonly TimeSpan NoVisibleOutputFeedbackDelay = TimeSpan.FromSeconds(5);
         private static readonly TimeSpan ScriptStartConfirmationDelay = TimeSpan.FromSeconds(3);
         private static readonly TimeSpan CommandHealthPollInterval = TimeSpan.FromMilliseconds(250);
@@ -104,6 +107,7 @@ namespace PS7ScriptDesk.PowerShell.Services
         private string? _lastPromptHeuristicDirectory;
         private int _terminalSessionGeneration;
         private bool _terminalSessionTeardownInProgress = true;
+        private readonly ResizeFailureEpisode _resizeFailureEpisode = new();
         private Task _lastProcessExitTeardownTask = Task.CompletedTask;
         private Task _pendingNativeTeardownTask = Task.CompletedTask;
 
@@ -193,6 +197,7 @@ namespace PS7ScriptDesk.PowerShell.Services
             {
                 _terminalSessionGeneration++;
                 _terminalSessionTeardownInProgress = false;
+                _resizeFailureEpisode.ResetForSession(_terminalSessionGeneration);
                 _handledTerminalExitProcessId = null;
                 _pendingStartToken = null;
                 _pendingCompletionToken = null;
@@ -224,6 +229,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                     return null;
                 }
 
+                process.Refresh();
                 var title = process.MainWindowTitle;
                 return string.IsNullOrWhiteSpace(title) ? null : title.Trim();
             }
@@ -260,21 +266,25 @@ namespace PS7ScriptDesk.PowerShell.Services
 
         public void ResizeHost(int width, int height)
         {
-            int columns;
-            int rows;
-            IntPtr pseudoConsole;
+            ResizeRequest resizeRequest;
 
             lock (_syncRoot)
             {
                 UpdateTerminalSize(width, height);
-                columns = _terminalColumns;
-                rows = _terminalRows;
-                pseudoConsole = _pseudoConsoleHandle;
+                resizeRequest = new ResizeRequest(
+                    _pseudoConsoleHandle,
+                    _terminalSessionGeneration,
+                    _terminalColumns,
+                    _terminalRows,
+                    _process);
             }
 
-            if (pseudoConsole != IntPtr.Zero)
+            if (resizeRequest.PseudoConsole != IntPtr.Zero)
             {
-                ResizePseudoConsole(pseudoConsole, new COORD((short)columns, (short)rows));
+                var hResult = ResizePseudoConsole(
+                    resizeRequest.PseudoConsole,
+                    new COORD((short)resizeRequest.Columns, (short)resizeRequest.Rows));
+                ObserveResizeResult("ResizeHost", resizeRequest, hResult);
             }
         }
 
@@ -315,9 +325,17 @@ namespace PS7ScriptDesk.PowerShell.Services
                     return;
                 }
 
-                if (!await StopConsoleCoreAsync(onOutput, "session-start").ConfigureAwait(false))
+                var previousSessionStoppedCleanly = await StopConsoleCoreAsync(onOutput, "session-start").ConfigureAwait(false);
+                if (!previousSessionStoppedCleanly && IsSessionRunning)
                 {
                     throw new InvalidOperationException("The previous PowerShell terminal session did not stop cleanly.");
+                }
+
+                if (!previousSessionStoppedCleanly)
+                {
+                    AppLogger.Warning(
+                        "LiveConsole",
+                        "Starting a replacement PowerShell session after the previous owned process stopped, even though bounded ConPTY cleanup is still completing in the background.");
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
@@ -738,6 +756,7 @@ namespace PS7ScriptDesk.PowerShell.Services
             bool commandInProgress;
             bool hasPseudoConsole;
             bool hostAttached;
+            int sessionGeneration;
 
             lock (_syncRoot)
             {
@@ -747,6 +766,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 commandInProgress = _isCommandInProgress;
                 hasPseudoConsole = _pseudoConsoleHandle != IntPtr.Zero;
                 hostAttached = _hostAttached;
+                sessionGeneration = _terminalSessionGeneration;
             }
 
             var ownedProcessId = TryGetProcessId(process);
@@ -805,19 +825,57 @@ namespace PS7ScriptDesk.PowerShell.Services
                     InterruptGracefulTimeout);
             }
 
-            await SendInterruptAsync().ConfigureAwait(false);
-            AppLogger.Info("LiveConsole", $"Graceful Ctrl+C interrupt sent. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, TimeoutMs={InterruptGracefulTimeout.TotalMilliseconds:0}.");
-            DeveloperDiagnostics.LogInfo(
-                "Terminal",
-                "Graceful interrupt was sent to the owned PowerShell session.",
-                new Dictionary<string, object?>
-                {
-                    ["operationId"] = operationId,
-                    ["ownedProcessId"] = ownedProcessId,
-                    ["timeoutMs"] = InterruptGracefulTimeout.TotalMilliseconds
-                });
+            var interruptSent = false;
+            var interruptWriteTask = SendInterruptAsync();
+            try
+            {
+                await interruptWriteTask
+                    .WaitAsync(InterruptInputWriteTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+                interruptSent = true;
+                AppLogger.Info("LiveConsole", $"Graceful Ctrl+C interrupt sent. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, InputWriteTimeoutMs={InterruptInputWriteTimeout.TotalMilliseconds:0}, RecoveryTimeoutMs={InterruptGracefulTimeout.TotalMilliseconds:0}.");
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "Graceful interrupt was sent to the owned PowerShell session.",
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = operationId,
+                        ["ownedProcessId"] = ownedProcessId,
+                        ["inputWriteTimeoutMs"] = InterruptInputWriteTimeout.TotalMilliseconds,
+                        ["recoveryTimeoutMs"] = InterruptGracefulTimeout.TotalMilliseconds
+                    });
+            }
+            catch (TimeoutException)
+            {
+                _ = interruptWriteTask.ContinueWith(
+                    static task => _ = task.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+                AppLogger.Warning("LiveConsole", $"Ctrl+C input write did not complete within the bounded timeout. Escalating recovery. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, TimeoutMs={InterruptInputWriteTimeout.TotalMilliseconds:0}.");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "InterruptRequested",
+                    "Ctrl+C input delivery timed out before it could be confirmed.",
+                    "InputWriteTimedOut",
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = operationId,
+                        ["ownedProcessId"] = ownedProcessId,
+                        ["timeoutMs"] = InterruptInputWriteTimeout.TotalMilliseconds
+                    });
+            }
 
-            if (await WaitForCommandCompletionAsync(InterruptGracefulTimeout, cancellationToken).ConfigureAwait(false))
+            var recoveryOutcome = interruptSent
+                ? await WaitForInterruptRecoveryAsync(
+                        process,
+                        sessionGeneration,
+                        InterruptGracefulTimeout,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : InterruptRecoveryWaitOutcome.TimedOut;
+
+            if (recoveryOutcome == InterruptRecoveryWaitOutcome.Recovered)
             {
                 AppLogger.Info("LiveConsole", $"Graceful interrupt completed before timeout. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}.");
                 DeveloperDiagnostics.LogDecision(
@@ -842,11 +900,24 @@ namespace PS7ScriptDesk.PowerShell.Services
                     InterruptGracefulTimeout);
             }
 
-            if (!IsCommandInProgress)
+            if (recoveryOutcome == InterruptRecoveryWaitOutcome.Superseded)
             {
+                AppLogger.Info("LiveConsole", $"Interrupt target was superseded before recovery completed. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, SessionGeneration={sessionGeneration}.");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "InterruptRequested",
+                    "Interrupt recovery stopped because its source terminal generation was replaced.",
+                    "Superseded",
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = operationId,
+                        ["ownedProcessId"] = ownedProcessId,
+                        ["sessionGeneration"] = sessionGeneration
+                    });
+
                 return new LiveConsoleInterruptResult(
                     interruptAttempted: true,
-                    completedGracefully: true,
+                    completedGracefully: false,
                     escalationRequired: false,
                     processTerminationSucceeded: false,
                     sessionRestarted: false,
@@ -854,7 +925,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                     InterruptGracefulTimeout);
             }
 
-            AppLogger.Warning("LiveConsole", $"Graceful interrupt timed out. Escalating to owned session restart. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, TimeoutMs={InterruptGracefulTimeout.TotalMilliseconds:0}.");
+            var hasVisibleOwnedWindow = !string.IsNullOrWhiteSpace(TryGetMainWindowTitleNoThrow(process));
+            AppLogger.Warning("LiveConsole", $"Graceful interrupt recovery timed out. Escalating to owned session restart. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, SessionGeneration={sessionGeneration}, CommandInProgress={IsCommandInProgress}, VisibleOwnedWindow={hasVisibleOwnedWindow}, TimeoutMs={InterruptGracefulTimeout.TotalMilliseconds:0}.");
             DeveloperDiagnostics.LogDecision(
                 "Terminal",
                 "InterruptRequested",
@@ -864,6 +936,9 @@ namespace PS7ScriptDesk.PowerShell.Services
                 {
                     ["operationId"] = operationId,
                     ["ownedProcessId"] = ownedProcessId,
+                    ["sessionGeneration"] = sessionGeneration,
+                    ["commandInProgress"] = IsCommandInProgress,
+                    ["visibleOwnedWindow"] = hasVisibleOwnedWindow,
                     ["timeoutMs"] = InterruptGracefulTimeout.TotalMilliseconds
                 });
 
@@ -873,7 +948,31 @@ namespace PS7ScriptDesk.PowerShell.Services
                 $"Interrupt timed out after {InterruptGracefulTimeout.TotalSeconds:0.#} seconds. Restarting the owned PowerShell session.",
                 DateTime.Now));
 
-            var processTerminationSucceeded = await StopConsoleAsync(output).ConfigureAwait(false);
+            var stopResult = await StopInterruptTargetAsync(
+                    process,
+                    sessionGeneration,
+                    output,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            // StopConsoleCoreAsync reports the health of the entire bounded ConPTY cleanup,
+            // not just whether the owned PowerShell process was terminated. A GUI child can
+            // keep a copied ConPTY handle alive briefly after Ctrl+C, causing reader/native
+            // cleanup to miss its timeout even though the PowerShell process is already gone.
+            // The replacement session must be allowed to start in that case.
+            var processTerminationSucceeded = stopResult.Succeeded || !IsProcessRunningNoThrow(process);
+
+            if (!stopResult.TargetWasCurrent)
+            {
+                AppLogger.Info("LiveConsole", $"Interrupt escalation did not stop a replacement terminal session. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, SessionGeneration={sessionGeneration}.");
+                return new LiveConsoleInterruptResult(
+                    interruptAttempted: true,
+                    completedGracefully: false,
+                    escalationRequired: true,
+                    processTerminationSucceeded: false,
+                    sessionRestarted: false,
+                    ownedProcessId,
+                    InterruptGracefulTimeout);
+            }
             AppLogger.Info("LiveConsole", $"Owned PowerShell session termination completed. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, TerminationSucceeded={processTerminationSucceeded}.");
             DeveloperDiagnostics.LogInfo(
                 "Terminal",
@@ -1023,6 +1122,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _currentDispatchStartedUtc = null;
                 _handledTerminalExitProcessId = null;
                 _terminalSessionTeardownInProgress = true;
+                _resizeFailureEpisode.ResetForSession(_terminalSessionGeneration);
                 _commandDispatchGeneration++;
             }
 
@@ -3288,18 +3388,91 @@ namespace PS7ScriptDesk.PowerShell.Services
         /// <inheritdoc />
         public void ResizeConsole(int cols, int rows)
         {
-            IntPtr pseudoConsole;
+            ResizeRequest resizeRequest;
             lock (_syncRoot)
             {
                 _terminalColumns = Math.Max(1, cols);
                 _terminalRows    = Math.Max(1, rows);
-                pseudoConsole    = _pseudoConsoleHandle;
+                resizeRequest = new ResizeRequest(
+                    _pseudoConsoleHandle,
+                    _terminalSessionGeneration,
+                    _terminalColumns,
+                    _terminalRows,
+                    _process);
             }
 
-            if (pseudoConsole != IntPtr.Zero)
+            if (resizeRequest.PseudoConsole != IntPtr.Zero)
             {
-                ResizePseudoConsole(pseudoConsole, new COORD((short)_terminalColumns, (short)_terminalRows));
+                var hResult = ResizePseudoConsole(
+                    resizeRequest.PseudoConsole,
+                    new COORD((short)resizeRequest.Columns, (short)resizeRequest.Rows));
+                ObserveResizeResult("ResizeConsole", resizeRequest, hResult);
             }
+        }
+
+        private void ObserveResizeResult(string operation, ResizeRequest resizeRequest, int hResult)
+        {
+            bool shouldLog;
+            bool rendererHandlePresent;
+            bool teardownInProgress;
+            bool processSessionRunning;
+
+            lock (_syncRoot)
+            {
+                if (hResult == 0)
+                {
+                    if (_terminalSessionGeneration == resizeRequest.SessionGeneration)
+                    {
+                        _resizeFailureEpisode.RecordResult(resizeRequest.SessionGeneration, hResult);
+                    }
+
+                    return;
+                }
+
+                if (!IsCurrentResizeRequestNoLock(resizeRequest))
+                {
+                    return;
+                }
+
+                shouldLog = _resizeFailureEpisode.RecordResult(resizeRequest.SessionGeneration, hResult);
+                rendererHandlePresent = _pseudoConsoleHandle != IntPtr.Zero;
+                teardownInProgress = _terminalSessionTeardownInProgress;
+                processSessionRunning = IsProcessRunningNoThrow(_process);
+            }
+
+            if (!shouldLog)
+            {
+                return;
+            }
+
+            var hResultHex = $"0x{hResult:X8}";
+            var message = $"ConPTY resize failed. Operation={operation}, Columns={resizeRequest.Columns}, Rows={resizeRequest.Rows}, HRESULT={hResultHex}, SessionGeneration={resizeRequest.SessionGeneration}.";
+            var metadata = new Dictionary<string, object?>
+            {
+                ["operation"] = operation,
+                ["effectiveColumns"] = resizeRequest.Columns,
+                ["effectiveRows"] = resizeRequest.Rows,
+                ["hResult"] = hResult,
+                ["hResultHex"] = hResultHex,
+                ["sessionGeneration"] = resizeRequest.SessionGeneration,
+                ["rendererHandlePresent"] = rendererHandlePresent,
+                ["teardownInProgress"] = teardownInProgress,
+                ["processSessionRunning"] = processSessionRunning,
+                ["contentOmitted"] = true
+            };
+
+            AppLogger.Warning("LiveConsole", message);
+            DeveloperDiagnostics.LogWarning("LiveConsole", "ConPTY resize failed.", metadata);
+        }
+
+        private bool IsCurrentResizeRequestNoLock(ResizeRequest resizeRequest)
+        {
+            return !_terminalSessionTeardownInProgress &&
+                   _terminalSessionGeneration == resizeRequest.SessionGeneration &&
+                   _pseudoConsoleHandle == resizeRequest.PseudoConsole &&
+                   ReferenceEquals(_process, resizeRequest.Process) &&
+                   resizeRequest.Process is not null &&
+                   IsProcessRunningNoThrow(resizeRequest.Process);
         }
 
         /// <inheritdoc />
@@ -3343,42 +3516,95 @@ namespace PS7ScriptDesk.PowerShell.Services
                 "Manual terminal Enter observed without creating authoritative command state; Ctrl+C remains available through direct terminal input.");
         }
 
-        private async Task<bool> WaitForCommandCompletionAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        private async Task<InterruptRecoveryWaitOutcome> WaitForInterruptRecoveryAsync(
+            Process expectedProcess,
+            int expectedSessionGeneration,
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
         {
-            if (!IsCommandInProgress)
+            var stopwatch = Stopwatch.StartNew();
+            while (stopwatch.Elapsed < timeout)
             {
-                return true;
+                bool targetIsCurrent;
+                bool commandInProgress;
+                bool processRunning;
+                lock (_syncRoot)
+                {
+                    targetIsCurrent = _terminalSessionGeneration == expectedSessionGeneration &&
+                                      !_terminalSessionTeardownInProgress &&
+                                      ReferenceEquals(_process, expectedProcess);
+                    commandInProgress = _isCommandInProgress;
+                    processRunning = IsProcessRunningNoThrow(expectedProcess);
+                }
+
+                if (!targetIsCurrent)
+                {
+                    return InterruptRecoveryWaitOutcome.Superseded;
+                }
+
+                var hasVisibleOwnedWindow = !string.IsNullOrWhiteSpace(TryGetMainWindowTitleNoThrow(expectedProcess));
+                if (TerminalSessionEventPolicy.IsInterruptRecoveryComplete(
+                        commandInProgress,
+                        processRunning,
+                        hasVisibleOwnedWindow))
+                {
+                    return InterruptRecoveryWaitOutcome.Recovered;
+                }
+
+                var remaining = timeout - stopwatch.Elapsed;
+                var delay = remaining < InterruptRecoveryPollInterval
+                    ? remaining
+                    : InterruptRecoveryPollInterval;
+                if (delay > TimeSpan.Zero)
+                {
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                }
             }
 
-            var completionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            return InterruptRecoveryWaitOutcome.TimedOut;
+        }
 
-            void HandleCompletion() => completionSource.TrySetResult(true);
-
-            CommandExecutionCompleted += HandleCompletion;
-            SessionTerminated += HandleCompletion;
+        private async Task<(bool TargetWasCurrent, bool Succeeded)> StopInterruptTargetAsync(
+            Process expectedProcess,
+            int expectedSessionGeneration,
+            Action<ExecutionOutputRecord> onOutput,
+            CancellationToken cancellationToken)
+        {
+            if (!await _sessionLifecycleGate
+                    .WaitAsync(InterruptLifecycleGateTimeout, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                AppLogger.Warning("LiveConsole", $"Interrupt escalation could not enter the terminal lifecycle gate within {InterruptLifecycleGateTimeout.TotalSeconds:0.#} seconds. SessionGeneration={expectedSessionGeneration}.");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "InterruptEscalation",
+                    "Interrupt escalation could not enter the terminal lifecycle gate within its bounded timeout.",
+                    "LifecycleGateTimedOut",
+                    new Dictionary<string, object?>
+                    {
+                        ["sessionGeneration"] = expectedSessionGeneration,
+                        ["timeoutMs"] = InterruptLifecycleGateTimeout.TotalMilliseconds
+                    });
+                return (true, false);
+            }
 
             try
             {
-                if (!IsCommandInProgress || !IsSessionRunning)
+                lock (_syncRoot)
                 {
-                    return true;
+                    if (_terminalSessionGeneration != expectedSessionGeneration ||
+                        _terminalSessionTeardownInProgress ||
+                        !ReferenceEquals(_process, expectedProcess))
+                    {
+                        return (false, false);
+                    }
                 }
 
-                using var timeoutTaskCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                var delayTask = Task.Delay(timeout, timeoutTaskCancellation.Token);
-                var completedTask = await Task.WhenAny(completionSource.Task, delayTask).ConfigureAwait(false);
-                if (completedTask == completionSource.Task)
-                {
-                    timeoutTaskCancellation.Cancel();
-                    return true;
-                }
-
-                return !IsCommandInProgress || !IsSessionRunning;
+                return (true, await StopConsoleCoreAsync(onOutput, "interrupt-escalation").ConfigureAwait(false));
             }
             finally
             {
-                CommandExecutionCompleted -= HandleCompletion;
-                SessionTerminated -= HandleCompletion;
+                _sessionLifecycleGate.Release();
             }
         }
 
@@ -3693,6 +3919,95 @@ namespace PS7ScriptDesk.PowerShell.Services
         private const int HANDLE_FLAG_INHERIT = 0x00000001;
         private const int PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016;
         private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+
+        private enum InterruptRecoveryWaitOutcome
+        {
+            Recovered,
+            TimedOut,
+            Superseded
+        }
+
+        private readonly struct ResizeRequest
+        {
+            public ResizeRequest(
+                IntPtr pseudoConsole,
+                int sessionGeneration,
+                int columns,
+                int rows,
+                Process? process)
+            {
+                PseudoConsole = pseudoConsole;
+                SessionGeneration = sessionGeneration;
+                Columns = columns;
+                Rows = rows;
+                Process = process;
+            }
+
+            public IntPtr PseudoConsole { get; }
+
+            public int SessionGeneration { get; }
+
+            public int Columns { get; }
+
+            public int Rows { get; }
+
+            public Process? Process { get; }
+        }
+
+        private sealed class ResizeFailureEpisode
+        {
+            private int _sessionGeneration = -1;
+            private bool _failureEpisodeActive;
+            private int _firstHResult;
+            private bool _alternateHResultRecorded;
+            private int _alternateHResult;
+
+            public bool RecordResult(int sessionGeneration, int hResult)
+            {
+                if (_sessionGeneration != sessionGeneration)
+                {
+                    ResetForSession(sessionGeneration);
+                }
+
+                if (hResult == 0)
+                {
+                    _failureEpisodeActive = false;
+                    _alternateHResultRecorded = false;
+                    return false;
+                }
+
+                if (!_failureEpisodeActive)
+                {
+                    _failureEpisodeActive = true;
+                    _firstHResult = hResult;
+                    return true;
+                }
+
+                if (hResult == _firstHResult ||
+                    (_alternateHResultRecorded && hResult == _alternateHResult))
+                {
+                    return false;
+                }
+
+                if (_alternateHResultRecorded)
+                {
+                    return false;
+                }
+
+                _alternateHResultRecorded = true;
+                _alternateHResult = hResult;
+                return true;
+            }
+
+            public void ResetForSession(int sessionGeneration)
+            {
+                _sessionGeneration = sessionGeneration;
+                _failureEpisodeActive = false;
+                _firstHResult = 0;
+                _alternateHResultRecorded = false;
+                _alternateHResult = 0;
+            }
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct COORD

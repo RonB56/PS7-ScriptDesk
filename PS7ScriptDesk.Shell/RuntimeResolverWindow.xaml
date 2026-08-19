@@ -1,6 +1,7 @@
 ﻿<Window x:Class="PS7ScriptDesk.Shell.RuntimeResolverWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
         Title="PowerShell 7 Required"
         Width="620"
         Height="600"
@@ -11,7 +12,10 @@
         ShowInTaskbar="False"
         Background="#F8FBFF"
         Foreground="#172033"
-        FontFamily="Segoe UI Variable Display, Segoe UI">
+        FontFamily="Segoe UI Variable Display, Segoe UI"
+        help:ContextHelp.Key="Runtime.Resolver"
+        Loaded="Window_Loaded"
+        PreviewKeyDown="Window_PreviewKeyDown">
     <Window.Resources>
         <SolidColorBrush x:Key="ResolverBackgroundBrush" Color="#F8FBFF" />
         <SolidColorBrush x:Key="ResolverSurfaceBrush" Color="#FFFFFF" />
@@ -130,6 +134,7 @@
                     Width="104"
                     Margin="10,0,0,0"
                     Click="BrowseButton_Click"
+                    help:ContextHelp.Key="Runtime.Resolver"
                     DockPanel.Dock="Right" />
             <TextBox x:Name="SelectedPathTextBox"
                      IsReadOnly="True"
@@ -187,24 +192,30 @@
                      Margin="0,18,0,0">
             <Button Content="Try Automatic Search Again"
                     Margin="0,0,7,7"
-                    Click="RetryDiscoveryButton_Click" />
+                    Click="RetryDiscoveryButton_Click"
+                    help:ContextHelp.Key="Runtime.Refresh" />
             <Button Content="Browse for pwsh.exe"
                     Margin="7,0,0,7"
                     IsDefault="True"
-                    Click="BrowseButton_Click" />
+                    Click="BrowseButton_Click"
+                    help:ContextHelp.Key="Runtime.Resolver" />
             <Button Content="Open Logs Folder"
                     Margin="0,7,7,7"
-                    Click="OpenLogsFolderButton_Click" />
+                    Click="OpenLogsFolderButton_Click"
+                    help:ContextHelp.Key="Help.Logs" />
             <Button Content="Copy Logs Path"
                     Margin="7,7,0,7"
-                    Click="CopyLogsPathButton_Click" />
+                    Click="CopyLogsPathButton_Click"
+                    help:ContextHelp.Key="Help.Logs" />
             <Button Content="Exit"
                     Margin="0,7,7,0"
                     IsCancel="True"
-                    Click="ExitButton_Click" />
+                    Click="ExitButton_Click"
+                    help:ContextHelp.Key="Runtime.Resolver" />
             <Button Content="Copy Setup Help Text"
                     Margin="7,7,0,0"
-                    Click="CopyHelpTextButton_Click" />
+                    Click="CopyHelpTextButton_Click"
+                    help:ContextHelp.Key="Runtime.Resolver" />
         </UniformGrid>
     </Grid>
 </Window>

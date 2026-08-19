@@ -132,6 +132,36 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.Contains("type: 'terminal_theme_applied'", terminalControlSource, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void FailedTerminalBootstrap_UsesOneWayRendererUnavailableStateWithoutPersistingTerminalContent()
+    {
+        var terminalControlSource = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalControl.xaml.cs");
+        var flowControllerSource = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalOutputBridge.cs");
+
+        Assert.Contains("NavigationCompleted += OnNavigationCompleted", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("_webView2Available = false", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("_isReady = false", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("FallbackBanner.Visibility = Visibility.Visible", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("WebView.Visibility = Visibility.Collapsed", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("navigationStage\"] = \"TerminalHtmlBootstrap\"", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("navigationOrigin\"] = \"NavigateToString\"", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("Dispatcher.HasShutdownStarted", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("Dispatcher.HasShutdownFinished", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("MarkRendererUnavailable", terminalControlSource, StringComparison.Ordinal);
+        var navigationHandlerIndex = terminalControlSource.IndexOf("private void OnNavigationCompleted", StringComparison.Ordinal);
+        Assert.True(navigationHandlerIndex >= 0);
+        Assert.DoesNotContain("[\"terminalHtml\"]", terminalControlSource[navigationHandlerIndex..], StringComparison.Ordinal);
+        Assert.Contains("_rendererUnavailable", flowControllerSource, StringComparison.Ordinal);
+        Assert.Contains("MarkRendererUnavailable", flowControllerSource, StringComparison.Ordinal);
+        Assert.Contains("if (_rendererUnavailable)", flowControllerSource, StringComparison.Ordinal);
+    }
+
     private static string ReadRepositoryFile(params string[] relativeSegments)
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

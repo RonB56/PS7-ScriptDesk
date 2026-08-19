@@ -7,6 +7,7 @@ using System.Windows.Controls;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using PS7ScriptDesk.Application.Diagnostics;
+using PS7ScriptDesk.UI.ViewModels;
 
 namespace PS7ScriptDesk.Shell.Controls
 {
@@ -21,6 +22,9 @@ namespace PS7ScriptDesk.Shell.Controls
     /// </summary>
     public partial class TerminalControl : System.Windows.Controls.UserControl
     {
+        private const string ClipboardCopyOperation = "ClipboardCopy";
+        private const string ClipboardPasteReadOperation = "ClipboardPasteRead";
+
         // ── xterm.js HTML page ───────────────────────────────────────────────────
         //
         // xterm.js and its addons are served from the virtual host "terminal.local"
@@ -338,7 +342,42 @@ namespace PS7ScriptDesk.Shell.Controls
                     try { term.write('\x1b[2J\x1b[3J\x1b[H'); } catch (ignoreErase) { }
                     focusTerminal('termApi.clear');
                   },
-                  focus: function ()  { focusTerminal('termApi.focus'); }
+                  focus: function ()  { focusTerminal('termApi.focus'); },
+                  normalizeInteractiveState: function () {
+                    try {
+                      // A completed or interrupted native/GUI command can leave xterm's
+                      // cursor layer stale until the next input repaint. Restore the
+                      // normal visible cursor and repaint without moving keyboard focus
+                      // away from the editor.
+                      term.write('\x1b[0m\x1b[?25h', function () {
+                        try { term.refresh(0, Math.max(0, term.rows - 1)); } catch (ignoreRefresh) { }
+                        post({ type: 'interactive_state_normalized' });
+                      });
+                    } catch (normalizeErr) {
+                      post({ type: 'xterm_normalize_error', message: String(normalizeErr) });
+                    }
+                  }
+                };
+                window.__ps7ScriptDeskFocusTerminal = function () {
+                  var helperTextarea = terminalElement.querySelector('textarea.xterm-helper-textarea');
+                  if (!termApi || !helperTextarea) {
+                    return {
+                      terminalAvailable: !!termApi,
+                      inputActive: false,
+                      activeElement: document.activeElement ? document.activeElement.tagName : '',
+                      failureReason: 'xterm-input-unavailable'
+                    };
+                  }
+
+                  focusTerminal('host.executeScript.focus');
+                  var activeElement = document.activeElement;
+                  var activeElementClass = activeElement && activeElement.className ? String(activeElement.className) : '';
+                  return {
+                    terminalAvailable: true,
+                    inputActive: activeElement === helperTextarea,
+                    activeElement: activeElementClass ? activeElement.tagName + '.' + activeElementClass : activeElement.tagName,
+                    failureReason: activeElement === helperTextarea ? '' : 'xterm-input-not-active'
+                  };
                 };
                 applyTerminalTheme('Dark');
                 initializeTerminalHost();
@@ -364,6 +403,9 @@ namespace PS7ScriptDesk.Shell.Controls
                     termApi.focus();
                     reportFocus('focus', 'host.message.focus');
                   }
+                  else if (msg.type === 'normalize_interactive_state') {
+                    termApi.normalizeInteractiveState();
+                  }
                   else if (msg.type === 'paste' && typeof msg.data === 'string') { termApi.paste(msg.data); }
                   else if (msg.type === 'settheme' && msg.data && terminalThemes[msg.data]) {
                     applyTerminalTheme(msg.data);
@@ -388,6 +430,8 @@ namespace PS7ScriptDesk.Shell.Controls
         private bool                   _firstOutputPostedLogged;
         private bool                   _firstInputReceivedLogged;
         private int                    _inputInfoLogCount;
+        private bool                   _clipboardCopyFailureEpisodeActive;
+        private bool                   _clipboardPasteReadFailureEpisodeActive;
         private long                   _droppedOutputCharacters;
         private long                   _reportedDroppedOutputCharacters;
 
@@ -472,18 +516,7 @@ namespace PS7ScriptDesk.Shell.Controls
 
                 WebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
-                // Log navigation success/failure to the debug output; navigation errors
-                // mean the HTML page could not be loaded at all (very rare).
-                WebView.CoreWebView2.NavigationCompleted += (_, nav) =>
-                {
-                    var title = WebView.CoreWebView2.DocumentTitle;
-                    if (nav.IsSuccess)
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[TerminalControl] NavigationCompleted — success | title={title}");
-                    else
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[TerminalControl] NavigationCompleted — FAILED ({nav.WebErrorStatus}) | title={title}");
-                };
+                WebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
 
                 WebView.CoreWebView2.NavigateToString(TerminalHtml);
                 System.Diagnostics.Debug.WriteLine("[TerminalControl] WebView2 initialized — navigating to terminal page");
@@ -498,6 +531,55 @@ namespace PS7ScriptDesk.Shell.Controls
                     $"[TerminalControl] WebView2 initialization failed: {ex.Message}");
                 AppLogger.Error("Terminal", "WebView2 terminal initialization failed.", ex);
             }
+        }
+
+        private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs navigation)
+        {
+            if (navigation.IsSuccess)
+            {
+                var title = WebView.CoreWebView2?.DocumentTitle;
+                System.Diagnostics.Debug.WriteLine(
+                    $"[TerminalControl] NavigationCompleted — success | title={title}");
+                return;
+            }
+
+            var dispatcherShutdownStarted = Dispatcher.HasShutdownStarted;
+            var dispatcherShutdownFinished = Dispatcher.HasShutdownFinished;
+            if (dispatcherShutdownStarted || dispatcherShutdownFinished || !IsLoaded)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[TerminalControl] Ignored NavigationCompleted failure during terminal lifecycle shutdown ({navigation.WebErrorStatus}).");
+                return;
+            }
+
+            var discardedOutput = _outputFlowController.MarkRendererUnavailable();
+            _webView2Available = false;
+            _isReady = false;
+            FallbackBanner.Visibility = Visibility.Visible;
+            WebView.Visibility = Visibility.Collapsed;
+            RecordDroppedTerminalOutput(discardedOutput.DiscardedCharacters);
+            ReportDroppedTerminalOutputIfNeeded();
+
+            var metadata = new Dictionary<string, object?>
+            {
+                ["webErrorStatus"] = navigation.WebErrorStatus.ToString(),
+                ["navigationStage"] = "TerminalHtmlBootstrap",
+                ["navigationOrigin"] = "NavigateToString",
+                ["rendererAvailable"] = _webView2Available,
+                ["isReady"] = _isReady,
+                ["isLoaded"] = IsLoaded,
+                ["dispatcherHasShutdownStarted"] = dispatcherShutdownStarted,
+                ["dispatcherHasShutdownFinished"] = dispatcherShutdownFinished,
+                ["discardedOutputCharacters"] = discardedOutput.DiscardedCharacters,
+                ["terminalContentOmitted"] = true
+            };
+            AppLogger.Error(
+                "Terminal",
+                $"WebView2 terminal bootstrap navigation failed. WebErrorStatus={navigation.WebErrorStatus}; DiscardedOutputCharacters={discardedOutput.DiscardedCharacters}.");
+            DeveloperDiagnostics.LogError(
+                "Terminal",
+                "WebView2 terminal bootstrap navigation failed.",
+                metadata);
         }
 
         // ── Public API ────────────────────────────────────────────────────────────
@@ -588,12 +670,46 @@ namespace PS7ScriptDesk.Shell.Controls
             PostToWebView("clear", string.Empty);
         }
 
+        /// <summary>
+        /// Restores the visible xterm cursor and repaints the terminal after a command
+        /// completes, without changing WPF or browser keyboard focus.
+        /// </summary>
+        public void NormalizeInteractiveState()
+        {
+            if (!_webView2Available) return;
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Terminal interactive display normalization requested without changing focus.");
+            PostToWebView("normalize_interactive_state", string.Empty);
+        }
+
         /// <summary>Focuses the xterm.js terminal so keystrokes are captured immediately.</summary>
         public void FocusTerminal()
         {
             if (!_webView2Available) return;
             DeveloperDiagnostics.LogUserAction("Terminal", "TerminalFocusRequested", "Terminal focus requested.");
             ActivateTerminalHost("FocusTerminal");
+        }
+
+        /// <summary>
+        /// Focuses the WPF host, WebView2, and the live xterm helper textarea, then
+        /// verifies the browser-side active element. The caller owns session-generation
+        /// validation; the generation is recorded only as safe diagnostic metadata here.
+        /// </summary>
+        public Task<TerminalFocusRestoreResult> RestoreTerminalFocusAsync(
+            int generation,
+            CancellationToken cancellationToken = default)
+        {
+            if (Dispatcher.CheckAccess())
+            {
+                return RestoreTerminalFocusCoreAsync(generation, cancellationToken);
+            }
+
+            return Dispatcher.InvokeAsync(
+                    () => RestoreTerminalFocusCoreAsync(generation, cancellationToken),
+                    DispatcherPriority.Input)
+                .Task
+                .Unwrap();
         }
 
         /// <summary>Updates the xterm.js colour theme to match the active application theme.</summary>
@@ -603,6 +719,106 @@ namespace PS7ScriptDesk.Shell.Controls
         }
 
         // ── Private helpers ───────────────────────────────────────────────────────
+
+        private async Task<TerminalFocusRestoreResult> RestoreTerminalFocusCoreAsync(
+            int generation,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_webView2Available || !_isReady || WebView.CoreWebView2 is null)
+            {
+                AppLogger.Info("Terminal", $"Skipped verified terminal focus because the WebView2 renderer is not ready. Generation={generation}, RendererReady={_isReady}, CoreReady={WebView.CoreWebView2 is not null}.");
+                return new TerminalFocusRestoreResult(false, false, false, false, null, "renderer-not-ready");
+            }
+
+            var wpfHostFocused = WebView.Focus();
+            var webViewFocused = WebView.IsKeyboardFocused || WebView.IsKeyboardFocusWithin;
+            AppLogger.Debug(
+                "Terminal",
+                $"Verified terminal focus requested. Generation={generation}, WpfHostFocusResult={wpfHostFocused}, WebViewFocused={webViewFocused}.");
+            DeveloperDiagnostics.LogUiThreadDispatch(
+                "Terminal",
+                "VerifiedTerminalFocus",
+                "Requested WPF and WebView2 terminal focus before browser-side xterm verification.",
+                Dispatcher.CheckAccess(),
+                new Dictionary<string, object?>
+                {
+                    ["generation"] = generation,
+                    ["wpfHostFocusResult"] = wpfHostFocused,
+                    ["webViewFocused"] = webViewFocused
+                });
+
+            if (!wpfHostFocused || !webViewFocused)
+            {
+                return new TerminalFocusRestoreResult(
+                    wpfHostFocused,
+                    webViewFocused,
+                    false,
+                    false,
+                    null,
+                    "webview-focus-failed");
+            }
+
+            try
+            {
+                const string focusScript = "window.__ps7ScriptDeskFocusTerminal ? window.__ps7ScriptDeskFocusTerminal() : ({ terminalAvailable: false, inputActive: false, activeElement: '', failureReason: 'focus-bridge-unavailable' });";
+                var scriptResult = await WebView.CoreWebView2.ExecuteScriptAsync(focusScript).ConfigureAwait(true);
+                cancellationToken.ThrowIfCancellationRequested();
+                using var resultDocument = JsonDocument.Parse(scriptResult);
+                var root = resultDocument.RootElement;
+                var terminalAvailable = root.TryGetProperty("terminalAvailable", out var terminalAvailableProperty) &&
+                                        terminalAvailableProperty.ValueKind == JsonValueKind.True;
+                var inputActive = root.TryGetProperty("inputActive", out var inputActiveProperty) &&
+                                  inputActiveProperty.ValueKind == JsonValueKind.True;
+                var activeElement = root.TryGetProperty("activeElement", out var activeElementProperty)
+                    ? activeElementProperty.GetString()
+                    : null;
+                var failureReason = root.TryGetProperty("failureReason", out var failureReasonProperty)
+                    ? failureReasonProperty.GetString()
+                    : null;
+                var browserFocusCommandExecuted = terminalAvailable;
+
+                AppLogger.Info(
+                    "Terminal",
+                    $"Verified browser xterm focus result. Generation={generation}, BrowserFocusCommandExecuted={browserFocusCommandExecuted}, XtermInputActive={inputActive}, ActiveElement={activeElement ?? "(none)"}.");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "VerifiedTerminalFocus",
+                    "Browser-side xterm focus command completed.",
+                    inputActive ? "InputActive" : "InputInactive",
+                    new Dictionary<string, object?>
+                    {
+                        ["generation"] = generation,
+                        ["browserFocusCommandExecuted"] = browserFocusCommandExecuted,
+                        ["xtermInputActive"] = inputActive,
+                        ["activeElement"] = activeElement,
+                        ["failureReason"] = failureReason
+                    });
+                return new TerminalFocusRestoreResult(
+                    wpfHostFocused,
+                    webViewFocused,
+                    browserFocusCommandExecuted,
+                    inputActive,
+                    activeElement,
+                    failureReason);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("Terminal", $"Verified browser xterm focus failed. Generation={generation}, ExceptionType={ex.GetType().Name}.");
+                DeveloperDiagnostics.LogException(
+                    "Terminal",
+                    ex,
+                    "Browser-side xterm focus verification failed.",
+                    new Dictionary<string, object?> { ["generation"] = generation });
+                return new TerminalFocusRestoreResult(
+                    wpfHostFocused,
+                    webViewFocused,
+                    false,
+                    false,
+                    null,
+                    "browser-focus-exception");
+            }
+        }
 
         private void RequestOutputFlush(bool scheduleFlush)
         {
@@ -974,11 +1190,15 @@ namespace PS7ScriptDesk.Shell.Controls
                             var copyText = copyTextProp.GetString();
                             if (!string.IsNullOrEmpty(copyText))
                             {
-                                try { System.Windows.Clipboard.SetText(copyText); }
+                                try
+                                {
+                                    System.Windows.Clipboard.SetText(copyText);
+                                    ResetClipboardFailureEpisode(ClipboardCopyOperation);
+                                }
                                 catch (Exception ex)
                                 {
-                                    System.Diagnostics.Debug.WriteLine(
-                                        $"[TerminalControl] Clipboard.SetText failed: {ex.Message}");
+                                    System.Diagnostics.Debug.WriteLine("[TerminalControl] Clipboard.SetText failed.");
+                                    LogClipboardFailure(ClipboardCopyOperation, ex);
                                 }
                             }
                         }
@@ -996,11 +1216,12 @@ namespace PS7ScriptDesk.Shell.Controls
                             {
                                 if (System.Windows.Clipboard.ContainsText())
                                     pasteText = System.Windows.Clipboard.GetText();
+                                ResetClipboardFailureEpisode(ClipboardPasteReadOperation);
                             }
                             catch (Exception ex)
                             {
-                                System.Diagnostics.Debug.WriteLine(
-                                    $"[TerminalControl] Clipboard.GetText failed: {ex.Message}");
+                                System.Diagnostics.Debug.WriteLine("[TerminalControl] Clipboard paste read failed.");
+                                LogClipboardFailure(ClipboardPasteReadOperation, ex);
                             }
                             if (!string.IsNullOrEmpty(pasteText))
                                 PostToWebView("paste", pasteText);
@@ -1056,6 +1277,63 @@ namespace PS7ScriptDesk.Shell.Controls
                 AppLogger.Error("Terminal", "WebView2 terminal message parsing failed.", ex);
                 DeveloperDiagnostics.LogException("Terminal", ex, "WebView2 terminal message parsing failed.");
             }
+        }
+
+        private void LogClipboardFailure(string operation, Exception exception)
+        {
+            if (!TryBeginClipboardFailureEpisode(operation))
+            {
+                return;
+            }
+
+            var message = operation == ClipboardCopyOperation
+                ? "Terminal clipboard copy failed; clipboard content was omitted."
+                : "Terminal clipboard paste read failed; clipboard content was omitted.";
+            var metadata = new Dictionary<string, object?>
+            {
+                ["operation"] = operation,
+                ["exceptionType"] = exception.GetType().FullName,
+                ["hResult"] = exception.HResult,
+                ["dispatcherCheckAccess"] = Dispatcher.CheckAccess(),
+                ["managedThreadId"] = Environment.CurrentManagedThreadId,
+                ["contentOmitted"] = true
+            };
+
+            AppLogger.Warning("Terminal", message);
+            DeveloperDiagnostics.LogWarning("Terminal", message, metadata);
+        }
+
+        private bool TryBeginClipboardFailureEpisode(string operation)
+        {
+            if (operation == ClipboardCopyOperation)
+            {
+                if (_clipboardCopyFailureEpisodeActive)
+                {
+                    return false;
+                }
+
+                _clipboardCopyFailureEpisodeActive = true;
+                return true;
+            }
+
+            if (_clipboardPasteReadFailureEpisodeActive)
+            {
+                return false;
+            }
+
+            _clipboardPasteReadFailureEpisodeActive = true;
+            return true;
+        }
+
+        private void ResetClipboardFailureEpisode(string operation)
+        {
+            if (operation == ClipboardCopyOperation)
+            {
+                _clipboardCopyFailureEpisodeActive = false;
+                return;
+            }
+
+            _clipboardPasteReadFailureEpisodeActive = false;
         }
 
         private void FlushOutputQueue()

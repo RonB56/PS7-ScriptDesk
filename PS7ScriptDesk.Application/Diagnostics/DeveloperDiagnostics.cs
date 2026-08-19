@@ -9,7 +9,6 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -30,6 +29,8 @@ namespace PS7ScriptDesk.Application.Diagnostics
         private const int MaximumPropertyValueLength = 2048;
         private const int MaximumStoredHighLevelEvents = 200;
         private const int MaximumReadableExceptionLength = 8192;
+        // Engineering safety bound for optional diagnostics, subject to stress calibration.
+        private const int DiagnosticsQueueCapacity = 128;
         private const string LegacyTerminalCaptureDirectoryName = "TerminalCaptures";
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -46,6 +47,9 @@ namespace PS7ScriptDesk.Application.Diagnostics
         private static readonly string SessionsDirectory = Path.Combine(RootDirectory, "Sessions");
         private static readonly string PackagesDirectory = Path.Combine(RootDirectory, "Packages");
         private static readonly string LatestSessionPointerPath = Path.Combine(RootDirectory, "latest-session.txt");
+        // Private production-default delegates are deterministic, reflection-accessed test seams for diagnostics persistence.
+        private static Action<string, string> _appendLine = AppendLine;
+        private static Action<string, string, Encoding> _writeAllText = File.WriteAllText;
         private static readonly ConcurrentQueue<HighLevelEventRecord> HighLevelEvents = new();
         private static volatile SessionRuntimeState? _sessionState;
         private static volatile DeveloperDiagnosticsConfiguration _configuration = DeveloperDiagnosticsConfiguration.Disabled;
@@ -360,6 +364,9 @@ namespace PS7ScriptDesk.Application.Diagnostics
             builder.AppendLine($"App: {ApplicationBranding.PublicName} {TryGetAppVersion()}");
             builder.AppendLine($"Session ID: {session?.SessionId ?? "(not active)"}");
             builder.AppendLine($"Diagnostics Enabled: {IsEnabled}");
+            builder.AppendLine($"Diagnostics Storage State: {session?.StorageState.ToString() ?? "(not active)"}");
+            builder.AppendLine($"Disabled Secondary Artifacts: {session?.DisabledArtifactCount.ToString(CultureInfo.InvariantCulture) ?? "0"}");
+            builder.AppendLine($"Dropped Diagnostic Events: {Volatile.Read(ref _droppedEventCount)}");
             builder.AppendLine($"Developer Debugging Folder: {RootDirectory}");
             builder.AppendLine($"Latest Session Folder: {session?.SessionDirectoryPath ?? ReadLatestSessionPointer() ?? "(none)"}");
             builder.AppendLine($"OS Version: {RuntimeInformation.OSDescription}");
@@ -404,13 +411,9 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 return;
             }
 
-            try
+            if (session.StorageState != DiagnosticsStorageState.StorageDisabled && session.IsArtifactEnabled(session.SummaryFilePath))
             {
-                File.WriteAllText(session.SummaryFilePath, BuildSummaryText(), Encoding.UTF8);
-            }
-            catch
-            {
-                // Best effort only.
+                TryRefreshSummaryFile(session);
             }
         }
 
@@ -591,11 +594,12 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 Path.Combine(sessionDirectory, "diagnostics-summary.txt"),
                 CreateFilePathMap(sessionDirectory),
                 configuration,
-                Channel.CreateUnbounded<DeveloperDiagnosticEnvelope>(new UnboundedChannelOptions
+                Channel.CreateBounded<DeveloperDiagnosticEnvelope>(new BoundedChannelOptions(DiagnosticsQueueCapacity)
                 {
                     AllowSynchronousContinuations = false,
                     SingleReader = true,
-                    SingleWriter = false
+                    SingleWriter = false,
+                    FullMode = BoundedChannelFullMode.Wait
                 }),
                 startedUtc);
 
@@ -605,7 +609,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
             ClearHighLevelEvents();
 
             WriteManifest(state);
-            WriteLatestSessionPointer(sessionDirectory);
+            WriteLatestSessionPointer(state);
             state.WriterTask = Task.Run(() => WriterLoopAsync(state));
 
             Enqueue(state, CreateEvent(
@@ -645,13 +649,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
             {
             }
 
-            try
-            {
-                File.WriteAllText(state.SummaryFilePath, BuildSummaryText(), Encoding.UTF8);
-            }
-            catch
-            {
-            }
+            TryRefreshSummaryFile(state);
         }
 
         private static void WriteSettingChangedEvent(string reason, DeveloperDiagnosticsConfiguration configuration, SessionRuntimeState state)
@@ -674,12 +672,18 @@ namespace PS7ScriptDesk.Application.Diagnostics
             {
                 await foreach (var envelope in state.Channel.Reader.ReadAllAsync().ConfigureAwait(false))
                 {
+                    if (state.StorageState == DiagnosticsStorageState.StorageDisabled)
+                    {
+                        Interlocked.Increment(ref _droppedEventCount);
+                        continue;
+                    }
+
                     WriteEventToFiles(state, envelope.Event);
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Diagnostics must never crash the app.
+                DisablePrimaryStorage(state, ex, "WriterLoop");
             }
             finally
             {
@@ -689,43 +693,115 @@ namespace PS7ScriptDesk.Application.Diagnostics
 
         private static void WriteEventToFiles(SessionRuntimeState state, DeveloperDiagnosticEvent diagnosticEvent)
         {
+            string json;
             try
             {
-                var json = JsonSerializer.Serialize(diagnosticEvent, JsonOptions);
-                if (state.Configuration.WriteJsonLines)
-                {
-                    AppendLine(state.MainJsonLinesPath, json);
-                    if (ShouldWriteCategoryFile(diagnosticEvent.Category, out var categoryFilePath))
-                    {
-                        AppendLine(categoryFilePath, json);
-                    }
-
-                    if (string.Equals(diagnosticEvent.EventType, "Exception", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(diagnosticEvent.Level, "Error", StringComparison.OrdinalIgnoreCase))
-                    {
-                        AppendLine(state.ErrorsJsonLinesPath, json);
-                    }
-                }
-
-                if (state.Configuration.WriteReadableLog)
-                {
-                    AppendLine(state.ReadableLogPath, FormatReadableLine(diagnosticEvent));
-                }
-
-                TrackHighLevelEvent(diagnosticEvent);
-                if (string.Equals(diagnosticEvent.EventType, "Exception", StringComparison.OrdinalIgnoreCase))
-                {
-                    _lastException = new ExceptionRecord(diagnosticEvent.ExceptionType, diagnosticEvent.ExceptionMessage, diagnosticEvent.Message);
-                }
-
-                if (diagnosticEvent.SequenceNumber % 25 == 0 || string.Equals(diagnosticEvent.Level, "Error", StringComparison.OrdinalIgnoreCase))
-                {
-                    RefreshSummaryFile();
-                }
+                json = JsonSerializer.Serialize(diagnosticEvent, JsonOptions);
             }
-            catch
+            catch (Exception ex)
             {
+                Interlocked.Increment(ref _droppedEventCount);
+                ReportArtifactFailureOnce(state, "Serialization", ex, primaryFailure: false, artifactDisabled: false);
+                return;
             }
+
+            if (state.Configuration.WriteJsonLines)
+            {
+                try
+                {
+                    _appendLine(state.MainJsonLinesPath, json);
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.Increment(ref _droppedEventCount);
+                    DisablePrimaryStorage(state, ex, "PrimaryNdjson");
+                    return;
+                }
+
+                if (ShouldWriteCategoryFile(diagnosticEvent.Category, out var categoryFilePath) && state.IsArtifactEnabled(categoryFilePath))
+                {
+                    TryWriteSecondaryArtifact(state, categoryFilePath, json, "CategoryNdjson");
+                }
+
+                if ((string.Equals(diagnosticEvent.EventType, "Exception", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(diagnosticEvent.Level, "Error", StringComparison.OrdinalIgnoreCase)) &&
+                    state.IsArtifactEnabled(state.ErrorsJsonLinesPath))
+                {
+                    TryWriteSecondaryArtifact(state, state.ErrorsJsonLinesPath, json, "ErrorsNdjson");
+                }
+            }
+
+            if (state.Configuration.WriteReadableLog && state.IsArtifactEnabled(state.ReadableLogPath))
+            {
+                TryWriteSecondaryArtifact(state, state.ReadableLogPath, FormatReadableLine(diagnosticEvent), "ReadableLog");
+            }
+
+            TrackHighLevelEvent(diagnosticEvent);
+            if (string.Equals(diagnosticEvent.EventType, "Exception", StringComparison.OrdinalIgnoreCase))
+            {
+                _lastException = new ExceptionRecord(diagnosticEvent.ExceptionType, diagnosticEvent.ExceptionMessage, diagnosticEvent.Message);
+            }
+
+            if ((diagnosticEvent.SequenceNumber % 25 == 0 || string.Equals(diagnosticEvent.Level, "Error", StringComparison.OrdinalIgnoreCase)) &&
+                state.IsArtifactEnabled(state.SummaryFilePath))
+            {
+                TryRefreshSummaryFile(state);
+            }
+        }
+
+        private static void TryWriteSecondaryArtifact(SessionRuntimeState state, string path, string content, string artifact)
+        {
+            try
+            {
+                _appendLine(path, content);
+            }
+            catch (Exception ex)
+            {
+                state.DisableArtifact(path);
+                ReportArtifactFailureOnce(state, artifact, ex, primaryFailure: false);
+            }
+        }
+
+        private static void TryRefreshSummaryFile(SessionRuntimeState state)
+        {
+            try
+            {
+                _writeAllText(state.SummaryFilePath, BuildSummaryText(), Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                state.DisableArtifact(state.SummaryFilePath);
+                ReportArtifactFailureOnce(state, "Summary", ex, primaryFailure: false);
+            }
+        }
+
+        private static void DisablePrimaryStorage(SessionRuntimeState state, Exception exception, string artifact)
+        {
+            if (state.DisablePrimaryStorage())
+            {
+                ReportArtifactFailureOnce(state, artifact, exception, primaryFailure: true);
+            }
+        }
+
+        private static void ReportArtifactFailureOnce(
+            SessionRuntimeState state,
+            string artifact,
+            Exception exception,
+            bool primaryFailure,
+            bool artifactDisabled = true)
+        {
+            if (!state.TryMarkFailureReported(artifact))
+            {
+                return;
+            }
+
+            var message = primaryFailure
+                ? $"Developer diagnostics primary event storage was disabled after a {artifact} failure."
+                : artifactDisabled
+                    ? $"Developer diagnostics optional artifact '{artifact}' was disabled after a storage failure."
+                    : $"Developer diagnostics event persistence skipped an event after a {artifact} failure.";
+
+            AppLogger.Error("DeveloperDiagnostics", message, exception);
         }
 
         private static void LogCore(
@@ -857,10 +933,12 @@ namespace PS7ScriptDesk.Application.Diagnostics
                     ["commandLineArgs"] = Environment.GetCommandLineArgs().Select(arg => SanitizePreview(arg, MaximumPropertyValueLength)).ToArray()
                 };
 
-                File.WriteAllText(state.ManifestPath, JsonSerializer.Serialize(manifest, JsonOptions), Encoding.UTF8);
+                _writeAllText(state.ManifestPath, JsonSerializer.Serialize(manifest, JsonOptions), Encoding.UTF8);
             }
-            catch
+            catch (Exception ex)
             {
+                state.DisableArtifact(state.ManifestPath);
+                ReportArtifactFailureOnce(state, "Manifest", ex, primaryFailure: false);
             }
         }
 
@@ -1006,21 +1084,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
 
         private static bool? TryResolveElevation()
         {
-            try
-            {
-                if (!OperatingSystem.IsWindows())
-                {
-                    return null;
-                }
-
-                using var identity = WindowsIdentity.GetCurrent();
-                var principal = new WindowsPrincipal(identity);
-                return principal.IsInRole(WindowsBuiltInRole.Administrator);
-            }
-            catch
-            {
-                return null;
-            }
+            return CurrentProcessElevation.TryGetIsElevated();
         }
 
         private static DeveloperDiagnosticsStateSnapshot SafeGetSummarySnapshot()
@@ -1057,14 +1121,16 @@ namespace PS7ScriptDesk.Application.Diagnostics
             }
         }
 
-        private static void WriteLatestSessionPointer(string sessionDirectory)
+        private static void WriteLatestSessionPointer(SessionRuntimeState state)
         {
             try
             {
-                File.WriteAllText(LatestSessionPointerPath, sessionDirectory, Encoding.UTF8);
+                _writeAllText(LatestSessionPointerPath, state.SessionDirectoryPath, Encoding.UTF8);
             }
-            catch
+            catch (Exception ex)
             {
+                state.DisableArtifact(LatestSessionPointerPath);
+                ReportArtifactFailureOnce(state, "LatestSessionPointer", ex, primaryFailure: false);
             }
         }
 
@@ -1340,6 +1406,62 @@ namespace PS7ScriptDesk.Application.Diagnostics
             public DateTimeOffset StartedUtc { get; }
 
             public Task? WriterTask { get; set; }
+
+            public DiagnosticsStorageState StorageState => (DiagnosticsStorageState)Volatile.Read(ref _storageState);
+
+            public int DisabledArtifactCount
+            {
+                get
+                {
+                    lock (_artifactSync)
+                    {
+                        return _disabledArtifacts.Count;
+                    }
+                }
+            }
+
+            public bool IsArtifactEnabled(string path)
+            {
+                lock (_artifactSync)
+                {
+                    return !_disabledArtifacts.Contains(path);
+                }
+            }
+
+            public void DisableArtifact(string path)
+            {
+                lock (_artifactSync)
+                {
+                    _disabledArtifacts.Add(path);
+                }
+
+                Interlocked.CompareExchange(ref _storageState, (int)DiagnosticsStorageState.PrimaryWritableWithSecondaryFailures, (int)DiagnosticsStorageState.FullyWritable);
+            }
+
+            public bool DisablePrimaryStorage()
+            {
+                return Interlocked.Exchange(ref _storageState, (int)DiagnosticsStorageState.StorageDisabled) != (int)DiagnosticsStorageState.StorageDisabled;
+            }
+
+            public bool TryMarkFailureReported(string artifact)
+            {
+                lock (_artifactSync)
+                {
+                    return _reportedFailures.Add(artifact);
+                }
+            }
+
+            private readonly object _artifactSync = new();
+            private readonly HashSet<string> _disabledArtifacts = new(StringComparer.OrdinalIgnoreCase);
+            private readonly HashSet<string> _reportedFailures = new(StringComparer.OrdinalIgnoreCase);
+            private int _storageState;
+        }
+
+        private enum DiagnosticsStorageState
+        {
+            FullyWritable,
+            PrimaryWritableWithSecondaryFailures,
+            StorageDisabled
         }
 
         private sealed class ScopeState

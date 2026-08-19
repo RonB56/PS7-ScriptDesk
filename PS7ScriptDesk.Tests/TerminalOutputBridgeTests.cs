@@ -125,4 +125,33 @@ public sealed class TerminalOutputBridgeTests
         Assert.False(controller.Acknowledge(11, currentBatch.Sequence));
         Assert.Null(controller.TryBeginDelivery());
     }
+
+    [Fact]
+    public void FlowController_RendererUnavailableDiscardsQueuedAndInFlightOutputWithoutAllowingReactivation()
+    {
+        var controller = new TerminalOutputFlowController(
+            maximumPendingCharacters: 16,
+            maximumBatchCharacters: 4);
+
+        controller.ActivateGeneration(3);
+        controller.Enqueue(3, "abcd");
+        Assert.True(controller.SetRendererReady());
+        var inFlightBatch = Assert.IsType<TerminalOutputBatch>(controller.TryBeginDelivery());
+        controller.Enqueue(3, "ef");
+
+        var unavailable = controller.MarkRendererUnavailable();
+
+        Assert.Equal(6, unavailable.DiscardedCharacters);
+        Assert.False(controller.SetRendererReady());
+        Assert.Null(controller.TryBeginDelivery());
+        Assert.False(controller.Acknowledge(3, inFlightBatch.Sequence));
+
+        var laterOutput = controller.Enqueue(3, "later");
+        Assert.Equal(5, laterOutput.DroppedCharacters);
+        Assert.Equal(0, laterOutput.AcceptedCharacters);
+
+        controller.ActivateGeneration(4);
+        Assert.False(controller.SetRendererReady());
+        Assert.Null(controller.TryBeginDelivery());
+    }
 }

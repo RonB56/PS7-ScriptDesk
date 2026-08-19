@@ -369,6 +369,25 @@ public sealed class TerminalSessionEventPolicyTests
     }
 
     [Theory]
+    [InlineData(false, true, false, true)]
+    [InlineData(false, true, true, false)]
+    [InlineData(true, true, false, false)]
+    [InlineData(true, false, true, true)]
+    public void InterruptRecoveryPolicy_RequiresCommandAndOwnedWindowToBeFinished(
+        bool commandInProgress,
+        bool processRunning,
+        bool hasVisibleOwnedWindow,
+        bool expectedRecovered)
+    {
+        Assert.Equal(
+            expectedRecovered,
+            TerminalSessionEventPolicy.IsInterruptRecoveryComplete(
+                commandInProgress,
+                processRunning,
+                hasVisibleOwnedWindow));
+    }
+
+    [Theory]
     [InlineData(false, false, null, null, null, true)]
     [InlineData(false, true, null, null, null, false)]
     [InlineData(true, false, 10, 11, null, true)]

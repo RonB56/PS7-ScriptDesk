@@ -18,6 +18,14 @@ namespace PS7ScriptDesk.PowerShell.Services
             return commandInProgress && currentGeneration == observedGeneration;
         }
 
+        public static bool IsInterruptRecoveryComplete(
+            bool commandInProgress,
+            bool processRunning,
+            bool hasVisibleOwnedWindow)
+        {
+            return !processRunning || (!commandInProgress && !hasVisibleOwnedWindow);
+        }
+
         public static bool ShouldIgnoreProcessExit(
             bool hasTrackedProcess,
             bool trackedCommandInProgress,

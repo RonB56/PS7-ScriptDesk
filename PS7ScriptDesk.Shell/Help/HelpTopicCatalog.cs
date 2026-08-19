@@ -10,6 +10,20 @@ namespace PS7ScriptDesk.Shell.Help
     {
         public const string OverviewKey = "App.Overview";
 
+        private static readonly IReadOnlyList<HelpCategory> Categories = new[]
+        {
+            new HelpCategory("GettingStarted", "Getting Started", "Learn the main areas, context Help, and the first editing and run workflow."),
+            new HelpCategory("FilesSaving", "Files & Saving", "Create, open, organize, save, and export scripts."),
+            new HelpCategory("Editing", "Editing", "Use the editor, document tabs, diagnostics, and status information."),
+            new HelpCategory("RunningScripts", "Running Scripts & Terminal", "Run code, work in the shared terminal session, and recover it when needed."),
+            new HelpCategory("Debugging", "Debugging", "Set breakpoints, start debugging, and inspect paused state."),
+            new HelpCategory("SearchNavigation", "Search & Navigation", "Find, replace, and move through the active document."),
+            new HelpCategory("RuntimeIntelliSense", "Runtime & IntelliSense", "Select PowerShell, manage metadata, and understand completion."),
+            new HelpCategory("SettingsAppearance", "Settings & Appearance", "Control layout, themes, zoom, and persisted shell state."),
+            new HelpCategory("TroubleshootingSupport", "Troubleshooting & Support", "Find recovery guidance, logs, and support information."),
+            new HelpCategory("Packaging", "Packaging & Version", "Understand EXE export, version display, and packaging-facing behavior.")
+        };
+
         private static readonly IReadOnlyDictionary<string, HelpTopic> Topics = BuildTopics();
         private static readonly HashSet<string> LoggedMissingKeys = new(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> LoggedBrokenRelationships = new(StringComparer.OrdinalIgnoreCase);
@@ -64,6 +78,27 @@ namespace PS7ScriptDesk.Shell.Help
         public static IReadOnlyList<HelpTopic> GetAllTopics()
         {
             return Topics.Values
+                .OrderBy(static topic => topic.Title, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        public static IReadOnlyList<HelpCategory> GetCategories()
+        {
+            return Categories;
+        }
+
+        public static IReadOnlyList<HelpTopic> GetTopicsForCategory(string? categoryKey)
+        {
+            return Topics.Values
+                .Where(topic => string.Equals(topic.CategoryKey, categoryKey, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(static topic => topic.Title, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        public static IReadOnlyList<HelpTopic> Search(string? searchText)
+        {
+            return Topics.Values
+                .Where(topic => topic.MatchesSearch(searchText))
                 .OrderBy(static topic => topic.Title, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
@@ -123,7 +158,70 @@ namespace PS7ScriptDesk.Shell.Help
                         "If a saved tab no longer matches the file on disk, Run and Debug use the visible editor content instead of silently executing stale disk content.",
                         "PowerShell command metadata loads in the background per runtime and can be refreshed or deleted from the Run menu.",
                         "There is no dedicated Settings dialog today. Layout, theme, zoom, selected runtime, reopened tabs, workspace path, and context-help enablement are persisted automatically."),
-                    related: new[] { "Explorer.Area", "Editor.Area", "Console.Area", "Debug.Area", "Editor.Metadata", "App.Settings", "Help.Troubleshooting", "Help.Packaging" }),
+                    related: new[] { "Help.GettingStarted", "Explorer.Area", "Editor.Area", "Console.Area", "Debug.Area", "Editor.Metadata", "App.AdministratorMode", "Help.Troubleshooting", "Help.Packaging" }),
+
+                ["Help.GettingStarted"] = Topic(
+                    "Help.GettingStarted",
+                    "Getting Started",
+                    "A practical first-session guide to opening, editing, saving, running, and getting help for a PowerShell script.",
+                    "Use it when you are new to PS7 ScriptDesk or want a quick route through the core workflow.",
+                    "Run and Run Selection share the interactive Console session, while debugger-specific output is shown separately in Debug Output.",
+                    Section("First session", true,
+                        "Create a blank tab with New Script or open an existing script with File > Open.",
+                        "Edit the script in the editor, then save it with Save or Save As when you want a file on disk.",
+                        "Use Run Script to send the whole visible editor buffer to the shared PowerShell Console.",
+                        "Use Run Selection to run highlighted text, or the current line when nothing is selected.",
+                        "Read normal script output and prompts in Console. Debug sessions use the separate Debug Output bottom tab.",
+                        "Use Interrupt for a running command that should stop; use Reset Console when you need a fresh PowerShell session."),
+                    Section("Finding Help", false,
+                        "Open Help Home from the Help menu or toolbar to browse categories and search every topic.",
+                        "Press F1 outside the terminal for focused Help; the editor first tries command quick info at the caret.",
+                        "Hover supported controls for quick guidance, or right-click many controls and choose What does this do?."),
+                    Section("If something seems stuck", false,
+                        "A GUI script, long startup task, or command waiting for input can run without new Console output. Check for its window or input request before interrupting it.",
+                        "When the terminal owns keyboard focus, use Ctrl+Shift+F6 to return to the editor, or use the Help menu to open Help."),
+                    Section("Administrator banner", false,
+                        "If the Administrator Mode banner is visible, scripts launched from this elevated app session may have elevated rights. Use File > Open if Windows blocks drag-and-drop from ordinary File Explorer."),
+                    related: new[] { "App.Overview", "Command.NewScript", "Command.OpenFile", "Command.Save", "Command.RunScript", "Command.RunSelection", "Console.FocusAndRecovery", "Debug.OutputAndSessions", "App.AdministratorMode" },
+                    keywords: new[] { "first run", "beginner", "onboarding", "new user" }),
+
+                ["App.AdministratorMode"] = Topic(
+                    "App.AdministratorMode",
+                    "Administrator Mode",
+                    "Explains what it means when PS7 ScriptDesk is running elevated and why Windows can restrict some interactions.",
+                    "Open this topic when the Administrator Mode banner is visible or an elevated script workflow behaves differently from a normal session.",
+                    "Elevation is powerful but not a workaround for Windows security boundaries. Do not rely on drag-and-drop across different integrity levels.",
+                    Section("What the banner means", false,
+                        "When the Administrator Mode banner is visible, PS7 ScriptDesk itself is running elevated.",
+                        "Scripts and child processes launched from that elevated context may inherit elevated rights, depending on how they are launched.",
+                        "This increases the consequence of script mistakes because protected files, services, system-wide configuration, and other normally restricted resources may be affected."),
+                    Section("Drag and drop", false,
+                        "Windows can block dragging files from ordinary, non-elevated File Explorer into elevated PS7 ScriptDesk because of its integrity policy (UIPI).",
+                        "That restriction is enforced by Windows rather than a PS7 ScriptDesk file-open failure.",
+                        "Use File > Open as the normal alternative when a cross-integrity drag operation is blocked."),
+                    Section("Mapped drives", false,
+                        "Elevated and non-elevated Windows contexts can have different visible mapped-drive state. A drive that is available in one context might not appear in the other."),
+                    related: new[] { "Editor.DragDrop", "Command.OpenFile", "Console.Area", "Command.RunScript", "Help.Troubleshooting" },
+                    keywords: new[] { "admin", "elevated", "elevation", "UAC", "drag drop", "UIPI", "mapped drive" }),
+
+                ["App.StoreUpdate"] = Topic(
+                    "App.StoreUpdate",
+                    "Updating PS7 ScriptDesk",
+                    "Explains the Microsoft Store update window and the choices it presents for Store-managed installations.",
+                    "Use it when PS7 ScriptDesk shows an update notification or you need to understand why Store update checking is unavailable for the current build.",
+                    "The window can start a Microsoft Store update request or open the Store update page, but it does not replace Windows or Microsoft Store package management.",
+                    Section("When the window appears", false,
+                        "After startup, PS7 ScriptDesk shows a notification only when it confirms an installable Store-managed update or detects a mandatory update.",
+                        "Unpackaged/local builds and sideloaded or test packages can show manual instructions instead because a Store-managed update path is not confirmed."),
+                    Section("Your choices", false,
+                        "Install Update Now asks the Microsoft Store update service to download and install the confirmed update packages, then shows the returned status.",
+                        "Open Microsoft Store opens the Store updates page and provides the Library > Get updates route.",
+                        "Open Logs Folder and Copy Logs Path help collect support information if update checking or installation reports a problem."),
+                    Section("Close and restart", false,
+                        "For an optional update, Close dismisses the non-blocking window and you can keep working.",
+                        "For a mandatory update, closing the modal update window exits PS7 ScriptDesk. The app does not make a restart guarantee; follow the Store result and Windows prompts."),
+                    related: new[] { "Help.Packaging", "Help.About", "Status.Version", "Help.Logs", "Help.Troubleshooting" },
+                    keywords: new[] { "update", "Microsoft Store", "Store update", "install update", "package" }),
 
                 ["Menu.File"] = Topic(
                     "Menu.File",
@@ -206,7 +304,7 @@ namespace PS7ScriptDesk.Shell.Help
                         "If the file is already open, the app switches to that existing tab instead of opening a duplicate.",
                         "You can also drag supported files onto the editor surface to open them.",
                         "The workspace explorer can open files by double-clicking them in the tree."),
-                    related: new[] { "Editor.Surface", "Explorer.WorkspaceTree", "Editor.DragDrop" }),
+                    related: new[] { "Editor.Surface", "Explorer.WorkspaceTree", "Editor.DragDrop", "App.AdministratorMode" }),
 
                 ["Command.OpenFolder"] = Topic(
                     "Command.OpenFolder",
@@ -235,7 +333,7 @@ namespace PS7ScriptDesk.Shell.Help
                         "Document saves are completed through a same-folder temporary file so a failed write does not first truncate the previous disk version.",
                         "If a clean tab's disk file changed behind the editor, the tab is marked stale so Run and Debug use the visible editor content instead of stale disk text.",
                         "Save failures are surfaced in the status/output areas and logged."),
-                    related: new[] { "Command.SaveAs", "Command.StartDebug" }),
+                    related: new[] { "Command.SaveAs", "Files.ExternalChanges", "Command.StartDebug" }),
 
                 ["Command.SaveAs"] = Topic(
                     "Command.SaveAs",
@@ -244,7 +342,7 @@ namespace PS7ScriptDesk.Shell.Help
                     "Use it for new tabs, copies, renamed files, or alternate versions.",
                     "If you omit a file extension, the app adds `.ps1`. After a successful Save As, the active tab is rebound to the new path.",
                     Section("Shortcut", false, "Ctrl+Shift+S"),
-                    related: new[] { "Command.Save", "Editor.ActiveDocument" }),
+                    related: new[] { "Command.Save", "Files.ExternalChanges", "Editor.ActiveDocument" }),
 
                 ["Command.ExportAsExe"] = Topic(
                     "Command.ExportAsExe",
@@ -466,7 +564,7 @@ namespace PS7ScriptDesk.Shell.Help
                         "If the current saved `.ps1` exactly matches the visible editor text, the run can preserve that file identity. Otherwise the app runs the visible buffer from a temporary snapshot so it never executes stale disk content.",
                         "If enabled breakpoints exist in the active script, Run can switch into the debugger path instead of plain execution.",
                         "The shared terminal session stays alive after the run unless the script itself exits it."),
-                    related: new[] { "Command.RunSelection", "Console.Area", "Command.StartDebug", "Help.Troubleshooting" }),
+                    related: new[] { "Command.RunSelection", "Console.Area", "Console.FocusAndRecovery", "Command.StartDebug", "Help.Troubleshooting" }),
 
                 ["Command.RunSelection"] = Topic(
                     "Command.RunSelection",
@@ -498,7 +596,7 @@ namespace PS7ScriptDesk.Shell.Help
                         "A normal interrupt tries to preserve the current session.",
                         "If the command does not stop in time, the app can forcibly restart its own PowerShell session.",
                         "Open editor tabs and unsaved text stay in the app while the console session is recovered."),
-                    related: new[] { "Console.Reset", "Command.RunScript", "Help.Troubleshooting" }),
+                    related: new[] { "Console.Reset", "Console.FocusAndRecovery", "Command.RunScript", "Help.Troubleshooting" }),
 
                 ["Command.ToggleBreakpoint"] = Topic(
                     "Command.ToggleBreakpoint",
@@ -526,7 +624,7 @@ namespace PS7ScriptDesk.Shell.Help
                         "Stop Debug when you are done."),
                     Section("Current-behavior note", false,
                         "Debugging follows the current app debug pipeline and PowerShell debug prompt handling. That means it is powerful, but still more implementation-sensitive than simple Run."),
-                    related: new[] { "Command.ToggleBreakpoint", "Debug.Area", "Debug.Variables", "Debug.CallStack", "Debug.Breakpoints" }),
+                    related: new[] { "Command.ToggleBreakpoint", "Debug.Area", "Debug.OutputAndSessions", "Debug.Variables", "Debug.CallStack", "Debug.Breakpoints" }),
 
                 ["Command.StepInto"] = Topic(
                     "Command.StepInto",
@@ -571,7 +669,7 @@ namespace PS7ScriptDesk.Shell.Help
                     "Use it when you no longer need the debugger attached.",
                     "Stopping debug is not the same as Interrupt for the shared console run path.",
                     Section("Shortcut", false, "Shift+F5"),
-                    related: new[] { "Command.Interrupt", "Command.StartDebug" }),
+                    related: new[] { "Command.Interrupt", "Command.StartDebug", "Debug.OutputAndSessions" }),
 
                 ["Help.Menu"] = Topic(
                     "Help.Menu",
@@ -579,7 +677,7 @@ namespace PS7ScriptDesk.Shell.Help
                     "The Help menu is the central place for overview help, focused help, and About information.",
                     "Use it when you want guidance without guessing where to click.",
                     "Context Help works best when the control you care about currently has focus.",
-                    related: new[] { "Help.Context", "App.Overview", "Help.About" }),
+                    related: new[] { "Help.Context", "Help.GettingStarted", "Help.Shortcuts", "App.Overview", "Help.About" }),
 
                 ["Help.Context"] = Topic(
                     "Help.Context",
@@ -591,14 +689,14 @@ namespace PS7ScriptDesk.Shell.Help
                         "F1 opens context help for most controls.",
                         "When the editor has focus, F1 first tries PowerShell quick info at the caret.",
                         "If the editor caret does not resolve to quick info, F1 falls back to the editor help topic instead of doing nothing."),
-                    related: new[] { "App.Overview" }),
+                    related: new[] { "App.Overview", "Help.Shortcuts", "Console.FocusAndRecovery" }),
 
                 ["Help.About"] = Topic(
                     "Help.About",
                     "About",
-                    "The current About command writes a brief version and identity note into the shell status and output areas.",
-                    "Use it when you want to confirm the running build without opening a separate About dialog.",
-                    "There is no separate About dialog today. Packaging details live in the repo's Windows packaging project, not in a runtime UI.",
+                    "Opens an About window with the running PS7 ScriptDesk version and a concise product description.",
+                    "Use it when you want to confirm the running build or identify the application.",
+                    "Package metadata can be unavailable; the running shell version is always the primary version shown.",
                     related: new[] { "App.Overview", "Help.Packaging", "App.Settings" }),
 
                 ["Help.Logs"] = Topic(
@@ -643,7 +741,25 @@ namespace PS7ScriptDesk.Shell.Help
                         "On Windows it also checks PowerShell registry entries, `PATH`, and `where.exe` results when needed.",
                         "Only candidates that resolve to a launchable `pwsh.exe` and report PowerShell Core 7.0 or newer are accepted.",
                         "Candidate metadata is validated before a runtime is accepted."),
-                    related: new[] { "Runtime.Refresh", "Runtime.Path", "Runtime.List", "Editor.Metadata", "Help.Troubleshooting" }),
+                    related: new[] { "Runtime.Resolver", "Runtime.Refresh", "Runtime.Path", "Runtime.List", "Editor.Metadata", "Help.Troubleshooting" }),
+
+                ["Runtime.Resolver"] = Topic(
+                    "Runtime.Resolver",
+                    "PowerShell Runtime Resolver",
+                    "Explains the startup window shown when PS7 ScriptDesk cannot find a usable PowerShell 7 runtime automatically.",
+                    "Use it when startup stops at the PowerShell 7 Required window or when you need to choose a valid pwsh.exe manually.",
+                    "PS7 ScriptDesk requires a validated PowerShell Core 7.0-or-newer `pwsh.exe`; Windows PowerShell `powershell.exe` is not a supported substitute.",
+                    Section("Why it appears", false,
+                        "The startup runtime check did not find a valid PowerShell 7 runtime, including any previously saved runtime path that could be trusted.",
+                        "Without a valid runtime, PS7 ScriptDesk exits before opening the main shell."),
+                    Section("Resolver choices", false,
+                        "Try Automatic Search Again runs runtime discovery with launch validation. If it finds a valid runtime, that runtime is accepted and startup continues.",
+                        "Browse for pwsh.exe lets you select a candidate executable. The resolver validates it and continues only after accepting a valid PowerShell 7 runtime.",
+                        "Open Logs Folder, Copy Logs Path, and Copy Setup Help Text help collect or share recovery information. Exit closes the resolver without a runtime, so startup exits."),
+                    Section("After recovery", false,
+                        "The accepted runtime becomes the runtime used for the app's subsequent terminal, Run, Debug, and editor metadata work. You can refresh runtime discovery later from the main shell."),
+                    related: new[] { "Runtime.Area", "Runtime.Refresh", "Runtime.Path", "Runtime.List", "Help.Logs", "Help.Troubleshooting" },
+                    keywords: new[] { "resolver", "PowerShell 7 required", "pwsh.exe", "runtime not found", "startup" }),
 
                 ["Runtime.Refresh"] = Topic(
                     "Runtime.Refresh",
@@ -651,7 +767,7 @@ namespace PS7ScriptDesk.Shell.Help
                     "Rescans the machine for installed PowerShell runtimes.",
                     "Use it after installing or removing a PowerShell version, or if the runtime list looks wrong.",
                     "Refresh temporarily disables runtime-changing actions while discovery is in progress. It does not modify script tabs, console history, or file contents.",
-                    related: new[] { "Runtime.Area", "Runtime.List", "Help.Troubleshooting" }),
+                    related: new[] { "Runtime.Area", "Runtime.Resolver", "Runtime.List", "Help.Troubleshooting" }),
 
                 ["Runtime.Path"] = Topic(
                     "Runtime.Path",
@@ -674,7 +790,8 @@ namespace PS7ScriptDesk.Shell.Help
                     "Workspace summary text",
                     "These summary lines show tab count, workspace counts, current workspace path, and the selected workspace item path.",
                     "Use them for quick orientation without drilling into the tree.",
-                    "Counts and paths describe what the app currently knows about the loaded workspace view; they do not replace the actual tree."),
+                    "Counts and paths describe what the app currently knows about the loaded workspace view; they do not replace the actual tree.",
+                    related: new[] { "Explorer.WorkspaceTree", "Explorer.WorkspaceFilter", "Command.OpenFolder" }),
 
                 ["Explorer.WorkspaceFilter"] = Topic(
                     "Explorer.WorkspaceFilter",
@@ -818,8 +935,11 @@ namespace PS7ScriptDesk.Shell.Help
                     "Drag and drop file open",
                     "You can drag one or more files from Windows Explorer and drop them onto the editor area to open them as tabs.",
                     "Use it when you already have File Explorer open and want a fast way to bring files into the app.",
-                    "Only real file paths can be opened this way. Dropping folders does not turn them into a workspace by itself.",
-                    related: new[] { "Command.OpenFile", "Command.OpenFolder" }),
+                    "Only real file paths can be opened this way, and dropping folders does not turn them into a workspace by itself. When PS7 ScriptDesk runs elevated, Windows can block a drop from ordinary File Explorer because of cross-integrity policy.",
+                    Section("Administrator Mode", false,
+                        "If the Administrator Mode banner is visible and a drop is blocked, use File > Open instead.",
+                        "Windows enforces that cross-integrity restriction; it is not a PS7 ScriptDesk drag-and-drop workaround scenario."),
+                    related: new[] { "Command.OpenFile", "Command.OpenFolder", "App.AdministratorMode" }),
 
                 ["Console.Area"] = Topic(
                     "Console.Area",
@@ -833,15 +953,22 @@ namespace PS7ScriptDesk.Shell.Help
                         "Session status text",
                         "Reset Console button",
                         "Shared session state used by Run, Run Selection, and manual commands"),
-                    related: new[] { "Console.Output", "Console.Reset", "Command.RunScript", "Command.RunSelection", "Help.Troubleshooting" }),
+                    related: new[] { "Console.Output", "Console.FocusAndRecovery", "Console.Reset", "Command.RunScript", "Command.RunSelection", "Help.Troubleshooting" }),
 
                 ["Console.Output"] = Topic(
                     "Console.Output",
                     "Interactive terminal surface",
-                    "Shows script output, prompt text, manual commands, and debugger-related terminal output inside the embedded console.",
+                    "Shows normal PowerShell prompt text, manual commands, script output, and script errors from the shared interactive Console session.",
                     "Use it to read results and to type directly into the live PowerShell session.",
-                    "The terminal surface is interactive. PowerShell errors from your script appear here, and a broken script should not be confused with an app crash. If the prompt or cursor looks confusing after a command, Interrupt or Reset Console can recover the session more reliably than editing the visible text.",
-                    related: new[] { "Command.ClearOutput", "Console.Reset", "Help.Troubleshooting" }),
+                    "The terminal surface is interactive. A PowerShell error from a normal run appears here, and a broken script should not be confused with an app crash. If the prompt or cursor looks confusing after a command, use Interrupt or Reset Console instead of editing the visible terminal text.",
+                    Section("Output locations", false,
+                        "Console is the embedded interactive PowerShell terminal used by manual commands, Run Script, and Run Selection.",
+                        "Activity shows application messages and operation details. It is not the PowerShell terminal and should not be confused with script output.",
+                        "Debug Output is a separate bottom pane for output from the debugger-specific session; debugger output does not indicate that the normal Console session produced it."),
+                    Section("Clear and Reset", false,
+                        "Clear Output clears the visible Console. With a live session it sends `cls` so PowerShell and PSReadLine redraw the prompt; without a session it clears only the display.",
+                        "Reset Console replaces the current PowerShell session with a fresh one. It discards Console session state but leaves open editor tabs in place."),
+                    related: new[] { "Command.ClearOutput", "Console.Area", "Console.FocusAndRecovery", "Console.Reset", "Debug.OutputAndSessions", "Help.Troubleshooting" }),
 
                 ["Console.Reset"] = Topic(
                     "Console.Reset",
@@ -849,7 +976,90 @@ namespace PS7ScriptDesk.Shell.Help
                     "Rebuilds the live terminal session.",
                     "Use it when the session state becomes confusing or you want a fresh PowerShell host.",
                     "Reset Console is stronger than Interrupt. It discards the old interactive session state and starts a new PowerShell process under the currently selected runtime, while keeping your open editor tabs in place.",
-                    related: new[] { "Command.Interrupt", "Console.Area" }),
+                    related: new[] { "Command.Interrupt", "Console.Area", "Console.FocusAndRecovery" }),
+
+                ["Console.FocusAndRecovery"] = Topic(
+                    "Console.FocusAndRecovery",
+                    "Terminal Focus and Recovery",
+                    "Explains terminal keyboard ownership, the F1 exception, and practical recovery when a Console command or script appears stuck.",
+                    "Use it when a terminal shortcut does not reach the app, the prompt does not return as expected, or a script is still running without visible Console output.",
+                    "The embedded terminal intentionally prioritizes PowerShell and xterm input. Do not assume that a missing prompt or output means the app has stopped responding.",
+                    Section("Keyboard focus", false,
+                        "When the embedded terminal has keyboard focus, most keys are delivered to PowerShell/xterm instead of PS7 ScriptDesk shortcuts.",
+                        "F1 while the terminal has focus does not open PS7 ScriptDesk contextual Help. Use the Help menu or toolbar, or use hover/right-click Help with the pointer instead.",
+                        "Press Ctrl+Shift+F6 in the terminal to return keyboard focus to the active editor."),
+                    Section("Interrupt and Reset", false,
+                        "Use Interrupt first when a tracked command or script should stop. It sends the normal Ctrl+C-style interruption path and may restart the app-owned PowerShell session if the command does not recover in time.",
+                        "Use Reset Console when you deliberately want a fresh terminal session or the existing session state remains confusing. Reset replaces the session and discards its variables, functions, location, and other interactive state."),
+                    Section("GUI and no-output scripts", false,
+                        "A script can remain running without writing new Console output while it opens a GUI, waits on a dialog, performs long startup work, or waits for input.",
+                        "If PS7 ScriptDesk reports that a PowerShell-owned window is open, use or close that window as appropriate. If the work is genuinely stuck, use Interrupt; use Reset Console if recovery still requires a fresh session."),
+                    Section("Prompt recovery", false,
+                        "After normal completion or a successful interruption, the Console is expected to return to an interactive prompt. If it does not recover cleanly, Reset Console is the reliable replacement-session recovery path."),
+                    related: new[] { "Console.Area", "Console.Output", "Console.Reset", "Command.Interrupt", "Command.RunScript", "Help.Troubleshooting", "Help.Shortcuts" },
+                    keywords: new[] { "stuck", "cursor", "prompt", "focus", "reset", "interrupt", "GUI", "terminal" }),
+
+                ["Debug.OutputAndSessions"] = Topic(
+                    "Debug.OutputAndSessions",
+                    "Debug Output and Sessions",
+                    "Explains where debugger output appears and how the debugger-specific session differs from the normal Console session.",
+                    "Use it when you are debugging, cannot find debug output, or need to distinguish a debug action from normal Console execution.",
+                    "Debugger output is not ordinary terminal output. A line in Debug Output does not mean the shared Console session produced it.",
+                    Section("Where to look", false,
+                        "Debug Output is the dedicated bottom pane for output from the separate PowerShell debugger process/session.",
+                        "Console remains the interactive PowerShell terminal for manual commands, Run Script, and Run Selection.",
+                        "Activity contains application messages and operation details rather than script output or debugger-session output."),
+                    Section("Debugger state", false,
+                        "Variables, Call Stack, and Breakpoints describe debugger state and are most useful while the session is paused.",
+                        "Start Debug begins the debugger-specific execution path. Stop Debug ends that debug session; it is different from Interrupt, which targets normal shared-Console execution."),
+                    Section("When output seems missing", false,
+                        "Select the Debug Output bottom tab after starting a debug session. Also check the current debug state and the Variables, Call Stack, and Breakpoints panels when a breakpoint is expected to pause execution.",
+                        "For a normal Run Script or Run Selection, look in Console instead. Use Troubleshooting if the status or output still does not explain the state."),
+                    related: new[] { "Debug.Area", "Command.StartDebug", "Command.StopDebug", "Debug.Variables", "Debug.CallStack", "Console.Output", "Console.FocusAndRecovery", "Help.Troubleshooting" },
+                    keywords: new[] { "debug output", "debugger output", "output pane", "debug session", "activity" }),
+
+                ["Files.ExternalChanges"] = Topic(
+                    "Files.ExternalChanges",
+                    "Files Changed Outside ScriptDesk",
+                    "Explains what to do when a file changed, was deleted, moved, locked, or became inaccessible after ScriptDesk opened it.",
+                    "Use it when Save warns that the disk version no longer matches the editor tab.",
+                    "Saving after an external change can overwrite someone else's disk version. Read the conflict choice before confirming it.",
+                    Section("What triggers a conflict", false,
+                        "A conflict is raised when the disk file was changed after the tab loaded or last saved, was deleted or moved, or its current state cannot be safely verified.",
+                        "A clean tab whose disk file changed is marked stale, so Run and Debug continue using the visible editor content rather than silently running stale disk text."),
+                    Section("Conflict choices", false,
+                        "Reload from Disk discards the editor tab's current content and loads the version now on disk.",
+                        "Overwrite Disk replaces the disk version with the editor content after you confirm that choice.",
+                        "Save As keeps the changed disk version and saves the editor content to another path.",
+                        "Cancel writes nothing and leaves the editor content available for you to review."),
+                    Section("Safe recovery", false,
+                        "If you need to preserve both versions, use Save As before making further changes. If the file was moved or deleted, choose a new destination with Save As or locate the intended file before reloading."),
+                    related: new[] { "Command.Save", "Command.SaveAs", "Command.OpenFile", "Help.Troubleshooting" },
+                    keywords: new[] { "changed outside", "external", "deleted", "moved", "conflict", "reload", "overwrite", "save as" }),
+
+                ["Help.Shortcuts"] = Topic(
+                    "Help.Shortcuts",
+                    "Keyboard Shortcuts",
+                    "A verified reference for the core PS7 ScriptDesk shortcuts and the contexts where they apply.",
+                    "Use it when you want a faster workflow or need to know why a shortcut is not active in the terminal or debugger state.",
+                    "The embedded terminal keeps most keys for PowerShell/xterm. Terminal focus is an important exception to main-window shortcuts.",
+                    Section("Files and tabs", false,
+                        "Ctrl+N: New Script; Ctrl+O: Open File; Ctrl+Shift+O: Open Folder/Workspace.",
+                        "Ctrl+S: Save; Ctrl+Shift+S: Save As; Ctrl+W: Close Tab; Ctrl+Shift+W: Close All.",
+                        "Ctrl+Tab and Ctrl+Shift+Tab: move to the next or previous editor tab."),
+                    Section("Editing and search", false,
+                        "Ctrl+F: Find; Ctrl+H: Replace; Ctrl+G: Go To Line; F3 and Shift+F3: next and previous search result.",
+                        "Ctrl+Space: request editor completion; Ctrl+/: toggle editor comments; Alt+Up and Alt+Down: move the current editor line.",
+                        "Ctrl+mouse wheel over the editor: zoom the editor text."),
+                    Section("Running and debugging", false,
+                        "Ctrl+F5: Run Script; F8 in the editor: Run Selection, or the current line when nothing is selected.",
+                        "F9: toggle the editor breakpoint. F5: Start Debug, or Continue when a debug session is paused. Shift+F5: Stop Debug.",
+                        "F10: Step Over; F11: Step Into; Shift+F11: Step Out. Debug step commands require a paused debug session."),
+                    Section("Help and terminal focus", false,
+                        "F1: focused Help outside the terminal. In the editor it first tries command or parameter quick info.",
+                        "Ctrl+Shift+F6: move keyboard focus from the embedded terminal back to the active editor. F1 while terminal-focused does not open PS7 ScriptDesk contextual Help."),
+                    related: new[] { "Help.Context", "Help.GettingStarted", "Editor.Area", "Console.FocusAndRecovery", "Debug.Area", "Command.RunScript" },
+                    keywords: new[] { "keyboard", "hotkey", "hotkeys", "shortcut", "Ctrl+F5", "F8", "F1" }),
 
                 ["Editor.Metadata"] = Topic(
                     "Editor.Metadata",
@@ -882,7 +1092,7 @@ namespace PS7ScriptDesk.Shell.Help
                     "The Debug panel holds Variables, Call Stack, and Breakpoints tabs.",
                     "Use it while debugging to inspect the current paused state.",
                     "These views are most meaningful when a debug session is active and paused. Use Start Debug, Continue, Step Into, Step Over, Step Out, and Stop Debug from the Debug menu or toolbar.",
-                    related: new[] { "Debug.Variables", "Debug.CallStack", "Debug.Breakpoints", "Command.StartDebug", "Command.ContinueDebug", "Command.StepInto", "Command.StepOver", "Command.StepOut", "Command.StopDebug" }),
+                    related: new[] { "Debug.OutputAndSessions", "Debug.Variables", "Debug.CallStack", "Debug.Breakpoints", "Command.StartDebug", "Command.ContinueDebug", "Command.StepInto", "Command.StepOver", "Command.StepOut", "Command.StopDebug" }),
 
                 ["Debug.Variables"] = Topic(
                     "Debug.Variables",
@@ -936,9 +1146,9 @@ namespace PS7ScriptDesk.Shell.Help
                 ["Help.Troubleshooting"] = Topic(
                     "Help.Troubleshooting",
                     "Troubleshooting",
-                    "Use these checks when help, completion, diagnostics, runtime discovery, file operations, or script execution do not behave as expected.",
+                    "Use these checks when Help, completion, runtime discovery, files, Console execution, or debugging do not behave as expected.",
                     "Open this topic when a feature seems idle, unavailable, or inconsistent with the current UI state.",
-                    "PS7 ScriptDesk writes detailed diagnostics to the app log. Most help and metadata failures should remain visible and logged instead of failing silently.",
+                    "Start with the visible status and the relevant bottom pane. PS7 ScriptDesk writes detailed diagnostics to the app log, but normal script output, Activity, and Debug Output are different places.",
                     Section("Metadata failed or completion is weak", true,
                         "Watch the metadata status badge or Run-menu metadata commands for the current runtime state.",
                         "If completion is sparse right after startup or a runtime switch, wait for the background metadata build to finish.",
@@ -951,8 +1161,15 @@ namespace PS7ScriptDesk.Shell.Help
                         "Remember that the terminal is interactive and owns its own prompt.",
                         "Use Interrupt if PowerShell is waiting for more input.",
                         "If Interrupt does not stop the command in time, PS7 ScriptDesk can restart only the PowerShell session it owns and return a fresh prompt.",
-                        "Use Reset Console if the session state is confused or the prompt never recovers cleanly."),
-                    Section("Help topic missing, diagnostics absent, runtime missing, or file open/save failed", true,
+                        "Use Reset Console if the session state is confused or the prompt never recovers cleanly.",
+                        "A GUI script, long startup task, or command waiting for input can run without new Console output. Check for its window or prompt before interrupting it."),
+                    Section("Focused recovery topics", false,
+                        "F1 does nothing while the terminal has focus: use the Help menu or toolbar, then see Terminal Focus and Recovery. Ctrl+Shift+F6 returns focus to the editor.",
+                        "Debugger output is not in Console: select the Debug Output bottom tab and see Debug Output and Sessions.",
+                        "A file changed outside ScriptDesk: Save opens a choice to Reload from Disk, Overwrite Disk, Save As, or Cancel. See Files Changed Outside ScriptDesk before choosing.",
+                        "Drag-and-drop fails while the Administrator Mode banner is visible: Windows can block a drop from ordinary File Explorer. Use File > Open and see Administrator Mode.",
+                        "Mapped drives can differ between elevated and normal contexts; see Administrator Mode before assuming a drive is unavailable."),
+                    Section("Help, runtime, or file operation failed", true,
                         "A missing help topic now shows a visible fallback message with the missing key and logs the problem.",
                         "If diagnostics do not appear, verify that a PowerShell runtime is available for syntax checking.",
                         "If no runtime is found, refresh discovery and verify that `pwsh.exe` from PowerShell 7.x is installed on the machine.",
@@ -961,7 +1178,8 @@ namespace PS7ScriptDesk.Shell.Help
                         $"Standard app log: {AppLogger.CurrentLogPath}",
                         $"Logs folder: {AppLogger.CurrentLogDirectory}",
                         "Use Tools to open the logs folder, copy the path, or package support logs into a ZIP file."),
-                    related: new[] { "Editor.Metadata", "Console.Area", "Runtime.Area", "Command.RunScript", "Command.RunSelection", "Help.Context", "Help.Logs" }),
+                    related: new[] { "Console.FocusAndRecovery", "Debug.OutputAndSessions", "Files.ExternalChanges", "App.AdministratorMode", "Editor.Metadata", "Runtime.Area", "Help.Context", "Help.Logs" },
+                    keywords: new[] { "stuck", "prompt", "conflict", "administrator", "debug output", "help disabled" }),
 
                 ["Help.Packaging"] = Topic(
                     "Help.Packaging",
@@ -970,11 +1188,11 @@ namespace PS7ScriptDesk.Shell.Help
                     "Use this topic when you want to understand what the app exposes at runtime versus what only exists in the packaging/build configuration.",
                     "Store/MSIX builds can now surface Microsoft Store update guidance at startup, while unpackaged and non-Store builds continue to run without any Store-specific UI.",
                     Section("Current runtime-facing behavior", false,
-                        "The About command writes a brief version note to the shell status/output areas.",
+                        "The About window shows the running shell version without writing to the terminal or application activity output.",
                         "The status bar also shows the running version string.",
                         "Store-managed packaged builds can check for Microsoft Store updates during startup and prompt when an update is available or required.",
                         "Packaging and signing are build-time concerns, not a live in-app settings page."),
-                    related: new[] { "Help.About", "Status.Version", "App.Overview" }),
+                    related: new[] { "App.StoreUpdate", "Help.About", "Status.Version", "App.Overview" }),
 
                 ["Status.Version"] = StatusTopic(
                     "Status.Version",
@@ -1107,14 +1325,86 @@ namespace PS7ScriptDesk.Shell.Help
             HelpSection? section6 = null,
             HelpSection? section7 = null,
             HelpSection? section8 = null,
-            IEnumerable<string>? related = null)
+            IEnumerable<string>? related = null,
+            IEnumerable<string>? keywords = null)
         {
             var sections = new[] { section1, section2, section3, section4, section5, section6, section7, section8 }
                 .Where(static section => section is not null)
                 .Cast<HelpSection>()
                 .ToArray();
 
-            return new HelpTopic(key, title, quickSummary, whenToUse, limitationOrGotcha, sections, related);
+            return new HelpTopic(
+                key,
+                title,
+                quickSummary,
+                whenToUse,
+                limitationOrGotcha,
+                sections,
+                related,
+                keywords,
+                categoryKey: GetCategoryKey(key));
+        }
+
+        private static string GetCategoryKey(string key)
+        {
+            if (key.StartsWith("FindReplace.", StringComparison.OrdinalIgnoreCase) ||
+                key.StartsWith("GoToLine.", StringComparison.OrdinalIgnoreCase) ||
+                key is "Command.Find" or "Command.Replace" or "Command.GoToLine" or "Status.Caret" or "Status.Lines" or "Status.Selection")
+            {
+                return "SearchNavigation";
+            }
+
+            if (key.StartsWith("Debug.", StringComparison.OrdinalIgnoreCase) ||
+                key is "Command.ToggleBreakpoint" or "Command.StartDebug" or "Command.StepInto" or "Command.StepOver" or "Command.StepOut" or "Command.ContinueDebug" or "Command.StopDebug" or "Status.Breakpoints")
+            {
+                return "Debugging";
+            }
+
+            if (key.StartsWith("Runtime.", StringComparison.OrdinalIgnoreCase) || key is "Editor.Metadata")
+            {
+                return "RuntimeIntelliSense";
+            }
+
+            if (key.StartsWith("View.", StringComparison.OrdinalIgnoreCase) ||
+                key.StartsWith("Theme.", StringComparison.OrdinalIgnoreCase) ||
+                key is "App.Settings" or "Status.Zoom")
+            {
+                return "SettingsAppearance";
+            }
+
+            if (key is "Help.Troubleshooting" or "Help.Logs" or "Help.Shortcuts" or "Menu.Tools" or "Status.General" or "Status.Execution")
+            {
+                return "TroubleshootingSupport";
+            }
+
+            if (key is "Help.Packaging" or "App.StoreUpdate" or "Command.ExportAsExe" or "Status.Version")
+            {
+                return "Packaging";
+            }
+
+            if (key.StartsWith("Console.", StringComparison.OrdinalIgnoreCase) ||
+                key is "Command.RunScript" or "Command.RunSelection" or "Command.Interrupt" or "Command.ClearOutput")
+            {
+                return "RunningScripts";
+            }
+
+            if (key.StartsWith("Explorer.", StringComparison.OrdinalIgnoreCase) ||
+                key is "Menu.File" or "Menu.RecentScripts" or "Command.NewScript" or "Command.CloseTab" or "Command.CloseAll" or "Command.OpenFile" or "Command.OpenFolder" or "Command.Save" or "Command.SaveAs" or "Editor.DragDrop")
+            {
+                return "FilesSaving";
+            }
+
+            if (key is "Files.ExternalChanges")
+            {
+                return "FilesSaving";
+            }
+
+            if (key.StartsWith("Editor.", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Editing";
+            }
+
+            return "GettingStarted";
         }
 
         private static HelpSection Section(string heading, bool numbered, params string[] items)

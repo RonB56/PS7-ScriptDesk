@@ -15,6 +15,7 @@
         ContentRendered="Window_ContentRendered"
         Closing="Window_Closing"
         PreviewKeyDown="Window_PreviewKeyDown"
+        PreviewGotKeyboardFocus="Window_PreviewGotKeyboardFocus"
         AllowDrop="True">
 
     <Window.Resources>
@@ -149,6 +150,32 @@
 
     <Grid>
         <DockPanel>
+
+        <Border x:Name="AdministratorModeBanner"
+                DockPanel.Dock="Top"
+                Background="#B91C1C"
+                BorderBrush="#FCA5A5"
+                BorderThickness="0,0,0,1"
+                Padding="12,8"
+                Visibility="{Binding AdministratorModeBannerVisibility, RelativeSource={RelativeSource AncestorType=Window}}"
+                AutomationProperties.Name="Administrator mode warning">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="ADMINISTRATOR MODE"
+                           Foreground="White"
+                           FontWeight="Bold"
+                           VerticalAlignment="Center"
+                           Margin="0,0,12,0" />
+                <TextBlock Grid.Column="1"
+                           Text="{Binding AdministratorModeBannerDetail, RelativeSource={RelativeSource AncestorType=Window}}"
+                           Foreground="White"
+                           TextWrapping="Wrap"
+                           VerticalAlignment="Center" />
+            </Grid>
+        </Border>
 
         <Menu DockPanel.Dock="Top" help:ContextHelp.Key="App.Overview">
                 <MenuItem x:Name="FileMenuItem"
@@ -336,7 +363,7 @@
                           help:ContextHelp.Key="Help.Context" />
                 <MenuItem Header="PS7 ScriptDesk _Help" Click="HelpOverview_Click" help:ContextHelp.Key="App.Overview" />
                 <Separator />
-                <MenuItem Header="_About" Command="{Binding AboutCommand}" help:ContextHelp.Key="Help.About" />
+                <MenuItem Header="_About" Click="About_Click" help:ContextHelp.Key="Help.About" />
             </MenuItem>
         </Menu>
 
@@ -1412,8 +1439,10 @@
                                 <StackPanel Orientation="Horizontal"
                                             DockPanel.Dock="Right"
                                             HorizontalAlignment="Right">
-                                    <Button Content="Reset Console"
+                                    <Button x:Name="ResetConsoleButton"
+                                            Content="Reset Console"
                                             Command="{Binding RestartConsoleCommand}"
+                                            PreviewMouseLeftButtonDown="ResetConsoleButton_PreviewMouseLeftButtonDown"
                                             Padding="10,4"
                                             Margin="8,0,0,0"
                                             MinWidth="110"

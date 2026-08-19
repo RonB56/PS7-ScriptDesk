@@ -5,9 +5,11 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Windows;
+using System.Windows.Input;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Shell.Services;
+using PS7ScriptDesk.Shell.Help;
 
 namespace PS7ScriptDesk.Shell
 {
@@ -26,6 +28,22 @@ namespace PS7ScriptDesk.Shell
 
             InitializeComponent();
             ConfigureWindow();
+        }
+
+        private void Window_Loaded(object sender, RoutedEventArgs e)
+        {
+            ContextHelp.ValidateWindowTopics(this);
+        }
+
+        private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (e.Key != Key.F1)
+            {
+                return;
+            }
+
+            e.Handled = true;
+            ContextHelp.OpenForFocusedElement(this);
         }
 
         private void ConfigureWindow()

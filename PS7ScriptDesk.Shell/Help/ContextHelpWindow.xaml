@@ -11,11 +11,41 @@
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0"
+        <DockPanel Grid.Row="0" Margin="0,0,0,12">
+            <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                <Button x:Name="HomeButton"
+                        Content="Home"
+                        Padding="12,6"
+                        Click="HomeButton_Click"
+                        AutomationProperties.Name="Show Help Home" />
+                <Button x:Name="BackButton"
+                        Content="Back"
+                        Margin="8,0,0,0"
+                        Padding="12,6"
+                        Click="BackButton_Click"
+                        AutomationProperties.Name="Go back in Help navigation" />
+            </StackPanel>
+            <TextBox x:Name="HelpSearchBox"
+                     DockPanel.Dock="Right"
+                     Width="280"
+                     Padding="8,5"
+                     VerticalContentAlignment="Center"
+                     TextChanged="HelpSearchBox_TextChanged"
+                     KeyDown="HelpSearchBox_KeyDown"
+                     ToolTip="Search Help topics by title, key, or content"
+                     AutomationProperties.Name="Search Help topics" />
+            <TextBlock DockPanel.Dock="Right"
+                       Margin="0,0,8,0"
+                       VerticalAlignment="Center"
+                       Text="Search" />
+        </DockPanel>
+
+        <Border Grid.Row="1"
                 Padding="16"
                 Margin="0,0,0,12"
                 Style="{StaticResource PanelCardBorderStyle}">
@@ -32,25 +62,24 @@
                                TextWrapping="Wrap" />
                 </StackPanel>
 
-                <Border DockPanel.Dock="Right"
-                        VerticalAlignment="Top"
-                        Padding="12,6"
-                        Background="{DynamicResource Theme.Accent.Primary}"
-                        CornerRadius="{StaticResource Radius.Pill}">
-                    <TextBlock Text="Context Help"
-                               FontWeight="SemiBold"
-                               Foreground="{DynamicResource Theme.Accent.Foreground}" />
-                </Border>
+                <TextBlock x:Name="ContextHelpLabel"
+                           DockPanel.Dock="Right"
+                           HorizontalAlignment="Right"
+                           VerticalAlignment="Top"
+                           Text="Context Help"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource Theme.Text.Secondary}"
+                           AutomationProperties.Name="Context Help" />
             </DockPanel>
         </Border>
 
-        <ScrollViewer Grid.Row="1"
+        <ScrollViewer Grid.Row="2"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled">
             <StackPanel x:Name="BodyPanel" />
         </ScrollViewer>
 
-        <DockPanel Grid.Row="2" Margin="0,12,0,0">
+        <DockPanel Grid.Row="3" Margin="0,12,0,0">
             <TextBlock x:Name="FooterText"
                        VerticalAlignment="Center"
                        Foreground="{DynamicResource Theme.Text.Secondary}"

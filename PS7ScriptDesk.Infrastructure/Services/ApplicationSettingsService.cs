@@ -18,6 +18,8 @@ namespace PS7ScriptDesk.Infrastructure.Services
         };
 
         private readonly string _settingsFilePath;
+        // Private production-default delegate allows deterministic read-failure testing without a filesystem abstraction.
+        private static Func<string, string> _readAllText = File.ReadAllText;
 
         public ApplicationSettingsService()
         {
@@ -50,7 +52,7 @@ namespace PS7ScriptDesk.Infrastructure.Services
                     return defaults;
                 }
 
-                var json = File.ReadAllText(_settingsFilePath);
+                var json = _readAllText(_settingsFilePath);
                 if (string.IsNullOrWhiteSpace(json))
                 {
                     var defaults = new ApplicationSettings();
@@ -81,6 +83,10 @@ namespace PS7ScriptDesk.Infrastructure.Services
             catch (Exception ex)
             {
                 var defaults = new ApplicationSettings();
+                AppLogger.Error(
+                    "Settings",
+                    "Application settings could not be loaded; safe defaults are being used. SettingsFile=appsettings.json.",
+                    ex);
                 DeveloperDiagnostics.ConfigureFromSettings(defaults, "Settings load failed; defaults applied");
                 DeveloperDiagnostics.LogOperationFailure(
                     "Settings",
