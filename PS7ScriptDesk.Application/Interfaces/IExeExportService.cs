@@ -6,6 +6,9 @@ namespace PS7ScriptDesk.Application.Interfaces
 {
     public interface IExeExportService
     {
-        Task<ExeExportResult> ExportScriptAsExeAsync(ExeExportRequest request, CancellationToken cancellationToken = default);
+        Task<ExeExportResult> ExportScriptAsExeAsync(
+            ExeExportRequest request,
+            CancellationToken cancellationToken = default,
+            IProgress<ExeExportProgressUpdate>? progress = null);
     }
 }

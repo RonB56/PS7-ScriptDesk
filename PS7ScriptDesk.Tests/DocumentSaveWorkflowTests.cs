@@ -397,7 +397,10 @@ internal sealed class FakeWorkspaceFolderService : IWorkspaceFolderService
 
 internal sealed class FakeExeExportService : IExeExportService
 {
-    public Task<ExeExportResult> ExportScriptAsExeAsync(ExeExportRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<ExeExportResult> ExportScriptAsExeAsync(
+        ExeExportRequest request,
+        CancellationToken cancellationToken = default,
+        IProgress<ExeExportProgressUpdate>? progress = null) => throw new NotSupportedException();
 }
 
 internal sealed class FakeLiveConsoleService : ILiveConsoleService

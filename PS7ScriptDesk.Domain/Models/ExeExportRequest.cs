@@ -8,7 +8,8 @@ namespace PS7ScriptDesk.Domain.Models
             string sourceScriptPath,
             string scriptContent,
             string outputExecutablePath,
-            PowerShellRuntimeInfo runtimeInfo)
+            PowerShellRuntimeInfo runtimeInfo,
+            ExeExportConfiguration? configuration = null)
         {
             SourceScriptPath = string.IsNullOrWhiteSpace(sourceScriptPath)
                 ? throw new ArgumentException("A saved source script path is required.", nameof(sourceScriptPath))
@@ -19,6 +20,7 @@ namespace PS7ScriptDesk.Domain.Models
                 ? throw new ArgumentException("An output executable path is required.", nameof(outputExecutablePath))
                 : outputExecutablePath;
             RuntimeInfo = runtimeInfo ?? throw new ArgumentNullException(nameof(runtimeInfo));
+            Configuration = configuration;
         }
 
         public string SourceScriptPath { get; }
@@ -28,5 +30,10 @@ namespace PS7ScriptDesk.Domain.Models
         public string OutputExecutablePath { get; }
 
         public PowerShellRuntimeInfo RuntimeInfo { get; }
+
+        /// <summary>
+        /// Null only for the legacy simple export call path. New wizard exports always supply this.
+        /// </summary>
+        public ExeExportConfiguration? Configuration { get; }
     }
 }

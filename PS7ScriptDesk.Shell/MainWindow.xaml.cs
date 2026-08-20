@@ -40,6 +40,7 @@ using PS7ScriptDesk.Application.Interfaces;
 using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.Shell.Debug;
+using PS7ScriptDesk.Shell.Dialogs;
 using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.Shell.Help;
 using PS7ScriptDesk.Shell.Services;
@@ -209,6 +210,7 @@ namespace PS7ScriptDesk.Shell
         private string? _activeDebugSnapshotPath;
         private int _debugPanelRefreshVersion;
         private DebugPaneWindow? _debugPaneWindow;
+        private ExportProgressWindow? _exportProgressWindow;
         private IReadOnlyList<DebugVariableInfo>? _currentDebugVariables;
         private IReadOnlyList<DebugCallStackFrame>? _currentDebugCallStack;
         private ObservableCollection<BreakpointRow>? _currentBreakpointRows;
@@ -367,6 +369,8 @@ namespace PS7ScriptDesk.Shell
                 ViewModel.BindToCurrentSynchronizationContext();
                 ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
                 ViewModel.PropertyChanged += ViewModel_PropertyChanged;
+                ViewModel.ExeExportProgressChanged -= ViewModel_ExeExportProgressChanged;
+                ViewModel.ExeExportProgressChanged += ViewModel_ExeExportProgressChanged;
                 DeveloperDiagnostics.LogInfo("Startup", "ViewModel bound to synchronization context and PropertyChanged handler attached.");
                 ContextHelp.ValidateWindowTopics(this);
                 ApplyExplorerVisibilityLayout();
@@ -5153,10 +5157,12 @@ namespace PS7ScriptDesk.Shell
                 if (ViewModel is not null)
                 {
                     ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
+                    ViewModel.ExeExportProgressChanged -= ViewModel_ExeExportProgressChanged;
                 }
 
                 _intelliSenseService.MetadataWarmupStatusChanged -= IntelliSenseService_MetadataWarmupStatusChanged;
                 _debugPaneWindow?.CloseForOwnerShutdown();
+                _exportProgressWindow?.CloseForOwnerShutdown();
                 DisposeLiveSyntaxPumps();
                 DisposeAuthoringDiagnosticsPumps();
                 _liveSyntaxDiagnosticsService.Dispose();
@@ -5408,6 +5414,49 @@ namespace PS7ScriptDesk.Shell
                         ["focusedElement"] = DescribeFocusedElement()
                     });
             }
+        }
+
+        private void ViewModel_ExeExportProgressChanged(object? sender, ExeExportProgressUpdate update)
+        {
+            if (update is null)
+            {
+                return;
+            }
+
+            if (!Dispatcher.CheckAccess())
+            {
+                _ = Dispatcher.BeginInvoke(new Action(() => ViewModel_ExeExportProgressChanged(sender, update)));
+                return;
+            }
+
+            if (_exportProgressWindow is null || !_exportProgressWindow.IsLoaded)
+            {
+                _exportProgressWindow = new ExportProgressWindow(update.OutputExecutablePath)
+                {
+                    Owner = this
+                };
+                _exportProgressWindow.Closed += ExportProgressWindow_Closed;
+                _exportProgressWindow.Show();
+                DeveloperDiagnostics.LogInfo(
+                    "ExeExport",
+                    "Export progress window opened.",
+                    new Dictionary<string, object?>
+                    {
+                        ["destinationFileName"] = Path.GetFileName(update.OutputExecutablePath)
+                    });
+            }
+
+            _exportProgressWindow.ApplyUpdate(update);
+        }
+
+        private void ExportProgressWindow_Closed(object? sender, EventArgs e)
+        {
+            if (sender is ExportProgressWindow exportProgressWindow)
+            {
+                exportProgressWindow.Closed -= ExportProgressWindow_Closed;
+            }
+
+            _exportProgressWindow = null;
         }
 
 

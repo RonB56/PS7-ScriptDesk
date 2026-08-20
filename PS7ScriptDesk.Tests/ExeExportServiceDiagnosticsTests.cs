@@ -14,6 +14,21 @@ public sealed class ExeExportServiceDiagnosticsTests
     private static readonly SemaphoreSlim DiagnosticTestGate = new(1, 1);
 
     [Fact]
+    public void FrameworkDependentPublish_DoesNotRequestUnsupportedSingleFileCompression()
+    {
+        var startInfo = ExeExportService.CreateDotNetPublishStartInfo(
+            "C:\\Temp Folder\\Exported Script.csproj",
+            "C:\\Output Folder",
+            "win-x64");
+
+        Assert.Equal("dotnet", startInfo.FileName);
+        Assert.Contains("--self-contained", startInfo.ArgumentList);
+        Assert.Contains("false", startInfo.ArgumentList);
+        Assert.Contains("C:\\Output Folder", startInfo.ArgumentList);
+        Assert.DoesNotContain("/p:EnableCompressionInSingleFile=true", startInfo.ArgumentList);
+    }
+
+    [Fact]
     public async Task TemporaryDirectoryFailure_IsServiceOwnedAndPreservesOriginalException()
     {
         using var source = new TemporaryScript();

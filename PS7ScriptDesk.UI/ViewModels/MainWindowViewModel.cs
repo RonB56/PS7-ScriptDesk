@@ -30,6 +30,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly IWorkspaceFolderService _workspaceFolderService;
         private readonly IUserPromptService _userPromptService;
         private readonly IExeExportService _exeExportService;
+        private readonly IExeExportWizardService? _exeExportWizardService;
         private SynchronizationContext? _uiSynchronizationContext;
         private readonly SemaphoreSlim _consoleSessionGate = new(1, 1);
         private readonly SemaphoreSlim _consoleRecoveryGate = new(1, 1);
@@ -133,7 +134,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             ILiveConsoleService liveConsoleService,
             IExeExportService exeExportService,
             ApplicationSettings? initialSettings = null,
-            PowerShellRuntimeInfo? startupRuntimeInfo = null)
+            PowerShellRuntimeInfo? startupRuntimeInfo = null,
+            IExeExportWizardService? exeExportWizardService = null)
         {
             _fileDocumentService = fileDocumentService;
             _runtimeService = runtimeService;
@@ -141,6 +143,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _userPromptService = userPromptService;
             _liveConsoleService = liveConsoleService;
             _exeExportService = exeExportService;
+            _exeExportWizardService = exeExportWizardService;
             _uiSynchronizationContext = SynchronizationContext.Current;
             _startupRuntimeInfo = startupRuntimeInfo;
             _applicationVersionText = GetApplicationVersionText();
@@ -772,6 +775,8 @@ namespace PS7ScriptDesk.UI.ViewModels
         public ICommand RestartConsoleCommand { get; }
 
         public ICommand ExportAsExeCommand { get; }
+
+        public event EventHandler<ExeExportProgressUpdate>? ExeExportProgressChanged;
 
         public ICommand ZoomInCommand    { get; }
         public ICommand ZoomOutCommand   { get; }
@@ -2667,7 +2672,48 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             var suggestedExecutableName = $"{Path.GetFileNameWithoutExtension(selectedFilePath)}.exe";
-            var outputExecutablePath = _userPromptService.ShowSaveExecutableDialog(suggestedExecutableName);
+            ExeExportConfiguration? exportConfiguration = null;
+            string? outputExecutablePath;
+            if (_exeExportWizardService is not null)
+            {
+                exportConfiguration = _exeExportWizardService.ShowWizard(new ExeExportWizardRequest(
+                    Path.GetFileNameWithoutExtension(selectedFilePath),
+                    selectedFilePath,
+                    SelectedTab.Content,
+                    Array.Empty<ExeExportDependency>()));
+
+                if (exportConfiguration is null)
+                {
+                    StatusText = "Export as EXE canceled";
+                    AppendOutputLine($"Export as EXE canceled for {SelectedTab.Title}: the wizard was closed without an export request.");
+                    DeveloperDiagnostics.LogDecision(
+                        "ExeExport",
+                        "ExportAsExeWizardClosed",
+                        "The Export as EXE wizard was canceled or closed; no legacy destination prompt or export was started.",
+                        "Canceled",
+                        new Dictionary<string, object?>
+                        {
+                            ["sourceFileName"] = Path.GetFileName(selectedFilePath)
+                        });
+                    return;
+                }
+
+                outputExecutablePath = exportConfiguration.OutputExecutablePath;
+            }
+            else
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "ExeExport",
+                    "ExportAsExeWizardUnavailable",
+                    "No Export as EXE wizard service is available; using the legacy destination prompt for a non-Shell caller.",
+                    "LegacyPromptFallback",
+                    new Dictionary<string, object?>
+                    {
+                        ["sourceFileName"] = Path.GetFileName(selectedFilePath)
+                    });
+                outputExecutablePath = _userPromptService.ShowSaveExecutableDialog(suggestedExecutableName);
+            }
+
             if (string.IsNullOrWhiteSpace(outputExecutablePath))
             {
                 StatusText = "Export as EXE canceled";
@@ -2677,10 +2723,27 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             _isExeExportInProgress = true;
             _exportAsExeCommand.RaiseCanExecuteChanged();
+            var exportOperationId = $"ExeExport-{Guid.NewGuid():N}";
 
             try
             {
                 StatusText = $"Export as EXE started - {SelectedTab.Title}";
+                DeveloperDiagnostics.LogUserAction(
+                    "ExeExport",
+                    "ExportAsExeRequested",
+                    "Export destination accepted; opening export progress workflow.",
+                    new Dictionary<string, object?>
+                    {
+                        ["operationId"] = exportOperationId,
+                        ["sourceFileName"] = Path.GetFileName(selectedFilePath),
+                        ["destinationFileName"] = Path.GetFileName(outputExecutablePath),
+                        ["runtimeDisplayName"] = runtimeToUse.DisplayName
+                    });
+                PublishExeExportProgress(new ExeExportProgressUpdate(
+                    "PreparingScript",
+                    "Preparing the selected script for export.",
+                    isIndeterminate: true,
+                    outputExecutablePath: outputExecutablePath));
                 AppendOutputLine(new string('-', 60));
                 AppendOutputLine($"Export as EXE started: {SelectedTab.Title}");
                 AppendOutputLine($"Source script: {selectedFilePath}");
@@ -2692,9 +2755,11 @@ namespace PS7ScriptDesk.UI.ViewModels
                     selectedFilePath,
                     SelectedTab.Content,
                     outputExecutablePath,
-                    runtimeToUse);
+                    runtimeToUse,
+                    exportConfiguration);
 
-                var result = await _exeExportService.ExportScriptAsExeAsync(request);
+                var progress = new Progress<ExeExportProgressUpdate>(PublishExeExportProgress);
+                var result = await _exeExportService.ExportScriptAsExeAsync(request, progress: progress);
 
                 PostToUi(() =>
                 {
@@ -2711,11 +2776,20 @@ namespace PS7ScriptDesk.UI.ViewModels
 
                     if (!string.IsNullOrWhiteSpace(result.DetailedLog))
                     {
-                        AppendOutputLine(result.DetailedLog);
+                        AppendOutputLine(CreateExportActivityDetailPreview(result.DetailedLog));
                     }
 
                     AppendOutputLine(new string('-', 60));
                 });
+
+                PublishExeExportProgress(new ExeExportProgressUpdate(
+                    result.Succeeded ? "Complete" : "Failed",
+                    result.SummaryMessage,
+                    isIndeterminate: false,
+                    isCompleted: true,
+                    succeeded: result.Succeeded,
+                    outputExecutablePath: result.OutputExecutablePath,
+                    detailedLog: result.DetailedLog));
             }
             catch (Exception ex)
             {
@@ -2734,6 +2808,14 @@ namespace PS7ScriptDesk.UI.ViewModels
                     });
                 StatusText = "Export as EXE failed";
                 AppendOutputLine($"Export as EXE failed unexpectedly: {ex.Message}");
+                PublishExeExportProgress(new ExeExportProgressUpdate(
+                    "Failed",
+                    "Export as EXE failed unexpectedly. See the details below or the application log for more information.",
+                    isIndeterminate: false,
+                    isCompleted: true,
+                    succeeded: false,
+                    outputExecutablePath: outputExecutablePath,
+                    detailedLog: ex.Message));
             }
             finally
             {
@@ -5006,6 +5088,50 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             _uiSynchronizationContext.Post(_ => action(), null);
+        }
+
+        private void PublishExeExportProgress(ExeExportProgressUpdate update)
+        {
+            if (update is null)
+            {
+                return;
+            }
+
+            void Publish()
+            {
+                ExeExportProgressChanged?.Invoke(this, update);
+                DeveloperDiagnostics.LogStateTransition(
+                    "ExeExport",
+                    "ExportProgress",
+                    string.Empty,
+                    update.Stage,
+                    update.StatusMessage,
+                    new Dictionary<string, object?>
+                    {
+                        ["isCompleted"] = update.IsCompleted,
+                        ["succeeded"] = update.Succeeded,
+                        ["destinationFileName"] = Path.GetFileName(update.OutputExecutablePath)
+                    });
+            }
+
+            if (_uiSynchronizationContext is not null && SynchronizationContext.Current != _uiSynchronizationContext)
+            {
+                _uiSynchronizationContext.Post(_ => Publish(), null);
+                return;
+            }
+
+            Publish();
+        }
+
+        private static string CreateExportActivityDetailPreview(string detailedLog)
+        {
+            const int maximumLength = 12000;
+            if (detailedLog.Length <= maximumLength)
+            {
+                return detailedLog;
+            }
+
+            return $"{detailedLog[..maximumLength]}{Environment.NewLine}[Export detail output was truncated. See the application log for the complete diagnostic output.]";
         }
 
         private bool CanRunScript()

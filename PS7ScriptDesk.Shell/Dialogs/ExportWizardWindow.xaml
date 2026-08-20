@@ -1,0 +1,127 @@
+<Window x:Class="PS7ScriptDesk.Shell.Dialogs.ExportWizardWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
+        Title="Export as EXE" Width="820" Height="650" MinWidth="680" MinHeight="540"
+        WindowStartupLocation="CenterOwner" Background="{DynamicResource Theme.App.Background}"
+        help:ContextHelp.Key="Command.ExportAsExe" Loaded="Window_Loaded" PreviewKeyDown="Window_PreviewKeyDown">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ExportWizardStyles.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="24" KeyboardNavigation.TabNavigation="Cycle">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="Export as EXE" FontSize="{StaticResource Theme.FontSize.Heading}" FontWeight="Bold" Foreground="{DynamicResource Theme.Text.Primary}" />
+            <TextBlock Text="Choose a preset, review the deployment details, then export." Margin="0,4,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" />
+        </StackPanel>
+
+        <TextBlock Grid.Row="1" x:Name="ValidationText" Style="{StaticResource WizardValidationTextStyle}" />
+
+        <Border Grid.Row="2" Margin="0,16,0,0" Style="{StaticResource WizardContentPanelStyle}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <ScrollViewer Grid.Row="0" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="PresetStepButton" Tag="0" Content="1  Preset" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardPrimaryButtonStyle}" ToolTip="Step 1: Choose a starting preset" AutomationProperties.Name="Step 1: Preset" Click="StepButton_Click" />
+                        <Button x:Name="ApplicationStepButton" Tag="1" Content="2  Application" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 2: Set application identity" AutomationProperties.Name="Step 2: Application" Click="StepButton_Click" />
+                        <Button x:Name="PlatformStepButton" Tag="2" Content="3  Platform" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 3: Set deployment and runtime" AutomationProperties.Name="Step 3: Platform" Click="StepButton_Click" />
+                        <Button x:Name="DependenciesStepButton" Tag="3" Content="4  Dependencies" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 4: Review dependency findings" AutomationProperties.Name="Step 4: Dependencies" Click="StepButton_Click" />
+                        <Button x:Name="AdvancedStepButton" Tag="4" Content="5  Advanced" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 5: Set runtime and metadata options" AutomationProperties.Name="Step 5: Advanced" Click="StepButton_Click" />
+                        <Button x:Name="ReviewStepButton" Tag="5" Content="6  Review" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 6: Confirm output and export" AutomationProperties.Name="Step 6: Review" Click="StepButton_Click" />
+                    </StackPanel>
+                </ScrollViewer>
+                <TabControl x:Name="Pages" Grid.Row="1" Margin="0,14,0,0" Style="{StaticResource WizardPageHostStyle}" SelectionChanged="Pages_SelectionChanged">
+                <TabItem Header="1  Preset" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 1: Choose a starting preset">
+                    <ScrollViewer Margin="0,14,0,0" VerticalScrollBarVisibility="Auto"><StackPanel>
+                        <TextBlock Text="Start with the closest deployment goal. Every option remains editable in the following steps." Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" />
+                        <ListBox x:Name="PresetList" Margin="0,14,0,0" HorizontalContentAlignment="Stretch" SelectionChanged="PresetList_SelectionChanged">
+                            <ListBoxItem Tag="PortableWindowsExe" IsSelected="True" Style="{StaticResource WizardPresetListBoxItemStyle}"><StackPanel><TextBlock Text="Portable Windows EXE" FontWeight="SemiBold" /><TextBlock Text="Recommended — embeds .NET and PowerShell for the broadest portability." Margin="0,3,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" /></StackPanel></ListBoxItem>
+                            <ListBoxItem Tag="WindowsConsoleApplication" Style="{StaticResource WizardPresetListBoxItemStyle}"><StackPanel><TextBlock Text="Windows Console Application" FontWeight="SemiBold" /><TextBlock Text="Keeps a console window available for script output and interaction." Margin="0,3,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" /></StackPanel></ListBoxItem>
+                            <ListBoxItem Tag="WindowsGuiApplication" Style="{StaticResource WizardPresetListBoxItemStyle}"><StackPanel><TextBlock Text="Windows GUI Application" FontWeight="SemiBold" /><TextBlock Text="Runs without a console window for graphical scripts." Margin="0,3,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" /></StackPanel></ListBoxItem>
+                            <ListBoxItem Tag="Arm64PortableExe" Style="{StaticResource WizardPresetListBoxItemStyle}"><StackPanel><TextBlock Text="ARM64 Portable EXE" FontWeight="SemiBold" /><TextBlock Text="Portable deployment targeting Windows on ARM devices." Margin="0,3,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" /></StackPanel></ListBoxItem>
+                            <ListBoxItem Tag="SmallExe" Style="{StaticResource WizardPresetListBoxItemStyle}"><StackPanel><TextBlock Text="Small EXE" FontWeight="SemiBold" /><TextBlock Text="Requires the .NET runtime on the destination device to reduce output size." Margin="0,3,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" /></StackPanel></ListBoxItem>
+                            <ListBoxItem Tag="Custom" Style="{StaticResource WizardPresetListBoxItemStyle}"><StackPanel><TextBlock Text="Custom" FontWeight="SemiBold" /><TextBlock Text="Start with a neutral configuration and set each deployment option yourself." Margin="0,3,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" /></StackPanel></ListBoxItem>
+                        </ListBox>
+                    </StackPanel></ScrollViewer>
+                </TabItem>
+
+                <TabItem Header="2  Application" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 2: Set application identity">
+                    <Grid Margin="0,18,0,0"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="Application name" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><TextBox x:Name="ApplicationNameBox" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited"/>
+                        <TextBlock Grid.Row="1" Text="Application type" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><ComboBox x:Name="ApplicationTypeBox" Grid.Row="1" Grid.Column="1" Margin="12,0,0,10" SelectionChanged="ConfigurationEdited"><ComboBoxItem Tag="AutoDetect" Content="Auto Detect (Console if uncertain)"/><ComboBoxItem Tag="Console" Content="Console Application"/><ComboBoxItem Tag="WindowsGui" Content="Windows GUI Application"/></ComboBox>
+                        <TextBlock Grid.Row="2" Text="Description" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><TextBox x:Name="DescriptionBox" Grid.Row="2" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited"/>
+                        <TextBlock Grid.Row="3" Text="Icon (.ico)" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><Grid Grid.Row="3" Grid.Column="1" Margin="12,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox x:Name="IconBox" TextChanged="ConfigurationEdited"/><Button Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="BrowseIcon_Click"/></Grid>
+                        <CheckBox x:Name="AdministratorBox" Grid.Row="4" Grid.Column="1" Content="Require Administrator (shows UAC prompt; changes drag-and-drop and file-access behavior)" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited"/>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="3  Platform" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 3: Set deployment and runtime">
+                    <StackPanel Margin="0,18,0,0">
+                        <TextBlock Text="Deployment and runtime" Style="{StaticResource SectionHeaderTextStyle}"/>
+                        <Grid Margin="0,14,0,0"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <TextBlock Text="Architecture" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><ComboBox x:Name="ArchitectureBox" Grid.Column="1" SelectionChanged="ConfigurationEdited"><ComboBoxItem Tag="X64" Content="Windows x64"/><ComboBoxItem Tag="Arm64" Content="Windows ARM64"/></ComboBox>
+                            <TextBlock Grid.Row="1" Margin="0,10,0,0" Text="Deployment" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><ComboBox x:Name="DeploymentBox" Grid.Row="1" Grid.Column="1" Margin="0,10,0,0" SelectionChanged="ConfigurationEdited"><ComboBoxItem Tag="SelfContained" Content="Self-contained — .NET runtime included"/><ComboBoxItem Tag="FrameworkDependent" Content="Framework-dependent — .NET runtime required"/></ComboBox>
+                            <TextBlock Grid.Row="2" Margin="0,10,0,0" Text="PowerShell runtime" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><ComboBox x:Name="PowerShellBox" Grid.Row="2" Grid.Column="1" Margin="0,10,0,0" SelectionChanged="ConfigurationEdited"><ComboBoxItem Tag="Embedded" Content="Embedded PowerShell runtime"/><ComboBoxItem Tag="InstalledPowerShell" Content="Use installed PowerShell"/></ComboBox>
+                            <TextBlock Grid.Row="3" Margin="0,10,0,0" Text="Package format" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><ComboBox x:Name="PackageBox" Grid.Row="3" Grid.Column="1" Margin="0,10,0,0" SelectionChanged="ConfigurationEdited"><ComboBoxItem Tag="SingleFile" Content="Single EXE"/><ComboBoxItem Tag="ApplicationFolder" Content="Application folder"/></ComboBox>
+                            <TextBlock Grid.Row="4" Margin="0,10,0,0" Text="Optimization" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><ComboBox x:Name="OptimizationBox" Grid.Row="4" Grid.Column="1" Margin="0,10,0,0" SelectionChanged="ConfigurationEdited"><ComboBoxItem Tag="MaximumCompatibility" Content="Maximum Compatibility"/><ComboBoxItem Tag="Balanced" Content="Balanced — Recommended"/><ComboBoxItem Tag="FastStartup" Content="Fast Startup (larger output)"/></ComboBox>
+                        </Grid>
+                        <Border Margin="0,18,0,0" Padding="10" Style="{StaticResource WizardSectionCardStyle}"><TextBlock x:Name="ImplicationsText" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap"/></Border>
+                    </StackPanel>
+                </TabItem>
+
+                <TabItem Header="4  Dependencies" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 4: Review dependency findings">
+                    <DockPanel Margin="0,18,0,0"><TextBlock DockPanel.Dock="Top" Text="Detected portability concerns are evidence-based and are not automatically bundled." TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Secondary}"/><ListBox x:Name="DependencyList" Margin="0,14,0,0"/></DockPanel>
+                </TabItem>
+
+                <TabItem Header="5  Advanced" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 5: Set runtime and metadata options">
+                    <ScrollViewer Margin="0,18,0,0" VerticalScrollBarVisibility="Auto"><StackPanel>
+                        <TextBlock Text="Runtime behavior" Style="{StaticResource SectionHeaderTextStyle}"/>
+                        <Border Margin="0,10,0,0" Style="{StaticResource WizardSectionCardStyle}"><StackPanel><CheckBox x:Name="LoadProfileBox" Content="Load user PowerShell profile" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited"/><CheckBox x:Name="ErrorDialogBox" Margin="0,8,0,0" Content="Show fatal error dialog" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited"/><CheckBox x:Name="WriteLogBox" Margin="0,8,0,0" Content="Write application log" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited"/></StackPanel></Border>
+                        <TextBlock Text="Metadata" Margin="0,10,0,0" Style="{StaticResource SectionHeaderTextStyle}"/>
+                        <Grid Margin="0,10,0,0"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <TextBlock Text="Company" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><TextBox x:Name="CompanyBox" Grid.Column="1" TextChanged="ConfigurationEdited"/>
+                            <TextBlock Grid.Row="1" Margin="0,10,0,0" Text="Product version" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><TextBox x:Name="ProductVersionBox" Grid.Row="1" Grid.Column="1" Margin="0,10,0,0" TextChanged="ConfigurationEdited"/>
+                            <TextBlock Grid.Row="2" Margin="0,10,0,0" Text="File version" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><TextBox x:Name="FileVersionBox" Grid.Row="2" Grid.Column="1" Margin="0,10,0,0" TextChanged="ConfigurationEdited"/>
+                        </Grid>
+                    </StackPanel></ScrollViewer>
+                </TabItem>
+
+                <TabItem Header="6  Review" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 6: Confirm output and export">
+                    <ScrollViewer Margin="0,18,0,0" VerticalScrollBarVisibility="Auto"><StackPanel>
+                        <TextBlock Text="Output executable" Style="{StaticResource SectionHeaderTextStyle}"/>
+                        <Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox x:Name="OutputBox" TextChanged="ConfigurationEdited"/><Button Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="BrowseOutput_Click"/></Grid>
+                        <TextBlock Text="Review your configuration" Margin="0,18,0,0" Style="{StaticResource SectionHeaderTextStyle}"/>
+                        <Border Margin="0,8,0,0" Style="{StaticResource WizardSectionCardStyle}"><StackPanel><TextBlock Text="Application" Style="{StaticResource CaptionTextStyle}"/><TextBlock x:Name="ReviewApplicationText" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+                        <Border Style="{StaticResource WizardSectionCardStyle}"><StackPanel><TextBlock Text="Platform and runtime" Style="{StaticResource CaptionTextStyle}"/><TextBlock x:Name="ReviewPlatformText" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+                        <Border Style="{StaticResource WizardSectionCardStyle}"><StackPanel><TextBlock Text="Advanced options" Style="{StaticResource CaptionTextStyle}"/><TextBlock x:Name="ReviewAdvancedText" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+                        <Border Style="{StaticResource WizardSectionCardStyle}"><StackPanel><TextBlock Text="Dependencies" Style="{StaticResource CaptionTextStyle}"/><TextBlock x:Name="ReviewDependencyText" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+                        <Border Style="{StaticResource WizardSectionCardStyle}"><StackPanel><TextBlock Text="Output" Style="{StaticResource CaptionTextStyle}"/><TextBlock x:Name="ReviewOutputText" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+                    </StackPanel></ScrollViewer>
+                </TabItem>
+                </TabControl>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="3" Margin="0,18,0,0" Padding="0,14,0,0" BorderBrush="{DynamicResource Theme.Border.Subtle}" BorderThickness="0,1,0,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="BackButton" Content="Back" Margin="0,0,8,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="BackButton_Click" IsEnabled="False" />
+                <Button x:Name="NextButton" Content="Next" Margin="0,0,8,0" Style="{StaticResource WizardPrimaryButtonStyle}" Click="NextButton_Click" IsDefault="True" />
+                <Button Content="Cancel" Style="{StaticResource WizardTertiaryButtonStyle}" IsCancel="True" Click="CancelButton_Click" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

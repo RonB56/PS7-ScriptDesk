@@ -12,18 +12,29 @@ using System.Threading.Tasks;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Application.Interfaces;
+using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Domain.Models;
 
 namespace PS7ScriptDesk.PowerShell.Services
 {
     public class ExeExportService : IExeExportService
     {
-        public async Task<ExeExportResult> ExportScriptAsExeAsync(ExeExportRequest request, CancellationToken cancellationToken = default)
+        public async Task<ExeExportResult> ExportScriptAsExeAsync(
+            ExeExportRequest request,
+            CancellationToken cancellationToken = default,
+            IProgress<ExeExportProgressUpdate>? progress = null)
         {
             if (request is null)
             {
                 throw new ArgumentNullException(nameof(request));
             }
+
+            if (request.Configuration is not null)
+            {
+                return await ExportConfiguredScriptAsync(request, cancellationToken, progress).ConfigureAwait(false);
+            }
+
+            ReportProgress(progress, "ValidatingSource", "Validating the selected script, runtime, and destination.");
 
             if (request.RuntimeInfo is null || !request.RuntimeInfo.IsPowerShell7OrLater)
             {
@@ -62,6 +73,7 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             try
             {
+                ReportProgress(progress, "PreparingPackagingEnvironment", "Preparing the temporary packaging environment.");
                 Directory.CreateDirectory(projectDirectory);
                 Directory.CreateDirectory(publishDirectory);
 
@@ -71,10 +83,12 @@ namespace PS7ScriptDesk.PowerShell.Services
                 runtimeIdentifier = GetRuntimeIdentifier();
 
                 failureStage = ExeExportFailureStage.WriteGeneratedProject;
+                ReportProgress(progress, "WritingGeneratedWrapper", "Preparing the generated wrapper project.");
                 File.WriteAllText(projectFilePath, BuildProjectFile(assemblyName), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 File.WriteAllText(programFilePath, BuildProgramSource(request), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
                 failureStage = ExeExportFailureStage.RunDotNetPublish;
+                ReportProgress(progress, "CompilingPackage", "Compiling and packaging the executable. This can take a few moments.");
                 var publishResult = await RunDotNetPublishAsync(
                     projectFilePath,
                     publishDirectory,
@@ -102,6 +116,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 }
 
                 failureStage = ExeExportFailureStage.LocatePublishedExecutable;
+                ReportProgress(progress, "LocatingExecutable", "Locating the executable produced by the package build.");
                 var publishedExecutablePath = Path.Combine(publishDirectory, $"{assemblyName}.exe");
                 if (!File.Exists(publishedExecutablePath))
                 {
@@ -132,10 +147,23 @@ namespace PS7ScriptDesk.PowerShell.Services
                 }
 
                 failureStage = ExeExportFailureStage.CreateOutputDirectory;
+                ReportProgress(progress, "PreparingDestination", "Preparing the selected output folder.");
                 Directory.CreateDirectory(outputDirectory);
 
                 failureStage = ExeExportFailureStage.CopyExecutable;
+                ReportProgress(progress, "WritingExecutable", "Writing the executable to the selected destination.");
                 File.Copy(publishedExecutablePath, request.OutputExecutablePath, overwrite: true);
+
+                ReportProgress(progress, "VerifyingExecutable", "Verifying the exported executable.");
+                if (!File.Exists(request.OutputExecutablePath))
+                {
+                    LogExportResultFailure(request, failureStage, runtimeIdentifier, publishResult,
+                        "The wrapper build completed, but the chosen output executable was not present after copying.");
+                    return BuildFailureResult(
+                        request.OutputExecutablePath,
+                        "The export did not create the expected executable file.",
+                        publishResult.LogText);
+                }
 
                 var successLog = new StringBuilder();
                 successLog.AppendLine($"Selected runtime: {request.RuntimeInfo.DisplayName}");
@@ -165,6 +193,127 @@ namespace PS7ScriptDesk.PowerShell.Services
             finally
             {
                 TryDeleteDirectory(tempRoot);
+            }
+        }
+
+        private async Task<ExeExportResult> ExportConfiguredScriptAsync(
+            ExeExportRequest request,
+            CancellationToken cancellationToken,
+            IProgress<ExeExportProgressUpdate>? progress)
+        {
+            var configuration = request.Configuration!;
+            var operationId = $"ExeExport-{Guid.NewGuid():N}";
+            var validator = new ExeExportConfigurationValidator();
+            ReportProgress(progress, "ValidatingConfiguration", "Validating export configuration.");
+            var validation = validator.Validate(configuration);
+            if (!validation.IsValid)
+            {
+                var details = string.Join(Environment.NewLine, validation.Errors);
+                DeveloperDiagnostics.LogError("ExeExport", "Export configuration validation failed.", new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["errorCount"] = validation.Errors.Count,
+                    ["destinationFileName"] = Path.GetFileName(configuration.OutputExecutablePath)
+                });
+                return new ExeExportResult(false, configuration.OutputExecutablePath, "Export settings need attention before publishing.", details, runtimeIdentifier: configuration.RuntimeIdentifier);
+            }
+
+            ReportProgress(progress, "AnalyzingSource", "Analyzing script dependencies and portability warnings.");
+            var dependencies = new PowerShellDependencyAnalyzer().Analyze(request.ScriptContent);
+            var temporaryRoot = Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Temp", "ExeExport", Guid.NewGuid().ToString("N"));
+            var projectDirectory = Path.Combine(temporaryRoot, "project");
+            var publishDirectory = Path.Combine(temporaryRoot, "publish");
+            var verifier = new ExecutableVerifier();
+            GeneratedExeHostProject? generatedProject = null;
+            DotNetPublishResult? publishResult = null;
+
+            try
+            {
+                ReportProgress(progress, "PreparingWorkspace", "Preparing an isolated temporary export workspace.");
+                Directory.CreateDirectory(projectDirectory);
+                Directory.CreateDirectory(publishDirectory);
+
+                ReportProgress(progress, "GeneratingHost", "Generating the .NET PowerShell host project.");
+                generatedProject = new ExeHostProjectGenerator().Generate(request, projectDirectory);
+
+                ReportProgress(progress, "PublishingApplication", "Restoring packages and publishing the application.");
+                publishResult = await RunDotNetPublishAsync(generatedProject.ProjectFilePath, publishDirectory, configuration.RuntimeIdentifier, configuration, cancellationToken).ConfigureAwait(false);
+                if (!publishResult.Started)
+                    return BuildFailureResult(configuration.OutputExecutablePath, "The local .NET SDK could not be started.", publishResult.LogText);
+                if (publishResult.ExitCode != 0)
+                {
+                    LogExportResultFailure(request, ExeExportFailureStage.RunDotNetPublish, configuration.RuntimeIdentifier, publishResult, "The generated-host publish process returned a non-zero exit code.");
+                    return BuildFailureResult(configuration.OutputExecutablePath, "Publishing the generated PowerShell host failed.", publishResult.LogText);
+                }
+
+                ReportProgress(progress, "LocatingExecutable", "Locating the published executable.");
+                var publishedExecutablePath = Path.Combine(publishDirectory, $"{generatedProject.AssemblyName}.exe");
+                if (!File.Exists(publishedExecutablePath))
+                    return BuildFailureResult(configuration.OutputExecutablePath, "Publishing completed without producing the expected executable.", publishResult.LogText);
+
+                ReportProgress(progress, "VerifyingExecutable", "Verifying the published Windows executable.");
+                var verification = verifier.Verify(publishedExecutablePath, configuration.Architecture);
+                if (!verification.IsValid)
+                    return BuildFailureResult(configuration.OutputExecutablePath, "The published file did not pass executable verification.", string.Join(Environment.NewLine, verification.Errors));
+
+                ReportProgress(progress, "WritingOutput", "Writing verified output to the selected destination.");
+                var outputDirectory = Path.GetDirectoryName(configuration.OutputExecutablePath);
+                if (string.IsNullOrWhiteSpace(outputDirectory))
+                    return BuildFailureResult(configuration.OutputExecutablePath, "The output destination is invalid.", "The destination does not have a valid directory.");
+                Directory.CreateDirectory(outputDirectory);
+                File.Copy(publishedExecutablePath, configuration.OutputExecutablePath, overwrite: true);
+                if (configuration.PackageFormat == ExePackageFormat.ApplicationFolder)
+                    CopyPublishCompanionFiles(publishDirectory, outputDirectory, publishedExecutablePath, configuration.OutputExecutablePath);
+
+                ReportProgress(progress, "FinalVerification", "Verifying the final executable at the requested destination.");
+                var finalVerification = verifier.Verify(configuration.OutputExecutablePath, configuration.Architecture);
+                if (!finalVerification.IsValid)
+                    return BuildFailureResult(configuration.OutputExecutablePath, "The copied output did not pass executable verification.", string.Join(Environment.NewLine, finalVerification.Errors));
+
+                var details = new StringBuilder();
+                details.AppendLine($"Operation: {operationId}");
+                details.AppendLine($"Runtime identifier: {configuration.RuntimeIdentifier}");
+                details.AppendLine($"Deployment: {configuration.DeploymentModel}");
+                details.AppendLine($"PowerShell runtime: {configuration.PowerShellRuntimeModel}");
+                details.AppendLine($"Package format: {configuration.PackageFormat}");
+                details.AppendLine($"Dependencies found: {dependencies.Count}");
+                foreach (var warning in validation.Warnings)
+                    details.AppendLine($"Warning: {warning}");
+                details.AppendLine(publishResult.LogText);
+                var fileLength = new FileInfo(configuration.OutputExecutablePath).Length;
+                DeveloperDiagnostics.LogInfo("ExeExport", "Generated-host export completed and output was verified.", new Dictionary<string, object?>
+                {
+                    ["operationId"] = operationId,
+                    ["runtimeIdentifier"] = configuration.RuntimeIdentifier,
+                    ["outputLength"] = fileLength,
+                    ["dependencyCount"] = dependencies.Count
+                });
+                return new ExeExportResult(true, configuration.OutputExecutablePath, "Export completed successfully.", details.ToString().Trim(), fileLength, configuration.RuntimeIdentifier);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                DeveloperDiagnostics.LogWarning("ExeExport", "Export was cancelled before a verified output was reported.");
+                return new ExeExportResult(false, configuration.OutputExecutablePath, "Export cancelled.", "The publish operation was cancelled. No unverified output was reported as successful.", runtimeIdentifier: configuration.RuntimeIdentifier, wasCancelled: true);
+            }
+            catch (Exception exception)
+            {
+                LogExportException(request, ExeExportFailureStage.RunDotNetPublish, configuration.RuntimeIdentifier, exception);
+                return BuildFailureResult(configuration.OutputExecutablePath, "Export failed unexpectedly.", exception.ToString());
+            }
+            finally
+            {
+                ReportProgress(progress, "CleaningWorkspace", "Cleaning the temporary export workspace.");
+                TryDeleteDirectory(temporaryRoot);
+            }
+        }
+
+        private static void CopyPublishCompanionFiles(string publishDirectory, string outputDirectory, string publishedExecutablePath, string outputExecutablePath)
+        {
+            foreach (var path in Directory.EnumerateFiles(publishDirectory, "*", SearchOption.TopDirectoryOnly))
+            {
+                if (string.Equals(path, publishedExecutablePath, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                File.Copy(path, Path.Combine(outputDirectory, Path.GetFileName(path)), overwrite: true);
             }
         }
 
@@ -522,31 +671,17 @@ internal static class Program
             string runtimeIdentifier,
             CancellationToken cancellationToken)
         {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "dotnet",
-                WorkingDirectory = Path.GetDirectoryName(projectFilePath) ?? Environment.CurrentDirectory,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
+            return await RunDotNetPublishAsync(projectFilePath, publishDirectory, runtimeIdentifier, configuration: null, cancellationToken).ConfigureAwait(false);
+        }
 
-            startInfo.ArgumentList.Add("publish");
-            startInfo.ArgumentList.Add(Path.GetFileName(projectFilePath));
-            startInfo.ArgumentList.Add("-c");
-            startInfo.ArgumentList.Add("Release");
-            startInfo.ArgumentList.Add("-r");
-            startInfo.ArgumentList.Add(runtimeIdentifier);
-            startInfo.ArgumentList.Add("--self-contained");
-            startInfo.ArgumentList.Add("false");
-            startInfo.ArgumentList.Add("-o");
-            startInfo.ArgumentList.Add(publishDirectory);
-            startInfo.ArgumentList.Add("/p:PublishSingleFile=true");
-            startInfo.ArgumentList.Add("/p:PublishTrimmed=false");
-            startInfo.ArgumentList.Add("/p:DebugType=None");
-            startInfo.ArgumentList.Add("/p:DebugSymbols=false");
-            startInfo.ArgumentList.Add("/p:EnableCompressionInSingleFile=true");
+        private static async Task<DotNetPublishResult> RunDotNetPublishAsync(
+            string projectFilePath,
+            string publishDirectory,
+            string runtimeIdentifier,
+            ExeExportConfiguration? configuration,
+            CancellationToken cancellationToken)
+        {
+            var startInfo = CreateDotNetPublishStartInfo(projectFilePath, publishDirectory, runtimeIdentifier, configuration);
 
             using var process = new Process { StartInfo = startInfo };
             try
@@ -568,13 +703,69 @@ internal static class Program
             var standardOutputTask = process.StandardOutput.ReadToEndAsync();
             var standardErrorTask = process.StandardError.ReadToEndAsync();
 
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                        await process.WaitForExitAsync().ConfigureAwait(false);
+                    }
+                }
+                catch
+                {
+                }
+
+                throw;
+            }
 
             var standardOutput = await standardOutputTask.ConfigureAwait(false);
             var standardError = await standardErrorTask.ConfigureAwait(false);
 
             var logText = BuildCombinedLogText(startInfo, standardOutput, standardError);
             return new DotNetPublishResult(true, process.ExitCode, logText);
+        }
+
+        internal static ProcessStartInfo CreateDotNetPublishStartInfo(
+            string projectFilePath,
+            string publishDirectory,
+            string runtimeIdentifier,
+            ExeExportConfiguration? configuration = null)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                WorkingDirectory = Path.GetDirectoryName(projectFilePath) ?? Environment.CurrentDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            startInfo.ArgumentList.Add("publish");
+            startInfo.ArgumentList.Add(Path.GetFileName(projectFilePath));
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add("Release");
+            startInfo.ArgumentList.Add("-r");
+            startInfo.ArgumentList.Add(runtimeIdentifier);
+            startInfo.ArgumentList.Add("--self-contained");
+            startInfo.ArgumentList.Add(configuration?.DeploymentModel == ExeDeploymentModel.SelfContained ? "true" : "false");
+            startInfo.ArgumentList.Add("-o");
+            startInfo.ArgumentList.Add(publishDirectory);
+            startInfo.ArgumentList.Add($"/p:PublishSingleFile={((configuration?.PackageFormat ?? ExePackageFormat.SingleFile) == ExePackageFormat.SingleFile ? "true" : "false")}");
+            startInfo.ArgumentList.Add("/p:PublishTrimmed=false");
+            if (configuration?.OptimizationProfile == ExeOptimizationProfile.FastStartup)
+            {
+                startInfo.ArgumentList.Add("/p:PublishReadyToRun=true");
+            }
+            startInfo.ArgumentList.Add("/p:DebugType=None");
+            startInfo.ArgumentList.Add("/p:DebugSymbols=false");
+            return startInfo;
         }
 
         private static string BuildCombinedLogText(ProcessStartInfo startInfo, string standardOutput, string standardError)
@@ -634,6 +825,20 @@ internal static class Program
                 .Replace("\\", "\\\\", StringComparison.Ordinal)
                 .Replace("\"", "\\\"", StringComparison.Ordinal)
                 + "\"";
+        }
+
+        private static void ReportProgress(IProgress<ExeExportProgressUpdate>? progress, string stage, string statusMessage)
+        {
+            progress?.Report(new ExeExportProgressUpdate(stage, statusMessage, isIndeterminate: true));
+            AppLogger.Info("ExeExport", $"Export progress stage: {stage}. {statusMessage}");
+            DeveloperDiagnostics.LogInfo(
+                "ExeExportProgress",
+                "Export stage changed.",
+                new Dictionary<string, object?>
+                {
+                    ["stage"] = stage,
+                    ["statusMessage"] = statusMessage
+                });
         }
 
         private static ExeExportResult BuildFailureResult(string outputExecutablePath, string summaryMessage, string detailedLog)

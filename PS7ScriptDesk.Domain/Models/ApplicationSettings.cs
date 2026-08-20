@@ -85,5 +85,8 @@ namespace PS7ScriptDesk.Domain.Models
         public bool DeveloperDiagnosticsWriteJsonLines { get; set; } = true;
 
         public bool DeveloperDiagnosticsWriteReadableLog { get; set; } = true;
+
+        /// <summary>Last stable Export as EXE choices. Script text and temporary paths are never stored here.</summary>
+        public ExeExportConfiguration? LastExeExportConfiguration { get; set; }
     }
 }

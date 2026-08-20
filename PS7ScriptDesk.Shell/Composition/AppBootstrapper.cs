@@ -18,6 +18,7 @@ namespace PS7ScriptDesk.Shell.Composition
             var userPromptService = new UserPromptService();
             var liveConsoleService = new LiveConsoleService();
             var exeExportService = new ExeExportService();
+            var exeExportWizardService = new ExportWizardService(applicationSettings);
             var runtimeService = new RuntimeService(applicationSettings.SelectedRuntimeExecutablePath);
             DeveloperDiagnostics.ConfigureFromSettings(applicationSettings, "AppBootstrapper loaded settings");
             DeveloperDiagnostics.LogInfo(
@@ -38,7 +39,8 @@ namespace PS7ScriptDesk.Shell.Composition
                 liveConsoleService,
                 exeExportService,
                 applicationSettings,
-                startupRuntimeInfo);
+                startupRuntimeInfo,
+                exeExportWizardService);
 
             var window = new MainWindow(applicationSettingsService, applicationSettings)
             {
