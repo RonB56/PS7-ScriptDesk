@@ -1,0 +1,188 @@
+{
+  "schemaVersion": 1,
+  "sourceScript": "TestApi.ps1",
+  "transport": "Rest",
+  "api": {
+    "title": "PS7 ScriptDesk REST API Proof Host",
+    "description": "Standalone Phase 3 proof-of-concept host.",
+    "version": "0.1.0",
+    "defaultRoutePrefix": "/api"
+  },
+  "endpoints": [
+    {
+      "endpointId": "poc-get-systeminfo",
+      "isEnabled": true,
+      "powerShellFunctionName": "Get-SystemInfo",
+      "displayName": "Get System Info",
+      "description": "Returns deterministic system-information proof data for a supplied computer name.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/systeminfo",
+        "operationId": "getSystemInfo",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": [
+        {
+          "powerShellParameterName": "ComputerName",
+          "source": "Query",
+          "name": "computerName",
+          "required": "Required",
+          "typeName": "string"
+        }
+      ]
+    },
+    {
+      "endpointId": "poc-post-systeminfo",
+      "isEnabled": true,
+      "powerShellFunctionName": "Get-SystemInfo",
+      "displayName": "Post System Info",
+      "description": "Binds a JSON object body to the same deterministic system-information proof function.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Post",
+        "routeTemplate": "/api/systeminfo",
+        "operationId": "postSystemInfo",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": [
+        {
+          "powerShellParameterName": "ComputerName",
+          "source": "Body",
+          "name": "computerName",
+          "required": "Required",
+          "typeName": "string"
+        }
+      ]
+    },
+    {
+      "endpointId": "poc-test-failure",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-TestFailure",
+      "displayName": "Invoke Test Failure",
+      "description": "Throws a deterministic PowerShell error for POC error handling.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/failure",
+        "operationId": "invokeTestFailure",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": []
+    },
+    {
+      "endpointId": "poc-get-numbers",
+      "isEnabled": true,
+      "powerShellFunctionName": "Get-Numbers",
+      "displayName": "Get Numbers",
+      "description": "Returns multiple pipeline results.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/numbers",
+        "operationId": "getNumbers",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": []
+    },
+    {
+      "endpointId": "poc-phase4-delay",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-Phase4Delay",
+      "displayName": "Phase 4 Delay",
+      "description": "Waits deterministically so runspace-pool concurrency can be measured.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/phase4/delay",
+        "operationId": "phase4Delay",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": [
+        {
+          "powerShellParameterName": "RequestId",
+          "source": "Query",
+          "name": "requestId",
+          "required": "Required",
+          "typeName": "string"
+        },
+        {
+          "powerShellParameterName": "Milliseconds",
+          "source": "Query",
+          "name": "milliseconds",
+          "required": "Required",
+          "typeName": "int"
+        }
+      ]
+    },
+    {
+      "endpointId": "poc-phase4-timeout",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-Phase4Delay",
+      "displayName": "Phase 4 Timeout",
+      "description": "Uses a short endpoint timeout for timeout and recovery tests.",
+      "timeoutOverride": "00:00:00.2000000",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/phase4/timeout",
+        "operationId": "phase4Timeout",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": [
+        {
+          "powerShellParameterName": "RequestId",
+          "source": "Query",
+          "name": "requestId",
+          "required": "Required",
+          "typeName": "string"
+        },
+        {
+          "powerShellParameterName": "Milliseconds",
+          "source": "Query",
+          "name": "milliseconds",
+          "required": "Required",
+          "typeName": "int"
+        }
+      ]
+    },
+    {
+      "endpointId": "poc-phase5-formatting",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-Phase5FormattingOutput",
+      "displayName": "Phase 5 Formatting Output",
+      "description": "Returns PowerShell formatting objects so normalization can reject them.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/phase5/formatting",
+        "operationId": "phase5Formatting",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": []
+    }
+  ],
+  "runtime": {
+    "runspacePoolMinimum": 1,
+    "runspacePoolMaximum": 4,
+    "maximumConcurrentExecutions": 4,
+    "queueLimit": 32,
+    "queueWaitTimeout": "00:00:10",
+    "defaultInvocationTimeout": "00:00:30",
+    "requestBodySizeLimitBytes": 1048576,
+    "responseItemLimit": 1000,
+    "responseByteLimit": 5242880,
+    "serializationDepth": 8,
+    "maximumRetainedStreamEntries": 100
+  },
+  "security": {
+    "mode": "LocalTestNoAuthentication",
+    "allowNoAuthenticationForLocalTest": true
+  },
+  "openApi": {
+    "isEnabled": false,
+    "enableSwaggerUiForLocalTest": false,
+    "enableSwaggerUiForPublishedApi": false,
+    "requireAuthenticationForPublishedSwagger": true
+  }
+}

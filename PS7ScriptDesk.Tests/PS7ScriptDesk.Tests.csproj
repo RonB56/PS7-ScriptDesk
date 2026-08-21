@@ -23,6 +23,7 @@
     <ProjectReference Include="..\PS7ScriptDesk.Domain\PS7ScriptDesk.Domain.csproj" />
     <ProjectReference Include="..\PS7ScriptDesk.Infrastructure\PS7ScriptDesk.Infrastructure.csproj" />
     <ProjectReference Include="..\PS7ScriptDesk.PowerShell\PS7ScriptDesk.PowerShell.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.RestApiProofHost\PS7ScriptDesk.RestApiProofHost.csproj" />
     <ProjectReference Include="..\PS7ScriptDesk.Shell\PS7ScriptDesk.Shell.csproj" />
     <ProjectReference Include="..\PS7ScriptDesk.UI\PS7ScriptDesk.UI.csproj" />
   </ItemGroup>

@@ -1,16 +1,15 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
-    <AssemblyName>PS7ScriptDesk.PowerShell</AssemblyName>
-    <RootNamespace>PS7ScriptDesk.PowerShell</RootNamespace>
+    <AssemblyName>PS7ScriptDesk.RestApiProofHost</AssemblyName>
+    <RootNamespace>PS7ScriptDesk.RestApiProofHost</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\PS7ScriptDesk.Application\PS7ScriptDesk.Application.csproj" />
     <ProjectReference Include="..\PS7ScriptDesk.Domain\PS7ScriptDesk.Domain.csproj" />
   </ItemGroup>
 
@@ -19,11 +18,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Folder Include="Runtime\" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <InternalsVisibleTo Include="PS7ScriptDesk.Tests" />
+    <Content Update="Config\TestApi.ps7api.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Update="Scripts\TestApi.ps1" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

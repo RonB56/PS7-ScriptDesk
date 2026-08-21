@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "PS7ScriptDesk.RestApiProofHost": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:9423;http://localhost:9424"
+    }
+  }
+}
