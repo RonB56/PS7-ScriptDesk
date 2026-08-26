@@ -51,9 +51,11 @@ namespace PS7ScriptDesk.Shell
 {
     public partial class MainWindow : Window
     {
-        private const double MinimumExplorerWidth = 220;
+        private const double MinimumExplorerWidth = 190;
         private const double MinimumConsoleHeight = 160;
         private const double MinimumExplorerSectionHeight = 120;
+        private const double DebugPanelWidth = 220;
+        private const double MinimumDebugPanelWidth = 160;
         private const int LiveSyntaxDiagnosticsQuietDelayMilliseconds = 0;
         private const int LiveSyntaxDiagnosticsLargeFileQuietDelayMilliseconds = 125;
         private const int LiveSyntaxDiagnosticsMinimumIntervalMilliseconds = 16;
@@ -196,7 +198,8 @@ namespace PS7ScriptDesk.Shell
         private bool _terminalShutdownInProgress;
         private Task? _deferredInitializationTask;
         private bool _shellLayoutApplied;
-        private double _lastKnownExplorerWidth = 300;
+        private double _lastKnownExplorerWidth = 220;
+        private double _lastKnownDebugPanelWidth = DebugPanelWidth;
         private string _lastFindText = string.Empty;
         private string _lastReplaceText = string.Empty;
         private bool _lastFindMatchCase;
@@ -6236,6 +6239,7 @@ namespace PS7ScriptDesk.Shell
             if (isVisible)
             {
                 ExplorerColumnDefinition.Width = new GridLength(Math.Max(_lastKnownExplorerWidth, MinimumExplorerWidth), GridUnitType.Pixel);
+                ExplorerColumnDefinition.MinWidth = MinimumExplorerWidth;
                 ExplorerSplitterColumnDefinition.Width = new GridLength(6, GridUnitType.Pixel);
             }
             else
@@ -6246,11 +6250,24 @@ namespace PS7ScriptDesk.Shell
                 }
 
                 ExplorerColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+                ExplorerColumnDefinition.MinWidth = 0;
                 ExplorerSplitterColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
             }
 
             EditorColumnDefinition.Width = new GridLength(1, GridUnitType.Star);
             EditorPaneBorder.Margin = new Thickness(0, 0, 0, 8);
+
+            DeveloperDiagnostics.LogInfo(
+                "UI",
+                "Explorer side pane layout applied.",
+                new Dictionary<string, object?>
+                {
+                    ["isVisible"] = isVisible,
+                    ["columnWidth"] = ExplorerColumnDefinition.Width.Value,
+                    ["columnMinWidth"] = ExplorerColumnDefinition.MinWidth,
+                    ["splitterColumnWidth"] = ExplorerSplitterColumnDefinition.Width.Value,
+                    ["lastKnownWidth"] = _lastKnownExplorerWidth
+                });
         }
 
         private void SaveApplicationSettings()
@@ -7880,23 +7897,29 @@ namespace PS7ScriptDesk.Shell
         // Debug panels (Variables, Call Stack, Breakpoints) — Part 3
         // -------------------------------------------------------------------------
 
-        private const double DebugPanelWidth = 290;
         private const double MinimumSavedDebugPaneWindowWidth = 240;
         private const double MinimumSavedDebugPaneWindowHeight = 180;
 
         /// <summary>Shows or hides the right-side debug panel column.</summary>
         private void SetDebugPanelVisible(bool visible)
         {
+            CaptureDockedDebugPanelWidth();
+
             if (visible)
             {
-                DebugPanelColumn.Width         = new GridLength(DebugPanelWidth, GridUnitType.Pixel);
-                DebugPanelColumn.MinWidth      = 160;
+                DebugPanelColumn.Width         = new GridLength(Math.Max(_lastKnownDebugPanelWidth, MinimumDebugPanelWidth), GridUnitType.Pixel);
+                DebugPanelColumn.MinWidth      = MinimumDebugPanelWidth;
                 DebugPanelSplitterColumn.Width = new GridLength(6, GridUnitType.Pixel);
                 DebugPanelSplitter.Visibility  = Visibility.Visible;
                 DebugPanelBorder.Visibility    = Visibility.Visible;
             }
             else
             {
+                if (DebugPanelColumn.ActualWidth >= MinimumDebugPanelWidth)
+                {
+                    _lastKnownDebugPanelWidth = DebugPanelColumn.ActualWidth;
+                }
+
                 DebugPanelColumn.Width         = new GridLength(0, GridUnitType.Pixel);
                 DebugPanelColumn.MinWidth      = 0;
                 DebugPanelSplitterColumn.Width = new GridLength(0, GridUnitType.Pixel);
@@ -7906,6 +7929,19 @@ namespace PS7ScriptDesk.Shell
 
             ShowDebugPanelMenuItem.IsChecked = visible;
             ApplyDebugPanePresentationState();
+
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Docked Debug pane layout applied.",
+                new Dictionary<string, object?>
+                {
+                    ["isVisible"] = visible,
+                    ["columnWidth"] = DebugPanelColumn.Width.Value,
+                    ["columnMinWidth"] = DebugPanelColumn.MinWidth,
+                    ["splitterColumnWidth"] = DebugPanelSplitterColumn.Width.Value,
+                    ["lastKnownDockedWidth"] = _lastKnownDebugPanelWidth,
+                    ["isPoppedOut"] = _debugPaneWindow is not null
+                });
         }
 
         private void ShowDebugPanel_Click(object sender, RoutedEventArgs e)
@@ -8023,7 +8059,7 @@ namespace PS7ScriptDesk.Shell
             CaptureDebugPaneWindowBounds(debugPaneWindow);
             SyncDebugPaneTabSelection(debugPaneWindow.SelectedTabIndex, "DockBack");
             _debugPaneWindow = null;
-            ApplyDebugPanePresentationState();
+            SetDebugPanelVisible(true);
             ApplyDebugPaneItemsSources("DockBack");
             debugPaneWindow.CloseForDockBack();
         }
@@ -8168,6 +8204,15 @@ namespace PS7ScriptDesk.Shell
             if (_debugPaneWindow is not null)
             {
                 CaptureDebugPaneWindowBounds(_debugPaneWindow);
+            }
+        }
+
+        private void CaptureDockedDebugPanelWidth()
+        {
+            if (DebugPanelBorder.Visibility == Visibility.Visible &&
+                DebugPanelColumn.ActualWidth >= MinimumDebugPanelWidth)
+            {
+                _lastKnownDebugPanelWidth = DebugPanelColumn.ActualWidth;
             }
         }
 
