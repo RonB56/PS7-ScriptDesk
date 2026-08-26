@@ -2,24 +2,30 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <AssemblyName>PS7ScriptDesk.RestApiProofHost</AssemblyName>
     <RootNamespace>PS7ScriptDesk.RestApiProofHost</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <SelfContained Condition="'$(RuntimeIdentifier)' != '' and '$(SelfContained)' == ''">true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\PS7ScriptDesk.Domain\PS7ScriptDesk.Domain.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.PowerShell\PS7ScriptDesk.PowerShell.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="System.Management.Automation" Version="7.6.2" />
+    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.6.1" />
   </ItemGroup>
 
   <ItemGroup>
-    <Content Update="Config\TestApi.ps7api.json" CopyToOutputDirectory="PreserveNewest" />
-    <Content Update="Scripts\TestApi.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <Content Update="Config\TestApi.ps7api.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Scripts\TestApi.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\THIRD-PARTY-NOTICES.txt" Link="THIRD-PARTY-NOTICES.txt" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

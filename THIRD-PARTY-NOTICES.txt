@@ -54,28 +54,121 @@ Microsoft PowerShell / System.Management.Automation
 ============================================================
 
 Project:
-Microsoft PowerShell / System.Management.Automation
+Microsoft PowerShell / System.Management.Automation / Microsoft.PowerShell.SDK
+
+Additional bundled PowerShell inbox modules:
+Microsoft.PowerShell.Commands.Diagnostics
+Microsoft.PowerShell.Commands.Management
+Microsoft.PowerShell.Commands.Utility
+Microsoft.PowerShell.ConsoleHost
+Microsoft.PowerShell.MarkdownRender
+Microsoft.PowerShell.Security
+Microsoft.WSMan.Management
+Microsoft.WSMan.Runtime
 
 License:
 MIT License
 
 Notice:
-System.Management.Automation is used for in-process PowerShell syntax parsing in the editor diagnostics path.
+System.Management.Automation is used for in-process PowerShell syntax parsing, editor diagnostics, REST API metadata analysis, and REST API PowerShell invocation hosting. Microsoft.PowerShell.SDK and bundled inbox command modules are included with the REST API host so trusted published PowerShell functions can use standard built-in PowerShell commands without requiring a user-installed PowerShell runtime.
 
 The MIT License permits use, copying, modification, distribution, sublicensing, and sale of the software, provided the copyright and permission notice are included with copies or substantial portions of the software.
 
 ============================================================
-Microsoft .NET / WPF / Windows desktop runtime components
+Markdig.Signed
 ============================================================
 
 Project:
-Microsoft .NET, WPF, Windows desktop runtime libraries, and related Microsoft runtime components
+Markdig.Signed
+
+License:
+BSD-2-Clause
+
+Notice:
+Markdig.Signed is a transitive dependency of bundled PowerShell SDK runtime assets.
+
+The BSD-2-Clause license permits redistribution and use in source and binary forms, with or without modification, provided its notice conditions are satisfied.
+
+============================================================
+PowerShell and .NET transitive runtime packages
+============================================================
+
+Projects:
+Humanizer.Core
+Json.More.Net
+JsonPointer.Net
+JsonSchema.Net
+Microsoft.ApplicationInsights
+Microsoft.Bcl.AsyncInterfaces
+Microsoft.CodeAnalysis.Analyzers
+Microsoft.CodeAnalysis.Common
+Microsoft.CodeAnalysis.CSharp
+Microsoft.Management.Infrastructure
+Microsoft.Management.Infrastructure.CimCmdlets
+Microsoft.Management.Infrastructure.Runtime.Unix
+Microsoft.Management.Infrastructure.Runtime.Win
+Microsoft.PowerShell.CoreCLR.Eventing
+Microsoft.PowerShell.Native
+Microsoft.Security.Extensions
+Microsoft.Win32.Registry.AccessControl
+Microsoft.Win32.SystemEvents
+Microsoft.Windows.Compatibility
+Newtonsoft.Json
+runtime.native.System.Data.SqlClient.sni
+runtime.*.runtime.native.System.IO.Ports
+runtime.win-*.runtime.native.System.Data.SqlClient.sni
+System.CodeDom
+System.ComponentModel.Composition
+System.ComponentModel.Composition.Registration
+System.Configuration.ConfigurationManager
+System.Data.Odbc
+System.Data.OleDb
+System.Data.SqlClient
+System.Diagnostics.PerformanceCounter
+System.DirectoryServices
+System.DirectoryServices.AccountManagement
+System.DirectoryServices.Protocols
+System.Drawing.Common
+System.IO.Packaging
+System.IO.Ports
+System.Management
+System.Net.Http.WinHttpHandler
+System.Reflection.Context
+System.Runtime.Caching
+System.Security.Cryptography.Pkcs
+System.Security.Cryptography.ProtectedData
+System.Security.Cryptography.Xml
+System.Security.Permissions
+System.ServiceModel.Http
+System.ServiceModel.NetFramingBase
+System.ServiceModel.NetTcp
+System.ServiceModel.Primitives
+System.ServiceModel.Syndication
+System.ServiceProcess.ServiceController
+System.Speech
+System.Web.Services.Description
+System.Windows.Extensions
+
+License:
+MIT License
+
+Notice:
+These packages are brought in by the PowerShell automation and REST API local test host runtime paths. Their NuGet package metadata declares MIT license terms.
+
+The MIT License permits use, copying, modification, distribution, sublicensing, and sale of the software, provided the copyright and permission notice are included with copies or substantial portions of the software.
+
+============================================================
+Microsoft .NET / ASP.NET Core / WPF / Windows desktop runtime components
+============================================================
+
+Project:
+Microsoft .NET, ASP.NET Core, WPF, Windows desktop runtime libraries, and related Microsoft runtime components
 
 License:
 Microsoft software license terms
 
 Notice:
-PS7 ScriptDesk is built using Microsoft .NET and Windows desktop technologies. Runtime components included with the application, when present, are provided under Microsoft’s applicable license terms.
+PS7 ScriptDesk is built using Microsoft .NET, ASP.NET Core, and Windows desktop technologies. Runtime components included with the application or REST API local test host, when present, are provided under Microsoft’s applicable license terms.
 
 ============================================================
 End of third-party notices

@@ -8,6 +8,8 @@ namespace PS7ScriptDesk.RestApiProofHost.PowerShell;
 
 public sealed class RunspacePoolManager : IAsyncDisposable
 {
+    private const string UtilityModuleName = "Microsoft.PowerShell.Utility";
+
     private readonly SemaphoreSlim _stateGate = new(1, 1);
     private readonly ILogger<RunspacePoolManager>? _logger;
     private readonly HashSet<string> _allowedFunctionNames = new(StringComparer.OrdinalIgnoreCase);
@@ -209,6 +211,8 @@ public sealed class RunspacePoolManager : IAsyncDisposable
     private PoolState CreatePoolState(int generation)
     {
         var initialSessionState = InitialSessionState.CreateDefault2();
+        AddTrustedBuiltInModules(initialSessionState);
+        DisableArbitraryModuleAutoload(initialSessionState);
         AddScriptFunctions(initialSessionState);
         var pool = RunspaceFactory.CreateRunspacePool(initialSessionState);
         try
@@ -229,6 +233,38 @@ public sealed class RunspacePoolManager : IAsyncDisposable
             pool.Dispose();
             throw;
         }
+    }
+
+    private static void AddTrustedBuiltInModules(InitialSessionState initialSessionState)
+    {
+        initialSessionState.ImportPSModule([ResolveBundledModulePath(UtilityModuleName)]);
+    }
+
+    private static string ResolveBundledModulePath(string moduleName)
+    {
+        var manifestName = moduleName + ".psd1";
+        var baseDirectory = AppContext.BaseDirectory;
+        foreach (var candidate in new[]
+        {
+            Path.Combine(baseDirectory, "Modules", moduleName, manifestName),
+            Path.Combine(baseDirectory, "runtimes", "win", "lib", "net10.0", "Modules", moduleName, manifestName)
+        })
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return moduleName;
+    }
+
+    private static void DisableArbitraryModuleAutoload(InitialSessionState initialSessionState)
+    {
+        initialSessionState.Variables.Add(new SessionStateVariableEntry(
+            "PSModuleAutoLoadingPreference",
+            "None",
+            "PS7 ScriptDesk REST API runspaces expose the default built-in command set and do not autoload arbitrary user modules."));
     }
 
     private void AddScriptFunctions(InitialSessionState initialSessionState)

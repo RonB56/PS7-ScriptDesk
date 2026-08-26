@@ -1,7 +1,5 @@
 using System.Diagnostics;
-using System.Text.Json;
 using PS7ScriptDesk.Domain.Models;
-using PS7ScriptDesk.RestApiProofHost.Models;
 using PS7ScriptDesk.RestApiProofHost.PowerShell;
 
 namespace PS7ScriptDesk.RestApiProofHost.Api;
@@ -25,50 +23,44 @@ public static class RestEndpointMapper
             {
                 app.MapPost(
                     capturedEndpoint.Rest.RouteTemplate,
-                    (Delegate)((HttpContext context) => InvokePostEndpointAsync(context, capturedEndpoint)));
+                    (Delegate)((HttpContext context) => InvokeEndpointAsync(context, capturedEndpoint)));
             }
         }
-    }
-
-    private static async Task<IResult> InvokePostEndpointAsync(HttpContext context, ApiEndpointConfiguration endpoint)
-    {
-        if (IsSystemInfoPostEndpoint(endpoint))
-        {
-            try
-            {
-                var request = await JsonSerializer.DeserializeAsync<SystemInfoRequest>(
-                    context.Request.Body,
-                    RestApiProofHost.Hosting.RestApiProofHostFactory.JsonOptions,
-                    context.RequestAborted);
-
-                if (string.IsNullOrWhiteSpace(request?.ComputerName))
-                {
-                    return BadRequest("Required parameter 'computerName' is missing.");
-                }
-
-                return await InvokeEndpointWithParametersAsync(
-                    context,
-                    endpoint,
-                    new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
-                    {
-                        ["ComputerName"] = request.ComputerName
-                    });
-            }
-            catch (JsonException)
-            {
-                return BadRequest("The request body is not valid JSON.");
-            }
-        }
-
-        return await InvokeEndpointAsync(context, endpoint);
     }
 
     private static async Task<IResult> InvokeEndpointAsync(HttpContext context, ApiEndpointConfiguration endpoint)
     {
         var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("RestApiProofHost.Endpoint");
+        var authentication = context.RequestServices.GetRequiredService<ApiKeyAuthenticationService>();
         var binder = context.RequestServices.GetRequiredService<RestParameterBinder>();
 
-        var bindResult = await binder.BindAsync(context, endpoint, context.RequestAborted);
+        var authenticationResult = authentication.AuthenticateEndpoint(context, endpoint);
+        if (!authenticationResult.IsSuccess)
+        {
+            logger.LogWarning(
+                "Rejected unauthenticated request for endpoint {EndpointId} function {FunctionName} path {Path}: status {Status}.",
+                endpoint.EndpointId,
+                endpoint.PowerShellFunctionName,
+                context.Request.Path.Value,
+                authenticationResult.StatusCode);
+            return authenticationResult.ToResult(context);
+        }
+
+        RestParameterBindingResult bindResult;
+        try
+        {
+            bindResult = await binder.BindAsync(context, endpoint, context.RequestAborted);
+        }
+        catch (BadHttpRequestException exception) when (exception.StatusCode == StatusCodes.Status413PayloadTooLarge)
+        {
+            logger.LogWarning(
+                "Rejected request for endpoint {EndpointId} function {FunctionName} path {Path}: request body too large.",
+                endpoint.EndpointId,
+                endpoint.PowerShellFunctionName,
+                context.Request.Path.Value);
+            return ApiInvocationProblemDetailsMapper.ToRequestBodyTooLarge(context);
+        }
+
         if (!bindResult.IsValid)
         {
             logger.LogWarning(
@@ -77,7 +69,9 @@ public static class RestEndpointMapper
                 endpoint.PowerShellFunctionName,
                 context.Request.Path.Value,
                 bindResult.ErrorCode);
-            return BadRequest(bindResult.ErrorMessage ?? "The request could not be bound.");
+            return ApiInvocationProblemDetailsMapper.ToRequestBindingFailure(
+                context,
+                bindResult.ErrorMessage ?? "The request could not be bound.");
         }
 
         return await InvokeEndpointWithParametersAsync(context, endpoint, bindResult.Parameters);
@@ -109,7 +103,7 @@ public static class RestEndpointMapper
             var normalized = normalizer.Normalize(
                 result.Output,
                 configuration.Runtime,
-                RestApiProofHost.Hosting.RestApiProofHostFactory.JsonOptions);
+                ApiJsonOptions.Shared);
             if (!normalized.IsSuccess)
             {
                 logger.LogWarning(
@@ -119,7 +113,14 @@ public static class RestEndpointMapper
                     context.Request.Path.Value,
                     normalized.FailureKind,
                     stopwatch.ElapsedMilliseconds);
-                return ServerError("PowerShell output could not be serialized.", "The configured PowerShell operation returned output that could not be converted safely.");
+                return ApiInvocationProblemDetailsMapper.ToResult(
+                    ApiInvocationResult.Failure(
+                        StatusForNormalizationFailure(normalized.FailureKind),
+                        normalized.SafeMessage,
+                        elapsed: stopwatch.Elapsed,
+                        poolGeneration: result.PoolGeneration,
+                        normalizationFailureKind: normalized.FailureKind),
+                    context);
             }
 
             logger.LogInformation(
@@ -131,7 +132,7 @@ public static class RestEndpointMapper
                 normalized.SerializedByteCount);
             return Results.Json(
                 normalized.Value,
-                options: RestApiProofHost.Hosting.RestApiProofHostFactory.JsonOptions);
+                options: ApiJsonOptions.Shared);
         }
 
         logger.LogWarning(
@@ -142,41 +143,12 @@ public static class RestEndpointMapper
             result.Status,
             stopwatch.ElapsedMilliseconds);
 
-        return result.Status switch
-        {
-            ApiInvocationStatus.QueueFull => Problem("PowerShell host busy.", StatusCodes.Status429TooManyRequests, "The PowerShell invocation queue is full."),
-            ApiInvocationStatus.QueueWaitTimedOut => Problem("PowerShell host busy.", StatusCodes.Status429TooManyRequests, "The PowerShell invocation queue wait timed out."),
-            ApiInvocationStatus.InvocationTimedOut => Problem("PowerShell invocation timed out.", StatusCodes.Status504GatewayTimeout, "The configured PowerShell operation did not complete before its timeout."),
-            ApiInvocationStatus.CallerCanceled => Problem("PowerShell invocation canceled.", 499, "The caller canceled the request."),
-            ApiInvocationStatus.HostUnavailable => Problem("PowerShell host unavailable.", StatusCodes.Status503ServiceUnavailable, "The PowerShell host is not available."),
-            ApiInvocationStatus.InvalidFunction => ServerError("PowerShell invocation failed.", "The configured PowerShell operation could not be completed."),
-            ApiInvocationStatus.PowerShellFailure => ServerError("PowerShell invocation failed.", "The configured PowerShell operation could not be completed."),
-            _ => ServerError("API request failed.", "The request could not be completed.")
-        };
+        return ApiInvocationProblemDetailsMapper.ToResult(result, context);
     }
 
-    private static bool IsSystemInfoPostEndpoint(ApiEndpointConfiguration endpoint)
-        => endpoint.Rest.Method == ApiHttpMethod.Post &&
-           string.Equals(endpoint.PowerShellFunctionName, "Get-SystemInfo", StringComparison.OrdinalIgnoreCase) &&
-           endpoint.ParameterBindings.Count == 1 &&
-           endpoint.ParameterBindings[0].Source == ApiParameterSource.Body &&
-           string.Equals(endpoint.ParameterBindings[0].PowerShellParameterName, "ComputerName", StringComparison.OrdinalIgnoreCase) &&
-           string.Equals(endpoint.ParameterBindings[0].Name, "computerName", StringComparison.OrdinalIgnoreCase);
+    private static ApiInvocationStatus StatusForNormalizationFailure(NormalizationFailureKind failureKind)
+        => failureKind is NormalizationFailureKind.ItemLimitExceeded or NormalizationFailureKind.ByteLimitExceeded
+            ? ApiInvocationStatus.SerializationOutputLimitFailure
+            : ApiInvocationStatus.NormalizationFailure;
 
-    private static IResult BadRequest(string detail)
-        => Results.Json(
-            new ApiProofProblemDetails("Invalid request.", StatusCodes.Status400BadRequest, detail),
-            statusCode: StatusCodes.Status400BadRequest,
-            options: RestApiProofHost.Hosting.RestApiProofHostFactory.JsonOptions);
-
-    private static IResult ServerError(string title, string detail)
-        => Problem(title, StatusCodes.Status500InternalServerError, detail);
-
-    private static IResult Problem(string title, int statusCode, string detail)
-        => Results.Json(
-            new ApiProofProblemDetails(title, statusCode, detail),
-            statusCode: statusCode,
-            options: RestApiProofHost.Hosting.RestApiProofHostFactory.JsonOptions);
 }
-
-public sealed record ApiProofProblemDetails(string Title, int Status, string Detail);

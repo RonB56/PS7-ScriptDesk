@@ -1,17 +1,16 @@
 using System.Net;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.RestApiProofHost.Api;
 using PS7ScriptDesk.RestApiProofHost.PowerShell;
+using PS7ScriptDesk.PowerShell.Services;
 
 namespace PS7ScriptDesk.RestApiProofHost.Hosting;
 
 public static class RestApiProofHostFactory
 {
-    public static JsonSerializerOptions JsonOptions { get; } = CreateJsonOptions();
+    public static System.Text.Json.JsonSerializerOptions JsonOptions => ApiJsonOptions.Shared;
 
     public static int ResolvePortFromEnvironment(int defaultPort)
         => int.TryParse(Environment.GetEnvironmentVariable("PS7SCRIPT_DESK_REST_POC_PORT"), out var port) && port is > 0 and <= 65535
@@ -22,8 +21,9 @@ public static class RestApiProofHostFactory
     {
         ArgumentNullException.ThrowIfNull(options);
         var contentRoot = ResolveContentRoot(options.ContentRootPath);
-        var configuration = LoadConfiguration(contentRoot);
+        var configuration = LoadConfiguration(contentRoot, options.ConfigurationRelativePath);
         var scriptPath = Path.Combine(contentRoot, "Scripts", configuration.SourceScript);
+        var metadata = LoadStaticMetadata(scriptPath);
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -31,37 +31,82 @@ public static class RestApiProofHostFactory
             ApplicationName = typeof(RestApiProofHostFactory).Assembly.FullName
         });
         builder.WebHost.UseUrls(RequireLocalhostUrl(options.Url));
+        builder.WebHost.ConfigureKestrel(kestrel =>
+        {
+            kestrel.Limits.MaxRequestBodySize = Math.Max(1, configuration.Runtime.RequestBodySizeLimitBytes);
+        });
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole();
 
         builder.Services.AddSingleton(configuration);
+        builder.Services.AddSingleton(metadata);
+        builder.Services.AddSingleton<ApiKeyAuthenticationService>();
         builder.Services.AddSingleton(RestParameterBinder.Shared);
+        builder.Services.AddSingleton<OpenApiDocumentBuilder>();
         builder.Services.AddSingleton(PowerShellResultNormalizer.Shared);
         builder.Services.AddSingleton<RunspacePoolManager>();
         builder.Services.AddSingleton<IPowerShellFunctionInvoker, PowerShellFunctionInvoker>();
         builder.Services.AddSingleton<PowerShellInvocationCoordinator>();
 
         var app = builder.Build();
+        app.MapGet("/healthz", () => Results.Json(new { status = "Ready" }, ApiJsonOptions.Shared));
+        OpenApiEndpointMapper.MapOpenApiEndpoints(app);
         RestEndpointMapper.MapConfiguredEndpoints(app);
 
         var coordinator = app.Services.GetRequiredService<PowerShellInvocationCoordinator>();
-        await coordinator.InitializeAsync(
-            scriptPath,
-            configuration.Endpoints.Select(endpoint => endpoint.PowerShellFunctionName),
-            configuration.Runtime,
-            cancellationToken);
+        try
+        {
+            await coordinator.InitializeAsync(
+                scriptPath,
+                configuration.Endpoints.Select(endpoint => endpoint.PowerShellFunctionName),
+                configuration.Runtime,
+                cancellationToken);
 
-        await app.StartAsync(cancellationToken);
-        var address = ResolveStartedAddress(app);
-        return new RunningRestApiProofHost(app, coordinator, configuration, address);
+            await app.StartAsync(cancellationToken);
+            var address = ResolveStartedAddress(app);
+            return new RunningRestApiProofHost(app, coordinator, configuration, address);
+        }
+        catch
+        {
+            await coordinator.DisposeAsync();
+            await app.DisposeAsync();
+            throw;
+        }
     }
 
-    private static ApiPublishConfiguration LoadConfiguration(string contentRoot)
+    private static ApiMetadataResult LoadStaticMetadata(string scriptPath)
     {
-        var configurationPath = Path.Combine(contentRoot, "Config", "TestApi.ps7api.json");
+        var source = File.ReadAllText(scriptPath);
+        return new PowerShellApiMetadataService().Analyze(source);
+    }
+
+    private static ApiPublishConfiguration LoadConfiguration(string contentRoot, string? relativeConfigurationPath)
+    {
+        var configurationPath = ResolveConfigurationPath(contentRoot, relativeConfigurationPath);
         using var stream = File.OpenRead(configurationPath);
-        return JsonSerializer.Deserialize<ApiPublishConfiguration>(stream, JsonOptions)
+        return System.Text.Json.JsonSerializer.Deserialize<ApiPublishConfiguration>(stream, ApiJsonOptions.Shared)
                ?? throw new InvalidDataException("The proof host API configuration is empty.");
+    }
+
+    private static string ResolveConfigurationPath(string contentRoot, string? relativeConfigurationPath)
+    {
+        var relativePath = string.IsNullOrWhiteSpace(relativeConfigurationPath)
+            ? Path.Combine("Config", "TestApi.ps7api.json")
+            : relativeConfigurationPath;
+        if (Path.IsPathRooted(relativePath))
+        {
+            throw new InvalidOperationException("The REST API configuration path must be relative to the content root.");
+        }
+
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(contentRoot));
+        var path = Path.GetFullPath(Path.Combine(root, relativePath));
+        if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(path, root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("The REST API configuration path escapes the content root.");
+        }
+
+        return path;
     }
 
     private static Uri ResolveStartedAddress(WebApplication app)
@@ -116,23 +161,13 @@ public static class RestApiProofHostFactory
         return uri.ToString();
     }
 
-    private static JsonSerializerOptions CreateJsonOptions()
-    {
-        var options = new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true,
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            WriteIndented = true
-        };
-        options.Converters.Add(new JsonStringEnumConverter());
-        return options;
-    }
 }
 
 public sealed class RestApiProofHostOptions
 {
     public string Url { get; init; } = "http://127.0.0.1:5087";
     public string? ContentRootPath { get; init; }
+    public string? ConfigurationRelativePath { get; init; }
 }
 
 public sealed class RunningRestApiProofHost : IAsyncDisposable

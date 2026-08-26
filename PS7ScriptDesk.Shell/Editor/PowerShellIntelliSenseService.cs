@@ -26,11 +26,19 @@ namespace PS7ScriptDesk.Shell.Editor
     {
         private readonly PowerShellCompletionService _completionService = new();
         private readonly PowerShellSnippetProvider _snippetProvider = new();
+        private int _firstCompletionRequestLogged;
+        private int _firstUsableCompletionLogged;
 
         public event EventHandler<EditorMetadataWarmupStatusChangedEventArgs>? MetadataWarmupStatusChanged
         {
             add => _completionService.MetadataWarmupStatusChanged += value;
             remove => _completionService.MetadataWarmupStatusChanged -= value;
+        }
+
+        public event EventHandler<PowerShellCompletionEngineStatusChangedEventArgs>? CompletionEngineStatusChanged
+        {
+            add => _completionService.CompletionEngineStatusChanged += value;
+            remove => _completionService.CompletionEngineStatusChanged -= value;
         }
 
         private static readonly string[] Keywords =
@@ -50,7 +58,7 @@ namespace PS7ScriptDesk.Shell.Editor
             "$null", "$OutputEncoding", "$PID", "$PROFILE", "$ProgressPreference", "$PSBoundParameters",
             "$PSCommandPath", "$PSCulture", "$PSDefaultParameterValues", "$PSEdition", "$PSEmailServer",
             "$PSHOME", "$PSScriptRoot", "$PSSenderInfo", "$PSStyle", "$PSUICulture", "$PSVersionTable",
-            "$PWD", "$ShellId", "$StackTrace", "$true", "$VerbosePreference", "$WarningPreference",
+            "$PWD", "$ShellId", "$StackTrace", "$this", "$true", "$VerbosePreference", "$WarningPreference",
             "$WhatIfPreference"
         };
 
@@ -107,6 +115,7 @@ namespace PS7ScriptDesk.Shell.Editor
             ["$PSStyle"] = "ANSI formatting and output-rendering preferences in PowerShell 7.",
             ["$PSVersionTable"] = "Table of PowerShell version and platform information.",
             ["$PWD"] = "Current location object.",
+            ["$this"] = "Current object in script class, script method, or selected PowerShell runtime contexts.",
             ["$true"] = "Boolean true."
         };
 
@@ -120,6 +129,7 @@ namespace PS7ScriptDesk.Shell.Editor
         {
             if (editor is null) return null;
 
+            var requestStopwatch = Stopwatch.StartNew();
             var caretOffset = editor.CaretOffset;
             var documentText = editor.Text ?? string.Empty;
             var context = GetCompletionContext(documentText, caretOffset);
@@ -130,6 +140,7 @@ namespace PS7ScriptDesk.Shell.Editor
             var memberContext = staticMemberContext is null ? TryGetMemberCompletionContext(documentText, context) : null;
             var commandSpecificContextName = parameterContext?.CommandName ?? parameterValueContext?.CommandName;
             var isParameterContextRequest = parameterContext is not null || parameterValueContext is not null;
+            var isVariableContextRequest = IsVariableCompletionContext(context, memberContext, staticMemberContext);
             var completionStopwatch = isParameterContextRequest ? Stopwatch.StartNew() : null;
             PowerShellQuickInfo? parameterCommandInfo = null;
             var usedCachedParameterMetadata = false;
@@ -144,7 +155,11 @@ namespace PS7ScriptDesk.Shell.Editor
                         ? "member"
                         : staticMemberContext is not null
                             ? "static-member"
-                            : "command";
+                            : isVariableContextRequest
+                                ? "variable"
+                                : "command";
+
+            LogFirstCompletionRequestIfNeeded(completionKind, context, includeEngine, engineWaitMilliseconds, forceCompletion);
 
             var cachedCommandReferences = _completionService.GetCachedCommandReferences(pwshExecutablePath);
             PowerShellQuickInfo? cachedParameterQuickInfoForLogging = null;
@@ -207,10 +222,13 @@ namespace PS7ScriptDesk.Shell.Editor
             }
 
             CompletionServiceResult? engineResult = null;
-            var shouldQueryEngine = includeEngine &&
-                                    engineWaitMilliseconds > 0 &&
-                                    !string.IsNullOrWhiteSpace(pwshExecutablePath) &&
-                                    (!isParameterContextRequest || !HasUsableParameterMetadata(parameterCommandInfo));
+            var shouldQueryEngine = ShouldQueryEngine(
+                includeEngine,
+                engineWaitMilliseconds,
+                pwshExecutablePath,
+                isParameterContextRequest,
+                HasUsableParameterMetadata(parameterCommandInfo),
+                isVariableContextRequest);
             if (shouldQueryEngine)
             {
                 using var engineCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -253,6 +271,19 @@ namespace PS7ScriptDesk.Shell.Editor
 
             if (cancellationToken.IsCancellationRequested) throw new OperationCanceledException(cancellationToken);
             var window = BuildWindow(editor, context, engineResult, documentText, parameterContext, parameterValueContext, memberContext, staticMemberContext, parameterCommandInfo, cachedCommandReferences, pwshExecutablePath, completionKind, forceCompletion);
+            requestStopwatch.Stop();
+
+            if (window is not null)
+            {
+                LogFirstUsableCompletionIfNeeded(
+                    completionKind,
+                    context,
+                    requestStopwatch.ElapsedMilliseconds,
+                    window.CompletionList.CompletionData.Count,
+                    engineResult?.Items.Count ?? 0,
+                    shouldQueryEngine,
+                    engineTimedOut);
+            }
 
             if (completionStopwatch is not null)
             {
@@ -270,9 +301,47 @@ namespace PS7ScriptDesk.Shell.Editor
             return window;
         }
 
+        internal static bool ShouldQueryEngineForTesting(
+            string documentText,
+            int caretOffset,
+            bool includeEngine,
+            int engineWaitMilliseconds,
+            string? pwshExecutablePath)
+        {
+            var context = GetCompletionContext(documentText ?? string.Empty, caretOffset);
+            var parameterContext = TryGetParameterCompletionContext(documentText ?? string.Empty, context);
+            var parameterValueContext = TryGetParameterValueCompletionContext(documentText ?? string.Empty, caretOffset, context);
+            var staticMemberContext = TryGetStaticMemberCompletionContext(documentText ?? string.Empty, context);
+            var memberContext = staticMemberContext is null ? TryGetMemberCompletionContext(documentText ?? string.Empty, context) : null;
+            var isParameterContextRequest = parameterContext is not null || parameterValueContext is not null;
+            var isVariableContextRequest = IsVariableCompletionContext(context, memberContext, staticMemberContext);
+
+            return ShouldQueryEngine(
+                includeEngine,
+                engineWaitMilliseconds,
+                pwshExecutablePath,
+                isParameterContextRequest,
+                hasUsableParameterMetadata: false,
+                isVariableContextRequest);
+        }
+
+        internal static IReadOnlyList<PowerShellLocalCompletionCandidate> GetLocalVariableCompletionCandidatesForTesting(
+            string documentText,
+            int caretOffset)
+        {
+            var safeDocumentText = documentText ?? string.Empty;
+            var context = GetCompletionContext(safeDocumentText, caretOffset);
+            return BuildLocalVariableCompletionCandidates(safeDocumentText, context).ToList();
+        }
+
         public void StartMetadataWarmup(PowerShellRuntimeInfo? runtimeInfo)
         {
             _completionService.StartMetadataWarmup(runtimeInfo);
+        }
+
+        public void StartCompletionEngineWarmup(PowerShellRuntimeInfo? runtimeInfo)
+        {
+            _completionService.StartCompletionEngineWarmup(runtimeInfo);
         }
 
         public void RefreshMetadata(PowerShellRuntimeInfo? runtimeInfo)
@@ -623,21 +692,19 @@ namespace PS7ScriptDesk.Shell.Editor
                 localFallbackCandidateCount++;
             }
 
-            foreach (var variable in ExtractParamBlockVariables(documentText))
+            foreach (var variable in BuildLocalVariableCompletionCandidates(documentText, context))
             {
-                AddCandidate(variable, variable, $"Parameter variable in this script: {variable}", CompletionItemKind.Variable,
-                    context.ReplacementOffset, context.ReplacementLength, 91, requireFragmentMatch: true);
+                AddCandidate(
+                    variable.CompletionText,
+                    variable.DisplayText,
+                    variable.Description,
+                    CompletionItemKind.Variable,
+                    variable.ReplacementOffset,
+                    variable.ReplacementLength,
+                    variable.Priority,
+                    requireFragmentMatch: true);
                 localFallbackCandidateCount++;
             }
-
-            foreach (var variable in ExtractDocumentVariables(documentText))
-            {
-                AddCandidate(variable, variable, $"Variable in this script: {variable}", CompletionItemKind.Variable,
-                    context.ReplacementOffset, context.ReplacementLength, 90, requireFragmentMatch: true);
-                localFallbackCandidateCount++;
-            }
-
-            AddStatic(candidates, seen, AutomaticVariables, CompletionItemKind.Variable, "Automatic variable: ", context, 72);
 
             foreach (var commandReference in cachedCommandReferences)
             {
@@ -778,6 +845,63 @@ namespace PS7ScriptDesk.Shell.Editor
             }
 
             return builder.ToString();
+        }
+
+        private void LogFirstCompletionRequestIfNeeded(
+            string completionKind,
+            CompletionContext context,
+            bool includeEngine,
+            int engineWaitMilliseconds,
+            bool forceCompletion)
+        {
+            if (Interlocked.Exchange(ref _firstCompletionRequestLogged, 1) != 0)
+            {
+                return;
+            }
+
+            DeveloperDiagnostics.LogInfo(
+                "EditorCompletion",
+                "First IntelliSense completion request observed.",
+                new Dictionary<string, object?>
+                {
+                    ["completionKind"] = completionKind,
+                    ["fragmentLength"] = context.Fragment.Length,
+                    ["includeEngine"] = includeEngine,
+                    ["engineWaitMilliseconds"] = engineWaitMilliseconds,
+                    ["forceCompletion"] = forceCompletion,
+                    ["replacementLength"] = context.ReplacementLength
+                });
+        }
+
+        private void LogFirstUsableCompletionIfNeeded(
+            string completionKind,
+            CompletionContext context,
+            long elapsedMilliseconds,
+            int itemCount,
+            int engineItemCount,
+            bool queriedEngine,
+            bool engineTimedOut)
+        {
+            if (itemCount <= 0 ||
+                Interlocked.Exchange(ref _firstUsableCompletionLogged, 1) != 0)
+            {
+                return;
+            }
+
+            DeveloperDiagnostics.LogOperationStop(
+                "EditorCompletion",
+                "FirstUsableCompletion",
+                "First usable IntelliSense completion list produced.",
+                elapsedMilliseconds,
+                new Dictionary<string, object?>
+                {
+                    ["completionKind"] = completionKind,
+                    ["fragmentLength"] = context.Fragment.Length,
+                    ["itemCount"] = itemCount,
+                    ["engineItemCount"] = engineItemCount,
+                    ["queriedEngine"] = queriedEngine,
+                    ["engineTimedOut"] = engineTimedOut
+                });
         }
 
 
@@ -1210,6 +1334,54 @@ namespace PS7ScriptDesk.Shell.Editor
             }
         }
 
+        private static IReadOnlyList<PowerShellLocalCompletionCandidate> BuildLocalVariableCompletionCandidates(
+            string documentText,
+            CompletionContext context)
+        {
+            var candidates = new List<PowerShellLocalCompletionCandidate>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void AddVariable(string value, string description, double priority)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return;
+                }
+
+                var matchScore = GetMatchScore(value, context.Fragment);
+                if (matchScore < 0 || !seen.Add(value))
+                {
+                    return;
+                }
+
+                candidates.Add(new PowerShellLocalCompletionCandidate(
+                    value,
+                    value,
+                    description,
+                    context.ReplacementOffset,
+                    context.ReplacementLength,
+                    priority,
+                    matchScore));
+            }
+
+            foreach (var variable in ExtractParamBlockVariables(documentText))
+            {
+                AddVariable(variable, $"Parameter variable in this script: {variable}", 91);
+            }
+
+            foreach (var variable in ExtractDocumentVariables(documentText))
+            {
+                AddVariable(variable, $"Variable in this script: {variable}", 90);
+            }
+
+            foreach (var variable in AutomaticVariables)
+            {
+                AddVariable(variable, "Automatic variable: " + variable, 72);
+            }
+
+            return candidates;
+        }
+
         private static CompletionContext GetCompletionContext(string text, int caretOffset)
         {
             var scanOffset = Math.Clamp(caretOffset, 0, text.Length);
@@ -1217,7 +1389,7 @@ namespace PS7ScriptDesk.Shell.Editor
             while (scanOffset > 0)
             {
                 var ch = text[scanOffset - 1];
-                if (char.IsLetterOrDigit(ch) || ch == '_' || ch == '-' || ch == '$' || ch == ':' || ch == '.' || ch == '\\' || ch == '/' || ch == '[' || ch == ']')
+                if (char.IsLetterOrDigit(ch) || ch == '_' || ch == '-' || ch == '$' || ch == '?' || ch == ':' || ch == '.' || ch == '\\' || ch == '/' || ch == '[' || ch == ']')
                 {
                     scanOffset--;
                     continue;
@@ -1228,6 +1400,31 @@ namespace PS7ScriptDesk.Shell.Editor
             var replacementLength = caretOffset - scanOffset;
             var fragment = replacementLength > 0 ? text.Substring(scanOffset, replacementLength) : string.Empty;
             return new CompletionContext(scanOffset, replacementLength, fragment);
+        }
+
+        private static bool IsVariableCompletionContext(
+            CompletionContext context,
+            MemberCompletionContext? memberContext,
+            StaticMemberCompletionContext? staticMemberContext)
+        {
+            return memberContext is null &&
+                   staticMemberContext is null &&
+                   context.Fragment.StartsWith("$", StringComparison.Ordinal);
+        }
+
+        private static bool ShouldQueryEngine(
+            bool includeEngine,
+            int engineWaitMilliseconds,
+            string? pwshExecutablePath,
+            bool isParameterContextRequest,
+            bool hasUsableParameterMetadata,
+            bool isVariableContextRequest)
+        {
+            return includeEngine &&
+                   engineWaitMilliseconds > 0 &&
+                   !string.IsNullOrWhiteSpace(pwshExecutablePath) &&
+                   !isVariableContextRequest &&
+                   (!isParameterContextRequest || !hasUsableParameterMetadata);
         }
 
         private static ParameterCompletionContext? TryGetParameterCompletionContext(string documentText, CompletionContext context)
@@ -3330,6 +3527,15 @@ namespace PS7ScriptDesk.Shell.Editor
             double Priority,
             int MatchScore);
     }
+
+    internal sealed record PowerShellLocalCompletionCandidate(
+        string CompletionText,
+        string DisplayText,
+        string Description,
+        int ReplacementOffset,
+        int ReplacementLength,
+        double Priority,
+        int MatchScore);
 
     public sealed class EditorQuickInfo
     {

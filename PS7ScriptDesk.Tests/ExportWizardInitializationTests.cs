@@ -27,4 +27,14 @@ public sealed class ExportWizardInitializationTests
     {
         Assert.False(ExportWizardWindow.TryResolvePreset(presetTag, out _));
     }
+
+    [Theory]
+    [InlineData(-1, 6, 0)]
+    [InlineData(0, 6, 0)]
+    [InlineData(3, 6, 3)]
+    [InlineData(-1, 0, -1)]
+    public void InitialPageSelection_NormalizesMissingSelectionToFirstPage(int selectedIndex, int itemCount, int expected)
+    {
+        Assert.Equal(expected, ExportWizardWindow.ResolveInitialPageIndex(selectedIndex, itemCount));
+    }
 }

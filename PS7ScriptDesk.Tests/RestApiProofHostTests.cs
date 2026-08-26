@@ -3,6 +3,8 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Http;
+using PS7ScriptDesk.RestApiProofHost.Api;
 using System.Management.Automation;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.RestApiProofHost.Hosting;
@@ -25,6 +27,173 @@ public sealed class RestApiProofHostTests
         Assert.Contains(host.Configuration.Endpoints, endpoint =>
             endpoint.EndpointId == "poc-post-systeminfo" &&
             endpoint.Rest.RouteTemplate == "/api/systeminfo");
+    }
+
+    [Fact]
+    public void ApiEndpointResolver_ResolvesEnabledEndpointIdsOnlyWithoutFunctionNameFallback()
+    {
+        var configuration = ApiPublishConfiguration.CreateDefaultForScriptPath("TestApi.ps1");
+        configuration.Endpoints =
+        [
+            new ApiEndpointConfiguration
+            {
+                EndpointId = "published-status",
+                IsEnabled = true,
+                PowerShellFunctionName = "Get-SystemInfo"
+            },
+            new ApiEndpointConfiguration
+            {
+                EndpointId = "disabled-status",
+                IsEnabled = false,
+                PowerShellFunctionName = "Get-DisabledStatus"
+            }
+        ];
+
+        var resolved = ApiEndpointResolver.Shared.ResolveByEndpointId(configuration, "PUBLISHED-STATUS");
+        var functionNameAttempt = ApiEndpointResolver.Shared.ResolveByEndpointId(configuration, "Get-SystemInfo");
+        var disabled = ApiEndpointResolver.Shared.ResolveByEndpointId(configuration, "disabled-status");
+        var missing = ApiEndpointResolver.Shared.ResolveByEndpointId(configuration, "missing-status");
+
+        Assert.True(resolved.IsSuccess);
+        Assert.Equal("published-status", resolved.Endpoint?.EndpointId);
+        Assert.False(functionNameAttempt.IsSuccess);
+        Assert.Equal("EndpointNotFound", functionNameAttempt.ErrorCode);
+        Assert.False(disabled.IsSuccess);
+        Assert.Equal("EndpointNotFound", disabled.ErrorCode);
+        Assert.False(missing.IsSuccess);
+        Assert.Equal("EndpointNotFound", missing.ErrorCode);
+    }
+
+    [Fact]
+    public void ApiEndpointParameterBinder_PreservesRequiredOptionalAndScalarConversionBehavior()
+    {
+        using var bodyDocument = JsonDocument.Parse(
+            """
+            {
+              "name": "SERVER01",
+              "count": 7,
+              "longValue": "9000000000",
+              "ratio": "1.25",
+              "enabled": true
+            }
+            """);
+        var values = bodyDocument.RootElement.EnumerateObject()
+            .ToDictionary(property => property.Name, property => property.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        var endpoint = new ApiEndpointConfiguration
+        {
+            EndpointId = "binding-test",
+            PowerShellFunctionName = "Get-SystemInfo",
+            ParameterBindings =
+            [
+                CreateBinding("Name", "name", "string", ApiRequiredBehavior.Required),
+                CreateBinding("Count", "count", "int", ApiRequiredBehavior.Required),
+                CreateBinding("LongValue", "longValue", "long", ApiRequiredBehavior.Required),
+                CreateBinding("Ratio", "ratio", "double", ApiRequiredBehavior.Required),
+                CreateBinding("Enabled", "enabled", "bool", ApiRequiredBehavior.Required),
+                CreateBinding("OptionalValue", "optionalValue", "string", ApiRequiredBehavior.Optional)
+            ]
+        };
+
+        var result = ApiEndpointParameterBinder.Shared.Bind(
+            endpoint,
+            binding => values.TryGetValue(binding.Name, out var value)
+                ? ApiParameterBindingValue.Present(value)
+                : ApiParameterBindingValue.Missing);
+
+        Assert.True(result.IsValid, result.ErrorMessage);
+        Assert.Equal("SERVER01", result.Parameters["Name"]);
+        Assert.Equal(7, result.Parameters["Count"]);
+        Assert.Equal(9000000000L, result.Parameters["LongValue"]);
+        Assert.Equal(1.25d, result.Parameters["Ratio"]);
+        Assert.Equal(true, result.Parameters["Enabled"]);
+        Assert.False(result.Parameters.ContainsKey("OptionalValue"));
+    }
+
+    [Fact]
+    public void ApiEndpointParameterBinder_RejectsMissingRequiredAndInvalidConvertedValues()
+    {
+        using var bodyDocument = JsonDocument.Parse("""{ "count": "not-an-int" }""");
+        var endpoint = new ApiEndpointConfiguration
+        {
+            EndpointId = "invalid-binding-test",
+            PowerShellFunctionName = "Get-SystemInfo",
+            ParameterBindings =
+            [
+                CreateBinding("Name", "name", "string", ApiRequiredBehavior.Required),
+                CreateBinding("Count", "count", "int", ApiRequiredBehavior.Required)
+            ]
+        };
+
+        var missing = ApiEndpointParameterBinder.Shared.Bind(
+            endpoint,
+            binding => binding.Name == "count"
+                ? ApiParameterBindingValue.Present(bodyDocument.RootElement.GetProperty("count").Clone())
+                : ApiParameterBindingValue.Missing);
+        var invalid = ApiEndpointParameterBinder.Shared.Bind(
+            endpoint,
+            binding => binding.Name == "name"
+                ? ApiParameterBindingValue.Present("SERVER01")
+                : ApiParameterBindingValue.Present(bodyDocument.RootElement.GetProperty("count").Clone()));
+
+        Assert.False(missing.IsValid);
+        Assert.Equal("MissingParameter", missing.ErrorCode);
+        Assert.False(invalid.IsValid);
+        Assert.Equal("InvalidParameter", invalid.ErrorCode);
+        Assert.Contains("integer", invalid.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RestParameterBinder_UsesSharedBinderAndDoesNotAllowClientServerDefinedOverrides()
+    {
+        var variableName = $"PS7SCRIPT_DESK_PHASE1_SECRET_{Guid.NewGuid():N}";
+        Environment.SetEnvironmentVariable(variableName, "SERVER-OWNED");
+        try
+        {
+            var endpoint = new ApiEndpointConfiguration
+            {
+                EndpointId = "server-defined-test",
+                PowerShellFunctionName = "Get-SecureServerDefined",
+                ParameterBindings =
+                [
+                    new ApiParameterBindingConfiguration
+                    {
+                        PowerShellParameterName = "ClientValue",
+                        Source = ApiParameterSource.Body,
+                        Name = "clientValue",
+                        Required = ApiRequiredBehavior.Required,
+                        TypeName = "string"
+                    },
+                    new ApiParameterBindingConfiguration
+                    {
+                        PowerShellParameterName = "ServerSecret",
+                        Source = ApiParameterSource.ServerDefined,
+                        Name = "serverSecret",
+                        Required = ApiRequiredBehavior.Required,
+                        TypeName = "string",
+                        IsSecretSensitive = true,
+                        ServerValue = new ApiServerDefinedValue
+                        {
+                            Kind = ApiServerDefinedValueKind.EnvironmentVariable,
+                            Value = variableName
+                        }
+                    }
+                ]
+            };
+            var context = new DefaultHttpContext { TraceIdentifier = "phase1-rest-binder" };
+            context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(
+                """{ "clientValue": "CLIENT", "serverSecret": "REQUEST-OVERRIDE" }"""));
+
+            var result = await RestParameterBinder.Shared.BindAsync(context, endpoint, CancellationToken.None);
+
+            Assert.True(result.IsValid, result.ErrorMessage);
+            Assert.Equal("CLIENT", result.Parameters["ClientValue"]);
+            Assert.Equal("SERVER-OWNED", result.Parameters["ServerSecret"]);
+            Assert.DoesNotContain("REQUEST-OVERRIDE", result.Parameters.Values.Select(value => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture)));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variableName, null);
+        }
     }
 
     [Fact]
@@ -52,6 +221,8 @@ public sealed class RestApiProofHostTests
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal("Invalid request.", json.RootElement.GetProperty("title").GetString());
         Assert.Equal(400, json.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal("https://ps7scriptdesk.local/errors/request-binding-failure", json.RootElement.GetProperty("type").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(json.RootElement.GetProperty("requestId").GetString()));
         Assert.Contains("computerName", json.RootElement.GetProperty("detail").GetString(), StringComparison.Ordinal);
     }
 
@@ -143,6 +314,57 @@ public sealed class RestApiProofHostTests
         Assert.DoesNotContain("Intentional test failure", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Runspace", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("System.Management.Automation", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task SuccessResponse_DoesNotExposeStreamsByDefault()
+    {
+        await using var host = await StartHostAsync();
+        using var client = host.CreateClient();
+
+        using var response = await client.GetAsync("/api/phase5b/streams");
+        var body = await response.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("stream-success", json.RootElement.GetProperty("Value").GetString());
+        Assert.DoesNotContain("phase5b-warning", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task NonTerminatingError_ReturnsSanitizedProblemWithoutPartialOutput()
+    {
+        await using var host = await StartHostAsync();
+        using var client = host.CreateClient();
+
+        using var response = await client.GetAsync("/api/phase5b/nonterminating");
+        var body = await response.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal("https://ps7scriptdesk.local/errors/powershell-non-terminating-error", json.RootElement.GetProperty("type").GetString());
+        Assert.Equal("PowerShell invocation failed.", json.RootElement.GetProperty("title").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(json.RootElement.GetProperty("requestId").GetString()));
+        Assert.DoesNotContain("partial-output-must-not-leak", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("phase5b-nonterminating-secret", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("C:\\Sensitive", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task BindingAndValidationFailures_MapToBadRequestProblemDetails()
+    {
+        await using var host = await StartHostAsync();
+        using var client = host.CreateClient();
+
+        using var bindingResponse = await client.GetAsync("/api/phase4/delay?requestId=bad&milliseconds=not-an-int");
+        using var validationResponse = await client.GetAsync("/api/phase5b/validation?value=10");
+        using var bindingJson = await ReadJsonAsync(bindingResponse);
+        using var validationJson = await ReadJsonAsync(validationResponse);
+
+        Assert.Equal(HttpStatusCode.BadRequest, bindingResponse.StatusCode);
+        Assert.Equal("https://ps7scriptdesk.local/errors/request-binding-failure", bindingJson.RootElement.GetProperty("type").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest, validationResponse.StatusCode);
+        Assert.Equal("https://ps7scriptdesk.local/errors/powershell-validation-failure", validationJson.RootElement.GetProperty("type").GetString());
     }
 
     [Fact]
@@ -251,7 +473,9 @@ public sealed class RestApiProofHostTests
         var normalized = (Dictionary<string, object?>)NormalizeSuccess(result.Output)!;
 
         Assert.True(coordinator.RequiredFunctionsVerified);
-        Assert.Equal(ApiInvocationStatus.Success, result.Status);
+        Assert.True(
+            result.Status == ApiInvocationStatus.Success,
+            $"Expected Success but got {result.Status}: {string.Join(" | ", result.Streams.Select(stream => $"{stream.StreamName}:{stream.Message}"))}");
         Assert.Equal("SERVER04", normalized["ComputerName"]);
     }
 
@@ -285,7 +509,9 @@ public sealed class RestApiProofHostTests
             new ApiInvocationRequest { FunctionName = "Get-ExplicitNull" },
             CancellationToken.None);
 
-        Assert.Equal(ApiInvocationStatus.Success, result.Status);
+        Assert.True(
+            result.Status == ApiInvocationStatus.Success,
+            $"Expected Success but got {result.Status}: {string.Join(" | ", result.Streams.Select(stream => $"{stream.StreamName}:{stream.Message}"))}");
         Assert.Null(NormalizeSuccess(result.Output));
     }
 
@@ -551,9 +777,141 @@ public sealed class RestApiProofHostTests
             new ApiInvocationRequest { FunctionName = "Invoke-TestFailure" },
             CancellationToken.None);
 
-        Assert.Equal(ApiInvocationStatus.PowerShellFailure, result.Status);
+        Assert.Equal(ApiInvocationStatus.PowerShellTerminatingFailure, result.Status);
         Assert.Contains(result.Streams, stream => stream.StreamName is "Error" or "Exception");
         Assert.DoesNotContain(result.Streams, stream => stream.Message.Contains(ResolveProofScriptPath(), StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(result.Streams, stream => stream.Message.Contains("Intentional test failure", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task PowerShellStreamPolicy_WarningsSucceedAndRetainedStreamsAreCapped()
+    {
+        await using var coordinator = await CreateCoordinatorAsync(
+            CreateRuntime(retainedStreamEntries: 12),
+            ["Invoke-Phase5BStreams"]);
+
+        var result = await coordinator.InvokeAsync(
+            new ApiInvocationRequest { FunctionName = "Invoke-Phase5BStreams" },
+            CancellationToken.None);
+
+        Assert.True(
+            result.Status == ApiInvocationStatus.Success,
+            $"Expected Success but got {result.Status}: {string.Join(" | ", result.Streams.Select(stream => $"{stream.StreamName}:{stream.Message}"))}");
+        Assert.True(result.Streams.Count <= 12);
+        Assert.Contains(result.Streams, stream => stream.StreamName == "Warning");
+    }
+
+    [Fact]
+    public async Task PowerShellNonTerminatingError_FailsWithoutPartialOutputOrRawErrorText()
+    {
+        await using var coordinator = await CreateCoordinatorAsync(allowedFunctions: ["Invoke-Phase5BNonTerminatingError"]);
+
+        var result = await coordinator.InvokeAsync(
+            new ApiInvocationRequest { FunctionName = "Invoke-Phase5BNonTerminatingError" },
+            CancellationToken.None);
+
+        Assert.Equal(ApiInvocationStatus.PowerShellNonTerminatingError, result.Status);
+        Assert.Empty(result.Output);
+        Assert.Contains(result.Streams, stream => stream.StreamName == "Error");
+        Assert.DoesNotContain(result.Streams, stream => stream.Message.Contains("phase5b-nonterminating-secret", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(result.Streams, stream => stream.Message.Contains("C:\\Sensitive", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task PowerShellParameterBindingAndValidationFailures_AreClassifiedSeparately()
+    {
+        await using var coordinator = await CreateCoordinatorAsync(
+            allowedFunctions: ["Invoke-Phase4Delay", "Invoke-Phase5BValidation"]);
+
+        var binding = await coordinator.InvokeAsync(
+            new ApiInvocationRequest
+            {
+                FunctionName = "Invoke-Phase4Delay",
+                Parameters = new Dictionary<string, object?>
+                {
+                    ["RequestId"] = "binding",
+                    ["Milliseconds"] = "not-an-int"
+                }
+            },
+            CancellationToken.None);
+        var validation = await coordinator.InvokeAsync(
+            new ApiInvocationRequest
+            {
+                FunctionName = "Invoke-Phase5BValidation",
+                Parameters = new Dictionary<string, object?> { ["Value"] = 10 }
+            },
+            CancellationToken.None);
+
+        Assert.Equal(ApiInvocationStatus.PowerShellParameterBindingFailure, binding.Status);
+        Assert.Equal(ApiInvocationStatus.PowerShellValidationFailure, validation.Status);
+    }
+
+    [Fact]
+    public void ProblemDetailsMapper_MapsQueueTimeoutHostAndNormalizationStatusesDeterministically()
+    {
+        var context = new DefaultHttpContext
+        {
+            TraceIdentifier = "phase5b-request-id"
+        };
+        context.Request.Path = "/api/test";
+
+        var queueFull = ApiInvocationProblemDetailsMapper.CreateProblemDetails(
+            ApiInvocationResult.Failure(ApiInvocationStatus.QueueFull, "The PowerShell invocation queue is full."),
+            context);
+        var timeout = ApiInvocationProblemDetailsMapper.CreateProblemDetails(
+            ApiInvocationResult.Failure(ApiInvocationStatus.InvocationTimedOut, "The PowerShell invocation timed out."),
+            context);
+        var host = ApiInvocationProblemDetailsMapper.CreateProblemDetails(
+            ApiInvocationResult.Failure(ApiInvocationStatus.HostUnavailable, "The PowerShell host is not available."),
+            context);
+        var normalization = ApiInvocationProblemDetailsMapper.CreateProblemDetails(
+            ApiInvocationResult.Failure(
+                ApiInvocationStatus.NormalizationFailure,
+                "The configured PowerShell operation returned output that could not be converted safely.",
+                normalizationFailureKind: NormalizationFailureKind.CycleDetected),
+            context);
+        var outputLimit = ApiInvocationProblemDetailsMapper.CreateProblemDetails(
+            ApiInvocationResult.Failure(
+                ApiInvocationStatus.SerializationOutputLimitFailure,
+                "The configured PowerShell operation returned output that exceeded a configured response limit.",
+                normalizationFailureKind: NormalizationFailureKind.ByteLimitExceeded),
+            context);
+
+        Assert.Equal(StatusCodes.Status429TooManyRequests, queueFull.Status);
+        Assert.Equal(StatusCodes.Status504GatewayTimeout, timeout.Status);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, host.Status);
+        Assert.Equal(StatusCodes.Status500InternalServerError, normalization.Status);
+        Assert.Equal(StatusCodes.Status500InternalServerError, outputLimit.Status);
+        Assert.Equal("https://ps7scriptdesk.local/errors/normalization-failure", normalization.Type);
+        Assert.Equal("https://ps7scriptdesk.local/errors/serialization-output-limit-failure", outputLimit.Type);
+        Assert.Equal("phase5b-request-id", normalization.Extensions["requestId"]);
+        Assert.Equal("CycleDetected", normalization.Extensions["failureKind"]);
+        Assert.Equal("ByteLimitExceeded", outputLimit.Extensions["failureKind"]);
+    }
+
+    [Fact]
+    public void ErrorDescriptorMapper_MatchesRestProblemDetailsShape()
+    {
+        var context = new DefaultHttpContext
+        {
+            TraceIdentifier = "phase1-descriptor-request-id"
+        };
+        context.Request.Path = "/api/test";
+
+        foreach (var status in Enum.GetValues<ApiInvocationStatus>())
+        {
+            var descriptor = ApiInvocationErrorDescriptorMapper.Describe(status);
+            var problem = ApiInvocationProblemDetailsMapper.CreateProblemDetails(
+                ApiInvocationResult.Failure(status, string.Empty),
+                context);
+
+            Assert.Equal(descriptor.Type, problem.Type);
+            Assert.Equal(descriptor.Title, problem.Title);
+            Assert.Equal(descriptor.StatusCode, problem.Status);
+            Assert.Equal(descriptor.Detail, problem.Detail);
+            Assert.DoesNotContain("secret", descriptor.Detail, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("stack", descriptor.Detail, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     [Fact]
@@ -771,7 +1129,7 @@ public sealed class RestApiProofHostTests
         var coordinator = new PowerShellInvocationCoordinator(poolManager, invoker);
         await coordinator.InitializeAsync(
             ResolveProofScriptPath(),
-            allowedFunctions ?? ["Get-SystemInfo", "Invoke-TestFailure", "Get-Numbers", "Get-ExplicitNull", "Invoke-Phase4Delay", "Invoke-Phase5FormattingOutput"],
+            allowedFunctions ?? ["Get-SystemInfo", "Invoke-TestFailure", "Get-Numbers", "Get-ExplicitNull", "Invoke-Phase4Delay", "Invoke-Phase5FormattingOutput", "Invoke-Phase5BStreams", "Invoke-Phase5BNonTerminatingError", "Invoke-Phase5BValidation", "Invoke-Phase5BOversizedOutput"],
             runtimeOptions ?? CreateRuntime(),
             CancellationToken.None);
         return coordinator;
@@ -784,7 +1142,8 @@ public sealed class RestApiProofHostTests
         TimeSpan? defaultTimeout = null,
         int responseItemLimit = 1000,
         int responseByteLimit = 5 * 1024 * 1024,
-        int serializationDepth = 8)
+        int serializationDepth = 8,
+        int retainedStreamEntries = 100)
         => new()
         {
             RunspacePoolMinimum = 1,
@@ -796,7 +1155,21 @@ public sealed class RestApiProofHostTests
             ResponseItemLimit = responseItemLimit,
             ResponseByteLimit = responseByteLimit,
             SerializationDepth = serializationDepth,
-            MaximumRetainedStreamEntries = 100
+            MaximumRetainedStreamEntries = retainedStreamEntries
+        };
+
+    private static ApiParameterBindingConfiguration CreateBinding(
+        string powerShellParameterName,
+        string externalName,
+        string typeName,
+        ApiRequiredBehavior required)
+        => new()
+        {
+            PowerShellParameterName = powerShellParameterName,
+            Source = ApiParameterSource.Body,
+            Name = externalName,
+            Required = required,
+            TypeName = typeName
         };
 
     private static NormalizedApiResult NormalizeResult(IReadOnlyList<PSObject> output, ApiRuntimeOptions? runtimeOptions = null)

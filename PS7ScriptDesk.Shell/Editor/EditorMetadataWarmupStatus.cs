@@ -91,10 +91,10 @@ namespace PS7ScriptDesk.Shell.Editor
             GetChildItemParameterCount > 0;
 
         public string ReadinessCaption =>
-            "Editor metadata ready";
+            "PowerShell IntelliSense ready";
 
         public string WarningCaption =>
-            "Metadata refresh failed; cached metadata still in use";
+            "PowerShell IntelliSense degraded; cached metadata still in use";
 
         public bool IsManualRefresh => Reason == EditorMetadataWarmupReason.ManualRefresh;
 
@@ -120,5 +120,56 @@ namespace PS7ScriptDesk.Shell.Editor
         }
 
         public EditorMetadataWarmupStatus Status { get; }
+    }
+
+    public enum PowerShellCompletionEnginePhase
+    {
+        Idle = 0,
+        Initializing = 1,
+        Ready = 2,
+        Failed = 3
+    }
+
+    public sealed class PowerShellCompletionEngineStatus
+    {
+        public PowerShellCompletionEngineStatus(
+            PowerShellCompletionEnginePhase phase,
+            string message,
+            string? runtimePath = null,
+            string? detailText = null,
+            long elapsedMilliseconds = 0)
+        {
+            Phase = phase;
+            Message = string.IsNullOrWhiteSpace(message) ? "PowerShell completion engine status changed." : message.Trim();
+            RuntimePath = runtimePath;
+            DetailText = detailText?.Trim() ?? string.Empty;
+            ElapsedMilliseconds = Math.Max(0, elapsedMilliseconds);
+        }
+
+        public PowerShellCompletionEnginePhase Phase { get; }
+
+        public string Message { get; }
+
+        public string? RuntimePath { get; }
+
+        public string DetailText { get; }
+
+        public long ElapsedMilliseconds { get; }
+
+        public bool IsActive => Phase == PowerShellCompletionEnginePhase.Initializing;
+
+        public bool IsReady => Phase == PowerShellCompletionEnginePhase.Ready;
+
+        public bool IsFailed => Phase == PowerShellCompletionEnginePhase.Failed;
+    }
+
+    public sealed class PowerShellCompletionEngineStatusChangedEventArgs : EventArgs
+    {
+        public PowerShellCompletionEngineStatusChangedEventArgs(PowerShellCompletionEngineStatus status)
+        {
+            Status = status ?? throw new ArgumentNullException(nameof(status));
+        }
+
+        public PowerShellCompletionEngineStatus Status { get; }
     }
 }

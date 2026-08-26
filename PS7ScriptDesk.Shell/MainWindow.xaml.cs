@@ -228,6 +228,7 @@ namespace PS7ScriptDesk.Shell
         private string? _pendingEditorMetadataWarmupIdentity;
         private string? _lastScheduledEditorMetadataWarmupIdentity;
         private DateTimeOffset _lastScheduledEditorMetadataWarmupAtUtc = DateTimeOffset.MinValue;
+        private PowerShellCompletionEnginePhase _lastCompletionEnginePhase = PowerShellCompletionEnginePhase.Idle;
         private EditorMetadataWarmupStatus? _pendingMetadataToastStatus;
         private EditorMetadataWarmupStatus? _visibleMetadataToastStatus;
         private bool _metadataToastVisible;
@@ -301,6 +302,7 @@ namespace PS7ScriptDesk.Shell
             InitializeComponent();
 
             _intelliSenseService.MetadataWarmupStatusChanged += IntelliSenseService_MetadataWarmupStatusChanged;
+            _intelliSenseService.CompletionEngineStatusChanged += IntelliSenseService_CompletionEngineStatusChanged;
 
             _editorHoverTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
             {
@@ -1382,7 +1384,7 @@ namespace PS7ScriptDesk.Shell
 
                 // Let the active completion window commit when the user types a non-identifier character.
                 if (_activeCompletionWindow is not null &&
-                    !char.IsLetterOrDigit(ch) && ch != '_' && ch != '-')
+                    !char.IsLetterOrDigit(ch) && ch != '_' && ch != '-' && ch != '?' && ch != '$')
                 {
                     _activeCompletionWindow.CompletionList.RequestInsertion(e);
                 }
@@ -2819,7 +2821,7 @@ namespace PS7ScriptDesk.Shell
         {
             AppLogger.Debug(
                 "EditorCompletion",
-                $"Force completion requested. Source={invocationSource}, Handler=EditorTextEditor_PreviewKeyDown, Fragment='{GetCurrentWordFragment(editorTextEditor)}', InsideParameterToken={IsCaretInsideParameterToken(editorTextEditor)}, CaretOffset={editorTextEditor.CaretOffset}, MetadataPhase={_lastEditorMetadataWarmupPhase}, MetadataWarmupTriggered=False.");
+                $"Force completion requested. Source={invocationSource}, Handler=EditorTextEditor_PreviewKeyDown, Fragment='{GetCurrentWordFragment(editorTextEditor)}', InsideParameterToken={IsCaretInsideParameterToken(editorTextEditor)}, CaretOffset={editorTextEditor.CaretOffset}, MetadataPhase={_lastEditorMetadataWarmupPhase}, CompletionEnginePhase={_lastCompletionEnginePhase}, MetadataWarmupTriggered=False.");
             ShowCompletionAsync(editorTextEditor, autoTriggered: false, includeEngine: true, forceCompletion: true);
         }
 
@@ -2866,7 +2868,7 @@ namespace PS7ScriptDesk.Shell
 
                 AppLogger.Debug(
                     "EditorCompletion",
-                    $"Starting completion request. AutoTriggered={autoTriggered}, ForceCompletion={forceCompletion}, IncludeEngine={includeEngine}, Fragment='{fragment}', InsideParameterToken={insideParameterToken}, EngineWaitMs={engineWaitMilliseconds}, CaretOffset={editorTextEditor.CaretOffset}.");
+                    $"Starting completion request. AutoTriggered={autoTriggered}, ForceCompletion={forceCompletion}, IncludeEngine={includeEngine}, Fragment='{fragment}', InsideParameterToken={insideParameterToken}, EngineWaitMs={engineWaitMilliseconds}, CaretOffset={editorTextEditor.CaretOffset}, CompletionEnginePhase={_lastCompletionEnginePhase}.");
 
                 var window = await _intelliSenseService.ShowCompletionAsync(
                         editorTextEditor,
@@ -5161,6 +5163,7 @@ namespace PS7ScriptDesk.Shell
                 }
 
                 _intelliSenseService.MetadataWarmupStatusChanged -= IntelliSenseService_MetadataWarmupStatusChanged;
+                _intelliSenseService.CompletionEngineStatusChanged -= IntelliSenseService_CompletionEngineStatusChanged;
                 _debugPaneWindow?.CloseForOwnerShutdown();
                 _exportProgressWindow?.CloseForOwnerShutdown();
                 DisposeLiveSyntaxPumps();
@@ -5240,7 +5243,7 @@ namespace PS7ScriptDesk.Shell
             // Queue the final Close() so the current Closing handler can return first.
             // _allowWindowClose is already true, so the queued close takes the final
             // cleanup path without starting terminal/debug teardown again.
-            Dispatcher.BeginInvoke(
+            _ = Dispatcher.BeginInvoke(
                 new Action(Close),
                 DispatcherPriority.Normal);
         }
@@ -5470,6 +5473,95 @@ namespace PS7ScriptDesk.Shell
             Dispatcher.BeginInvoke(new Action(() => ApplyEditorMetadataWarmupStatus(e.Status)));
         }
 
+        private void IntelliSenseService_CompletionEngineStatusChanged(object? sender, PowerShellCompletionEngineStatusChangedEventArgs e)
+        {
+            if (e is null)
+            {
+                return;
+            }
+
+            Dispatcher.BeginInvoke(new Action(() => ApplyCompletionEngineStatus(e.Status)));
+        }
+
+        private void ApplyCompletionEngineStatus(PowerShellCompletionEngineStatus status)
+        {
+            if (status is null)
+            {
+                return;
+            }
+
+            _lastCompletionEnginePhase = status.Phase;
+
+            var metadataIsActive = _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.Scheduled ||
+                                   _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.BuildingCommandCatalog ||
+                                   _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.LoadingCommandMetadata ||
+                                   _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.RefreshingCachedMetadata;
+            if (metadataIsActive && status.Phase != PowerShellCompletionEnginePhase.Failed)
+            {
+                return;
+            }
+
+            var detailText = string.IsNullOrWhiteSpace(status.DetailText)
+                ? "PS7 ScriptDesk is starting the live PowerShell completion engine."
+                : status.DetailText;
+            var runtimeCaption = string.IsNullOrWhiteSpace(status.RuntimePath)
+                ? string.Empty
+                : $"{Environment.NewLine}Runtime: {status.RuntimePath}";
+            var elapsedText = status.ElapsedMilliseconds > 0
+                ? $"{Environment.NewLine}Elapsed={status.ElapsedMilliseconds:N0} ms"
+                : string.Empty;
+            var tooltipText = $"{status.Message}{Environment.NewLine}{detailText}{elapsedText}{runtimeCaption}";
+
+            switch (status.Phase)
+            {
+                case PowerShellCompletionEnginePhase.Initializing:
+                    EditorMetadataStatusItem.Visibility = Visibility.Visible;
+                    EditorMetadataStatusGlyph.Text = "⏳";
+                    EditorMetadataStatusTextBlock.Text = status.Message;
+                    ApplyEditorMetadataBadgeColors(GetLoadingBadgeBackgroundBrush(), GetLoadingBadgeBorderBrush(), GetLoadingBadgeForegroundBrush());
+                    EditorMetadataStatusBadge.ToolTip = tooltipText;
+                    if (ViewModel is not null)
+                    {
+                        ViewModel.StatusText = status.Message;
+                    }
+
+                    break;
+
+                case PowerShellCompletionEnginePhase.Ready:
+                    EditorMetadataStatusItem.Visibility = Visibility.Collapsed;
+                    EditorMetadataStatusGlyph.Text = "✓";
+                    EditorMetadataStatusTextBlock.Text = status.Message;
+                    ApplyEditorMetadataBadgeColors(GetReadyBadgeBackgroundBrush(), GetReadyBadgeBorderBrush(), GetReadyBadgeForegroundBrush());
+                    EditorMetadataStatusBadge.ToolTip = tooltipText;
+                    if (ViewModel is not null)
+                    {
+                        ViewModel.StatusText = status.Message;
+                    }
+
+                    break;
+
+                case PowerShellCompletionEnginePhase.Failed:
+                    EditorMetadataStatusItem.Visibility = Visibility.Visible;
+                    EditorMetadataStatusGlyph.Text = "!";
+                    EditorMetadataStatusTextBlock.Text = status.Message;
+                    ApplyEditorMetadataBadgeColors(GetFailureBadgeBackgroundBrush(), GetFailureBadgeBorderBrush(), GetFailureBadgeForegroundBrush());
+                    EditorMetadataStatusBadge.ToolTip = tooltipText;
+                    if (ViewModel is not null)
+                    {
+                        ViewModel.StatusText = status.Message;
+                    }
+
+                    break;
+
+                default:
+                    break;
+            }
+
+            AppLogger.Debug(
+                "EditorCompletion",
+                $"Completion engine readiness applied. Phase={status.Phase}, Runtime='{status.RuntimePath ?? "(unknown)"}', MetadataPhase={_lastEditorMetadataWarmupPhase}, ElapsedMs={status.ElapsedMilliseconds:N0}.");
+        }
+
         private void ApplyEditorMetadataWarmupStatus(EditorMetadataWarmupStatus status)
         {
             if (status is null)
@@ -5480,7 +5572,7 @@ namespace PS7ScriptDesk.Shell
             _lastEditorMetadataWarmupPhase = status.Phase;
 
             var detailText = string.IsNullOrWhiteSpace(status.DetailText)
-                ? "PS7 ScriptDesk is loading editor command metadata in the background."
+                ? "PS7 ScriptDesk is loading PowerShell IntelliSense metadata in the background."
                 : status.DetailText;
             var metadataSummary = status.CommandCount > 0 || status.QuickInfoCount > 0
                 ? $"{Environment.NewLine}Catalog={status.CommandCount:N0}, QuickInfo={status.QuickInfoCount:N0}, ParameterizedQuickInfos={status.ParameterizedQuickInfoCount:N0}, Get-ChildItemParameters={status.GetChildItemParameterCount:N0}"
@@ -5539,7 +5631,7 @@ namespace PS7ScriptDesk.Shell
                     break;
 
                 case EditorMetadataWarmupPhase.Completed:
-                    EditorMetadataStatusItem.Visibility = Visibility.Visible;
+                    EditorMetadataStatusItem.Visibility = Visibility.Collapsed;
                     EditorMetadataStatusGlyph.Text = "✓";
                     EditorMetadataStatusTextBlock.Text = status.ReadinessCaption;
                     ApplyEditorMetadataBadgeColors(GetReadyBadgeBackgroundBrush(), GetReadyBadgeBorderBrush(), GetReadyBadgeForegroundBrush());
@@ -5569,13 +5661,13 @@ namespace PS7ScriptDesk.Shell
                 case EditorMetadataWarmupPhase.Failed:
                     EditorMetadataStatusItem.Visibility = Visibility.Visible;
                     EditorMetadataStatusGlyph.Text = "!";
-                    EditorMetadataStatusTextBlock.Text = "Editor metadata failed; see log";
+                    EditorMetadataStatusTextBlock.Text = "PowerShell IntelliSense failed; see log";
                     ApplyEditorMetadataBadgeColors(GetFailureBadgeBackgroundBrush(), GetFailureBadgeBorderBrush(), GetFailureBadgeForegroundBrush());
                     EditorMetadataStatusBadge.ToolTip = tooltipText;
 
                     if (ViewModel is not null)
                     {
-                        ViewModel.StatusText = "Editor metadata failed; see log";
+                        ViewModel.StatusText = "PowerShell IntelliSense failed; see log";
                     }
 
                     break;
@@ -5757,7 +5849,7 @@ namespace PS7ScriptDesk.Shell
         private (string Title, string Body, string PhaseText, string Glyph, bool ShowProgress, System.Windows.Media.Brush Background, System.Windows.Media.Brush Border, System.Windows.Media.Brush Foreground) BuildMetadataToastVisual(EditorMetadataWarmupStatus status)
         {
             var detailText = string.IsNullOrWhiteSpace(status.DetailText)
-                ? "PS7 ScriptDesk is preparing editor metadata in the background."
+                ? "PS7 ScriptDesk is preparing PowerShell IntelliSense metadata in the background."
                 : status.DetailText.Trim();
 
             var progressText = status.HasProgress
@@ -5767,8 +5859,8 @@ namespace PS7ScriptDesk.Shell
             if (status.Phase == EditorMetadataWarmupPhase.Warning)
             {
                 return (
-                    "Metadata refresh did not complete",
-                    "PS7 ScriptDesk could not finish rebuilding editor metadata. The previous cached metadata is still being used. Details were written to the app log.",
+                    "PowerShell IntelliSense degraded",
+                    "PS7 ScriptDesk could not finish rebuilding PowerShell IntelliSense metadata. The previous cached metadata is still being used. Details were written to the app log.",
                     detailText,
                     "!",
                     false,
@@ -5780,8 +5872,8 @@ namespace PS7ScriptDesk.Shell
             if (status.Phase == EditorMetadataWarmupPhase.Failed)
             {
                 return (
-                    "PowerShell editor metadata failed",
-                    "PS7 ScriptDesk could not prepare editor metadata for this PowerShell runtime. Basic editor features may still work, but IntelliSense may be limited. Details were written to the app log.",
+                    "PowerShell IntelliSense failed",
+                    "PS7 ScriptDesk could not prepare IntelliSense metadata for this PowerShell runtime. Basic editor features may still work, but IntelliSense may be limited. Details were written to the app log.",
                     detailText,
                     "!",
                     false,
@@ -5793,8 +5885,8 @@ namespace PS7ScriptDesk.Shell
             if (status.Phase == EditorMetadataWarmupPhase.Completed)
             {
                 return (
-                    "PowerShell editor metadata ready",
-                    "PS7 ScriptDesk finished preparing full editor metadata for this PowerShell runtime. IntelliSense and autofill now have richer command, parameter, syntax, and help details.",
+                    "PowerShell IntelliSense ready",
+                    "PS7 ScriptDesk finished preparing full IntelliSense metadata for this PowerShell runtime. IntelliSense and autofill now have richer command, parameter, syntax, and help details.",
                     detailText,
                     "✓",
                     false,
@@ -5806,7 +5898,7 @@ namespace PS7ScriptDesk.Shell
             if (status.Reason == EditorMetadataWarmupReason.ManualRefresh)
             {
                 return (
-                    "Refreshing PowerShell editor metadata",
+                    "Refreshing PowerShell IntelliSense metadata",
                     "PS7 ScriptDesk is rebuilding command, parameter, syntax, and help metadata for the selected PowerShell runtime.\n\nYou can keep using the editor. The existing metadata cache will remain available until the refresh completes successfully.",
                     $"{detailText} {progressText}".Trim(),
                     "↻",
@@ -5821,7 +5913,7 @@ namespace PS7ScriptDesk.Shell
                 : "PS7 ScriptDesk is loading command, parameter, syntax, and help metadata for this PowerShell runtime.\n\nThis can take a while the first time a PowerShell version is used. You can keep using the editor while this runs. IntelliSense will improve when loading completes.";
 
             return (
-                "Preparing PowerShell editor metadata",
+                "PowerShell IntelliSense initializing",
                 body,
                 $"{detailText} {progressText}".Trim(),
                 "⏳",
@@ -5910,6 +6002,7 @@ namespace PS7ScriptDesk.Shell
             }
 
             var runtimeIdentity = BuildRuntimeIdentityKey(runtimeInfo);
+            _intelliSenseService.StartCompletionEngineWarmup(runtimeInfo);
             if (string.Equals(_pendingEditorMetadataWarmupIdentity, runtimeIdentity, StringComparison.OrdinalIgnoreCase))
             {
                 AppLogger.Info("MainWindow", $"Skipped duplicate editor metadata warmup request while debounce is pending for runtime '{runtimeInfo.LaunchExecutablePath}'.");
@@ -7124,6 +7217,11 @@ namespace PS7ScriptDesk.Shell
                     catch (Exception ex) when (!pumpToken.IsCancellationRequested)
                     {
                         var failureWorkItem = workItem;
+                        if (failureWorkItem is null)
+                        {
+                            return;
+                        }
+
                         _ = Dispatcher.InvokeAsync(() =>
                         {
                             if (!IsAuthoringDiagnosticsRequestCurrent(editorTextEditor, state, failureWorkItem))

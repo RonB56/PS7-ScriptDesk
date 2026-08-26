@@ -40,6 +40,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
         private static readonly AsyncLocal<ScopeState?> CurrentScope = new();
         private static readonly Stopwatch ProcessStopwatch = Stopwatch.StartNew();
         private static readonly Regex AuthorizationRegex = new(@"(?i)\b(authorization\s*[:=]\s*)(bearer\s+)?[^\s,;]+", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex ApiKeyHeaderRegex = new(@"(?i)\b(x-api-key\s*[:=]\s*)[^\s,;]+", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         private static readonly Regex SecretAssignmentRegex = new(@"(?i)\b(password|passwd|pwd|token|api[_-]?key|secret|client[_-]?secret|access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\r\n;]+)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         private static readonly Regex PrivateKeyRegex = new(@"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.CultureInvariant);
         private static readonly object SyncRoot = new();
@@ -1058,6 +1059,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
         private static string RedactSecrets(string text)
         {
             var redacted = AuthorizationRegex.Replace(text, "$1[REDACTED]");
+            redacted = ApiKeyHeaderRegex.Replace(redacted, "$1[REDACTED]");
             redacted = SecretAssignmentRegex.Replace(redacted, "$1=[REDACTED]");
             redacted = PrivateKeyRegex.Replace(redacted, "[REDACTED_PRIVATE_KEY]");
             return redacted;

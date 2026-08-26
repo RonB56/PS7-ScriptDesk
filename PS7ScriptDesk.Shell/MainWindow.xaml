@@ -199,6 +199,9 @@
                 <Separator />
                 <MenuItem Header="_Save" InputGestureText="Ctrl+S" Click="SaveFile_Click" help:ContextHelp.Key="Command.Save" />
                 <MenuItem Header="Save _As..." InputGestureText="Ctrl+Shift+S" Click="SaveFileAs_Click" help:ContextHelp.Key="Command.SaveAs" />
+                <MenuItem Header="Publish as _API" help:ContextHelp.Key="Command.PublishRestApi">
+                    <MenuItem Header="_REST API..." Command="{Binding PublishRestApiCommand}" help:ContextHelp.Key="Command.PublishRestApi" />
+                </MenuItem>
                 <MenuItem Header="Export as E_XE..." Command="{Binding ExportAsExeCommand}" help:ContextHelp.Key="Command.ExportAsExe" />
                 <Separator />
                 <MenuItem Header="E_xit" Click="Exit_Click" help:ContextHelp.Key="Menu.File" />

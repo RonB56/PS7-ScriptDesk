@@ -26,6 +26,7 @@ public partial class ExportWizardWindow : Window
         try
         {
             InitializeComponent();
+            EnsureInitialPageSelection(Pages);
             SelectPreset(_configuration.Preset);
             LoadConfiguration();
             DependencyList.ItemsSource = request.Dependencies.Select(dependency => $"{dependency.Kind}: {dependency.Value} — {dependency.Message}");
@@ -137,6 +138,18 @@ public partial class ExportWizardWindow : Window
             stepButtons[index].Style = (Style)FindResource(index == Pages.SelectedIndex
                 ? "WizardPrimaryButtonStyle"
                 : "WizardSecondaryButtonStyle");
+        }
+    }
+
+    internal static int ResolveInitialPageIndex(int selectedIndex, int itemCount)
+        => selectedIndex >= 0 || itemCount <= 0 ? selectedIndex : 0;
+
+    private static void EnsureInitialPageSelection(System.Windows.Controls.TabControl pages)
+    {
+        var pageIndex = ResolveInitialPageIndex(pages.SelectedIndex, pages.Items.Count);
+        if (pageIndex >= 0)
+        {
+            pages.SelectedIndex = pageIndex;
         }
     }
 

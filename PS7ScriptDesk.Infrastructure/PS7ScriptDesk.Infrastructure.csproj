@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <AssemblyName>PS7ScriptDesk.Infrastructure</AssemblyName>
     <RootNamespace>PS7ScriptDesk.Infrastructure</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>

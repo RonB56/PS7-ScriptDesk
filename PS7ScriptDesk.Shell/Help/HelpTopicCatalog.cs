@@ -226,7 +226,7 @@ namespace PS7ScriptDesk.Shell.Help
                 ["Menu.File"] = Topic(
                     "Menu.File",
                     "File menu",
-                    "The File menu is where you create, open, save, close, reopen, export, and exit.",
+                    "The File menu is where you create, open, save, close, reopen, publish, export, and exit.",
                     "Use it when you are managing script tabs, saved files, and recent scripts.",
                     "Saving affects the active tab only. Closing a tab removes it from the editor, not from disk.",
                     Section("Typical uses", false,
@@ -236,8 +236,9 @@ namespace PS7ScriptDesk.Shell.Help
                         "Open a folder into the workspace explorer.",
                         "Reopen a recent script from the Recent Scripts section.",
                         "Save the active tab or save it under a different name.",
+                        "Open the REST API publishing wizard for the active saved script.",
                         "Export the active saved script as a Windows EXE wrapper."),
-                    related: new[] { "Command.NewScript", "Command.CloseTab", "Command.CloseAll", "Command.OpenFile", "Command.Save", "Menu.RecentScripts", "Command.ExportAsExe", "Explorer.WorkspaceTree" }),
+                    related: new[] { "Command.NewScript", "Command.CloseTab", "Command.CloseAll", "Command.OpenFile", "Command.Save", "Menu.RecentScripts", "Command.PublishRestApi", "Command.ExportAsExe", "Explorer.WorkspaceTree" }),
 
                 ["Command.NewScript"] = Topic(
                     "Command.NewScript",
@@ -362,6 +363,24 @@ namespace PS7ScriptDesk.Shell.Help
                         "The export step requires the local .NET SDK because the IDE builds a small wrapper executable on demand.",
                         "Scripts that depend on $PSScriptRoot pointing at a real on-disk project folder may need extra care because the embedded script is extracted to a temporary file at runtime."),
                     related: new[] { "Menu.File", "Command.Save", "Runtime.List" }),
+
+                ["Command.PublishRestApi"] = Topic(
+                    "Command.PublishRestApi",
+                    "Publish as REST API",
+                    "Opens the REST API publishing wizard for the active saved PowerShell script.",
+                    "Use it when you want to review detected functions, save an API companion configuration, and run a localhost REST API test host.",
+                    "The local test host runs outside the PS7 ScriptDesk WPF process and listens only on localhost by default.",
+                    Section("What the command does", true,
+                        "Verifies that the active tab has script content.",
+                        "Requires the active script to be saved first.",
+                        "Analyzes publishable PowerShell functions and creates a starter REST endpoint list.",
+                        "Saves a `.ps7api.json` companion configuration beside the script.",
+                        "Can start, restart, and stop a local REST API test host from the wizard."),
+                    Section("Local testing", false,
+                        "The local test host uses the generated API project and polls a readiness endpoint before reporting the API as running.",
+                        "The wizard shows localhost URLs for the API, OpenAPI document, and Swagger UI when enabled.",
+                        "Closing the wizard stops the local test host it started."),
+                    related: new[] { "Menu.File", "Command.Save", "Help.Packaging" }),
 
                 ["Command.Find"] = Topic(
                     "Command.Find",
@@ -1377,7 +1396,7 @@ namespace PS7ScriptDesk.Shell.Help
                 return "TroubleshootingSupport";
             }
 
-            if (key is "Help.Packaging" or "App.StoreUpdate" or "Command.ExportAsExe" or "Status.Version")
+            if (key is "Help.Packaging" or "App.StoreUpdate" or "Command.ExportAsExe" or "Command.PublishRestApi" or "Status.Version")
             {
                 return "Packaging";
             }

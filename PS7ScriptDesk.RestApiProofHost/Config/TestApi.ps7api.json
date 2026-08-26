@@ -20,7 +20,7 @@
         "method": "Get",
         "routeTemplate": "/api/systeminfo",
         "operationId": "getSystemInfo",
-        "includeInOpenApi": false
+        "includeInOpenApi": true
       },
       "parameterBindings": [
         {
@@ -43,7 +43,7 @@
         "method": "Post",
         "routeTemplate": "/api/systeminfo",
         "operationId": "postSystemInfo",
-        "includeInOpenApi": false
+        "includeInOpenApi": true
       },
       "parameterBindings": [
         {
@@ -160,6 +160,150 @@
         "includeInOpenApi": false
       },
       "parameterBindings": []
+    },
+    {
+      "endpointId": "poc-phase5b-streams",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-Phase5BStreams",
+      "displayName": "Phase 5B Streams",
+      "description": "Emits bounded PowerShell streams while returning successful data.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/phase5b/streams",
+        "operationId": "phase5bStreams",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": []
+    },
+    {
+      "endpointId": "poc-phase5b-nonterminating",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-Phase5BNonTerminatingError",
+      "displayName": "Phase 5B Non-Terminating Error",
+      "description": "Emits a non-terminating PowerShell error after partial output.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/phase5b/nonterminating",
+        "operationId": "phase5bNonTerminating",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": []
+    },
+    {
+      "endpointId": "poc-phase5b-validation",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-Phase5BValidation",
+      "displayName": "Phase 5B Validation",
+      "description": "Uses PowerShell validation attributes for adapter error mapping.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/phase5b/validation",
+        "operationId": "phase5bValidation",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": [
+        {
+          "powerShellParameterName": "Value",
+          "source": "Query",
+          "name": "value",
+          "required": "Required",
+          "typeName": "int"
+        }
+      ]
+    },
+    {
+      "endpointId": "poc-phase5b-oversized",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-Phase5BOversizedOutput",
+      "displayName": "Phase 5B Oversized Output",
+      "description": "Returns deterministic output for response byte-limit mapping tests.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/phase5b/oversized",
+        "operationId": "phase5bOversized",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": []
+    },
+    {
+      "endpointId": "poc-phase6-get-computer",
+      "isEnabled": true,
+      "powerShellFunctionName": "Get-Phase6Computer",
+      "displayName": "Get Phase 6 Computer",
+      "description": "Returns deterministic Phase 6 metadata proof data for a route-bound computer.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/phase6/computers/{computerName}",
+        "operationId": "phase6GetComputer",
+        "tags": [ "Phase 6" ],
+        "includeInOpenApi": true
+      },
+      "parameterBindings": [
+        {
+          "powerShellParameterName": "ComputerName",
+          "source": "Route",
+          "name": "computerName",
+          "required": "Required",
+          "typeName": "string"
+        },
+        {
+          "powerShellParameterName": "View",
+          "source": "Query",
+          "name": "view",
+          "required": "Optional",
+          "typeName": "string"
+        },
+        {
+          "powerShellParameterName": "Limit",
+          "source": "Query",
+          "name": "limit",
+          "required": "Optional",
+          "typeName": "int"
+        }
+      ]
+    },
+    {
+      "endpointId": "poc-phase6-set-computer",
+      "isEnabled": true,
+      "powerShellFunctionName": "Set-Phase6Computer",
+      "displayName": "Set Phase 6 Computer",
+      "description": "Accepts deterministic Phase 6 body metadata proof data for a route-bound computer.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Post",
+        "routeTemplate": "/api/phase6/computers/{computerName}",
+        "operationId": "phase6SetComputer",
+        "tags": [ "Phase 6" ],
+        "includeInOpenApi": true
+      },
+      "parameterBindings": [
+        {
+          "powerShellParameterName": "ComputerName",
+          "source": "Route",
+          "name": "computerName",
+          "required": "Required",
+          "typeName": "string"
+        },
+        {
+          "powerShellParameterName": "DisplayName",
+          "source": "Body",
+          "name": "displayName",
+          "required": "Required",
+          "typeName": "string"
+        },
+        {
+          "powerShellParameterName": "Enabled",
+          "source": "Body",
+          "name": "enabled",
+          "required": "Optional",
+          "typeName": "bool"
+        }
+      ]
     }
   ],
   "runtime": {
@@ -180,8 +324,8 @@
     "allowNoAuthenticationForLocalTest": true
   },
   "openApi": {
-    "isEnabled": false,
-    "enableSwaggerUiForLocalTest": false,
+    "isEnabled": true,
+    "enableSwaggerUiForLocalTest": true,
     "enableSwaggerUiForPublishedApi": false,
     "requireAuthenticationForPublishedSwagger": true
   }

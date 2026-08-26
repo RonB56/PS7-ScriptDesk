@@ -5,12 +5,19 @@ namespace PS7ScriptDesk.RestApiProofHost.PowerShell;
 public enum ApiInvocationStatus
 {
     Success,
+    RequestBindingFailure,
     InvalidFunction,
     QueueFull,
     QueueWaitTimedOut,
     CallerCanceled,
     InvocationTimedOut,
+    PowerShellTerminatingFailure,
+    PowerShellNonTerminatingError,
+    PowerShellParameterBindingFailure,
+    PowerShellValidationFailure,
     PowerShellFailure,
+    NormalizationFailure,
+    SerializationOutputLimitFailure,
     HostUnavailable,
     InternalFailure
 }
@@ -24,6 +31,7 @@ public sealed class ApiInvocationResult
     public TimeSpan Elapsed { get; init; }
     public int PoolGeneration { get; init; }
     public bool RequiresPoolRebuild { get; init; }
+    public NormalizationFailureKind NormalizationFailureKind { get; init; } = NormalizationFailureKind.None;
     public bool IsSuccess => Status == ApiInvocationStatus.Success;
 
     public static ApiInvocationResult Success(
@@ -46,7 +54,8 @@ public sealed class ApiInvocationResult
         IReadOnlyList<ApiInvocationStreamRecord>? streams = null,
         TimeSpan elapsed = default,
         int poolGeneration = 0,
-        bool requiresPoolRebuild = false)
+        bool requiresPoolRebuild = false,
+        NormalizationFailureKind normalizationFailureKind = NormalizationFailureKind.None)
         => new()
         {
             Status = status,
@@ -54,7 +63,8 @@ public sealed class ApiInvocationResult
             Streams = streams ?? Array.Empty<ApiInvocationStreamRecord>(),
             Elapsed = elapsed,
             PoolGeneration = poolGeneration,
-            RequiresPoolRebuild = requiresPoolRebuild
+            RequiresPoolRebuild = requiresPoolRebuild,
+            NormalizationFailureKind = normalizationFailureKind
         };
 }
 

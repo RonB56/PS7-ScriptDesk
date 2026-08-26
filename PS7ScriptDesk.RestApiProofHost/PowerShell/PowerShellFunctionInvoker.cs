@@ -42,9 +42,10 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
         {
             stopwatch.Stop();
             _logger?.LogError(ex, "PowerShell invocation could not start for function {FunctionName}.", request.FunctionName);
+            var status = PowerShellFailureClassifier.ClassifyTerminatingException(ex);
             return ApiInvocationResult.Failure(
-                ApiInvocationStatus.InternalFailure,
-                "The configured PowerShell operation could not be started.",
+                status,
+                SafeMessageForStatus(status),
                 elapsed: stopwatch.Elapsed,
                 poolGeneration: poolLease.Generation,
                 requiresPoolRebuild: true);
@@ -92,9 +93,10 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
             var streams = CaptureStreams(powerShell.Streams, retainedStreamLimit);
             if (powerShell.HadErrors || powerShell.Streams.Error.Count > 0)
             {
+                var status = PowerShellFailureClassifier.ClassifyNonTerminatingErrors(powerShell.Streams.Error);
                 return ApiInvocationResult.Failure(
-                    ApiInvocationStatus.PowerShellFailure,
-                    "The configured PowerShell operation could not be completed.",
+                    status,
+                    SafeMessageForStatus(status),
                     streams,
                     stopwatch.Elapsed,
                     poolLease.Generation);
@@ -124,12 +126,13 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
             var streams = CaptureStreams(powerShell.Streams, retainedStreamLimit).ToList();
             if (streams.Count < retainedStreamLimit)
             {
-                streams.Add(new ApiInvocationStreamRecord("Exception", Cap($"{ex.GetType().Name}: {ex.Message}")));
+                streams.Add(new ApiInvocationStreamRecord("Exception", Cap(SanitizeStreamMessage(ex.GetType().Name))));
             }
 
+            var status = PowerShellFailureClassifier.ClassifyTerminatingException(ex);
             return ApiInvocationResult.Failure(
-                ApiInvocationStatus.PowerShellFailure,
-                "The configured PowerShell operation could not be completed.",
+                status,
+                SafeMessageForStatus(status),
                 streams,
                 stopwatch.Elapsed,
                 poolLease.Generation);
@@ -174,11 +177,11 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
         }
 
         var records = new List<ApiInvocationStreamRecord>(limit);
-        AddRecords(records, "Error", streams.Error.Select(record => record.ToString()), limit);
+        AddRecords(records, "Error", streams.Error.Select(FormatSafeErrorRecord), limit);
         AddRecords(records, "Warning", streams.Warning.Select(record => record.Message), limit);
         AddRecords(records, "Verbose", streams.Verbose.Select(record => record.Message), limit);
         AddRecords(records, "Debug", streams.Debug.Select(record => record.Message), limit);
-        AddRecords(records, "Information", streams.Information.Select(record => record.ToString()), limit);
+        AddRecords(records, "Information", streams.Information.Select(record => record.MessageData?.ToString() ?? string.Empty), limit);
         return records;
     }
 
@@ -191,8 +194,44 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
                 return;
             }
 
-            records.Add(new ApiInvocationStreamRecord(streamName, Cap(message)));
+            records.Add(new ApiInvocationStreamRecord(streamName, Cap(SanitizeStreamMessage(message))));
         }
+    }
+
+    private static string FormatSafeErrorRecord(ErrorRecord record)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(record.FullyQualifiedErrorId))
+        {
+            parts.Add(record.FullyQualifiedErrorId);
+        }
+
+        parts.Add(record.CategoryInfo.Category.ToString());
+        parts.Add(record.Exception.GetType().Name);
+        return string.Join("; ", parts);
+    }
+
+    private static string SafeMessageForStatus(ApiInvocationStatus status)
+        => status switch
+        {
+            ApiInvocationStatus.PowerShellParameterBindingFailure => "The PowerShell invocation parameters are invalid.",
+            ApiInvocationStatus.PowerShellValidationFailure => "The PowerShell invocation parameters failed validation.",
+            ApiInvocationStatus.PowerShellNonTerminatingError => "The configured PowerShell operation reported a non-terminating error.",
+            _ => "The configured PowerShell operation could not be completed."
+        };
+
+    private static string SanitizeStreamMessage(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        return value
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Replace('\t', ' ')
+            .Trim();
     }
 
     private static string Cap(string? value)

@@ -3,22 +3,27 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
-	<RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+	<RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <AssemblyName>PS7ScriptDesk.Shell</AssemblyName>
     <RootNamespace>PS7ScriptDesk.Shell</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
 	<UseWindowsForms>true</UseWindowsForms>
-    <Version>1.16.0</Version>
-    <AssemblyVersion>1.16.0.0</AssemblyVersion>
-    <FileVersion>1.16.0.0</FileVersion>
-    <InformationalVersion>1.16.0</InformationalVersion>
+    <Version>2.0.1</Version>
+    <AssemblyVersion>2.0.1.0</AssemblyVersion>
+    <FileVersion>2.0.1.0</FileVersion>
+    <InformationalVersion>2.0.1</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <AssemblyTitle>PS7 ScriptDesk</AssemblyTitle>
     <Product>PS7 ScriptDesk</Product>
     <Description>An ISE-style scripting tool for PowerShell 7.x</Description>
 	<ApplicationIcon>Assets\PS7ScriptDesk.Safe.ico</ApplicationIcon>
+    <SelfContained Condition="'$(RuntimeIdentifier)' != '' and '$(SelfContained)' == ''">true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <RestApiProofHostPublishDir Condition="'$(RuntimeIdentifier)' != ''">$(MSBuildProjectDirectory)\..\PS7ScriptDesk.RestApiProofHost\obj\restapi-proofhost\$(Configuration)\$(RuntimeIdentifier)\publish\</RestApiProofHostPublishDir>
+    <RestApiProofHostRuntimeCatalogRoot Condition="'$(RuntimeIdentifier)' != ''">$(MSBuildProjectDirectory)\..\PS7ScriptDesk.RestApiProofHost\obj\restapi-proofhost\$(Configuration)\catalog\</RestApiProofHostRuntimeCatalogRoot>
   </PropertyGroup>
 
   <ItemGroup>
@@ -28,6 +33,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="..\THIRD-PARTY-NOTICES.txt" Link="THIRD-PARTY-NOTICES.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
     <Content Include="terminal\xterm.min.js">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
@@ -54,4 +63,61 @@
   <ItemGroup>
     <InternalsVisibleTo Include="PS7ScriptDesk.Tests" />
   </ItemGroup>
+
+  <ItemGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <RestApiProofHostBundledRuntime Include="win-x64">
+      <RuntimePlatformTarget>x64</RuntimePlatformTarget>
+    </RestApiProofHostBundledRuntime>
+    <RestApiProofHostBundledRuntime Include="win-arm64">
+      <RuntimePlatformTarget>ARM64</RuntimePlatformTarget>
+    </RestApiProofHostBundledRuntime>
+  </ItemGroup>
+
+  <Target Name="PublishRestApiProofHostForShell"
+          BeforeTargets="CopyFilesToPublishDirectory"
+          Condition="'$(RuntimeIdentifier)' != ''">
+    <MSBuild Projects="..\PS7ScriptDesk.RestApiProofHost\PS7ScriptDesk.RestApiProofHost.csproj"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);SelfContained=true;PublishSingleFile=false;PublishTrimmed=false;PublishDir=$(RestApiProofHostPublishDir)" />
+    <ItemGroup>
+      <RestApiProofHostPublishedFiles Include="$(RestApiProofHostPublishDir)**\*" />
+      <ResolvedFileToPublish Include="@(RestApiProofHostPublishedFiles)">
+        <RelativePath>RestApi\%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="CopyRestApiProofHostToShellPublish"
+          AfterTargets="Publish"
+          DependsOnTargets="PublishRestApiProofHostForShell"
+          Condition="'$(RuntimeIdentifier)' != '' and '$(PublishDir)' != ''">
+    <ItemGroup>
+      <RestApiProofHostPublishedFilesForCopy Include="$(RestApiProofHostPublishDir)**\*" />
+    </ItemGroup>
+    <MakeDir Directories="$(PublishDir)RestApi" />
+    <Copy SourceFiles="@(RestApiProofHostPublishedFilesForCopy)"
+          DestinationFiles="@(RestApiProofHostPublishedFilesForCopy->'$(PublishDir)RestApi\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="PublishRestApiProofHostRuntimeCatalogForShell"
+          BeforeTargets="CopyFilesToPublishDirectory"
+          Condition="'$(RuntimeIdentifier)' != ''">
+    <MSBuild Projects="..\PS7ScriptDesk.RestApiProofHost\PS7ScriptDesk.RestApiProofHost.csproj"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);Platform=AnyCPU;RuntimeIdentifier=%(RestApiProofHostBundledRuntime.Identity);PlatformTarget=%(RestApiProofHostBundledRuntime.RuntimePlatformTarget);SelfContained=true;PublishSingleFile=false;PublishTrimmed=false;PublishDir=$(RestApiProofHostRuntimeCatalogRoot)%(RestApiProofHostBundledRuntime.Identity)\publish\" />
+    <ItemGroup>
+      <RestApiProofHostPublishedCatalogFiles Include="$(RestApiProofHostRuntimeCatalogRoot)win-x64\publish\**\*">
+        <RestApiRuntimeIdentifier>win-x64</RestApiRuntimeIdentifier>
+      </RestApiProofHostPublishedCatalogFiles>
+      <RestApiProofHostPublishedCatalogFiles Include="$(RestApiProofHostRuntimeCatalogRoot)win-arm64\publish\**\*">
+        <RestApiRuntimeIdentifier>win-arm64</RestApiRuntimeIdentifier>
+      </RestApiProofHostPublishedCatalogFiles>
+      <ResolvedFileToPublish Include="@(RestApiProofHostPublishedCatalogFiles)">
+        <RelativePath>RestApi\%(RestApiProofHostPublishedCatalogFiles.RestApiRuntimeIdentifier)\%(RestApiProofHostPublishedCatalogFiles.RecursiveDir)%(RestApiProofHostPublishedCatalogFiles.Filename)%(RestApiProofHostPublishedCatalogFiles.Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 </Project>

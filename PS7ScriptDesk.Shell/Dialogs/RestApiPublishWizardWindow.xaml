@@ -1,0 +1,370 @@
+<Window x:Class="PS7ScriptDesk.Shell.Dialogs.RestApiPublishWizardWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
+        Title="Publish as REST API" Width="900" Height="680" MinWidth="760" MinHeight="560"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource Theme.App.Background}"
+        help:ContextHelp.Key="Command.PublishRestApi"
+        Loaded="Window_Loaded"
+        Closing="Window_Closing"
+        PreviewKeyDown="Window_PreviewKeyDown">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ExportWizardStyles.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="24" KeyboardNavigation.TabNavigation="Cycle">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="Publish as REST API"
+                       FontSize="{StaticResource Theme.FontSize.Heading}"
+                       FontWeight="Bold"
+                       Foreground="{DynamicResource Theme.Text.Primary}" />
+            <TextBlock x:Name="SourceText"
+                       Margin="0,4,0,0"
+                       Foreground="{DynamicResource Theme.Text.Secondary}"
+                       TextWrapping="Wrap" />
+        </StackPanel>
+
+        <TextBlock Grid.Row="1"
+                   x:Name="ValidationText"
+                   Style="{StaticResource WizardValidationTextStyle}" />
+
+        <Grid Grid.Row="2" Margin="0,16,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="190" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Style="{StaticResource WizardContentPanelStyle}" Margin="0,0,14,0">
+                <ListBox x:Name="SectionList"
+                         BorderThickness="0"
+                         Background="Transparent"
+                         SelectionChanged="SectionList_SelectionChanged">
+                    <ListBoxItem Content="API" IsSelected="True" Padding="8" />
+                    <ListBoxItem Content="Endpoints" Padding="8" />
+                    <ListBoxItem Content="Runtime" Padding="8" />
+                    <ListBoxItem Content="Local Test" Padding="8" />
+                    <ListBoxItem Content="Build / Publish" Padding="8" />
+                </ListBox>
+            </Border>
+
+            <Border Grid.Column="1" Style="{StaticResource WizardContentPanelStyle}">
+                <TabControl x:Name="Pages" Style="{StaticResource WizardPageHostStyle}">
+                    <TabItem Header="API">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="155" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <TextBlock Text="Title" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="ApiTitleBox" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited" />
+
+                                <TextBlock Grid.Row="1" Text="Version" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="ApiVersionBox" Grid.Row="1" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited" />
+
+                                <TextBlock Grid.Row="2" Text="Route prefix" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="RoutePrefixBox" Grid.Row="2" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited" />
+
+                                <TextBlock Grid.Row="3" Text="Description" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Top" Margin="0,4,0,0" />
+                                <TextBox x:Name="DescriptionBox" Grid.Row="3" Grid.Column="1" Margin="12,0,0,10" MinHeight="74" AcceptsReturn="True" TextWrapping="Wrap" TextChanged="ConfigurationEdited" />
+
+                                <TextBlock Grid.Row="4" Text="Security" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <ComboBox x:Name="SecurityModeBox"
+                                          Grid.Row="4"
+                                          Grid.Column="1"
+                                          Margin="12,0,0,10"
+                                          DisplayMemberPath="DisplayName"
+                                          SelectedValuePath="Mode"
+                                          SelectionChanged="ConfigurationEdited">
+                                    <ComboBox.ItemContainerStyle>
+                                        <Style TargetType="{x:Type ComboBoxItem}">
+                                            <Setter Property="IsEnabled" Value="{Binding IsSelectable}" />
+                                        </Style>
+                                    </ComboBox.ItemContainerStyle>
+                                </ComboBox>
+
+                                <TextBlock x:Name="UnsupportedSecurityModeText" Grid.Row="5" Grid.Column="1" Margin="12,0,0,10" Foreground="{DynamicResource Theme.Status.Error.Foreground}" TextWrapping="Wrap" />
+
+                                <TextBlock x:Name="ApiKeyEnvironmentVariableLabel" Grid.Row="6" Text="API key variable" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="ApiKeyEnvironmentVariableBox" Grid.Row="6" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited" />
+
+                                <CheckBox x:Name="AllowNoAuthBox" Grid.Row="7" Grid.Column="1" Margin="12,0,0,10" Content="Allow no authentication while testing on localhost" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited" />
+                                <CheckBox x:Name="SwaggerBox" Grid.Row="8" Grid.Column="1" Margin="12,0,0,10" Content="Enable OpenAPI Viewer for local testing" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited" />
+                                <CheckBox x:Name="PublishedOpenApiAuthBox" Grid.Row="9" Grid.Column="1" Margin="12,0,0,10" Content="Require API key for published OpenAPI access" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited" />
+                                <TextBlock x:Name="SecurityGuidanceText" Grid.Row="10" Grid.Column="1" Margin="12,0,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" />
+                            </Grid>
+                        </ScrollViewer>
+                    </TabItem>
+
+                    <TabItem Header="Endpoints">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="2*" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Text="{Binding EndpointSummaryText, RelativeSource={RelativeSource AncestorType=Window}}"
+                                       Foreground="{DynamicResource Theme.Text.Secondary}"
+                                       TextWrapping="Wrap" />
+                            <DataGrid x:Name="EndpointGrid"
+                                      Grid.Row="1"
+                                      Margin="0,12,0,14"
+                                      AutoGenerateColumns="False"
+                                      CanUserAddRows="False"
+                                      CanUserDeleteRows="False"
+                                      HeadersVisibility="Column"
+                                      SelectionMode="Single"
+                                      SelectionChanged="EndpointGrid_SelectionChanged"
+                                      ItemsSource="{Binding Endpoints, RelativeSource={RelativeSource AncestorType=Window}}">
+                                <DataGrid.Columns>
+                                    <DataGridCheckBoxColumn Header="Use" Binding="{Binding IsEnabled, UpdateSourceTrigger=PropertyChanged}" Width="52" />
+                                    <DataGridTextColumn Header="Function" Binding="{Binding FunctionName}" IsReadOnly="True" Width="*" />
+                                    <DataGridTextColumn Header="Method" Binding="{Binding Method, UpdateSourceTrigger=PropertyChanged}" Width="95" />
+                                    <DataGridTextColumn Header="Route" Binding="{Binding RouteTemplate, UpdateSourceTrigger=PropertyChanged}" Width="2*" />
+                                    <DataGridTextColumn Header="Operation" Binding="{Binding OperationId, UpdateSourceTrigger=PropertyChanged}" Width="*" />
+                                    <DataGridCheckBoxColumn Header="Auth" Binding="{Binding RequiresAuthentication, UpdateSourceTrigger=PropertyChanged}" Width="60" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock Grid.Row="2"
+                                       Text="{Binding SelectedEndpointParameterText, RelativeSource={RelativeSource AncestorType=Window}}"
+                                       Foreground="{DynamicResource Theme.Text.Secondary}"
+                                       TextWrapping="Wrap" />
+                            <DataGrid x:Name="ParameterGrid"
+                                      Grid.Row="3"
+                                      Margin="0,8,0,0"
+                                      AutoGenerateColumns="False"
+                                      CanUserAddRows="False"
+                                      CanUserDeleteRows="False"
+                                      HeadersVisibility="Column"
+                                      ItemsSource="{Binding EndpointParameterBindings, RelativeSource={RelativeSource AncestorType=Window}}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="PowerShell" Binding="{Binding PowerShellParameterName}" IsReadOnly="True" Width="*" />
+                                    <DataGridTextColumn Header="HTTP/API" Binding="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Width="*" />
+                                    <DataGridTextColumn Header="Source" Binding="{Binding Source, UpdateSourceTrigger=PropertyChanged}" Width="110" />
+                                    <DataGridTextColumn Header="Required" Binding="{Binding Required, UpdateSourceTrigger=PropertyChanged}" Width="110" />
+                                    <DataGridTextColumn Header="Type" Binding="{Binding TypeName, UpdateSourceTrigger=PropertyChanged}" Width="110" />
+                                    <DataGridTextColumn Header="Validation" Binding="{Binding ValidationSummary}" IsReadOnly="True" Width="2*" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </TabItem>
+
+                    <TabItem Header="Runtime">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="210" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <TextBlock Text="Runspace minimum" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="RunspaceMinBox" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited" />
+
+                                <TextBlock Grid.Row="1" Text="Runspace maximum" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="RunspaceMaxBox" Grid.Row="1" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited" />
+
+                                <TextBlock Grid.Row="2" Text="Maximum concurrent requests" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="ConcurrencyBox" Grid.Row="2" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited" />
+
+                                <TextBlock Grid.Row="3" Text="Queue limit" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="QueueLimitBox" Grid.Row="3" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited" />
+
+                                <TextBlock Grid.Row="4" Text="Request timeout seconds" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="TimeoutBox" Grid.Row="4" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited" />
+
+                                <TextBlock Grid.Row="5" Text="Response byte limit" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="ResponseByteLimitBox" Grid.Row="5" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited" />
+
+                                <TextBlock Grid.Row="6" Text="Generated project folder" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <Grid Grid.Row="6" Grid.Column="1" Margin="12,0,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="OutputDirectoryBox" TextChanged="ConfigurationEdited" />
+                                    <Button Grid.Column="1" Content="Browse..." Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="BrowseOutputDirectory_Click" />
+                                </Grid>
+
+                                <CheckBox x:Name="PreserveGeneratedProjectBox" Grid.Row="7" Grid.Column="1" Margin="12,0,0,0" Content="Keep generated project files after publishing" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited" />
+                            </Grid>
+                        </ScrollViewer>
+                    </TabItem>
+
+                    <TabItem Header="Local Test">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Top">
+                                <StackPanel Orientation="Horizontal">
+                                    <Button x:Name="SaveButton" Content="Save Configuration" Style="{StaticResource WizardSecondaryButtonStyle}" Margin="0,0,8,0" Click="SaveButton_Click" />
+                                    <Button x:Name="StartTestButton" Content="Start Local Test" Style="{StaticResource WizardPrimaryButtonStyle}" Margin="0,0,8,0" Click="StartTestButton_Click" />
+                                    <Button x:Name="RestartTestButton" Content="Restart" Style="{StaticResource WizardSecondaryButtonStyle}" Margin="0,0,8,0" Click="RestartTestButton_Click" IsEnabled="False" />
+                                    <Button x:Name="StopTestButton" Content="Stop" Style="{StaticResource WizardSecondaryButtonStyle}" Click="StopTestButton_Click" IsEnabled="False" />
+                                </StackPanel>
+
+                                <TextBlock x:Name="LocalTestStatusText" Margin="0,14,0,8" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" />
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="95" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Text="Base URL" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                    <TextBox x:Name="BaseUrlBox" Grid.Column="1" Margin="8,0,0,6" IsReadOnly="True" />
+                                    <TextBlock Grid.Row="1" Text="OpenAPI" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                    <TextBox x:Name="OpenApiUrlBox" Grid.Row="1" Grid.Column="1" Margin="8,0,0,6" IsReadOnly="True" />
+                                    <Button x:Name="OpenOpenApiButton" Grid.Row="1" Grid.Column="2" Content="Open JSON" Margin="8,0,0,6" Style="{StaticResource WizardSecondaryButtonStyle}" Click="OpenOpenApiButton_Click" IsEnabled="False" />
+                                    <TextBlock Grid.Row="2" Text="OpenAPI Viewer" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                    <TextBox x:Name="SwaggerUrlBox" Grid.Row="2" Grid.Column="1" Margin="8,0,0,0" IsReadOnly="True" />
+                                    <Button x:Name="OpenViewerButton" Grid.Row="2" Grid.Column="2" Content="Open Viewer" Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="OpenViewerButton_Click" IsEnabled="False" />
+                                </Grid>
+
+                                <Border Margin="0,16,0,0" Padding="0,14,0,0" BorderBrush="{DynamicResource Theme.Border.Subtle}" BorderThickness="0,1,0,0">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="130" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Text="Endpoint" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                        <ComboBox x:Name="LocalTestEndpointBox" Grid.Column="1" Margin="8,0,0,8" DisplayMemberPath="FunctionName" SelectionChanged="LocalTestEndpointBox_SelectionChanged" />
+                                        <TextBlock Grid.Row="1" Text="Parameters" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Top" Margin="0,4,0,0" />
+                                        <DataGrid x:Name="LocalTestParameterGrid"
+                                                  Grid.Row="1"
+                                                  Grid.Column="1"
+                                                  Margin="8,0,0,8"
+                                                  MaxHeight="115"
+                                                  AutoGenerateColumns="False"
+                                                  CanUserAddRows="False"
+                                                  CanUserDeleteRows="False"
+                                                  HeadersVisibility="Column"
+                                                  ItemsSource="{Binding EndpointParameterBindings, RelativeSource={RelativeSource AncestorType=Window}}">
+                                            <DataGrid.Columns>
+                                                <DataGridTextColumn Header="Parameter" Binding="{Binding Name}" IsReadOnly="True" Width="*" />
+                                                <DataGridTextColumn Header="Source" Binding="{Binding Source}" IsReadOnly="True" Width="100" />
+                                                <DataGridTextColumn Header="Value" Binding="{Binding TestValue, UpdateSourceTrigger=PropertyChanged}" Width="2*" />
+                                            </DataGrid.Columns>
+                                        </DataGrid>
+                                        <TextBlock x:Name="LocalTestApiKeyLabel" Grid.Row="2" Text="API key" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                        <PasswordBox x:Name="LocalTestApiKeyBox" Grid.Row="2" Grid.Column="1" Margin="8,0,0,8" />
+                                        <TextBlock Grid.Row="3" Text="Request URL" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                        <TextBox x:Name="TestRequestUrlBox" Grid.Row="3" Grid.Column="1" Margin="8,0,0,8" IsReadOnly="True" />
+                                        <TextBlock Grid.Row="4" Text="Body" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Top" Margin="0,4,0,0" />
+                                        <TextBox x:Name="TestRequestBodyBox" Grid.Row="4" Grid.Column="1" Margin="8,0,0,8" MinHeight="54" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" />
+                                        <StackPanel Grid.Row="5" Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
+                                            <Button x:Name="ExecuteRequestButton" Content="Execute Request" Style="{StaticResource WizardPrimaryButtonStyle}" Margin="0,0,8,0" Click="ExecuteRequestButton_Click" IsEnabled="False" />
+                                            <TextBlock Text="Uses the running local host." VerticalAlignment="Center" Foreground="{DynamicResource Theme.Text.Secondary}" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+
+                            <TextBox x:Name="LocalTestResponseBox" Margin="0,14,0,0" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" />
+                        </DockPanel>
+                    </TabItem>
+
+                    <TabItem Header="Build / Publish">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="155" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <TextBlock Text="Generated project" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="GeneratedProjectPathBox" Grid.Column="1" Margin="12,0,8,10" IsReadOnly="True" />
+                                <Button x:Name="GenerateProjectButton" Grid.Column="2" Content="Generate Project" Style="{StaticResource WizardSecondaryButtonStyle}" Margin="0,0,0,10" Click="GenerateProjectButton_Click" />
+
+                                <TextBlock Grid.Row="1" Text="Target architecture" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <ComboBox x:Name="TargetArchitectureBox"
+                                          Grid.Row="1"
+                                          Grid.Column="1"
+                                          Margin="12,0,8,10"
+                                          MinWidth="180"
+                                          HorizontalAlignment="Left"
+                                          DisplayMemberPath="DisplayName"
+                                          SelectedValuePath="Architecture" />
+
+                                <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="12,0,0,10">
+                                    <Button x:Name="BuildApiButton" Content="Build API" Style="{StaticResource WizardSecondaryButtonStyle}" Margin="0,0,8,0" Click="BuildApiButton_Click" />
+                                    <Button x:Name="PublishApiButton" Content="Publish API" Style="{StaticResource WizardPrimaryButtonStyle}" Click="PublishApiButton_Click" />
+                                </StackPanel>
+
+                                <TextBlock Grid.Row="3" Text="Status" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Top" Margin="0,4,0,0" />
+                                <TextBlock x:Name="BuildPublishStatusText" Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="12,0,0,10" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" />
+
+                                <TextBlock Grid.Row="4" Text="Final output" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBox x:Name="BuildPublishOutputPathBox" Grid.Row="4" Grid.Column="1" Margin="12,0,8,0" IsReadOnly="True" />
+                                <Button x:Name="OpenPublishFolderButton" Grid.Row="4" Grid.Column="2" Content="Open Folder" Style="{StaticResource WizardSecondaryButtonStyle}" Click="OpenPublishFolderButton_Click" IsEnabled="False" />
+                            </Grid>
+                        </ScrollViewer>
+                    </TabItem>
+                </TabControl>
+            </Border>
+        </Grid>
+
+        <Border Grid.Row="3" Margin="0,18,0,0" Padding="0,14,0,0" BorderBrush="{DynamicResource Theme.Border.Subtle}" BorderThickness="0,1,0,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="BackButton" Content="Back" Style="{StaticResource WizardSecondaryButtonStyle}" Margin="0,0,8,0" Click="BackButton_Click" IsEnabled="False" />
+                <Button x:Name="NextButton" Content="Next" Style="{StaticResource WizardPrimaryButtonStyle}" Margin="0,0,8,0" Click="NextButton_Click" IsDefault="True" />
+                <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource WizardTertiaryButtonStyle}" Click="CloseButton_Click" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

@@ -112,6 +112,7 @@ namespace PS7ScriptDesk.Shell.Editor
                    ch == '_' ||
                    ch == '-' ||
                    ch == '$' ||
+                   ch == '?' ||
                    ch == ':' ||
                    ch == '.' ||
                    ch == '\\' ||

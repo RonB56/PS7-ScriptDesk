@@ -259,10 +259,17 @@ public sealed class PowerShellInvocationCoordinator : IAsyncDisposable
                 _metrics.IncrementInvocationTimeout();
                 break;
             case ApiInvocationStatus.PowerShellFailure:
+            case ApiInvocationStatus.PowerShellTerminatingFailure:
+            case ApiInvocationStatus.PowerShellNonTerminatingError:
+            case ApiInvocationStatus.PowerShellParameterBindingFailure:
+            case ApiInvocationStatus.PowerShellValidationFailure:
                 _metrics.IncrementPowerShellFailure();
                 break;
             case ApiInvocationStatus.InternalFailure:
             case ApiInvocationStatus.InvalidFunction:
+            case ApiInvocationStatus.RequestBindingFailure:
+            case ApiInvocationStatus.NormalizationFailure:
+            case ApiInvocationStatus.SerializationOutputLimitFailure:
             case ApiInvocationStatus.HostUnavailable:
                 _metrics.IncrementInternalFailure();
                 break;

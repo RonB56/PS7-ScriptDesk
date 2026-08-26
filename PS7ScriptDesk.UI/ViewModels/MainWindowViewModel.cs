@@ -31,6 +31,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly IUserPromptService _userPromptService;
         private readonly IExeExportService _exeExportService;
         private readonly IExeExportWizardService? _exeExportWizardService;
+        private readonly IRestApiPublishWizardService? _restApiPublishWizardService;
         private SynchronizationContext? _uiSynchronizationContext;
         private readonly SemaphoreSlim _consoleSessionGate = new(1, 1);
         private readonly SemaphoreSlim _consoleRecoveryGate = new(1, 1);
@@ -46,6 +47,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly RelayCommand _sendConsoleCommand;
         private readonly RelayCommand _restartConsoleCommand;
         private readonly RelayCommand _exportAsExeCommand;
+        private readonly RelayCommand _publishRestApiCommand;
         private readonly RelayCommand _closeAllTabsCommand;
         private readonly RelayCommand _zoomInCommand;
         private readonly RelayCommand _zoomOutCommand;
@@ -91,6 +93,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private bool _isExecutionRunning;
         private bool _isStopInProgress;
         private bool _isExeExportInProgress;
+        private bool _isRestApiWizardOpen;
         private readonly List<string> _recentFilePaths = new();
         private string? _selectedRuntimeExecutablePathToRestore;
         private string? _selectedTabFilePathToRestore;
@@ -135,7 +138,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             IExeExportService exeExportService,
             ApplicationSettings? initialSettings = null,
             PowerShellRuntimeInfo? startupRuntimeInfo = null,
-            IExeExportWizardService? exeExportWizardService = null)
+            IExeExportWizardService? exeExportWizardService = null,
+            IRestApiPublishWizardService? restApiPublishWizardService = null)
         {
             _fileDocumentService = fileDocumentService;
             _runtimeService = runtimeService;
@@ -144,6 +148,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _liveConsoleService = liveConsoleService;
             _exeExportService = exeExportService;
             _exeExportWizardService = exeExportWizardService;
+            _restApiPublishWizardService = restApiPublishWizardService;
             _uiSynchronizationContext = SynchronizationContext.Current;
             _startupRuntimeInfo = startupRuntimeInfo;
             _applicationVersionText = GetApplicationVersionText();
@@ -180,6 +185,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             RestartConsoleCommand = _restartConsoleCommand;
             _exportAsExeCommand = new RelayCommand(async () => await OnExportAsExeAsync(), CanExportAsExe);
             ExportAsExeCommand = _exportAsExeCommand;
+            _publishRestApiCommand = new RelayCommand(async () => await OnPublishRestApiAsync(), CanPublishRestApi);
+            PublishRestApiCommand = _publishRestApiCommand;
 
             _zoomInCommand    = new RelayCommand(() => EditorZoomLevel = Math.Min(EditorZoomLevel + 2, 72));
             ZoomInCommand     = _zoomInCommand;
@@ -775,6 +782,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         public ICommand RestartConsoleCommand { get; }
 
         public ICommand ExportAsExeCommand { get; }
+        public ICommand PublishRestApiCommand { get; }
 
         public event EventHandler<ExeExportProgressUpdate>? ExeExportProgressChanged;
 
@@ -2821,6 +2829,123 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 _isExeExportInProgress = false;
                 PostToUi(() => _exportAsExeCommand.RaiseCanExecuteChanged());
+            }
+        }
+
+        private async Task OnPublishRestApiAsync()
+        {
+            if (_isRestApiWizardOpen)
+            {
+                return;
+            }
+
+            if (SelectedTab is null)
+            {
+                StatusText = "No script tab selected";
+                AppendOutputLine("Publish as REST API failed: there is no active editor tab.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(SelectedTab.Content))
+            {
+                StatusText = "Publish as REST API requires script content";
+                AppendOutputLine($"Publish as REST API failed for {SelectedTab.Title}: the active tab is empty.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(SelectedTab.FilePath))
+            {
+                var savePath = _userPromptService.ShowSaveFileDialog(GetSuggestedSaveFileName(SelectedTab));
+                if (string.IsNullOrWhiteSpace(savePath))
+                {
+                    StatusText = "Publish as REST API canceled";
+                    AppendOutputLine($"Publish as REST API canceled for {SelectedTab.Title}: the script must be saved first.");
+                    return;
+                }
+
+                if (!SaveTabAsCore(SelectedTab, savePath))
+                {
+                    StatusText = "Publish as REST API failed";
+                    AppendOutputLine($"Publish as REST API stopped for {SelectedTab.Title}: saving the active script failed.");
+                    return;
+                }
+            }
+            else if (SelectedTab.IsDirty && !SaveTabCore(SelectedTab))
+            {
+                StatusText = "Publish as REST API failed";
+                AppendOutputLine($"Publish as REST API stopped for {SelectedTab.Title}: saving the active script failed.");
+                return;
+            }
+
+            var selectedFilePath = SelectedTab.FilePath;
+            if (string.IsNullOrWhiteSpace(selectedFilePath))
+            {
+                StatusText = "Publish as REST API failed";
+                AppendOutputLine($"Publish as REST API failed for {SelectedTab.Title}: the saved script path is still unavailable.");
+                return;
+            }
+
+            if (_restApiPublishWizardService is null)
+            {
+                StatusText = "Publish as REST API unavailable";
+                AppendOutputLine("Publish as REST API failed: the REST API wizard service is not available.");
+                DeveloperDiagnostics.LogDecision(
+                    "RestApiPublish",
+                    "RestApiWizardUnavailable",
+                    "Publish as REST API was requested but no REST API wizard service is available.",
+                    "Unavailable",
+                    new Dictionary<string, object?> { ["sourceFileName"] = Path.GetFileName(selectedFilePath) });
+                return;
+            }
+
+            _isRestApiWizardOpen = true;
+            _publishRestApiCommand.RaiseCanExecuteChanged();
+            try
+            {
+                StatusText = $"Publish as REST API - {SelectedTab.Title}";
+                AppendOutputLine(new string('-', 60));
+                AppendOutputLine($"Publish as REST API opened: {SelectedTab.Title}");
+                AppendOutputLine($"Source script: {selectedFilePath}");
+                DeveloperDiagnostics.LogUserAction(
+                    "RestApiPublish",
+                    "PublishRestApiRequested",
+                    "Publish as REST API wizard requested for active script.",
+                    new Dictionary<string, object?>
+                    {
+                        ["sourceFileName"] = Path.GetFileName(selectedFilePath),
+                        ["scriptLength"] = SelectedTab.Content.Length
+                    });
+
+                var configuration = _restApiPublishWizardService.ShowWizard(new ApiPublishWizardRequest(
+                    Path.GetFileNameWithoutExtension(selectedFilePath),
+                    selectedFilePath,
+                    SelectedTab.Content));
+
+                if (configuration is null)
+                {
+                    StatusText = "Publish as REST API canceled";
+                    AppendOutputLine($"Publish as REST API canceled for {SelectedTab.Title}: the wizard was closed without saving.");
+                    return;
+                }
+
+                StatusText = "Publish as REST API configuration saved";
+                AppendOutputLine($"Publish as REST API configuration saved with {configuration.Endpoints.Count} endpoint(s).");
+                AppendOutputLine(new string('-', 60));
+            }
+            catch (Exception ex)
+            {
+                StatusText = "Publish as REST API failed";
+                AppendOutputLine($"Publish as REST API failed unexpectedly: {ex.Message}");
+                DeveloperDiagnostics.LogException(
+                    "RestApiPublish",
+                    ex,
+                    "Publish as REST API failed outside the wizard-owned failure boundary.",
+                    new Dictionary<string, object?> { ["sourceFileName"] = Path.GetFileName(selectedFilePath) });
+            }
+            finally
+            {
+                _isRestApiWizardOpen = false;
+                PostToUi(() => _publishRestApiCommand.RaiseCanExecuteChanged());
             }
         }
 
@@ -5154,6 +5279,15 @@ namespace PS7ScriptDesk.UI.ViewModels
                    !_isExeExportInProgress;
         }
 
+        private bool CanPublishRestApi()
+        {
+            return SelectedTab is not null &&
+                   !IsExecutionRunning &&
+                   !IsStopInProgress &&
+                   !IsRuntimeDiscoveryInProgress &&
+                   !_isRestApiWizardOpen;
+        }
+
         private bool CanStopScript()
         {
             return _liveConsoleService.IsSessionRunning && _liveConsoleService.IsCommandInProgress && !IsStopInProgress && !IsRuntimeDiscoveryInProgress;
@@ -5190,6 +5324,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _sendConsoleCommand.RaiseCanExecuteChanged();
             _restartConsoleCommand.RaiseCanExecuteChanged();
             _exportAsExeCommand.RaiseCanExecuteChanged();
+            _publishRestApiCommand.RaiseCanExecuteChanged();
             OnPropertyChanged(nameof(IsRunAvailable));
         }
 
