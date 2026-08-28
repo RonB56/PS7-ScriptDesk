@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -59,10 +60,18 @@ namespace PS7ScriptDesk.Shell.Services
                         ["isPackaged"] = result.IsPackaged,
                         ["isStoreManaged"] = result.IsStoreManaged,
                         ["isDevelopmentMode"] = result.IsDevelopmentMode,
+                        ["packageName"] = result.PackageName,
                         ["packageFamilyName"] = result.PackageFamilyName,
                         ["packageFullName"] = result.PackageFullName,
+                        ["packagePublisherId"] = result.PackagePublisherId,
                         ["packageVersion"] = result.PackageVersion,
-                        ["signatureKind"] = result.PackageSignatureKind
+                        ["signatureKind"] = result.PackageSignatureKind,
+                        ["packageIdentityApi"] = result.PackageIdentityApi,
+                        ["packageTypeAvailable"] = result.PackageTypeAvailable,
+                        ["packageCurrentAvailable"] = result.PackageCurrentAvailable,
+                        ["packageIdentityReadSucceeded"] = result.PackageIdentityReadSucceeded,
+                        ["packageIdentityReadFailure"] = result.PackageIdentityReadFailure,
+                        ["fallbackSource"] = result.PackageIdentityFallbackSource
                     });
 
                 if (!result.IsPackaged)
@@ -88,7 +97,11 @@ namespace PS7ScriptDesk.Shell.Services
                         {
                             ["signatureKind"] = result.PackageSignatureKind,
                             ["isDevelopmentMode"] = result.IsDevelopmentMode,
-                            ["packageFamilyName"] = result.PackageFamilyName
+                            ["packageFamilyName"] = result.PackageFamilyName,
+                            ["packageIdentityApi"] = result.PackageIdentityApi,
+                            ["packageIdentityReadSucceeded"] = result.PackageIdentityReadSucceeded,
+                            ["packageIdentityReadFailure"] = result.PackageIdentityReadFailure,
+                            ["fallbackSource"] = result.PackageIdentityFallbackSource
                         });
                     return result;
                 }
@@ -96,6 +109,7 @@ namespace PS7ScriptDesk.Shell.Services
                 result.PackagingKind = StoreUpdatePackagingKind.StoreInstalledManaged;
 
                 var queryResult = await _storeUpdateQuery.CheckForUpdatesAsync(cancellationToken).ConfigureAwait(false);
+                result.StoreContextAttempted = queryResult.StoreContextAttempted;
                 result.StoreContextAvailable = queryResult.StoreContextAvailable;
                 result.RawStoreContext = queryResult.RawStoreContext;
                 result.RawUpdatesCollection = queryResult.RawUpdatesCollection;
@@ -113,6 +127,7 @@ namespace PS7ScriptDesk.Shell.Services
                         {
                             ["packageFamilyName"] = result.PackageFamilyName,
                             ["signatureKind"] = result.PackageSignatureKind,
+                            ["storeContextAttempted"] = result.StoreContextAttempted,
                             ["storeContextAvailable"] = result.StoreContextAvailable
                         });
                     return result;
@@ -127,6 +142,9 @@ namespace PS7ScriptDesk.Shell.Services
                     "Store update query completed.",
                     new Dictionary<string, object?>
                     {
+                        ["storeContextAttempted"] = result.StoreContextAttempted,
+                        ["storeContextAvailable"] = result.StoreContextAvailable,
+                        ["perPackageUpdateListReturned"] = result.PerPackageUpdateListReturned,
                         ["updateCount"] = result.UpdateCount,
                         ["packageFamilyNames"] = string.Join(", ", result.Updates.Select(update => update.PackageFamilyName)),
                         ["mandatoryUpdatePresent"] = result.HasMandatoryUpdate
@@ -192,7 +210,13 @@ namespace PS7ScriptDesk.Shell.Services
                         ["availabilityState"] = result.AvailabilityState.ToString(),
                         ["isStoreManaged"] = result.IsStoreManaged,
                         ["isDevelopmentMode"] = result.IsDevelopmentMode,
+                        ["packageIdentityApi"] = result.PackageIdentityApi,
+                        ["packageIdentityReadSucceeded"] = result.PackageIdentityReadSucceeded,
+                        ["packageIdentityReadFailure"] = result.PackageIdentityReadFailure,
+                        ["fallbackSource"] = result.PackageIdentityFallbackSource,
+                        ["storeContextAttempted"] = result.StoreContextAttempted,
                         ["storeContextAvailable"] = result.StoreContextAvailable,
+                        ["perPackageUpdateListReturned"] = result.PerPackageUpdateListReturned,
                         ["updateCount"] = result.UpdateCount,
                         ["hasMandatoryUpdate"] = result.HasMandatoryUpdate,
                         ["shouldShowManualInstructions"] = result.ShouldShowManualInstructions,
@@ -306,9 +330,19 @@ namespace PS7ScriptDesk.Shell.Services
             result.IsPackaged = packageEnvironment.HasPackageIdentity || inferredPackagedFallback;
             result.IsDevelopmentMode = packageEnvironment.IsDevelopmentMode;
             result.PackageSignatureKind = NormalizePackageSignatureKind(packageEnvironment.SignatureKind);
+            result.PackageName = packageEnvironment.PackageName;
             result.PackageFullName = packageEnvironment.PackageFullName;
             result.PackageFamilyName = packageEnvironment.PackageFamilyName;
+            result.PackagePublisherId = packageEnvironment.PackagePublisherId;
             result.PackageVersion = packageEnvironment.PackageVersion;
+            result.PackageIdentityApi = packageEnvironment.PackageIdentityApi;
+            result.PackageTypeAvailable = packageEnvironment.PackageTypeAvailable;
+            result.PackageCurrentAvailable = packageEnvironment.PackageCurrentAvailable;
+            result.PackageIdentityReadSucceeded = packageEnvironment.PackageIdentityReadSucceeded;
+            result.PackageIdentityReadFailure = packageEnvironment.PackageIdentityReadFailure;
+            result.PackageIdentityFallbackSource = packageEnvironment.PackageIdentityFallbackSource;
+            result.IsFrameworkPackage = packageEnvironment.IsFramework;
+            result.IsResourcePackage = packageEnvironment.IsResourcePackage;
             result.IsStoreManaged = result.IsPackaged &&
                                     !inferredPackagedFallback &&
                                     !result.IsDevelopmentMode &&
@@ -324,7 +358,11 @@ namespace PS7ScriptDesk.Shell.Services
                         ["processPath"] = packageEnvironment.ProcessPath,
                         ["baseDirectory"] = packageEnvironment.BaseDirectory,
                         ["packageFamilyName"] = result.PackageFamilyName,
-                        ["signatureKind"] = result.PackageSignatureKind
+                        ["signatureKind"] = result.PackageSignatureKind,
+                        ["fallbackSource"] = result.PackageIdentityFallbackSource,
+                        ["packageIdentityApi"] = result.PackageIdentityApi,
+                        ["packageIdentityReadSucceeded"] = result.PackageIdentityReadSucceeded,
+                        ["packageIdentityReadFailure"] = result.PackageIdentityReadFailure
                     });
             }
         }
@@ -337,11 +375,21 @@ namespace PS7ScriptDesk.Shell.Services
                 return StoreUpdatePackagingKind.PackagedDeveloperOrTest;
             }
 
+            if (IsUnknownPackageSignature(result.PackageSignatureKind))
+            {
+                return StoreUpdatePackagingKind.PackagedUnknownSource;
+            }
+
             return StoreUpdatePackagingKind.PackagedSideloaded;
         }
 
         private static string BuildNonStorePackageStatusMessage(StoreUpdatePackagingKind packagingKind)
         {
+            if (packagingKind == StoreUpdatePackagingKind.PackagedUnknownSource)
+            {
+                return "ScriptDesk could not determine how this package was installed. Microsoft Store automatic update checks are not available until the package source is confirmed.";
+            }
+
             return packagingKind == StoreUpdatePackagingKind.PackagedDeveloperOrTest
                 ? "This appears to be a developer or test package. Microsoft Store automatic update checks are not available for this build."
                 : "This appears to be a sideloaded package. Microsoft Store automatic update checks are not available for this build.";
@@ -350,6 +398,13 @@ namespace PS7ScriptDesk.Shell.Services
         private static bool IsStorePackageSignature(string signatureKind)
         {
             return string.Equals(signatureKind, "Store", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsUnknownPackageSignature(string signatureKind)
+        {
+            return string.IsNullOrWhiteSpace(signatureKind) ||
+                   string.Equals(signatureKind, "Unknown", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(signatureKind, "UnknownPackagedFallback", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string NormalizePackageSignatureKind(object? signatureKind)
@@ -391,39 +446,147 @@ namespace PS7ScriptDesk.Shell.Services
             return text;
         }
 
+        private static class NativePackageIdentity
+        {
+            private const int ErrorInsufficientBuffer = 122;
+            private const int AppModelErrorNoPackage = 15700;
+
+            public static string TryGetCurrentPackageFullName(out string status)
+            {
+                return TryReadCurrentPackageString(GetCurrentPackageFullName, out status);
+            }
+
+            public static string TryGetCurrentPackageFamilyName(out string status)
+            {
+                return TryReadCurrentPackageString(GetCurrentPackageFamilyName, out status);
+            }
+
+            public static string TryGetStagedPackageOrigin(string packageFullName, out string status)
+            {
+                try
+                {
+                    var error = GetStagedPackageOrigin(packageFullName, out var origin);
+                    status = FormatNativeStatus(error);
+                    return error == 0 ? origin.ToString() : string.Empty;
+                }
+                catch (EntryPointNotFoundException ex)
+                {
+                    status = BuildExceptionSummary(ex);
+                    return string.Empty;
+                }
+                catch (DllNotFoundException ex)
+                {
+                    status = BuildExceptionSummary(ex);
+                    return string.Empty;
+                }
+            }
+
+            private static string TryReadCurrentPackageString(CurrentPackageStringReader reader, out string status)
+            {
+                var length = 0;
+                var initialBuffer = new StringBuilder(0);
+                var initialError = reader(ref length, initialBuffer);
+                if (initialError == AppModelErrorNoPackage)
+                {
+                    status = FormatNativeStatus(initialError);
+                    return string.Empty;
+                }
+
+                if (initialError != ErrorInsufficientBuffer || length <= 0)
+                {
+                    status = FormatNativeStatus(initialError);
+                    return string.Empty;
+                }
+
+                var buffer = new StringBuilder(length);
+                var error = reader(ref length, buffer);
+                status = FormatNativeStatus(error);
+                return error == 0 ? buffer.ToString().TrimEnd('\0') : string.Empty;
+            }
+
+            private static string FormatNativeStatus(int error)
+            {
+                return error switch
+                {
+                    0 => "Success",
+                    ErrorInsufficientBuffer => "ERROR_INSUFFICIENT_BUFFER",
+                    AppModelErrorNoPackage => "APPMODEL_ERROR_NO_PACKAGE",
+                    _ => $"Win32Error={error}"
+                };
+            }
+
+            private delegate int CurrentPackageStringReader(ref int packageNameLength, StringBuilder packageName);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+            private static extern int GetCurrentPackageFullName(ref int packageFullNameLength, StringBuilder packageFullName);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+            private static extern int GetCurrentPackageFamilyName(ref int packageFamilyNameLength, StringBuilder packageFamilyName);
+
+            [DllImport("api-ms-win-appmodel-runtime-l1-1-1.dll", CharSet = CharSet.Unicode)]
+            private static extern int GetStagedPackageOrigin(string packageFullName, out NativePackageOrigin origin);
+        }
+
+        private enum NativePackageOrigin
+        {
+            Unknown = 0,
+            Unsigned = 1,
+            Inbox = 2,
+            Store = 3,
+            DeveloperUnsigned = 4,
+            DeveloperSigned = 5,
+            LineOfBusiness = 6
+        }
+
         private sealed class WindowsStorePackageEnvironmentProvider : IStorePackageEnvironmentProvider
         {
             public StorePackageEnvironmentInfo ReadPackageEnvironment()
             {
                 var packageEnvironment = new StorePackageEnvironmentInfo();
                 var packageType = Type.GetType(PackageTypeName, throwOnError: false);
+                packageEnvironment.PackageTypeAvailable = packageType is not null;
                 if (packageType is not null)
                 {
                     try
                     {
                         var currentPackage = packageType.GetProperty("Current", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                        packageEnvironment.PackageCurrentAvailable = currentPackage is not null;
                         if (currentPackage is not null)
                         {
                             packageEnvironment.HasPackageIdentity = true;
+                            packageEnvironment.PackageIdentityReadSucceeded = true;
+                            packageEnvironment.PackageIdentityApi = "Package.Current";
                             packageEnvironment.SignatureKind = NormalizePackageSignatureKind(ReadPropertyValue(currentPackage, "SignatureKind"));
                             packageEnvironment.IsDevelopmentMode = ReadBooleanProperty(currentPackage, "IsDevelopmentMode") ?? false;
+                            packageEnvironment.IsFramework = ReadBooleanProperty(currentPackage, "IsFramework") ?? false;
+                            packageEnvironment.IsResourcePackage = ReadBooleanProperty(currentPackage, "IsResourcePackage") ?? false;
+                            packageEnvironment.PackageName = ReadStringProperty(currentPackage, "Id", "Name");
                             packageEnvironment.PackageFullName = ReadStringProperty(currentPackage, "Id", "FullName");
                             packageEnvironment.PackageFamilyName = ReadStringProperty(currentPackage, "Id", "FamilyName");
+                            packageEnvironment.PackagePublisherId = ReadStringProperty(currentPackage, "Id", "PublisherId");
                             packageEnvironment.PackageVersion = ReadPackageVersion(currentPackage);
                         }
                     }
                     catch (TargetInvocationException ex)
                     {
-                        LogCheckException("Package identity lookup failed.", ex.InnerException ?? ex);
+                        var effectiveException = ex.InnerException ?? ex;
+                        packageEnvironment.PackageIdentityReadFailure = BuildExceptionSummary(effectiveException);
+                        LogCheckException("Package identity lookup failed.", effectiveException);
                     }
                     catch (Exception ex)
                     {
+                        packageEnvironment.PackageIdentityReadFailure = BuildExceptionSummary(ex);
                         LogCheckException("Package identity lookup failed.", ex);
                     }
                 }
 
                 packageEnvironment.ProcessPath = Environment.ProcessPath ?? string.Empty;
                 packageEnvironment.BaseDirectory = AppContext.BaseDirectory ?? string.Empty;
+                if (!packageEnvironment.HasPackageIdentity)
+                {
+                    TryReadNativePackageEnvironment(packageEnvironment);
+                }
+
                 var packageFamilyName = Environment.GetEnvironmentVariable("APPX_PACKAGE_FAMILY_NAME") ?? string.Empty;
                 packageEnvironment.IsInferredPackagedFallback = !packageEnvironment.HasPackageIdentity &&
                     (packageEnvironment.ProcessPath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
@@ -433,10 +596,76 @@ namespace PS7ScriptDesk.Shell.Services
                 if (!packageEnvironment.HasPackageIdentity && packageEnvironment.IsInferredPackagedFallback)
                 {
                     packageEnvironment.PackageFamilyName = packageFamilyName;
+                    packageEnvironment.PackageIdentityFallbackSource = string.IsNullOrWhiteSpace(packageEnvironment.PackageIdentityFallbackSource)
+                        ? "WindowsAppsPathOrAppxEnvironment"
+                        : packageEnvironment.PackageIdentityFallbackSource;
                     packageEnvironment.SignatureKind = "UnknownPackagedFallback";
                 }
 
                 return packageEnvironment;
+            }
+
+            private static void TryReadNativePackageEnvironment(StorePackageEnvironmentInfo packageEnvironment)
+            {
+                try
+                {
+                    var packageFullName = NativePackageIdentity.TryGetCurrentPackageFullName(out var fullNameStatus);
+                    var packageFamilyName = NativePackageIdentity.TryGetCurrentPackageFamilyName(out var familyNameStatus);
+                    packageEnvironment.NativePackageFullNameStatus = fullNameStatus;
+                    packageEnvironment.NativePackageFamilyNameStatus = familyNameStatus;
+
+                    if (string.IsNullOrWhiteSpace(packageFullName))
+                    {
+                        return;
+                    }
+
+                    packageEnvironment.HasPackageIdentity = true;
+                    packageEnvironment.PackageIdentityReadSucceeded = true;
+                    packageEnvironment.PackageIdentityApi = "NativeAppModel";
+                    packageEnvironment.PackageFullName = packageFullName;
+                    packageEnvironment.PackageFamilyName = packageFamilyName;
+                    ApplyPackageFullNameParts(packageEnvironment, packageFullName);
+
+                    var origin = NativePackageIdentity.TryGetStagedPackageOrigin(packageFullName, out var originStatus);
+                    packageEnvironment.NativePackageOriginStatus = originStatus;
+                    packageEnvironment.PackageOrigin = origin;
+                    var originSignature = MapPackageOriginToSignatureKind(origin);
+                    if (!string.IsNullOrWhiteSpace(originSignature))
+                    {
+                        packageEnvironment.SignatureKind = originSignature;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    packageEnvironment.PackageIdentityReadFailure = BuildExceptionSummary(ex);
+                    LogCheckException("Native package identity lookup failed.", ex);
+                }
+            }
+
+            private static void ApplyPackageFullNameParts(StorePackageEnvironmentInfo packageEnvironment, string packageFullName)
+            {
+                var parts = packageFullName.Split('_');
+                if (parts.Length >= 5)
+                {
+                    packageEnvironment.PackageName = parts[0];
+                    packageEnvironment.PackageVersion = parts[1];
+                    packageEnvironment.PackagePublisherId = parts[^1];
+                    if (string.IsNullOrWhiteSpace(packageEnvironment.PackageFamilyName))
+                    {
+                        packageEnvironment.PackageFamilyName = $"{parts[0]}_{parts[^1]}";
+                    }
+                }
+            }
+
+            private static string MapPackageOriginToSignatureKind(string origin)
+            {
+                return origin switch
+                {
+                    "Store" => "Store",
+                    "DeveloperUnsigned" or "DeveloperSigned" => "Developer",
+                    "LineOfBusiness" or "Unsigned" => "Enterprise",
+                    _ => string.Empty
+                };
             }
         }
 
@@ -467,14 +696,19 @@ namespace PS7ScriptDesk.Shell.Services
                 var storeContext = getDefaultMethod.Invoke(null, null);
                 LogCheckStep(
                     "StoreContext availability evaluated.",
-                    new Dictionary<string, object?> { ["storeContextAvailable"] = storeContext is not null });
+                    new Dictionary<string, object?>
+                    {
+                        ["storeContextAttempted"] = true,
+                        ["storeContextAvailable"] = storeContext is not null
+                    });
 
                 if (storeContext is null)
                 {
                     return StoreUpdateQueryResult.Unavailable(
                         StoreUpdateAvailabilityState.UpdateCheckUnavailable,
                         "StoreContext was unavailable for this packaged build.",
-                        "StoreContext was unavailable for this packaged build.");
+                        "StoreContext was unavailable for this packaged build.",
+                        storeContextAttempted: true);
                 }
 
                 var checkMethod = storeContextType.GetMethod("GetAppAndOptionalStorePackageUpdatesAsync", BindingFlags.Public | BindingFlags.Instance);
@@ -484,7 +718,9 @@ namespace PS7ScriptDesk.Shell.Services
                     return StoreUpdateQueryResult.Unavailable(
                         StoreUpdateAvailabilityState.UpdateCheckUnavailable,
                         "GetAppAndOptionalStorePackageUpdatesAsync was unavailable at runtime.",
-                        "GetAppAndOptionalStorePackageUpdatesAsync was unavailable.");
+                        "GetAppAndOptionalStorePackageUpdatesAsync was unavailable.",
+                        storeContext,
+                        storeContextAttempted: true);
                 }
 
                 LogCheckStep("Calling GetAppAndOptionalStorePackageUpdatesAsync.");
@@ -497,7 +733,8 @@ namespace PS7ScriptDesk.Shell.Services
                         "No per-package Microsoft Store update list was returned for this build. Use Microsoft Store -> Library -> Get updates.",
                         "Store update query completed without a per-package update list. Treating the result as manual-check-required.",
                         storeContext,
-                        updatesObject);
+                        updatesObject,
+                        storeContextAttempted: true);
                 }
 
                 return StoreUpdateQueryResult.UpdatesReturned(
@@ -801,13 +1038,41 @@ namespace PS7ScriptDesk.Shell.Services
 
         public bool IsDevelopmentMode { get; set; }
 
+        public bool IsFramework { get; set; }
+
+        public bool IsResourcePackage { get; set; }
+
+        public bool PackageTypeAvailable { get; set; }
+
+        public bool PackageCurrentAvailable { get; set; }
+
+        public bool PackageIdentityReadSucceeded { get; set; }
+
         public string SignatureKind { get; set; } = string.Empty;
+
+        public string PackageName { get; set; } = string.Empty;
 
         public string PackageFullName { get; set; } = string.Empty;
 
         public string PackageFamilyName { get; set; } = string.Empty;
 
+        public string PackagePublisherId { get; set; } = string.Empty;
+
         public string PackageVersion { get; set; } = string.Empty;
+
+        public string PackageIdentityApi { get; set; } = string.Empty;
+
+        public string PackageIdentityReadFailure { get; set; } = string.Empty;
+
+        public string PackageIdentityFallbackSource { get; set; } = string.Empty;
+
+        public string PackageOrigin { get; set; } = string.Empty;
+
+        public string NativePackageFullNameStatus { get; set; } = string.Empty;
+
+        public string NativePackageFamilyNameStatus { get; set; } = string.Empty;
+
+        public string NativePackageOriginStatus { get; set; } = string.Empty;
 
         public string ProcessPath { get; set; } = string.Empty;
 
@@ -830,6 +1095,8 @@ namespace PS7ScriptDesk.Shell.Services
 
         public bool PerPackageUpdateListReturned { get; private set; }
 
+        public bool StoreContextAttempted { get; private set; }
+
         public object? RawStoreContext { get; private set; }
 
         public object? RawUpdatesCollection { get; private set; }
@@ -845,6 +1112,7 @@ namespace PS7ScriptDesk.Shell.Services
                 LogMessage = "Store update query returned a per-package update list.",
                 StoreContextAvailable = true,
                 PerPackageUpdateListReturned = true,
+                StoreContextAttempted = true,
                 RawStoreContext = storeContext,
                 RawUpdatesCollection = updatesCollection,
                 Updates = updates ?? new List<StoreUpdatePackageInfo>()
@@ -856,7 +1124,8 @@ namespace PS7ScriptDesk.Shell.Services
             string statusMessage,
             string logMessage,
             object? storeContext = null,
-            object? updatesCollection = null)
+            object? updatesCollection = null,
+            bool storeContextAttempted = false)
         {
             return new StoreUpdateQueryResult
             {
@@ -865,6 +1134,7 @@ namespace PS7ScriptDesk.Shell.Services
                 LogMessage = logMessage ?? string.Empty,
                 StoreContextAvailable = storeContext is not null,
                 PerPackageUpdateListReturned = false,
+                StoreContextAttempted = storeContextAttempted,
                 RawStoreContext = storeContext,
                 RawUpdatesCollection = updatesCollection
             };
@@ -883,15 +1153,37 @@ namespace PS7ScriptDesk.Shell.Services
 
         public bool IsDevelopmentMode { get; set; }
 
+        public bool IsFrameworkPackage { get; set; }
+
+        public bool IsResourcePackage { get; set; }
+
+        public bool PackageTypeAvailable { get; set; }
+
+        public bool PackageCurrentAvailable { get; set; }
+
+        public bool PackageIdentityReadSucceeded { get; set; }
+
+        public string PackageIdentityApi { get; set; } = string.Empty;
+
+        public string PackageIdentityReadFailure { get; set; } = string.Empty;
+
+        public string PackageIdentityFallbackSource { get; set; } = string.Empty;
+
+        public string PackageName { get; set; } = string.Empty;
+
         public string PackageFamilyName { get; set; } = string.Empty;
 
         public string PackageFullName { get; set; } = string.Empty;
+
+        public string PackagePublisherId { get; set; } = string.Empty;
 
         public string PackageVersion { get; set; } = string.Empty;
 
         public string PackageSignatureKind { get; set; } = string.Empty;
 
         public bool StoreContextAvailable { get; set; }
+
+        public bool StoreContextAttempted { get; set; }
 
         public bool StoreUpdateCheckAvailable { get; set; }
 
@@ -932,6 +1224,7 @@ namespace PS7ScriptDesk.Shell.Services
         StoreInstalledManaged = 3,
         PackagedDeveloperOrTest = 4,
         PackagedSideloaded = 5,
+        PackagedUnknownSource = 6,
     }
 
     public enum StoreUpdateAvailabilityState

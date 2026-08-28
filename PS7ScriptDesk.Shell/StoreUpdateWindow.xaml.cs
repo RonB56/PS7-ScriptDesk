@@ -136,6 +136,11 @@ namespace PS7ScriptDesk.Shell
                 return "This appears to be a sideloaded package.";
             }
 
+            if (_checkResult.PackagingKind == StoreUpdatePackagingKind.PackagedUnknownSource)
+            {
+                return "ScriptDesk could not determine how this package was installed.";
+            }
+
             return "Microsoft Store update check";
         }
 
@@ -162,6 +167,12 @@ namespace PS7ScriptDesk.Shell
             {
                 return "This appears to be a sideloaded package. Microsoft Store automatic update checks are not available for this build.\n\n" +
                        "If you expected an update, install a newer package manually or use the source that provided this package.";
+            }
+
+            if (_checkResult.PackagingKind == StoreUpdatePackagingKind.PackagedUnknownSource)
+            {
+                return "ScriptDesk could not determine how this package was installed.\n\n" +
+                       "Open Microsoft Store and use:\nMicrosoft Store -> Library -> Get updates.";
             }
 
             if (_checkResult.AvailabilityState is StoreUpdateAvailabilityState.ManualCheckRequired or StoreUpdateAvailabilityState.UpdateCheckUnavailable)
@@ -206,6 +217,7 @@ namespace PS7ScriptDesk.Shell
         {
             return packagingKind is StoreUpdatePackagingKind.PackagedDeveloperOrTest
                 or StoreUpdatePackagingKind.PackagedSideloaded
+                or StoreUpdatePackagingKind.PackagedUnknownSource
                 or StoreUpdatePackagingKind.PackagedSideloadedOrTest;
         }
 

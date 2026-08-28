@@ -29,8 +29,30 @@ public sealed class StoreUpdateDetectionTests
         Assert.Equal(StoreUpdatePackagingKind.StoreInstalledManaged, result.PackagingKind);
         Assert.Equal(StoreUpdateAvailabilityState.NoUpdateAvailable, result.AvailabilityState);
         Assert.True(result.StoreUpdateCheckAvailable);
+        Assert.True(result.StoreContextAttempted);
         Assert.DoesNotContain("sideload", result.StatusMessage, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("test package", result.StatusMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task NativeAppModelStoreIdentityUsesStoreUpdatePath()
+    {
+        var query = FakeStoreQuery.Returning(StoreUpdateQueryResult.UpdatesReturned(
+            new object(),
+            Array.Empty<object>(),
+            new List<StoreUpdatePackageInfo>()));
+        var service = CreateService(
+            StorePackage("Store", isDevelopmentMode: false, packageIdentityApi: "NativeAppModel"),
+            query);
+
+        var result = await service.CheckForUpdatesAsync(CancellationToken.None);
+
+        Assert.True(result.IsPackaged);
+        Assert.True(result.IsStoreManaged);
+        Assert.Equal(StoreUpdatePackagingKind.StoreInstalledManaged, result.PackagingKind);
+        Assert.Equal("NativeAppModel", result.PackageIdentityApi);
+        Assert.Equal("Store", result.PackageSignatureKind);
+        Assert.True(query.WasCalled);
     }
 
     [Fact]
@@ -71,6 +93,41 @@ public sealed class StoreUpdateDetectionTests
     }
 
     [Fact]
+    public async Task UnknownPackagedFallbackDoesNotBecomeSideloadedFromWindowsAppsPath()
+    {
+        var query = FakeStoreQuery.ThrowingIfCalled();
+        var service = CreateService(UnknownPackagedFallback(), query);
+
+        var result = await service.CheckForUpdatesAsync(CancellationToken.None);
+
+        Assert.True(result.IsPackaged);
+        Assert.False(result.IsStoreManaged);
+        Assert.Equal(StoreUpdatePackagingKind.PackagedUnknownSource, result.PackagingKind);
+        Assert.Equal(StoreUpdateAvailabilityState.ManualCheckRequired, result.AvailabilityState);
+        Assert.False(result.StoreUpdateCheckAvailable);
+        Assert.Contains("could not determine", result.StatusMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sideload", result.StatusMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.False(query.WasCalled);
+    }
+
+    [Fact]
+    public async Task PackageIdentityReadFailureIsRepresentedDistinctlyAndDoesNotThrow()
+    {
+        var query = FakeStoreQuery.ThrowingIfCalled();
+        var environment = UnknownPackagedFallback();
+        environment.PackageIdentityReadFailure = "InvalidOperationException: Package.Current failed. (HRESULT=0x80131509)";
+        var service = CreateService(environment, query);
+
+        var result = await service.CheckForUpdatesAsync(CancellationToken.None);
+
+        Assert.Equal(StoreUpdatePackagingKind.PackagedUnknownSource, result.PackagingKind);
+        Assert.Equal(environment.PackageIdentityReadFailure, result.PackageIdentityReadFailure);
+        Assert.Equal("WindowsAppsPathOrAppxEnvironment", result.PackageIdentityFallbackSource);
+        Assert.DoesNotContain("sideload", result.StatusMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.False(query.WasCalled);
+    }
+
+    [Fact]
     public async Task UnpackagedDevelopmentExecutionSkipsStoreApis()
     {
         var query = FakeStoreQuery.ThrowingIfCalled();
@@ -92,12 +149,13 @@ public sealed class StoreUpdateDetectionTests
     {
         var rawContext = new object();
         var rawUpdates = new[] { new object() };
+        var query = FakeStoreQuery.Returning(StoreUpdateQueryResult.UpdatesReturned(
+            rawContext,
+            rawUpdates,
+            new List<StoreUpdatePackageInfo> { new("31735RonBarnes.PowerShell7.xScriptDesk_wbw8xvvd4njnt", isMandatory: false) }));
         var service = CreateService(
             StorePackage("Store", isDevelopmentMode: false),
-            FakeStoreQuery.Returning(StoreUpdateQueryResult.UpdatesReturned(
-                rawContext,
-                rawUpdates,
-                new List<StoreUpdatePackageInfo> { new("31735RonBarnes.PowerShell7.xScriptDesk_wbw8xvvd4njnt", isMandatory: false) })));
+            query);
 
         var result = await service.CheckForUpdatesAsync(CancellationToken.None);
 
@@ -109,6 +167,8 @@ public sealed class StoreUpdateDetectionTests
         Assert.Equal(1, result.UpdateCount);
         Assert.Same(rawContext, result.RawStoreContext);
         Assert.Same(rawUpdates, result.RawUpdatesCollection);
+        Assert.True(query.WasCalled);
+        Assert.True(result.StoreContextAttempted);
     }
 
     [Fact]
@@ -144,6 +204,7 @@ public sealed class StoreUpdateDetectionTests
         Assert.Equal(StoreUpdatePackagingKind.StoreInstalledManaged, result.PackagingKind);
         Assert.Equal(StoreUpdateAvailabilityState.UpdateCheckUnavailable, result.AvailabilityState);
         Assert.False(result.StoreUpdateCheckAvailable);
+        Assert.False(result.StoreContextAttempted);
         Assert.True(result.ShouldShowManualInstructions);
         Assert.Contains("InvalidOperationException", result.ExceptionSummary, StringComparison.Ordinal);
     }
@@ -162,6 +223,57 @@ public sealed class StoreUpdateDetectionTests
         Assert.Equal(StoreUpdateAvailabilityState.UpdateCheckUnavailable, result.AvailabilityState);
         Assert.False(result.StoreUpdateCheckAvailable);
         Assert.Contains("OperationCanceledException", result.ExceptionSummary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UnknownPackageSourceDialogDoesNotCallItSideloaded()
+    {
+        RunOnStaThread(() =>
+        {
+            var window = new StoreUpdateWindow(
+                new StoreUpdateService(),
+                new StoreUpdateCheckResult
+                {
+                    PackagingKind = StoreUpdatePackagingKind.PackagedUnknownSource,
+                    AvailabilityState = StoreUpdateAvailabilityState.ManualCheckRequired,
+                    IsPackaged = true,
+                    PackageSignatureKind = "UnknownPackagedFallback",
+                    StatusMessage = "ScriptDesk could not determine how this package was installed."
+                },
+                isMandatory: false);
+
+            Assert.False(((Button)window.FindName("InstallNowButton")).IsEnabled);
+            Assert.Contains("could not determine", ((TextBlock)window.FindName("MessageTextBlock")).Text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("sideload", ((TextBlock)window.FindName("MessageTextBlock")).Text, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Fact]
+    public async Task IdentityDiagnosticsAreExposedOnCheckResult()
+    {
+        var environment = StorePackage("Store", isDevelopmentMode: false, packageIdentityApi: "NativeAppModel");
+        environment.PackageTypeAvailable = false;
+        environment.PackageCurrentAvailable = false;
+        environment.PackageIdentityReadSucceeded = true;
+        environment.PackageIdentityReadFailure = string.Empty;
+        environment.PackageIdentityFallbackSource = string.Empty;
+        var service = CreateService(
+            environment,
+            FakeStoreQuery.Returning(StoreUpdateQueryResult.UpdatesReturned(
+                new object(),
+                Array.Empty<object>(),
+                new List<StoreUpdatePackageInfo>())));
+
+        var result = await service.CheckForUpdatesAsync(CancellationToken.None);
+
+        Assert.Equal(environment.PackageName, result.PackageName);
+        Assert.Equal(environment.PackageFamilyName, result.PackageFamilyName);
+        Assert.Equal(environment.PackagePublisherId, result.PackagePublisherId);
+        Assert.Equal(environment.PackageVersion, result.PackageVersion);
+        Assert.Equal(environment.PackageIdentityApi, result.PackageIdentityApi);
+        Assert.False(result.PackageTypeAvailable);
+        Assert.False(result.PackageCurrentAvailable);
+        Assert.True(result.PackageIdentityReadSucceeded);
     }
 
     [Fact]
@@ -194,17 +306,43 @@ public sealed class StoreUpdateDetectionTests
     private static StoreUpdateService CreateService(StorePackageEnvironmentInfo packageEnvironment, IStoreUpdateQuery storeUpdateQuery)
         => new(new FakePackageEnvironmentProvider(packageEnvironment), storeUpdateQuery);
 
-    private static StorePackageEnvironmentInfo StorePackage(string signatureKind, bool isDevelopmentMode)
+    private static StorePackageEnvironmentInfo StorePackage(
+        string signatureKind,
+        bool isDevelopmentMode,
+        string packageIdentityApi = "Package.Current")
     {
         return new StorePackageEnvironmentInfo
         {
             HasPackageIdentity = true,
             IsInferredPackagedFallback = true,
             IsDevelopmentMode = isDevelopmentMode,
+            PackageTypeAvailable = string.Equals(packageIdentityApi, "Package.Current", StringComparison.Ordinal),
+            PackageCurrentAvailable = string.Equals(packageIdentityApi, "Package.Current", StringComparison.Ordinal),
+            PackageIdentityReadSucceeded = true,
+            PackageIdentityApi = packageIdentityApi,
             SignatureKind = signatureKind,
+            PackageName = "31735RonBarnes.PowerShell7.xScriptDesk",
             PackageFullName = "31735RonBarnes.PowerShell7.xScriptDesk_1.0.71.0_x64__wbw8xvvd4njnt",
             PackageFamilyName = "31735RonBarnes.PowerShell7.xScriptDesk_wbw8xvvd4njnt",
+            PackagePublisherId = "wbw8xvvd4njnt",
             PackageVersion = "1.0.71.0",
+            ProcessPath = @"C:\Program Files\WindowsApps\31735RonBarnes.PowerShell7.xScriptDesk_1.0.71.0_x64__wbw8xvvd4njnt\PS7ScriptDesk.Shell.exe",
+            BaseDirectory = @"C:\Program Files\WindowsApps\31735RonBarnes.PowerShell7.xScriptDesk_1.0.71.0_x64__wbw8xvvd4njnt\"
+        };
+    }
+
+    private static StorePackageEnvironmentInfo UnknownPackagedFallback()
+    {
+        return new StorePackageEnvironmentInfo
+        {
+            HasPackageIdentity = false,
+            IsInferredPackagedFallback = true,
+            IsDevelopmentMode = false,
+            PackageTypeAvailable = false,
+            PackageCurrentAvailable = false,
+            PackageIdentityReadSucceeded = false,
+            PackageIdentityFallbackSource = "WindowsAppsPathOrAppxEnvironment",
+            SignatureKind = "UnknownPackagedFallback",
             ProcessPath = @"C:\Program Files\WindowsApps\31735RonBarnes.PowerShell7.xScriptDesk_1.0.71.0_x64__wbw8xvvd4njnt\PS7ScriptDesk.Shell.exe",
             BaseDirectory = @"C:\Program Files\WindowsApps\31735RonBarnes.PowerShell7.xScriptDesk_1.0.71.0_x64__wbw8xvvd4njnt\"
         };
