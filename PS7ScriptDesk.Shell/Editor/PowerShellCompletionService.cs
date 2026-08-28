@@ -70,18 +70,23 @@ namespace PS7ScriptDesk.Shell.Editor
             string scriptText,
             int cursorOffset,
             string pwshExecutablePath,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            TimeSpan? responseTimeout = null)
         {
             if (string.IsNullOrWhiteSpace(pwshExecutablePath))
                 return CompletionServiceResult.Empty;
 
+            var effectiveResponseTimeout = responseTimeout ?? TimeSpan.FromSeconds(5);
             var stopwatch = Stopwatch.StartNew();
             try
             {
+                AppLogger.Debug(
+                    "EditorCompletion",
+                    $"Completion request waiting for helper readiness before applying response budget. ResponseBudgetMs={effectiveResponseTimeout.TotalMilliseconds:N0}.");
                 var payload = await ExecuteTransportRequestAsync(
                     pwshExecutablePath,
                     request => BuildCompletionCommand(scriptText, cursorOffset, request.StartMarker, request.EndMarker),
-                    TimeSpan.FromSeconds(5),
+                    effectiveResponseTimeout,
                     cancellationToken).ConfigureAwait(false);
 
                 stopwatch.Stop();
@@ -1674,6 +1679,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 entered = true;
 
                 await EnsureProcessReadyAsync(pwshExecutablePath, cancellationToken).ConfigureAwait(false);
+                AppLogger.Debug("EditorCompletion", "Completion helper ready; live response budget now active.");
 
                 var request = new ActiveRequest();
                 lock (_syncRoot) { _activeRequest = request; }
@@ -1692,7 +1698,6 @@ namespace PS7ScriptDesk.Shell.Editor
 
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeoutCts.CancelAfter(timeout);
-
                 try
                 {
                     return await request.CompletionSource.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);

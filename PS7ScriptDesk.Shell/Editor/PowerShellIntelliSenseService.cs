@@ -173,6 +173,92 @@ namespace PS7ScriptDesk.Shell.Editor
             AppLogger.Debug(
                 "EditorCompletion",
                 $"Classified completion request. Kind={completionKind}, ForceCompletion={forceCompletion}, IncludeEngine={includeEngine}, Fragment='{context.Fragment}', Command='{commandSpecificContextName ?? string.Empty}', CaretOffset={caretOffset}, CachedCommandCount={cachedCommandReferences.Count}, CachedQuickInfoAvailable={cachedParameterMetadataAvailable}, CachedParameterCount={cachedParameterCount}, MetadataWarmupTriggered=False.");
+
+            CompletionWindow? ReturnImmediateLocalWindow(CompletionWindow window, string localSource)
+            {
+                requestStopwatch.Stop();
+                var itemCount = window.CompletionList.CompletionData.Count;
+                AppLogger.Debug(
+                    "EditorCompletion",
+                    $"Immediate local completion popup built. Source={localSource}, Kind={completionKind}, ForceCompletion={forceCompletion}, FragmentLength={context.Fragment.Length}, Items={itemCount}, ElapsedMs={requestStopwatch.ElapsedMilliseconds:N0}.");
+                DeveloperDiagnostics.LogInfo(
+                    "EditorCompletion",
+                    "Immediate local IntelliSense completion list produced.",
+                    new Dictionary<string, object?>
+                    {
+                        ["source"] = localSource,
+                        ["completionKind"] = completionKind,
+                        ["fragmentLength"] = context.Fragment.Length,
+                        ["itemCount"] = itemCount,
+                        ["forceCompletion"] = forceCompletion,
+                        ["elapsedMilliseconds"] = requestStopwatch.ElapsedMilliseconds
+                    });
+                LogFirstUsableCompletionIfNeeded(
+                    completionKind,
+                    context,
+                    requestStopwatch.ElapsedMilliseconds,
+                    itemCount,
+                    engineItemCount: 0,
+                    queriedEngine: false,
+                    engineTimedOut: false);
+
+                if (completionStopwatch is not null)
+                {
+                    completionStopwatch.Stop();
+                    AppLogger.Debug(
+                        "EditorCompletion",
+                        $"Parameter IntelliSense for '{commandSpecificContextName}' fragment='{parameterValueContext?.Fragment ?? context.Fragment}' completed in {completionStopwatch.ElapsedMilliseconds:N0} ms. Source={localSource}, CachedMetadata={usedCachedParameterMetadata}, CachedParameterCount={parameterCommandInfo?.Parameters.Count ?? 0}, FetchedMetadata={fetchedParameterMetadata}, EngineTimedOut=False, EngineItems=0, WindowCreated=True.");
+                }
+
+                return window;
+            }
+
+            if (staticMemberContext is not null)
+            {
+                var immediateStaticWindow = BuildWindow(
+                    editor,
+                    context,
+                    engineResult: null,
+                    documentText,
+                    parameterContext,
+                    parameterValueContext,
+                    memberContext,
+                    staticMemberContext,
+                    parameterCommandInfo,
+                    cachedCommandReferences,
+                    pwshExecutablePath,
+                    completionKind,
+                    forceCompletion);
+
+                if (immediateStaticWindow is not null)
+                {
+                    return ReturnImmediateLocalWindow(immediateStaticWindow, "local-static-member");
+                }
+            }
+
+            if (parameterValueContext?.IsPositionalPathFallback == true)
+            {
+                var immediatePathWindow = BuildWindow(
+                    editor,
+                    context,
+                    engineResult: null,
+                    documentText,
+                    parameterContext,
+                    parameterValueContext,
+                    memberContext,
+                    staticMemberContext,
+                    parameterCommandInfo,
+                    cachedCommandReferences,
+                    pwshExecutablePath,
+                    completionKind,
+                    forceCompletion);
+
+                if (immediatePathWindow is not null)
+                {
+                    return ReturnImmediateLocalWindow(immediatePathWindow, "local-positional-path");
+                }
+            }
+
             if (!string.IsNullOrWhiteSpace(commandSpecificContextName) &&
                 _completionService.TryGetCachedCommandQuickInfo(
                     pwshExecutablePath,
@@ -231,11 +317,9 @@ namespace PS7ScriptDesk.Shell.Editor
                 isVariableContextRequest);
             if (shouldQueryEngine)
             {
-                using var engineCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var effectiveEngineWaitMilliseconds = memberContext is not null || staticMemberContext is not null
                     ? Math.Max(engineWaitMilliseconds, 450)
                     : engineWaitMilliseconds;
-                engineCts.CancelAfter(TimeSpan.FromMilliseconds(effectiveEngineWaitMilliseconds));
 
                 try
                 {
@@ -243,7 +327,8 @@ namespace PS7ScriptDesk.Shell.Editor
                             documentText,
                             caretOffset,
                             pwshExecutablePath!,
-                            engineCts.Token)
+                            cancellationToken,
+                            TimeSpan.FromMilliseconds(effectiveEngineWaitMilliseconds))
                         .ConfigureAwait(true);
 
                     if (engineResult is { HasItems: true } && completionSource == "none")
@@ -332,6 +417,80 @@ namespace PS7ScriptDesk.Shell.Editor
             var safeDocumentText = documentText ?? string.Empty;
             var context = GetCompletionContext(safeDocumentText, caretOffset);
             return BuildLocalVariableCompletionCandidates(safeDocumentText, context).ToList();
+        }
+
+        internal static IReadOnlyList<PowerShellLocalCompletionCandidate> GetLocalStaticMemberCompletionCandidatesForTesting(
+            string documentText,
+            int caretOffset)
+        {
+            var safeDocumentText = documentText ?? string.Empty;
+            var context = GetCompletionContext(safeDocumentText, caretOffset);
+            var staticMemberContext = TryGetStaticMemberCompletionContext(safeDocumentText, context);
+            if (staticMemberContext is null)
+            {
+                return Array.Empty<PowerShellLocalCompletionCandidate>();
+            }
+
+            return GetLocalStaticMemberCompletionCandidates(safeDocumentText, staticMemberContext)
+                .Select(member => new PowerShellLocalCompletionCandidate(
+                    member.CompletionText,
+                    member.DisplayText,
+                    member.Description,
+                    staticMemberContext.MemberReplacementOffset,
+                    staticMemberContext.MemberReplacementLength,
+                    member.Priority,
+                    GetMatchScore(member.DisplayText, staticMemberContext.MemberFragment)))
+                .ToList();
+        }
+
+        internal static bool HasImmediateLocalStaticMemberCompletionForTesting(
+            string documentText,
+            int caretOffset)
+        {
+            return GetLocalStaticMemberCompletionCandidatesForTesting(documentText, caretOffset).Count > 0;
+        }
+
+        internal static PowerShellParameterValueCompletionContextSnapshot? GetParameterValueCompletionContextForTesting(
+            string documentText,
+            int caretOffset)
+        {
+            var safeDocumentText = documentText ?? string.Empty;
+            var context = GetCompletionContext(safeDocumentText, caretOffset);
+            var parameterValueContext = TryGetParameterValueCompletionContext(safeDocumentText, caretOffset, context);
+            return parameterValueContext is null
+                ? null
+                : new PowerShellParameterValueCompletionContextSnapshot(
+                    parameterValueContext.CommandName,
+                    parameterValueContext.ParameterName,
+                    parameterValueContext.Fragment,
+                    parameterValueContext.ReplacementOffset,
+                    parameterValueContext.ReplacementLength,
+                    parameterValueContext.IsQuotedValue,
+                    parameterValueContext.IsPositionalPathFallback);
+        }
+
+        internal static IReadOnlyList<PowerShellLocalCompletionCandidate> GetLocalPathCompletionCandidatesForTesting(
+            string documentText,
+            int caretOffset)
+        {
+            var safeDocumentText = documentText ?? string.Empty;
+            var context = GetCompletionContext(safeDocumentText, caretOffset);
+            var parameterValueContext = TryGetParameterValueCompletionContext(safeDocumentText, caretOffset, context);
+            if (parameterValueContext is null)
+            {
+                return Array.Empty<PowerShellLocalCompletionCandidate>();
+            }
+
+            return GetPathValueCandidates(parameterValueContext, commandInfo: null)
+                .Select(candidate => new PowerShellLocalCompletionCandidate(
+                    candidate.CompletionText,
+                    candidate.DisplayText,
+                    candidate.Description,
+                    parameterValueContext.ReplacementOffset,
+                    parameterValueContext.ReplacementLength,
+                    Priority: 114,
+                    MatchScore: GetMatchScore(candidate.CompletionText, parameterValueContext.Fragment)))
+                .ToList();
         }
 
         public void StartMetadataWarmup(PowerShellRuntimeInfo? runtimeInfo)
@@ -927,7 +1086,8 @@ namespace PS7ScriptDesk.Shell.Editor
             ParameterCompletionContext? parameterContext,
             ParameterValueCompletionContext? parameterValueContext)
         {
-            return parameterContext is not null || parameterValueContext is not null;
+            return parameterContext is not null ||
+                   parameterValueContext is { IsPositionalPathFallback: false };
         }
 
         private static bool HasUsableParameterMetadata(PowerShellQuickInfo? quickInfo)
@@ -1640,13 +1800,23 @@ namespace PS7ScriptDesk.Shell.Editor
 
             if (parameterTokenIndex <= commandTokenIndex || parameterTokenIndex >= tokens.Count)
             {
-                return null;
+                return TryGetPositionalPathValueCompletionContext(
+                    commandName,
+                    context,
+                    tokens,
+                    commandTokenIndex,
+                    fragmentTokenIndex);
             }
 
             var parameterToken = tokens[parameterTokenIndex].Text;
             if (!LooksLikeParameterToken(parameterToken))
             {
-                return null;
+                return TryGetPositionalPathValueCompletionContext(
+                    commandName,
+                    context,
+                    tokens,
+                    commandTokenIndex,
+                    fragmentTokenIndex);
             }
 
             var parameterName = parameterToken.TrimStart('-');
@@ -1662,7 +1832,86 @@ namespace PS7ScriptDesk.Shell.Editor
                 context.ReplacementOffset,
                 context.ReplacementLength,
                 isQuotedValue,
-                quoteChar);
+                quoteChar,
+                IsPositionalPathFallback: false);
+        }
+
+        private static ParameterValueCompletionContext? TryGetPositionalPathValueCompletionContext(
+            string commandName,
+            CompletionContext context,
+            IReadOnlyList<ScriptSegmentToken> tokens,
+            int commandTokenIndex,
+            int fragmentTokenIndex)
+        {
+            if (string.IsNullOrWhiteSpace(commandName) ||
+                fragmentTokenIndex <= commandTokenIndex ||
+                fragmentTokenIndex >= tokens.Count ||
+                string.IsNullOrWhiteSpace(context.Fragment) ||
+                context.Fragment.StartsWith("-", StringComparison.Ordinal) ||
+                context.Fragment.StartsWith("$", StringComparison.Ordinal) ||
+                !LooksLikePositionalPathFragment(context.Fragment))
+            {
+                return null;
+            }
+
+            var valueToken = tokens[fragmentTokenIndex].Text;
+            if (string.IsNullOrWhiteSpace(valueToken) ||
+                LooksLikeParameterToken(valueToken) ||
+                LooksLikePowerShellOperatorToken(valueToken))
+            {
+                return null;
+            }
+
+            var previousToken = tokens[fragmentTokenIndex - 1].Text;
+            if (LooksLikePowerShellOperatorToken(previousToken))
+            {
+                return null;
+            }
+
+            var isQuotedValue = valueToken.Length > 0 && valueToken[0] is '\'' or '"';
+            var quoteChar = isQuotedValue ? valueToken[0] : (char?)null;
+
+            return new ParameterValueCompletionContext(
+                commandName,
+                "Path",
+                context.Fragment,
+                context.ReplacementOffset,
+                context.ReplacementLength,
+                isQuotedValue,
+                quoteChar,
+                IsPositionalPathFallback: true);
+        }
+
+        private static bool LooksLikePositionalPathFragment(string fragment)
+        {
+            if (string.IsNullOrWhiteSpace(fragment))
+            {
+                return false;
+            }
+
+            var value = fragment.Trim().TrimStart('\'', '"');
+            if (value.Contains("::", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return value.Contains('\\', StringComparison.Ordinal) ||
+                   value.Contains('/', StringComparison.Ordinal) ||
+                   Regex.IsMatch(value, @"^[A-Za-z]:", RegexOptions.CultureInvariant) ||
+                   value.StartsWith("~", StringComparison.Ordinal);
+        }
+
+        private static bool LooksLikePowerShellOperatorToken(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return false;
+            }
+
+            return token is "=" or "," or "(" or ")" or "{" or "}" or "[" or "]" ||
+                   Regex.IsMatch(token, @"^-[A-Za-z]+$", RegexOptions.CultureInvariant) &&
+                   token.Length > 1 &&
+                   char.IsLower(token[1]);
         }
 
         private static int FindStatementStart(string documentText, int safeOffset)
@@ -3502,7 +3751,8 @@ namespace PS7ScriptDesk.Shell.Editor
             int ReplacementOffset,
             int ReplacementLength,
             bool IsQuotedValue,
-            char? QuoteChar);
+            char? QuoteChar,
+            bool IsPositionalPathFallback);
 
         private sealed record MemberCompletionContext(
             string ExpressionText,
@@ -3554,6 +3804,15 @@ namespace PS7ScriptDesk.Shell.Editor
         int ReplacementLength,
         double Priority,
         int MatchScore);
+
+    internal sealed record PowerShellParameterValueCompletionContextSnapshot(
+        string CommandName,
+        string ParameterName,
+        string Fragment,
+        int ReplacementOffset,
+        int ReplacementLength,
+        bool IsQuotedValue,
+        bool IsPositionalPathFallback);
 
     public sealed class EditorQuickInfo
     {
