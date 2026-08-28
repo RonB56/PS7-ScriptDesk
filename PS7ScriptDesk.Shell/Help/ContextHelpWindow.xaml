@@ -20,13 +20,13 @@
             <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
                 <Button x:Name="HomeButton"
                         Content="Home"
-                        Padding="12,6"
+                        Style="{StaticResource IdeDialogSecondaryButtonStyle}"
                         Click="HomeButton_Click"
                         AutomationProperties.Name="Show Help Home" />
                 <Button x:Name="BackButton"
                         Content="Back"
                         Margin="8,0,0,0"
-                        Padding="12,6"
+                        Style="{StaticResource IdeDialogSecondaryButtonStyle}"
                         Click="BackButton_Click"
                         AutomationProperties.Name="Go back in Help navigation" />
             </StackPanel>
@@ -46,14 +46,15 @@
         </DockPanel>
 
         <Border Grid.Row="1"
-                Padding="16"
+                Padding="0,0,0,12"
                 Margin="0,0,0,12"
-                Style="{StaticResource PanelCardBorderStyle}">
+                BorderBrush="{DynamicResource Theme.Border.Subtle}"
+                BorderThickness="0,0,0,1">
             <DockPanel LastChildFill="True">
                 <StackPanel DockPanel.Dock="Left" Margin="0,0,16,0">
                     <TextBlock x:Name="TopicTitleText"
-                               FontSize="{StaticResource Theme.FontSize.Heading}"
-                               FontWeight="Bold"
+                               FontSize="{StaticResource Theme.FontSize.Section}"
+                               FontWeight="SemiBold"
                                Foreground="{DynamicResource Theme.Text.Primary}"
                                TextWrapping="Wrap" />
                     <TextBlock x:Name="TopicQuickSummaryText"
@@ -89,12 +90,11 @@
                         Content="Related Topics"
                         MinWidth="120"
                         Margin="0,0,8,0"
-                        Padding="12,6"
+                        Style="{StaticResource IdeDialogSecondaryButtonStyle}"
                         Click="RelatedTopicsButton_Click" />
                 <Button Content="Close"
                         IsDefault="True"
-                        MinWidth="90"
-                        Padding="12,6"
+                        Style="{StaticResource IdeDialogPrimaryButtonStyle}"
                         Click="CloseButton_Click" />
             </StackPanel>
         </DockPanel>

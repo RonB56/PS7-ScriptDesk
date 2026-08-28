@@ -72,6 +72,7 @@ namespace PS7ScriptDesk.PowerShell.Services
         private readonly object _syncRoot = new();
         private readonly SemaphoreSlim _sessionLifecycleGate = new(1, 1);
         private readonly TerminalInputRouter _terminalInputRouter = new();
+        private readonly bool _preferRedirectedTerminalSession;
         private bool _firstOutputLogged;
         private bool _firstAnsiOutputLogged;
         private int _rawOutputInfoLogCount;
@@ -107,9 +108,20 @@ namespace PS7ScriptDesk.PowerShell.Services
         private string? _lastPromptHeuristicDirectory;
         private int _terminalSessionGeneration;
         private bool _terminalSessionTeardownInProgress = true;
+        private bool _redirectedTerminalTransportActive;
         private readonly ResizeFailureEpisode _resizeFailureEpisode = new();
         private Task _lastProcessExitTeardownTask = Task.CompletedTask;
         private Task _pendingNativeTeardownTask = Task.CompletedTask;
+
+        public LiveConsoleService()
+            : this(preferRedirectedTerminalSession: false)
+        {
+        }
+
+        internal LiveConsoleService(bool preferRedirectedTerminalSession)
+        {
+            _preferRedirectedTerminalSession = preferRedirectedTerminalSession;
+        }
 
         public bool IsSessionRunning
         {
@@ -344,42 +356,57 @@ namespace PS7ScriptDesk.PowerShell.Services
                 var sessionGeneration = BeginTerminalSessionGeneration();
                 NotifyTerminalSessionStarted(sessionGeneration);
 
-                try
+                if (_preferRedirectedTerminalSession)
                 {
                     AppLogger.Info(
                         "LiveConsole",
-                        $"Starting terminal session. SessionGeneration={sessionGeneration}, DisplayPath='{runtime.ExecutablePath}', LaunchPath='{runtime.LaunchExecutablePath}', LaunchPathExists={File.Exists(runtime.LaunchExecutablePath)}, WorkingDirectory={workingDirectory}");
-                    StartPseudoConsoleSession(runtime, workingDirectory, onOutput, sessionGeneration);
-                    AppLogger.Info("LiveConsole", $"ConPTY terminal session started with {runtime.DisplayName}; SessionGeneration={sessionGeneration}, WorkingDirectory={workingDirectory}");
+                        $"Starting redirected terminal session because the host requested redirected mode. SessionGeneration={sessionGeneration}, DisplayPath='{runtime.ExecutablePath}', LaunchPath='{runtime.LaunchExecutablePath}', LaunchPathExists={File.Exists(runtime.LaunchExecutablePath)}, WorkingDirectory={workingDirectory}");
+                    StartRedirectedSession(runtime, workingDirectory, onOutput, sessionGeneration);
+                    AppLogger.Info("LiveConsole", $"Redirected terminal session started with {runtime.DisplayName}; SessionGeneration={sessionGeneration}, WorkingDirectory={workingDirectory}");
                     onOutput(new ExecutionOutputRecord(
                         ExecutionOutputStreamKind.Lifecycle,
-                        $"ConPTY terminal session started with {runtime.DisplayName}.",
+                        $"Redirected terminal session started with {runtime.DisplayName}.",
                         DateTime.Now));
                 }
-                catch (Exception ex)
+                else
                 {
-                    AppLogger.Warning("LiveConsole", $"ConPTY startup failed for {runtime.DisplayName}; falling back to redirected terminal mode. SessionGeneration={sessionGeneration}, Error={ex.Message}");
-                    onOutput(new ExecutionOutputRecord(
-                        ExecutionOutputStreamKind.Lifecycle,
-                        $"ConPTY startup failed ({ex.Message}). Falling back to redirected terminal mode.",
-                        DateTime.Now));
-
-                    if (!await StopConsoleCoreAsync(onOutput, "conpty-startup-fallback").ConfigureAwait(false))
-                    {
-                        throw new InvalidOperationException("The failed ConPTY session could not be torn down before fallback startup.", ex);
-                    }
-
-                    cancellationToken.ThrowIfCancellationRequested();
-                    sessionGeneration = BeginTerminalSessionGeneration();
-                    NotifyTerminalSessionStarted(sessionGeneration);
                     try
                     {
-                        StartRedirectedSession(runtime, workingDirectory, onOutput, sessionGeneration);
+                        AppLogger.Info(
+                            "LiveConsole",
+                            $"Starting terminal session. SessionGeneration={sessionGeneration}, DisplayPath='{runtime.ExecutablePath}', LaunchPath='{runtime.LaunchExecutablePath}', LaunchPathExists={File.Exists(runtime.LaunchExecutablePath)}, WorkingDirectory={workingDirectory}");
+                        StartPseudoConsoleSession(runtime, workingDirectory, onOutput, sessionGeneration);
+                        AppLogger.Info("LiveConsole", $"ConPTY terminal session started with {runtime.DisplayName}; SessionGeneration={sessionGeneration}, WorkingDirectory={workingDirectory}");
+                        onOutput(new ExecutionOutputRecord(
+                            ExecutionOutputStreamKind.Lifecycle,
+                            $"ConPTY terminal session started with {runtime.DisplayName}.",
+                            DateTime.Now));
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        await StopConsoleCoreAsync(onOutput, "redirected-startup-failure").ConfigureAwait(false);
-                        throw;
+                        AppLogger.Warning("LiveConsole", $"ConPTY startup failed for {runtime.DisplayName}; falling back to redirected terminal mode. SessionGeneration={sessionGeneration}, Error={ex.Message}");
+                        onOutput(new ExecutionOutputRecord(
+                            ExecutionOutputStreamKind.Lifecycle,
+                            $"ConPTY startup failed ({ex.Message}). Falling back to redirected terminal mode.",
+                            DateTime.Now));
+
+                        if (!await StopConsoleCoreAsync(onOutput, "conpty-startup-fallback").ConfigureAwait(false))
+                        {
+                            throw new InvalidOperationException("The failed ConPTY session could not be torn down before fallback startup.", ex);
+                        }
+
+                        cancellationToken.ThrowIfCancellationRequested();
+                        sessionGeneration = BeginTerminalSessionGeneration();
+                        NotifyTerminalSessionStarted(sessionGeneration);
+                        try
+                        {
+                            StartRedirectedSession(runtime, workingDirectory, onOutput, sessionGeneration);
+                        }
+                        catch
+                        {
+                            await StopConsoleCoreAsync(onOutput, "redirected-startup-failure").ConfigureAwait(false);
+                            throw;
+                        }
                     }
                 }
 
@@ -497,6 +524,7 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             var dispatchGeneration = GetCurrentCommandDispatchGeneration();
             var startedAt = DateTime.Now;
+            AddPendingSnapshotPath(commandSnapshotPath);
             AddPendingSnapshotPath(instructionSnapshotPath);
             AddPendingSnapshotPath(helperSnapshotPath);
             SetPendingExecutionTokens(startToken, completionToken, locationToken);
@@ -1101,6 +1129,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _pseudoConsoleHandle = IntPtr.Zero;
                 _inputWriterHandle = IntPtr.Zero;
                 _outputReaderHandle = IntPtr.Zero;
+                _redirectedTerminalTransportActive = false;
                 ActiveRuntime = null;
                 CurrentWorkingDirectory = null;
                 _isCommandInProgress = false;
@@ -1497,6 +1526,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                     AutoFlush = true,
                     NewLine = "\r\n"
                 };
+                _redirectedTerminalTransportActive = false;
                 _terminalInputRouter.Activate(sessionGeneration, _terminalWriter);
 
                 _readerCancellationTokenSource = new CancellationTokenSource();
@@ -1626,6 +1656,7 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             _process = process;
             _terminalWriter = process.StandardInput;
+            _redirectedTerminalTransportActive = true;
             _terminalInputRouter.Activate(sessionGeneration, _terminalWriter);
             _readerCancellationTokenSource = new CancellationTokenSource();
             _stdoutReaderTask = Task.Run(() => ReadStreamLoopAsync(
@@ -1737,8 +1768,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                 var exitCodeText = exitCode.HasValue ? $" Exit code: {exitCode.Value}." : string.Empty;
                 var activeWorkDescription = currentCommandIsScript ? "script" : "command";
                 var userMessage = commandInProgress
-                    ? $"PowerShell terminal process exited while a {activeWorkDescription} was running. The app detected the exit, cleared the running state, and the terminal must be reset before another command can run.{exitCodeText}"
-                    : $"PowerShell terminal session exited. Use Reset Console to start a fresh PowerShell session.{exitCodeText}";
+                    ? $"PowerShell terminal process exited while a {activeWorkDescription} was running. The app detected the exit, cleared the running state, and will attempt to restart the embedded PowerShell session.{exitCodeText}"
+                    : $"PowerShell terminal session exited. The app will attempt to restart the embedded PowerShell session.{exitCodeText}";
 
                 AppLogger.Info(
                     "LiveConsole",
@@ -3324,12 +3355,13 @@ namespace PS7ScriptDesk.PowerShell.Services
         {
             cancellationToken.ThrowIfCancellationRequested();
             AppLogger.Debug("LiveConsole", $"Queueing terminal input. SessionGeneration={sessionGeneration}, Length={text.Length}, ContentOmitted=True.");
+            var payload = NormalizeTerminalInputForActiveTransport(text);
 
             try
             {
                 await _terminalInputRouter.WriteAsync(
                     sessionGeneration,
-                    text,
+                    payload,
                     cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -3349,6 +3381,25 @@ namespace PS7ScriptDesk.PowerShell.Services
                     });
                 throw;
             }
+        }
+
+        private string NormalizeTerminalInputForActiveTransport(string text)
+        {
+            bool redirectedTransport;
+            lock (_syncRoot)
+            {
+                redirectedTransport = _redirectedTerminalTransportActive;
+            }
+
+            if (!redirectedTransport || (!text.Contains('\r') && !text.Contains('\n')))
+            {
+                return text;
+            }
+
+            return text
+                .Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace("\r", "\n", StringComparison.Ordinal)
+                .Replace("\n", Environment.NewLine, StringComparison.Ordinal);
         }
 
         private bool TryGetWritableSessionGeneration(out int sessionGeneration)

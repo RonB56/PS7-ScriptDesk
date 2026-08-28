@@ -9,6 +9,8 @@
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
+        Background="{DynamicResource Theme.App.Background}"
+        Foreground="{DynamicResource Theme.Text.Primary}"
         help:ContextHelp.Key="Files.ExternalChanges"
         Loaded="Window_Loaded"
         PreviewKeyDown="Window_PreviewKeyDown">
@@ -40,27 +42,27 @@
         <UniformGrid Grid.Row="2" Rows="1" Columns="4">
             <Button Content="Reload from Disk"
                     Margin="0,0,6,0"
-                    Padding="10,7"
+                    Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
                     Click="ReloadButton_Click"
                     ToolTip="Discard the editor changes and load the current file from disk."
                     help:ContextHelp.Key="Files.ExternalChanges" />
             <Button Content="Overwrite Disk"
                     Margin="2,0,4,0"
-                    Padding="10,7"
+                    Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
                     Click="OverwriteButton_Click"
                     ToolTip="Replace the current disk version with the editor content."
                     help:ContextHelp.Key="Files.ExternalChanges" />
             <Button Content="Save As..."
                     Margin="4,0,2,0"
-                    Padding="10,7"
+                    Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
                     Click="SaveAsButton_Click"
                     ToolTip="Keep the changed disk file and save the editor content to another path."
                     help:ContextHelp.Key="Files.ExternalChanges" />
             <Button Content="Cancel"
                     Margin="6,0,0,0"
-                    Padding="10,7"
                     IsDefault="True"
                     IsCancel="True"
+                    Style="{DynamicResource IdeDialogPrimaryButtonStyle}"
                     Click="CancelButton_Click"
                     help:ContextHelp.Key="Files.ExternalChanges" />
         </UniformGrid>

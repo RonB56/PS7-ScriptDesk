@@ -36,16 +36,16 @@
                 </Grid.RowDefinitions>
                 <ScrollViewer Grid.Row="0" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                     <StackPanel Orientation="Horizontal">
-                        <Button x:Name="PresetStepButton" Tag="0" Content="1  Preset" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardPrimaryButtonStyle}" ToolTip="Step 1: Choose a starting preset" AutomationProperties.Name="Step 1: Preset" Click="StepButton_Click" />
-                        <Button x:Name="ApplicationStepButton" Tag="1" Content="2  Application" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 2: Set application identity" AutomationProperties.Name="Step 2: Application" Click="StepButton_Click" />
-                        <Button x:Name="PlatformStepButton" Tag="2" Content="3  Platform" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 3: Set deployment and runtime" AutomationProperties.Name="Step 3: Platform" Click="StepButton_Click" />
-                        <Button x:Name="DependenciesStepButton" Tag="3" Content="4  Dependencies" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 4: Review dependency findings" AutomationProperties.Name="Step 4: Dependencies" Click="StepButton_Click" />
-                        <Button x:Name="AdvancedStepButton" Tag="4" Content="5  Advanced" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 5: Set runtime and metadata options" AutomationProperties.Name="Step 5: Advanced" Click="StepButton_Click" />
-                        <Button x:Name="ReviewStepButton" Tag="5" Content="6  Review" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 6: Confirm output and export" AutomationProperties.Name="Step 6: Review" Click="StepButton_Click" />
+                        <Button x:Name="PresetStepButton" Tag="0" Content="Preset" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardPrimaryButtonStyle}" ToolTip="Step 1: Choose a starting preset" AutomationProperties.Name="Step 1: Preset" Click="StepButton_Click" />
+                        <Button x:Name="ApplicationStepButton" Tag="1" Content="Application" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 2: Set application identity" AutomationProperties.Name="Step 2: Application" Click="StepButton_Click" />
+                        <Button x:Name="PlatformStepButton" Tag="2" Content="Platform" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 3: Set deployment and runtime" AutomationProperties.Name="Step 3: Platform" Click="StepButton_Click" />
+                        <Button x:Name="DependenciesStepButton" Tag="3" Content="Dependencies" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 4: Review dependency findings" AutomationProperties.Name="Step 4: Dependencies" Click="StepButton_Click" />
+                        <Button x:Name="AdvancedStepButton" Tag="4" Content="Advanced" Margin="0,0,8,0" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 5: Set runtime and metadata options" AutomationProperties.Name="Step 5: Advanced" Click="StepButton_Click" />
+                        <Button x:Name="ReviewStepButton" Tag="5" Content="Review" MinWidth="0" Style="{StaticResource WizardSecondaryButtonStyle}" ToolTip="Step 6: Confirm output and export" AutomationProperties.Name="Step 6: Review" Click="StepButton_Click" />
                     </StackPanel>
                 </ScrollViewer>
                 <TabControl x:Name="Pages" Grid.Row="1" Margin="0,14,0,0" Style="{StaticResource WizardPageHostStyle}" SelectionChanged="Pages_SelectionChanged">
-                <TabItem Header="1  Preset" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 1: Choose a starting preset">
+                <TabItem Header="Preset" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 1: Choose a starting preset">
                     <ScrollViewer Margin="0,14,0,0" VerticalScrollBarVisibility="Auto"><StackPanel>
                         <TextBlock Text="Start with the closest deployment goal. Every option remains editable in the following steps." Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" />
                         <ListBox x:Name="PresetList" Margin="0,14,0,0" HorizontalContentAlignment="Stretch" SelectionChanged="PresetList_SelectionChanged">
@@ -59,7 +59,7 @@
                     </StackPanel></ScrollViewer>
                 </TabItem>
 
-                <TabItem Header="2  Application" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 2: Set application identity">
+                <TabItem Header="Application" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 2: Set application identity">
                     <Grid Margin="0,18,0,0"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <TextBlock Text="Application name" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><TextBox x:Name="ApplicationNameBox" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited"/>
                         <TextBlock Grid.Row="1" Text="Application type" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><ComboBox x:Name="ApplicationTypeBox" Grid.Row="1" Grid.Column="1" Margin="12,0,0,10" SelectionChanged="ConfigurationEdited"><ComboBoxItem Tag="AutoDetect" Content="Auto Detect (Console if uncertain)"/><ComboBoxItem Tag="Console" Content="Console Application"/><ComboBoxItem Tag="WindowsGui" Content="Windows GUI Application"/></ComboBox>
@@ -69,7 +69,7 @@
                     </Grid>
                 </TabItem>
 
-                <TabItem Header="3  Platform" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 3: Set deployment and runtime">
+                <TabItem Header="Platform" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 3: Set deployment and runtime">
                     <StackPanel Margin="0,18,0,0">
                         <TextBlock Text="Deployment and runtime" Style="{StaticResource SectionHeaderTextStyle}"/>
                         <Grid Margin="0,14,0,0"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -83,11 +83,11 @@
                     </StackPanel>
                 </TabItem>
 
-                <TabItem Header="4  Dependencies" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 4: Review dependency findings">
+                <TabItem Header="Dependencies" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 4: Review dependency findings">
                     <DockPanel Margin="0,18,0,0"><TextBlock DockPanel.Dock="Top" Text="Detected portability concerns are evidence-based and are not automatically bundled." TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Secondary}"/><ListBox x:Name="DependencyList" Margin="0,14,0,0"/></DockPanel>
                 </TabItem>
 
-                <TabItem Header="5  Advanced" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 5: Set runtime and metadata options">
+                <TabItem Header="Advanced" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 5: Set runtime and metadata options">
                     <ScrollViewer Margin="0,18,0,0" VerticalScrollBarVisibility="Auto"><StackPanel>
                         <TextBlock Text="Runtime behavior" Style="{StaticResource SectionHeaderTextStyle}"/>
                         <Border Margin="0,10,0,0" Style="{StaticResource WizardSectionCardStyle}"><StackPanel><CheckBox x:Name="LoadProfileBox" Content="Load user PowerShell profile" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited"/><CheckBox x:Name="ErrorDialogBox" Margin="0,8,0,0" Content="Show fatal error dialog" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited"/><CheckBox x:Name="WriteLogBox" Margin="0,8,0,0" Content="Write application log" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited"/></StackPanel></Border>
@@ -100,7 +100,7 @@
                     </StackPanel></ScrollViewer>
                 </TabItem>
 
-                <TabItem Header="6  Review" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 6: Confirm output and export">
+                <TabItem Header="Review" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 6: Confirm output and export">
                     <ScrollViewer Margin="0,18,0,0" VerticalScrollBarVisibility="Auto"><StackPanel>
                         <TextBlock Text="Output executable" Style="{StaticResource SectionHeaderTextStyle}"/>
                         <Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox x:Name="OutputBox" TextChanged="ConfigurationEdited"/><Button Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="BrowseOutput_Click"/></Grid>

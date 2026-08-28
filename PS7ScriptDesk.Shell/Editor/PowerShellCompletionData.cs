@@ -223,21 +223,24 @@ namespace PS7ScriptDesk.Shell.Editor
 
             if (!string.IsNullOrEmpty(kindLabel))
             {
-                panel.Children.Add(new TextBlock
+                var kindBlock = new TextBlock
                 {
                     Text = kindLabel,
                     FontSize = 10,
-                    Foreground = Brushes.Gray,
                     Margin = new Thickness(0, 0, 0, 4)
-                });
+                };
+                kindBlock.SetResourceReference(TextBlock.ForegroundProperty, "Theme.ToolTip.SecondaryForeground");
+                panel.Children.Add(kindBlock);
             }
 
-            panel.Children.Add(new TextBlock
+            var descriptionBlock = new TextBlock
             {
                 Text = description,
                 TextWrapping = TextWrapping.Wrap,
                 MaxWidth = 500,
-            });
+            };
+            descriptionBlock.SetResourceReference(TextBlock.ForegroundProperty, "Theme.ToolTip.Foreground");
+            panel.Children.Add(descriptionBlock);
 
             return panel;
         }

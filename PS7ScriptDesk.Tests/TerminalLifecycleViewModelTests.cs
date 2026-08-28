@@ -243,6 +243,36 @@ public sealed class TerminalLifecycleViewModelTests
         Assert.Equal("shutdown", console.Operations.Last());
     }
 
+    [Fact]
+    public async Task SessionTermination_AutomaticallyRestartsSelectedRuntimeAndExplainsRecovery()
+    {
+        var console = new RecordingLiveConsoleService
+        {
+            IsSessionRunning = true,
+            IsCommandInProgress = true
+        };
+        var runtime = CreateRuntime();
+        var viewModel = await CreateViewModelAsync(console, runtime);
+
+        console.IsSessionRunning = false;
+        console.IsCommandInProgress = false;
+        console.RaiseSessionTerminated();
+
+        await console.StartObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => viewModel.StatusText.Contains("restarted", StringComparison.OrdinalIgnoreCase));
+
+        Assert.Equal(["start"], console.Operations);
+        Assert.False(viewModel.IsExecutionRunning);
+        Assert.False(viewModel.StopCommand.CanExecute(null));
+        Assert.Contains("terminal exited", viewModel.ApplicationActivityText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("restarted", viewModel.ApplicationActivityText, StringComparison.OrdinalIgnoreCase);
+        Assert.Same(runtime, console.ActiveRuntime);
+        Assert.Contains("PowerShell 7.6.2", viewModel.RuntimeText, StringComparison.Ordinal);
+        Assert.Contains("Running", viewModel.RuntimeText, StringComparison.Ordinal);
+        Assert.False(viewModel.HasRunningRuntimeCompactText);
+        Assert.True(console.IsSessionRunning);
+    }
+
     private static Task<MainWindowViewModel> CreateViewModelAsync(
         RecordingLiveConsoleService console,
         PowerShellRuntimeInfo? runtime = null)
@@ -309,6 +339,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public TaskCompletionSource<bool>? ShutdownCompletion { get; set; }
     public TaskCompletionSource<LiveConsoleInterruptResult>? InterruptCompletion { get; set; }
     public bool StopResult { get; set; } = true;
+    public Exception? StartException { get; set; }
 
     public event Action? ScriptExecutionCompleted;
     public event Action? CommandExecutionCompleted;
@@ -335,6 +366,11 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
         CancellationToken cancellationToken = default)
     {
         Operations.Add("start");
+        if (StartException is not null)
+        {
+            throw StartException;
+        }
+
         TerminalSessionStarted?.Invoke(1);
         ActiveRuntime = runtime;
         IsSessionRunning = true;
@@ -365,6 +401,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
         TerminalSessionStopping?.Invoke(1);
         IsCommandInProgress = false;
         IsSessionRunning = false;
+        ActiveRuntime = null;
         return Task.FromResult(true);
     }
 
@@ -374,6 +411,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
         TerminalSessionStopping?.Invoke(1);
         IsCommandInProgress = false;
         IsSessionRunning = false;
+        ActiveRuntime = null;
         return ShutdownCompletion?.Task ?? Task.FromResult(true);
     }
 

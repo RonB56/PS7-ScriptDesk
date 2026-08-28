@@ -14,11 +14,15 @@ namespace PS7ScriptDesk.Domain.Models
 
         public bool StartMaximized { get; set; }
 
-        public bool IsExplorerVisible { get; set; } = true;
+        public bool IsExplorerVisible { get; set; }
 
         public double? ExplorerWidth { get; set; }
 
         public double? ConsoleHeight { get; set; }
+
+        public double? ConsoleSideWidth { get; set; }
+
+        public string? WorkspaceLayoutMode { get; set; } = "HorizontalSplit";
 
         public double? WorkspaceSectionHeight { get; set; }
 
@@ -31,6 +35,10 @@ namespace PS7ScriptDesk.Domain.Models
         public double? DebugPaneWindowLeft { get; set; }
 
         public double? DebugPaneWindowTop { get; set; }
+
+        public bool IsDebugPanelVisible { get; set; }
+
+        public double? DockedDebugPanelWidth { get; set; }
 
         public string? LastWorkspaceFolderPath { get; set; }
 
@@ -49,7 +57,7 @@ namespace PS7ScriptDesk.Domain.Models
         public List<OpenDocumentState> ReopenDocuments { get; set; } = new();
 
         /// <summary>Name of the active UI theme ("Dark", "Light", "IseBlue"). Null = default Dark.</summary>
-        public string? Theme { get; set; }
+        public string? Theme { get; set; } = "Dark";
 
         /// <summary>Editor font-size zoom level in points.  Null = default (13 pt).</summary>
         public double? EditorZoomLevel { get; set; }
@@ -63,8 +71,8 @@ namespace PS7ScriptDesk.Domain.Models
         /// <summary>Whether selected editor text should force a high-contrast foreground instead of preserving syntax colors.</summary>
         public bool ForceHighContrastSelectedText { get; set; } = true;
 
-        /// <summary>Whether contextual help UI is enabled across the shell. Defaults to true.</summary>
-        public bool IsContextHelpEnabled { get; set; } = true;
+        /// <summary>Whether contextual help UI is enabled across the shell.</summary>
+        public bool IsContextHelpEnabled { get; set; }
 
         public bool IsDeveloperDiagnosticsEnabled { get; set; }
 

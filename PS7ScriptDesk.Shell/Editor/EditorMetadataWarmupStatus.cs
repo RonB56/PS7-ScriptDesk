@@ -12,7 +12,9 @@ namespace PS7ScriptDesk.Shell.Editor
         Completed = 5,
         Failed = 6,
         Canceled = 7,
-        Warning = 8
+        Warning = 8,
+        CoreReady = 9,
+        DiscoveringModules = 10
     }
 
     public enum EditorMetadataWarmupReason
@@ -91,10 +93,10 @@ namespace PS7ScriptDesk.Shell.Editor
             GetChildItemParameterCount > 0;
 
         public string ReadinessCaption =>
-            "PowerShell IntelliSense ready";
+            "IntelliSense: Ready";
 
         public string WarningCaption =>
-            "PowerShell IntelliSense degraded; cached metadata still in use";
+            "IntelliSense: Degraded; cached metadata still in use";
 
         public bool IsManualRefresh => Reason == EditorMetadataWarmupReason.ManualRefresh;
 
@@ -105,7 +107,9 @@ namespace PS7ScriptDesk.Shell.Editor
 
         public bool IsActive =>
             Phase == EditorMetadataWarmupPhase.Scheduled ||
+            Phase == EditorMetadataWarmupPhase.CoreReady ||
             Phase == EditorMetadataWarmupPhase.BuildingCommandCatalog ||
+            Phase == EditorMetadataWarmupPhase.DiscoveringModules ||
             Phase == EditorMetadataWarmupPhase.LoadingCommandMetadata ||
             Phase == EditorMetadataWarmupPhase.RefreshingCachedMetadata;
 

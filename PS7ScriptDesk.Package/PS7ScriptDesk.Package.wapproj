@@ -1,17 +1,17 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" DefaultTargets="Build" InitialTargets="RestoreShellWapPublishAssetsForVisualStudio" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup Condition="'$(VisualStudioVersion)' == '' or '$(VisualStudioVersion)' &lt; '15.0'">
     <VisualStudioVersion>15.0</VisualStudioVersion>
   </PropertyGroup>
+  <!--
+    Supported Store/package architectures:
+      - x64   -> win-x64
+      - ARM64 -> win-arm64
+
+    x86 and ARM32 are intentionally not supported. The WPF Shell and bundled
+    REST API proof host are built only for win-x64 and win-arm64.
+  -->
   <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Debug|x86">
-      <Configuration>Debug</Configuration>
-      <Platform>x86</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Release|x86">
-      <Configuration>Release</Configuration>
-      <Platform>x86</Platform>
-    </ProjectConfiguration>
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
       <Platform>x64</Platform>
@@ -19,14 +19,6 @@
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Debug|ARM">
-      <Configuration>Debug</Configuration>
-      <Platform>ARM</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Release|ARM">
-      <Configuration>Release</Configuration>
-      <Platform>ARM</Platform>
     </ProjectConfiguration>
     <ProjectConfiguration Include="Debug|ARM64">
       <Configuration>Debug</Configuration>
@@ -55,16 +47,21 @@
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <DefaultLanguage>en-US</DefaultLanguage>
     <AppxPackageSigningEnabled>True</AppxPackageSigningEnabled>
-    <!-- NU1701 is a packaging-project compatibility warning from the WPF shell's AvalonEdit dependency. -->
+    <!-- NU1701/NU1702 are packaging-project compatibility warnings from WPF dependencies. -->
     <NoWarn>$(NoWarn);NU1701;NU1702</NoWarn>
     <EntryPointProjectUniqueName>..\PS7ScriptDesk.Shell\PS7ScriptDesk.Shell.csproj</EntryPointProjectUniqueName>
     <AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
     <AppxAutoIncrementPackageRevision>True</AppxAutoIncrementPackageRevision>
     <GenerateTestArtifacts>False</GenerateTestArtifacts>
-    <AppxBundlePlatforms>neutral</AppxBundlePlatforms>
-    <!-- Visual Studio package builds do not always pass the RuntimeIdentifier that the DesktopBridge targets use for the WPF entry-point project. Keep the Store package pinned to x64/win-x64 so VS and command-line builds restore the same assets. -->
+    <!-- Store bundle contains only the two architectures supported by ScriptDesk. -->
+    <AppxBundlePlatforms>x64|arm64</AppxBundlePlatforms>
+    <!--
+      Map the active WAP platform to the matching .NET RuntimeIdentifier.
+      This prevents DesktopBridge from propagating win-x86 into the Shell or
+      PS7ScriptDesk.RestApiProofHost during Store package creation.
+    -->
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'x64'">win-x64</RuntimeIdentifier>
-    <RuntimeIdentifiers Condition="'$(RuntimeIdentifiers)' == ''">win-x64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'ARM64'">win-arm64</RuntimeIdentifier>
     <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
     <GenerateAppInstallerFile>False</GenerateAppInstallerFile>
     <PackageCertificateThumbprint>5974F24B10652096AC4CF7354CABB20AD717D1F2</PackageCertificateThumbprint>
@@ -75,25 +72,13 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <AppxBundle>Always</AppxBundle>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
-    <AppxBundle>Always</AppxBundle>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
-    <AppxBundle>Always</AppxBundle>
-  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <AppxBundle>Always</AppxBundle>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
     <AppxBundle>Always</AppxBundle>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <AppxBundle>Always</AppxBundle>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
-    <AppxBundle>Always</AppxBundle>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <AppxBundle>Always</AppxBundle>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
@@ -123,8 +108,8 @@
     <Content Include="Images\SplashScreen.scale-125.png" />
     <Content Include="Images\SplashScreen.scale-150.png" />
     <Content Include="Images\SplashScreen.scale-200.png" />
-    <Content Include="Images\LockScreenLogo.scale-200.png" />
     <Content Include="Images\SplashScreen.scale-400.png" />
+    <Content Include="Images\LockScreenLogo.scale-200.png" />
     <Content Include="Images\Square150x150Logo.scale-100.png" />
     <Content Include="Images\Square150x150Logo.scale-125.png" />
     <Content Include="Images\Square150x150Logo.scale-150.png" />
@@ -169,15 +154,18 @@
   <ItemGroup>
     <ProjectReference Include="..\PS7ScriptDesk.Shell\PS7ScriptDesk.Shell.csproj" />
   </ItemGroup>
-  <Target Name="RestoreShellWapPublishAssetsForVisualStudio" BeforeTargets="Build" Condition="'$(RuntimeIdentifier)' == 'win-x64'">
-    <!--
-      Visual Studio can build the WAP project without first restoring the entry-point project's
-      wappublish intermediate assets. The package targets then look for:
-      PS7ScriptDesk.Shell\obj\wappublish\win-x64\project.assets.json
-      and fail before the Shell executable is packaged. This explicit restore mirrors the
-      command-line /t:Restore,Build path that successfully creates the Store upload package.
-    -->
-    <MSBuild Projects="..\PS7ScriptDesk.Shell\PS7ScriptDesk.Shell.csproj" Targets="Restore" Properties="Configuration=$(Configuration);Platform=x64;RuntimeIdentifier=win-x64;RuntimeIdentifiers=win-x64;BaseIntermediateOutputPath=obj\wappublish\win-x64\;MSBuildProjectExtensionsPath=obj\wappublish\win-x64\" />
+  <!--
+    Visual Studio can build the WAP project without first restoring the entry-point
+    project's wappublish intermediate assets. Restore the architecture-specific
+    Shell assets before DesktopBridge packaging begins.
+  -->
+  <Target Name="RestoreShellWapPublishAssetsForVisualStudio" BeforeTargets="Build" Condition="'$(RuntimeIdentifier)' == 'win-x64' or '$(RuntimeIdentifier)' == 'win-arm64'">
+    <PropertyGroup>
+      <ShellWapPlatform Condition="'$(RuntimeIdentifier)' == 'win-x64'">x64</ShellWapPlatform>
+      <ShellWapPlatform Condition="'$(RuntimeIdentifier)' == 'win-arm64'">ARM64</ShellWapPlatform>
+      <ShellWapIntermediate>obj\wappublish\$(RuntimeIdentifier)\</ShellWapIntermediate>
+    </PropertyGroup>
+    <MSBuild Projects="..\PS7ScriptDesk.Shell\PS7ScriptDesk.Shell.csproj" Targets="Restore" Properties="Configuration=$(Configuration);Platform=$(ShellWapPlatform);RuntimeIdentifier=$(RuntimeIdentifier);BaseIntermediateOutputPath=$(ShellWapIntermediate);MSBuildProjectExtensionsPath=$(ShellWapIntermediate)" />
   </Target>
   <Target Name="CopyCustomInstallerScripts" AfterTargets="Build">
     <ItemGroup>

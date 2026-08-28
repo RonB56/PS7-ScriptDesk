@@ -53,6 +53,9 @@ namespace PS7ScriptDesk.Shell
     {
         private const double MinimumExplorerWidth = 190;
         private const double MinimumConsoleHeight = 160;
+        private const double MinimumConsoleSideWidth = 260;
+        private const double DefaultConsoleHeight = 180;
+        private const double DefaultConsoleSideWidth = 420;
         private const double MinimumExplorerSectionHeight = 120;
         private const double DebugPanelWidth = 220;
         private const double MinimumDebugPanelWidth = 160;
@@ -78,6 +81,18 @@ namespace PS7ScriptDesk.Shell
         private const int MetadataToastSuccessDismissMilliseconds = 2200;
         private const int MetadataToastWarningDismissMilliseconds = 6500;
         private const int MetadataToastFailureDismissMilliseconds = 9000;
+        private const string ThemeAccentPrimaryResourceKey = "Theme.Accent.Primary";
+        private const string ThemeBorderStrongResourceKey = "Theme.Border.Strong";
+        private const string ThemeIconAccentResourceKey = "Theme.Icon.Accent";
+        private const string ThemeIconSuccessResourceKey = "Theme.Icon.Success";
+        private const string ThemeStatusErrorBackgroundResourceKey = "Theme.Status.Error.Background";
+        private const string ThemeStatusErrorBorderResourceKey = "Theme.Status.Error.Border";
+        private const string ThemeStatusErrorForegroundResourceKey = "Theme.Status.Error.Foreground";
+        private const string ThemeStatusWarningBackgroundResourceKey = "Theme.Status.Warning.Background";
+        private const string ThemeStatusWarningBorderResourceKey = "Theme.Status.Warning.Border";
+        private const string ThemeStatusWarningForegroundResourceKey = "Theme.Status.Warning.Foreground";
+        private const string ThemeSurfacePrimaryResourceKey = "Theme.Surface.Primary";
+        private const string ThemeTextPrimaryResourceKey = "Theme.Text.Primary";
         private const int DebugVariableValueMaxLength = 160;
         private const int DebugHoverValueMaxLength = 300;
         private const string RecentScriptMenuItemTagPrefix = "RecentScript:";
@@ -193,12 +208,15 @@ namespace PS7ScriptDesk.Shell
         private WpfPoint _pendingHoverPoint;
         private FindReplaceWindow? _findReplaceWindow;
         private AboutWindow? _aboutWindow;
+        private bool _manualStoreUpdateCheckInProgress;
         private readonly AdministratorModeBannerState _administratorModeBannerState;
         private bool _allowWindowClose;
         private bool _terminalShutdownInProgress;
         private Task? _deferredInitializationTask;
         private bool _shellLayoutApplied;
         private double _lastKnownExplorerWidth = 220;
+        private double _lastKnownConsoleHeight = DefaultConsoleHeight;
+        private double _lastKnownConsoleSideWidth = DefaultConsoleSideWidth;
         private double _lastKnownDebugPanelWidth = DebugPanelWidth;
         private string _lastFindText = string.Empty;
         private string _lastReplaceText = string.Empty;
@@ -215,6 +233,17 @@ namespace PS7ScriptDesk.Shell
         private DebugPaneWindow? _debugPaneWindow;
         private ExportProgressWindow? _exportProgressWindow;
         private IReadOnlyList<DebugVariableInfo>? _currentDebugVariables;
+
+        private enum WorkspaceLayoutMode
+        {
+            Default,
+            EditorMaximized,
+            ConsoleMaximized,
+            HorizontalSplit,
+            SideBySideSplit
+        }
+
+        private WorkspaceLayoutMode _workspaceLayoutMode = WorkspaceLayoutMode.HorizontalSplit;
         private IReadOnlyList<DebugCallStackFrame>? _currentDebugCallStack;
         private ObservableCollection<BreakpointRow>? _currentBreakpointRows;
         private int _selectedDebugTabIndex;
@@ -300,6 +329,21 @@ namespace PS7ScriptDesk.Shell
             if (IsUsableLength(_loadedSettings.ExplorerWidth, MinimumExplorerWidth))
             {
                 _lastKnownExplorerWidth = _loadedSettings.ExplorerWidth!.Value;
+            }
+
+            if (IsUsableLength(_loadedSettings.ConsoleHeight, MinimumConsoleHeight))
+            {
+                _lastKnownConsoleHeight = _loadedSettings.ConsoleHeight!.Value;
+            }
+
+            if (IsUsableLength(_loadedSettings.ConsoleSideWidth, MinimumConsoleSideWidth))
+            {
+                _lastKnownConsoleSideWidth = _loadedSettings.ConsoleSideWidth!.Value;
+            }
+
+            if (IsUsableLength(_loadedSettings.DockedDebugPanelWidth, MinimumDebugPanelWidth))
+            {
+                _lastKnownDebugPanelWidth = _loadedSettings.DockedDebugPanelWidth!.Value;
             }
 
             InitializeComponent();
@@ -1385,13 +1429,36 @@ namespace PS7ScriptDesk.Shell
                     }
                 }
 
+                if (_activeCompletionWindow is not null && ShouldDismissActivePathCompletionForTextInput(ch))
+                {
+                    CloseEditorCompletion("Whitespace typed while path completion selected");
+                    return;
+                }
+
                 // Let the active completion window commit when the user types a non-identifier character.
                 if (_activeCompletionWindow is not null &&
-                    !char.IsLetterOrDigit(ch) && ch != '_' && ch != '-' && ch != '?' && ch != '$')
+                    ShouldCommitCompletionForTextInput(ch))
                 {
                     _activeCompletionWindow.CompletionList.RequestInsertion(e);
                 }
             }
+        }
+
+        private bool ShouldDismissActivePathCompletionForTextInput(char ch)
+        {
+            return _activeCompletionWindow?.CompletionList.SelectedItem is PowerShellCompletionData completionData &&
+                   ShouldDismissPathCompletionForTextInput(completionData.Kind, ch);
+        }
+
+        internal static bool ShouldDismissPathCompletionForTextInput(CompletionItemKind completionKind, char ch)
+        {
+            return char.IsWhiteSpace(ch) &&
+                   completionKind is CompletionItemKind.ProviderItem or CompletionItemKind.ProviderContainer;
+        }
+
+        internal static bool ShouldCommitCompletionForTextInput(char ch)
+        {
+            return !char.IsLetterOrDigit(ch) && ch != '_' && ch != '-' && ch != '?' && ch != '$';
         }
 
         private async void EditorTextEditor_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
@@ -1546,6 +1613,221 @@ namespace PS7ScriptDesk.Shell
         private void HelpOverview_Click(object sender, RoutedEventArgs e)
         {
             ContextHelp.OpenOverview(this);
+        }
+
+        private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
+        {
+            await CheckForUpdatesFromHelpAsync().ConfigureAwait(true);
+        }
+
+        private async Task CheckForUpdatesFromHelpAsync()
+        {
+            DeveloperDiagnostics.LogUserAction(
+                "StoreUpdate",
+                "ManualCheckRequested",
+                "User requested a manual Store update check from Help > Check for Updates.");
+
+            if (_manualStoreUpdateCheckInProgress)
+            {
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = "Update check already in progress.";
+                }
+
+                AppLogger.Info("StoreUpdate", "Manual Store update check ignored because another manual check is already running.");
+                DeveloperDiagnostics.LogDecision(
+                    "StoreUpdate",
+                    "ManualCheckRequested",
+                    "Manual Store update check was rejected because another check is already running.",
+                    "RejectedReentrantCheck",
+                    new Dictionary<string, object?> { ["inProgress"] = true });
+                return;
+            }
+
+            _manualStoreUpdateCheckInProgress = true;
+            if (ViewModel is not null)
+            {
+                ViewModel.StatusText = "Checking for updates...";
+            }
+
+            var operationId = $"ManualStoreUpdateCheck-{Guid.NewGuid():N}";
+            var stopwatch = Stopwatch.StartNew();
+            StoreUpdateCheckResult? checkResult = null;
+
+            DeveloperDiagnostics.LogOperationStart(
+                "StoreUpdate",
+                "ManualCheckForUpdates",
+                "Manual Store update check started.",
+                operationId,
+                new Dictionary<string, object?>
+                {
+                    ["invocation"] = "HelpMenu",
+                    ["cancellationSupported"] = false
+                });
+
+            var storeUpdateService = new StoreUpdateService();
+            try
+            {
+                AppLogger.Info("StoreUpdate", "Manual Store/MSIX update check requested from Help > Check for Updates.");
+                checkResult = await storeUpdateService.CheckForUpdatesAsync(CancellationToken.None).ConfigureAwait(true);
+
+                var resultKind = ClassifyStoreUpdateResult(checkResult);
+                var resultProperties = BuildStoreUpdateDiagnosticsProperties(checkResult, "HelpMenu");
+                DeveloperDiagnostics.LogDecision(
+                    "StoreUpdate",
+                    "ManualCheckResult",
+                    $"Manual Store update check completed with result '{resultKind}'.",
+                    resultKind,
+                    resultProperties);
+
+                ShowManualStoreUpdateWindow(storeUpdateService, checkResult);
+            }
+            catch (OperationCanceledException ex)
+            {
+                AppLogger.Info("StoreUpdate", "Manual Store update check was canceled.");
+                DeveloperDiagnostics.LogException(
+                    "StoreUpdate",
+                    ex,
+                    "Manual Store update check was canceled.",
+                    new Dictionary<string, object?>
+                    {
+                        ["invocation"] = "HelpMenu",
+                        ["elapsedMilliseconds"] = stopwatch.ElapsedMilliseconds
+                    });
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = "Update check canceled.";
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("StoreUpdate", "Manual Store update check failed.", ex);
+                DeveloperDiagnostics.LogOperationFailure(
+                    "StoreUpdate",
+                    "ManualCheckForUpdates",
+                    "Manual Store update check failed.",
+                    ex,
+                    stopwatch.ElapsedMilliseconds,
+                    BuildStoreUpdateDiagnosticsProperties(checkResult, "HelpMenu"));
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = "Unable to check for updates.";
+                }
+            }
+            finally
+            {
+                stopwatch.Stop();
+                DeveloperDiagnostics.LogOperationStop(
+                    "StoreUpdate",
+                    "ManualCheckForUpdates",
+                    "Manual Store update check finished.",
+                    stopwatch.ElapsedMilliseconds,
+                    BuildStoreUpdateDiagnosticsProperties(checkResult, "HelpMenu"));
+                _manualStoreUpdateCheckInProgress = false;
+            }
+        }
+
+        private void ShowManualStoreUpdateWindow(StoreUpdateService storeUpdateService, StoreUpdateCheckResult checkResult)
+        {
+            var updateWindow = new StoreUpdateWindow(storeUpdateService, checkResult, isMandatory: checkResult.HasMandatoryUpdate)
+            {
+                Owner = this
+            };
+
+            var resultKind = ClassifyStoreUpdateResult(checkResult);
+            DeveloperDiagnostics.LogDecision(
+                "StoreUpdate",
+                "ManualUpdateWindowDisplay",
+                "Manual Store update result window displayed.",
+                checkResult.HasMandatoryUpdate ? "ShownMandatoryDialog" : "ShownModelessWindow",
+                BuildStoreUpdateDiagnosticsProperties(checkResult, "HelpMenu"));
+
+            if (ViewModel is not null)
+            {
+                ViewModel.StatusText = resultKind switch
+                {
+                    "MandatoryUpdate" => "Mandatory update detected.",
+                    "UpdateAvailable" => "Update available.",
+                    "NoUpdateAvailable" => "No updates available.",
+                    "ManualInstructions" => "Manual Store update instructions shown.",
+                    "LocalBuildUnavailable" => "Store updates are not available for this local build.",
+                    "CheckUnavailable" => "Update check unavailable.",
+                    "Failure" => "Update check failed.",
+                    _ => "Update check complete."
+                };
+            }
+
+            if (checkResult.HasMandatoryUpdate)
+            {
+                updateWindow.ShowDialog();
+                System.Windows.Application.Current?.Shutdown(0);
+                return;
+            }
+
+            updateWindow.Show();
+            updateWindow.Activate();
+        }
+
+        private static IReadOnlyDictionary<string, object?> BuildStoreUpdateDiagnosticsProperties(StoreUpdateCheckResult? checkResult, string invocation)
+        {
+            var properties = new Dictionary<string, object?>
+            {
+                ["invocation"] = invocation,
+                ["cancellationSupported"] = false
+            };
+
+            if (checkResult is null)
+            {
+                properties["resultAvailable"] = false;
+                return properties;
+            }
+
+            properties["resultAvailable"] = true;
+            properties["packagingKind"] = checkResult.PackagingKind.ToString();
+            properties["availabilityState"] = checkResult.AvailabilityState.ToString();
+            properties["storeUpdateCheckAvailable"] = checkResult.StoreUpdateCheckAvailable;
+            properties["storeContextAvailable"] = checkResult.StoreContextAvailable;
+            properties["isDevelopmentMode"] = checkResult.IsDevelopmentMode;
+            properties["perPackageUpdateListReturned"] = checkResult.PerPackageUpdateListReturned;
+            properties["updateCount"] = checkResult.UpdateCount;
+            properties["hasMandatoryUpdate"] = checkResult.HasMandatoryUpdate;
+            properties["hasConfirmedInstallableUpdate"] = checkResult.HasConfirmedInstallableUpdate;
+            properties["shouldShowManualInstructions"] = checkResult.ShouldShowManualInstructions;
+            properties["resultKind"] = ClassifyStoreUpdateResult(checkResult);
+            properties["exceptionSummary"] = string.IsNullOrWhiteSpace(checkResult.ExceptionSummary) ? null : checkResult.ExceptionSummary;
+            return properties;
+        }
+
+        private static string ClassifyStoreUpdateResult(StoreUpdateCheckResult checkResult)
+        {
+            if (!string.IsNullOrWhiteSpace(checkResult.ExceptionSummary))
+            {
+                return "Failure";
+            }
+
+            if (checkResult.HasMandatoryUpdate)
+            {
+                return "MandatoryUpdate";
+            }
+
+            if (checkResult.HasConfirmedInstallableUpdate)
+            {
+                return "UpdateAvailable";
+            }
+
+            if (checkResult.PackagingKind == StoreUpdatePackagingKind.UnpackagedLocalBuild)
+            {
+                return "LocalBuildUnavailable";
+            }
+
+            return checkResult.AvailabilityState switch
+            {
+                StoreUpdateAvailabilityState.NoUpdateAvailable => "NoUpdateAvailable",
+                StoreUpdateAvailabilityState.ManualCheckRequired => "ManualInstructions",
+                StoreUpdateAvailabilityState.UpdateCheckUnavailable => "CheckUnavailable",
+                StoreUpdateAvailabilityState.ConfirmedUpdateAvailable => "UpdateAvailable",
+                _ => "Unknown"
+            };
         }
 
         private void About_Click(object sender, RoutedEventArgs e)
@@ -5312,7 +5594,18 @@ namespace PS7ScriptDesk.Shell
 
             if (IsUsableLength(_loadedSettings.ConsoleHeight, MinimumConsoleHeight))
             {
-                ConsoleRowDefinition.Height = new GridLength(_loadedSettings.ConsoleHeight!.Value, GridUnitType.Pixel);
+                _lastKnownConsoleHeight = _loadedSettings.ConsoleHeight!.Value;
+                ConsoleRowDefinition.Height = new GridLength(_lastKnownConsoleHeight, GridUnitType.Pixel);
+            }
+
+            if (IsUsableLength(_loadedSettings.ConsoleSideWidth, MinimumConsoleSideWidth))
+            {
+                _lastKnownConsoleSideWidth = _loadedSettings.ConsoleSideWidth!.Value;
+            }
+
+            if (IsUsableLength(_loadedSettings.DockedDebugPanelWidth, MinimumDebugPanelWidth))
+            {
+                _lastKnownDebugPanelWidth = _loadedSettings.DockedDebugPanelWidth!.Value;
             }
 
             if (IsUsableLength(_loadedSettings.WorkspaceSectionHeight, MinimumExplorerSectionHeight))
@@ -5337,7 +5630,9 @@ namespace PS7ScriptDesk.Shell
                     _loadedSettings.DebugPaneWindowHeight!.Value);
             }
 
+            ApplyWorkspaceLayoutMode(RestoreWorkspaceLayoutMode(_loadedSettings.WorkspaceLayoutMode), "SettingsRestore");
             ApplyExplorerVisibilityLayout();
+            SetDebugPanelVisible(_loadedSettings.IsDebugPanelVisible);
 
             if (_loadedSettings.StartMaximized)
             {
@@ -5496,7 +5791,9 @@ namespace PS7ScriptDesk.Shell
             _lastCompletionEnginePhase = status.Phase;
 
             var metadataIsActive = _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.Scheduled ||
+                                   _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.CoreReady ||
                                    _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.BuildingCommandCatalog ||
+                                   _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.DiscoveringModules ||
                                    _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.LoadingCommandMetadata ||
                                    _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.RefreshingCachedMetadata;
             if (metadataIsActive && status.Phase != PowerShellCompletionEnginePhase.Failed)
@@ -5593,7 +5890,9 @@ namespace PS7ScriptDesk.Shell
             switch (status.Phase)
             {
                 case EditorMetadataWarmupPhase.Scheduled:
+                case EditorMetadataWarmupPhase.CoreReady:
                 case EditorMetadataWarmupPhase.BuildingCommandCatalog:
+                case EditorMetadataWarmupPhase.DiscoveringModules:
                 case EditorMetadataWarmupPhase.LoadingCommandMetadata:
                     if (status.Reason == EditorMetadataWarmupReason.CachedLoad)
                     {
@@ -5664,13 +5963,13 @@ namespace PS7ScriptDesk.Shell
                 case EditorMetadataWarmupPhase.Failed:
                     EditorMetadataStatusItem.Visibility = Visibility.Visible;
                     EditorMetadataStatusGlyph.Text = "!";
-                    EditorMetadataStatusTextBlock.Text = "PowerShell IntelliSense failed; see log";
+                    EditorMetadataStatusTextBlock.Text = "IntelliSense: Failed; see log";
                     ApplyEditorMetadataBadgeColors(GetFailureBadgeBackgroundBrush(), GetFailureBadgeBorderBrush(), GetFailureBadgeForegroundBrush());
                     EditorMetadataStatusBadge.ToolTip = tooltipText;
 
                     if (ViewModel is not null)
                     {
-                        ViewModel.StatusText = "PowerShell IntelliSense failed; see log";
+                        ViewModel.StatusText = "IntelliSense: Failed; see log";
                     }
 
                     break;
@@ -5734,7 +6033,9 @@ namespace PS7ScriptDesk.Shell
             switch (status.Phase)
             {
                 case EditorMetadataWarmupPhase.Scheduled:
+                case EditorMetadataWarmupPhase.CoreReady:
                 case EditorMetadataWarmupPhase.BuildingCommandCatalog:
+                case EditorMetadataWarmupPhase.DiscoveringModules:
                 case EditorMetadataWarmupPhase.LoadingCommandMetadata:
                 case EditorMetadataWarmupPhase.RefreshingCachedMetadata:
                     if (!ShouldShowInformationalMetadataToast(status))
@@ -5833,23 +6134,23 @@ namespace PS7ScriptDesk.Shell
         private void ApplyMetadataToastContent(EditorMetadataWarmupStatus status)
         {
             _visibleMetadataToastStatus = status;
-            var (title, body, phaseText, glyph, showProgress, background, border, foreground) = BuildMetadataToastVisual(status);
+            var (title, body, phaseText, glyph, showProgress, backgroundResourceKey, borderResourceKey, foregroundResourceKey) = BuildMetadataToastVisual(status);
 
             MetadataToastTitleTextBlock.Text = title;
             MetadataToastBodyTextBlock.Text = body;
             MetadataToastPhaseTextBlock.Text = phaseText;
             MetadataToastGlyph.Text = glyph;
-            MetadataToastCard.Background = background;
-            MetadataToastCard.BorderBrush = border;
-            MetadataToastTitleTextBlock.Foreground = foreground;
-            MetadataToastBodyTextBlock.Foreground = foreground;
-            MetadataToastPhaseTextBlock.Foreground = foreground;
-            MetadataToastGlyph.Foreground = foreground;
+            MetadataToastCard.SetResourceReference(Border.BackgroundProperty, backgroundResourceKey);
+            MetadataToastCard.SetResourceReference(Border.BorderBrushProperty, borderResourceKey);
+            MetadataToastTitleTextBlock.SetResourceReference(TextBlock.ForegroundProperty, foregroundResourceKey);
+            MetadataToastBodyTextBlock.SetResourceReference(TextBlock.ForegroundProperty, foregroundResourceKey);
+            MetadataToastPhaseTextBlock.SetResourceReference(TextBlock.ForegroundProperty, foregroundResourceKey);
+            MetadataToastGlyph.SetResourceReference(TextBlock.ForegroundProperty, foregroundResourceKey);
             MetadataToastProgressBar.Visibility = showProgress ? Visibility.Visible : Visibility.Collapsed;
             MetadataToastProgressBar.IsIndeterminate = showProgress;
         }
 
-        private (string Title, string Body, string PhaseText, string Glyph, bool ShowProgress, System.Windows.Media.Brush Background, System.Windows.Media.Brush Border, System.Windows.Media.Brush Foreground) BuildMetadataToastVisual(EditorMetadataWarmupStatus status)
+        private static (string Title, string Body, string PhaseText, string Glyph, bool ShowProgress, string BackgroundResourceKey, string BorderResourceKey, string ForegroundResourceKey) BuildMetadataToastVisual(EditorMetadataWarmupStatus status)
         {
             var detailText = string.IsNullOrWhiteSpace(status.DetailText)
                 ? "PS7 ScriptDesk is preparing PowerShell IntelliSense metadata in the background."
@@ -5862,53 +6163,53 @@ namespace PS7ScriptDesk.Shell
             if (status.Phase == EditorMetadataWarmupPhase.Warning)
             {
                 return (
-                    "PowerShell IntelliSense degraded",
+                    "IntelliSense: Degraded",
                     "PS7 ScriptDesk could not finish rebuilding PowerShell IntelliSense metadata. The previous cached metadata is still being used. Details were written to the app log.",
                     detailText,
                     "!",
                     false,
-                    CreateFrozenBrush(0xFF, 0xF3, 0xCD),
-                    CreateFrozenBrush(0xB7, 0x79, 0x1F),
-                    CreateFrozenBrush(0x4B, 0x35, 0x00));
+                    ThemeStatusWarningBackgroundResourceKey,
+                    ThemeStatusWarningBorderResourceKey,
+                    ThemeStatusWarningForegroundResourceKey);
             }
 
             if (status.Phase == EditorMetadataWarmupPhase.Failed)
             {
                 return (
-                    "PowerShell IntelliSense failed",
+                    "IntelliSense: Failed",
                     "PS7 ScriptDesk could not prepare IntelliSense metadata for this PowerShell runtime. Basic editor features may still work, but IntelliSense may be limited. Details were written to the app log.",
                     detailText,
                     "!",
                     false,
-                    CreateFrozenBrush(0xFD, 0xE8, 0xE8),
-                    CreateFrozenBrush(0xC6, 0x28, 0x28),
-                    CreateFrozenBrush(0x7F, 0x1D, 0x1D));
+                    ThemeStatusErrorBackgroundResourceKey,
+                    ThemeStatusErrorBorderResourceKey,
+                    ThemeStatusErrorForegroundResourceKey);
             }
 
             if (status.Phase == EditorMetadataWarmupPhase.Completed)
             {
                 return (
-                    "PowerShell IntelliSense ready",
+                    "IntelliSense: Ready",
                     "PS7 ScriptDesk finished preparing full IntelliSense metadata for this PowerShell runtime. IntelliSense and autofill now have richer command, parameter, syntax, and help details.",
                     detailText,
                     "✓",
                     false,
-                    CreateFrozenBrush(0xE6, 0xF4, 0xEA),
-                    CreateFrozenBrush(0x2E, 0x7D, 0x32),
-                    CreateFrozenBrush(0x1B, 0x5E, 0x20));
+                    ThemeSurfacePrimaryResourceKey,
+                    ThemeBorderStrongResourceKey,
+                    ThemeIconSuccessResourceKey);
             }
 
             if (status.Reason == EditorMetadataWarmupReason.ManualRefresh)
             {
                 return (
-                    "Refreshing PowerShell IntelliSense metadata",
+                    "IntelliSense: Warming up...",
                     "PS7 ScriptDesk is rebuilding command, parameter, syntax, and help metadata for the selected PowerShell runtime.\n\nYou can keep using the editor. The existing metadata cache will remain available until the refresh completes successfully.",
                     $"{detailText} {progressText}".Trim(),
                     "↻",
                     true,
-                    CreateFrozenBrush(0xE8, 0xF2, 0xEA),
-                    CreateFrozenBrush(0x2F, 0x85, 0x3A),
-                    CreateFrozenBrush(0x14, 0x53, 0x2D));
+                    ThemeSurfacePrimaryResourceKey,
+                    ThemeAccentPrimaryResourceKey,
+                    ThemeIconAccentResourceKey);
             }
 
             var body = status.Reason == EditorMetadataWarmupReason.CacheRebuild
@@ -5916,14 +6217,14 @@ namespace PS7ScriptDesk.Shell
                 : "PS7 ScriptDesk is loading command, parameter, syntax, and help metadata for this PowerShell runtime.\n\nThis can take a while the first time a PowerShell version is used. You can keep using the editor while this runs. IntelliSense will improve when loading completes.";
 
             return (
-                "PowerShell IntelliSense initializing",
+                "IntelliSense: Warming up...",
                 body,
                 $"{detailText} {progressText}".Trim(),
                 "⏳",
                 true,
-                CreateFrozenBrush(0xE8, 0xF2, 0xFF),
-                CreateFrozenBrush(0x4A, 0x90, 0xE2),
-                CreateFrozenBrush(0x1E, 0x3A, 0x5F));
+                ThemeSurfacePrimaryResourceKey,
+                ThemeAccentPrimaryResourceKey,
+                ThemeTextPrimaryResourceKey);
         }
 
         private void ShowMetadataToastIfNeeded(EditorMetadataWarmupStatus status, string logReason)
@@ -6204,7 +6505,9 @@ namespace PS7ScriptDesk.Shell
         {
             var hasRuntime = ViewModel?.EffectiveRuntimeItem?.RuntimeInfo is not null;
             var isBusy = _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.Scheduled ||
+                         _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.CoreReady ||
                          _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.BuildingCommandCatalog ||
+                         _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.DiscoveringModules ||
                          _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.LoadingCommandMetadata ||
                          _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.RefreshingCachedMetadata;
 
@@ -6232,6 +6535,156 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
+        private void WorkspaceEditorMaximized_Click(object sender, RoutedEventArgs e)
+        {
+            ApplyWorkspaceLayoutMode(WorkspaceLayoutMode.EditorMaximized, "ViewMenu");
+        }
+
+        private void WorkspaceConsoleMaximized_Click(object sender, RoutedEventArgs e)
+        {
+            ApplyWorkspaceLayoutMode(WorkspaceLayoutMode.ConsoleMaximized, "ViewMenu");
+        }
+
+        private void WorkspaceHorizontalSplit_Click(object sender, RoutedEventArgs e)
+        {
+            ApplyWorkspaceLayoutMode(WorkspaceLayoutMode.HorizontalSplit, "ViewMenu");
+        }
+
+        private void WorkspaceSideBySideSplit_Click(object sender, RoutedEventArgs e)
+        {
+            ApplyWorkspaceLayoutMode(WorkspaceLayoutMode.SideBySideSplit, "ViewMenu");
+        }
+
+        private void WorkspaceRestoreDefault_Click(object sender, RoutedEventArgs e)
+        {
+            _lastKnownConsoleHeight = DefaultConsoleHeight;
+            _lastKnownConsoleSideWidth = DefaultConsoleSideWidth;
+            ApplyWorkspaceLayoutMode(WorkspaceLayoutMode.Default, "ViewMenu");
+        }
+
+        private void ApplyWorkspaceLayoutMode(WorkspaceLayoutMode mode, string source)
+        {
+            var previousMode = _workspaceLayoutMode;
+            CaptureWorkspaceLayoutSizes();
+            _workspaceLayoutMode = mode;
+
+            EditorPaneBorder.Visibility = Visibility.Visible;
+            ConsolePaneBorder.Visibility = Visibility.Visible;
+            EditorPaneBorder.Margin = new Thickness(0, 0, 0, 4);
+            ConsolePaneBorder.Margin = new Thickness(0);
+            ConsolePaneBorder.BorderThickness = new Thickness(0, 1, 0, 0);
+            Grid.SetRow(EditorPaneBorder, 0);
+            Grid.SetRowSpan(EditorPaneBorder, 1);
+            Grid.SetColumn(EditorPaneBorder, 2);
+            Grid.SetColumnSpan(EditorPaneBorder, 1);
+            Grid.SetRow(ConsolePaneBorder, 2);
+            Grid.SetRowSpan(ConsolePaneBorder, 1);
+            Grid.SetColumn(ConsolePaneBorder, 2);
+            Grid.SetColumnSpan(ConsolePaneBorder, 1);
+            EditorColumnDefinition.Width = new GridLength(1, GridUnitType.Star);
+            ConsoleSideSplitterColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+            ConsoleSideColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+            ConsoleSideColumnDefinition.MinWidth = 0;
+            EditorConsoleColumnSplitter.Visibility = Visibility.Collapsed;
+            EditorConsoleRowSplitter.Visibility = Visibility.Visible;
+            EditorConsoleRowSplitterDefinition.Height = new GridLength(6, GridUnitType.Pixel);
+            EditorRowDefinition.Height = new GridLength(1, GridUnitType.Star);
+            ConsoleRowDefinition.Height = new GridLength(Math.Max(_lastKnownConsoleHeight, MinimumConsoleHeight), GridUnitType.Pixel);
+
+            switch (mode)
+            {
+                case WorkspaceLayoutMode.EditorMaximized:
+                    ConsolePaneBorder.Visibility = Visibility.Collapsed;
+                    EditorConsoleRowSplitter.Visibility = Visibility.Collapsed;
+                    EditorConsoleRowSplitterDefinition.Height = new GridLength(0, GridUnitType.Pixel);
+                    ConsoleRowDefinition.Height = new GridLength(0, GridUnitType.Pixel);
+                    break;
+
+                case WorkspaceLayoutMode.ConsoleMaximized:
+                    EditorPaneBorder.Visibility = Visibility.Collapsed;
+                    EditorConsoleRowSplitter.Visibility = Visibility.Collapsed;
+                    EditorConsoleRowSplitterDefinition.Height = new GridLength(0, GridUnitType.Pixel);
+                    EditorRowDefinition.Height = new GridLength(0, GridUnitType.Pixel);
+                    ConsoleRowDefinition.Height = new GridLength(1, GridUnitType.Star);
+                    Grid.SetRow(ConsolePaneBorder, 0);
+                    Grid.SetRowSpan(ConsolePaneBorder, 3);
+                    break;
+
+                case WorkspaceLayoutMode.SideBySideSplit:
+                    EditorConsoleRowSplitter.Visibility = Visibility.Collapsed;
+                    EditorConsoleRowSplitterDefinition.Height = new GridLength(0, GridUnitType.Pixel);
+                    ConsoleRowDefinition.Height = new GridLength(0, GridUnitType.Pixel);
+                    ConsoleSideSplitterColumnDefinition.Width = new GridLength(6, GridUnitType.Pixel);
+                    ConsoleSideColumnDefinition.Width = new GridLength(Math.Max(_lastKnownConsoleSideWidth, MinimumConsoleSideWidth), GridUnitType.Pixel);
+                    ConsoleSideColumnDefinition.MinWidth = MinimumConsoleSideWidth;
+                    EditorConsoleColumnSplitter.Visibility = Visibility.Visible;
+                    Grid.SetRow(ConsolePaneBorder, 0);
+                    Grid.SetRowSpan(ConsolePaneBorder, 3);
+                    Grid.SetColumn(ConsolePaneBorder, 4);
+                    ConsolePaneBorder.BorderThickness = new Thickness(1, 0, 0, 0);
+                    break;
+            }
+
+            if (ViewModel is not null && !string.Equals(source, "SettingsRestore", StringComparison.Ordinal))
+            {
+                ViewModel.StatusText = mode switch
+                {
+                    WorkspaceLayoutMode.EditorMaximized => "Workspace layout: editor maximized",
+                    WorkspaceLayoutMode.ConsoleMaximized => "Workspace layout: console maximized",
+                    WorkspaceLayoutMode.HorizontalSplit => "Workspace layout: editor and console horizontal split",
+                    WorkspaceLayoutMode.SideBySideSplit => "Workspace layout: editor and console side-by-side split",
+                    _ => "Workspace layout: default"
+                };
+            }
+
+            var diagnosticsProperties = new Dictionary<string, object?>
+            {
+                ["source"] = source,
+                ["previousMode"] = previousMode.ToString(),
+                ["mode"] = mode.ToString(),
+                ["lastKnownConsoleHeight"] = _lastKnownConsoleHeight,
+                ["lastKnownConsoleSideWidth"] = _lastKnownConsoleSideWidth
+            };
+
+            if (string.Equals(source, "SettingsRestore", StringComparison.Ordinal))
+            {
+                DeveloperDiagnostics.LogInfo("UI", "Workspace layout restored from settings.", diagnosticsProperties);
+            }
+            else
+            {
+                DeveloperDiagnostics.LogUserAction(
+                    "UI",
+                    "WorkspaceLayoutChanged",
+                    "Workspace layout command applied.",
+                    diagnosticsProperties);
+            }
+        }
+
+        private void CaptureWorkspaceLayoutSizes()
+        {
+            if ((_workspaceLayoutMode is WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit) &&
+                ConsoleRowDefinition.ActualHeight >= MinimumConsoleHeight)
+            {
+                _lastKnownConsoleHeight = ConsoleRowDefinition.ActualHeight;
+            }
+
+            if (_workspaceLayoutMode == WorkspaceLayoutMode.SideBySideSplit &&
+                ConsoleSideColumnDefinition.ActualWidth >= MinimumConsoleSideWidth)
+            {
+                _lastKnownConsoleSideWidth = ConsoleSideColumnDefinition.ActualWidth;
+            }
+        }
+
+        private static WorkspaceLayoutMode RestoreWorkspaceLayoutMode(string? persistedMode)
+        {
+            if (Enum.TryParse<WorkspaceLayoutMode>(persistedMode, ignoreCase: true, out var mode))
+            {
+                return mode;
+            }
+
+            return WorkspaceLayoutMode.HorizontalSplit;
+        }
+
         private void ApplyExplorerVisibilityLayout()
         {
             var isVisible = ViewModel?.IsExplorerVisible ?? true;
@@ -6255,7 +6708,6 @@ namespace PS7ScriptDesk.Shell
             }
 
             EditorColumnDefinition.Width = new GridLength(1, GridUnitType.Star);
-            EditorPaneBorder.Margin = new Thickness(0, 0, 0, 8);
 
             DeveloperDiagnostics.LogInfo(
                 "UI",
@@ -6275,6 +6727,7 @@ namespace PS7ScriptDesk.Shell
             var settings = ViewModel?.CreateApplicationSettingsSnapshot() ?? new ApplicationSettings();
             var restoreBounds = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
             CaptureDebugPaneWindowBounds();
+            CaptureWorkspaceLayoutSizes();
 
             if (IsUsableLength(restoreBounds.Width, MinWidth))
             {
@@ -6308,10 +6761,17 @@ namespace PS7ScriptDesk.Shell
 
             settings.ExplorerWidth = _lastKnownExplorerWidth;
 
-            if (ConsoleRowDefinition.ActualHeight >= MinimumConsoleHeight)
+            if (_workspaceLayoutMode is WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit &&
+                ConsoleRowDefinition.ActualHeight >= MinimumConsoleHeight)
             {
-                settings.ConsoleHeight = ConsoleRowDefinition.ActualHeight;
+                _lastKnownConsoleHeight = ConsoleRowDefinition.ActualHeight;
             }
+
+            settings.ConsoleHeight = _lastKnownConsoleHeight;
+            settings.ConsoleSideWidth = _lastKnownConsoleSideWidth;
+            settings.WorkspaceLayoutMode = _workspaceLayoutMode.ToString();
+            settings.IsDebugPanelVisible = DebugPanelBorder.Visibility == Visibility.Visible;
+            settings.DockedDebugPanelWidth = _lastKnownDebugPanelWidth;
 
             if (WorkspaceTreeRowDefinition.ActualHeight >= MinimumExplorerSectionHeight)
             {
@@ -7646,6 +8106,10 @@ namespace PS7ScriptDesk.Shell
                 MaxWidth = 760,
                 IsOpen = true,
             };
+            _activeEditorToolTip.SetResourceReference(System.Windows.Controls.Control.BackgroundProperty, "Theme.ToolTip.Background");
+            _activeEditorToolTip.SetResourceReference(System.Windows.Controls.Control.ForegroundProperty, "Theme.ToolTip.Foreground");
+            _activeEditorToolTip.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "Theme.ToolTip.Foreground");
+            _activeEditorToolTip.SetResourceReference(System.Windows.Controls.Control.BorderBrushProperty, "Theme.ToolTip.Border");
         }
 
         private void CloseActiveEditorToolTip()

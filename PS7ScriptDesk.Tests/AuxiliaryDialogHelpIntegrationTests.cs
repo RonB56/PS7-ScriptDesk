@@ -10,6 +10,7 @@ using PS7ScriptDesk.Shell.Services;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection("WpfUi")]
 public sealed class AuxiliaryDialogHelpIntegrationTests
 {
     [Fact]

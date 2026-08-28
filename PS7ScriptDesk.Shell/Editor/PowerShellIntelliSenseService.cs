@@ -774,6 +774,7 @@ namespace PS7ScriptDesk.Shell.Editor
             };
 
             window.CompletionList.IsFiltering = true;
+            ApplyCompletionListTheme(window);
 
             foreach (var item in ordered)
             {
@@ -794,6 +795,23 @@ namespace PS7ScriptDesk.Shell.Editor
                 "EditorCompletion",
                 $"Completion window built. Kind={completionKind}, ForceCompletion={forceCompletion}, Fragment='{context.Fragment}', ItemCount={ordered.Count}, EngineCandidates={engineCandidateCount}, CachedCommandCandidates={cachedCommandCandidateCount}, ParameterMetadataCandidates={parameterMetadataCandidateCount}, ParameterFallbackCandidates={parameterFallbackCandidateCount}, ParameterValueCandidates={parameterValueCandidateCount}, PathValueCandidates={pathValueCandidateCount}, LocalMemberCandidates={localMemberCandidateCount}, LocalFallbackCandidates={localFallbackCandidateCount}, SnippetCandidates={snippetCandidateCount}, CachedParameterCount={parameterCommandInfo?.Parameters.Count ?? 0}.");
             return window;
+        }
+
+        private static void ApplyCompletionListTheme(CompletionWindow window)
+        {
+            if (window?.CompletionList?.ListBox is not { } listBox)
+            {
+                return;
+            }
+
+            listBox.SetResourceReference(System.Windows.Controls.Control.BackgroundProperty, "Theme.Completion.Background");
+            listBox.SetResourceReference(System.Windows.Controls.Control.ForegroundProperty, "Theme.Completion.Foreground");
+            listBox.SetResourceReference(System.Windows.Controls.Control.BorderBrushProperty, "Theme.Completion.Border");
+            listBox.ItemContainerStyle = window.TryFindResource("PowerShellCompletionListBoxItemStyle") as System.Windows.Style;
+
+            window.CompletionList.SetResourceReference(System.Windows.Controls.Control.BackgroundProperty, "Theme.Completion.Background");
+            window.CompletionList.SetResourceReference(System.Windows.Controls.Control.ForegroundProperty, "Theme.Completion.Foreground");
+            window.CompletionList.SetResourceReference(System.Windows.Controls.Control.BorderBrushProperty, "Theme.Completion.Border");
         }
 
         private static string BuildCachedCommandDescription(PowerShellCommandReference commandReference, PowerShellQuickInfo? quickInfo)

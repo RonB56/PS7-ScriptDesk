@@ -55,6 +55,7 @@ namespace PS7ScriptDesk.Shell
             StatusMessageTextBlock.Text = BuildInitialStatusText();
             CloseOrExitButton.Content = _isMandatory ? "Exit" : "Close";
             InstallNowButton.IsEnabled = _checkResult.HasConfirmedInstallableUpdate;
+            UpdatesHeadingTextBlock.Text = BuildUpdatesHeadingText();
 
             var items = new List<string>();
             if (_checkResult.HasConfirmedInstallableUpdate)
@@ -66,22 +67,41 @@ namespace PS7ScriptDesk.Shell
             }
             else
             {
-                switch (_checkResult.AvailabilityState)
+                if (_checkResult.PackagingKind == StoreUpdatePackagingKind.UnpackagedLocalBuild)
                 {
-                    case StoreUpdateAvailabilityState.NoUpdateAvailable:
-                        items.Add("No installable Microsoft Store update packages were returned.");
-                        break;
-                    case StoreUpdateAvailabilityState.ManualCheckRequired:
-                    case StoreUpdateAvailabilityState.UpdateCheckUnavailable:
-                        items.Add(_checkResult.StatusMessage);
-                        break;
-                    default:
-                        items.Add("No installable Microsoft Store update packages were returned.");
-                        break;
+                    items.Add("Install Update Now is disabled because this process is not running as a Store-managed package.");
+                }
+                else
+                {
+                    switch (_checkResult.AvailabilityState)
+                    {
+                        case StoreUpdateAvailabilityState.NoUpdateAvailable:
+                            items.Add("No installable Microsoft Store update packages were returned.");
+                            break;
+                        case StoreUpdateAvailabilityState.ManualCheckRequired:
+                        case StoreUpdateAvailabilityState.UpdateCheckUnavailable:
+                            items.Add(_checkResult.StatusMessage);
+                            break;
+                        default:
+                            items.Add("No installable Microsoft Store update packages were returned.");
+                            break;
+                    }
                 }
             }
 
             UpdatesItemsControl.ItemsSource = items;
+        }
+
+        private string BuildUpdatesHeadingText()
+        {
+            if (_checkResult.HasConfirmedInstallableUpdate)
+            {
+                return "Updates detected";
+            }
+
+            return _checkResult.PackagingKind == StoreUpdatePackagingKind.UnpackagedLocalBuild
+                ? "Build state"
+                : "Update details";
         }
 
         private string BuildWindowTitle()
@@ -89,7 +109,7 @@ namespace PS7ScriptDesk.Shell
             return _checkResult.AvailabilityState switch
             {
                 StoreUpdateAvailabilityState.ConfirmedUpdateAvailable => $"{ApplicationBranding.PublicName} - Update Available",
-                StoreUpdateAvailabilityState.ManualCheckRequired when _checkResult.PackagingKind == StoreUpdatePackagingKind.PackagedSideloadedOrTest => $"{ApplicationBranding.PublicName} - Test Package Update Check",
+                StoreUpdateAvailabilityState.ManualCheckRequired when IsNonStorePackagedInstall(_checkResult.PackagingKind) => $"{ApplicationBranding.PublicName} - Package Update Check",
                 StoreUpdateAvailabilityState.UpdateCheckUnavailable => $"{ApplicationBranding.PublicName} - Update Check",
                 StoreUpdateAvailabilityState.ManualCheckRequired => $"{ApplicationBranding.PublicName} - Update Check",
                 StoreUpdateAvailabilityState.NoUpdateAvailable => $"{ApplicationBranding.PublicName} - Update Check",
@@ -106,9 +126,14 @@ namespace PS7ScriptDesk.Shell
                     : "A Microsoft Store update is available.";
             }
 
-            if (_checkResult.PackagingKind == StoreUpdatePackagingKind.PackagedSideloadedOrTest)
+            if (_checkResult.PackagingKind == StoreUpdatePackagingKind.PackagedDeveloperOrTest)
             {
-                return "This appears to be a sideloaded or test package.";
+                return "This appears to be a developer or test package.";
+            }
+
+            if (_checkResult.PackagingKind is StoreUpdatePackagingKind.PackagedSideloaded or StoreUpdatePackagingKind.PackagedSideloadedOrTest)
+            {
+                return "This appears to be a sideloaded package.";
             }
 
             return "Microsoft Store update check";
@@ -125,6 +150,18 @@ namespace PS7ScriptDesk.Shell
             {
                 return "This appears to be a sideloaded or test package. Microsoft Store update checks may not be available for this build.\n\n" +
                        "If you expected an update, install a newer test package manually or use the source that provided this package.";
+            }
+
+            if (_checkResult.PackagingKind == StoreUpdatePackagingKind.PackagedDeveloperOrTest)
+            {
+                return "This appears to be a developer or test package. Microsoft Store automatic update checks are not available for this build.\n\n" +
+                       "If you expected an update, install a newer test package manually or use the source that provided this package.";
+            }
+
+            if (_checkResult.PackagingKind == StoreUpdatePackagingKind.PackagedSideloaded)
+            {
+                return "This appears to be a sideloaded package. Microsoft Store automatic update checks are not available for this build.\n\n" +
+                       "If you expected an update, install a newer package manually or use the source that provided this package.";
             }
 
             if (_checkResult.AvailabilityState is StoreUpdateAvailabilityState.ManualCheckRequired or StoreUpdateAvailabilityState.UpdateCheckUnavailable)
@@ -155,9 +192,21 @@ namespace PS7ScriptDesk.Shell
                 return $"{_checkResult.StatusMessage}{Environment.NewLine}{_checkResult.ExceptionSummary}";
             }
 
+            if (_checkResult.PackagingKind == StoreUpdatePackagingKind.UnpackagedLocalBuild)
+            {
+                return "No Store update action was started.";
+            }
+
             return string.IsNullOrWhiteSpace(_checkResult.StatusMessage)
                 ? _checkResult.ManualInstructions
                 : _checkResult.StatusMessage;
+        }
+
+        private static bool IsNonStorePackagedInstall(StoreUpdatePackagingKind packagingKind)
+        {
+            return packagingKind is StoreUpdatePackagingKind.PackagedDeveloperOrTest
+                or StoreUpdatePackagingKind.PackagedSideloaded
+                or StoreUpdatePackagingKind.PackagedSideloadedOrTest;
         }
 
         private async void InstallNowButton_Click(object sender, RoutedEventArgs e)
@@ -178,7 +227,9 @@ namespace PS7ScriptDesk.Shell
                 new Dictionary<string, object?>
                 {
                     ["isMandatory"] = _isMandatory,
-                    ["updateCount"] = _checkResult.UpdateCount
+                    ["updateCount"] = _checkResult.UpdateCount,
+                    ["packagingKind"] = _checkResult.PackagingKind.ToString(),
+                    ["availabilityState"] = _checkResult.AvailabilityState.ToString()
                 });
 
             var progress = new Progress<StoreUpdateInstallProgressInfo>(info =>
@@ -295,7 +346,7 @@ namespace PS7ScriptDesk.Shell
         {
             if (_isMandatory && System.Windows.Application.Current?.MainWindow is not null && System.Windows.Application.Current.MainWindow != this)
             {
-                DeveloperDiagnostics.LogDecision("StoreUpdate", "MandatoryDialogClosing", "Mandatory Store update dialog closed; the app will exit without opening the main shell.", "Exit");
+                DeveloperDiagnostics.LogDecision("StoreUpdate", "MandatoryDialogClosing", "Mandatory Store update dialog closed; the app will exit.", "Exit");
             }
 
             base.OnClosing(e);

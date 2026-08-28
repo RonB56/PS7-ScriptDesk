@@ -20,6 +20,19 @@ namespace PS7ScriptDesk.Shell.Services
         private const string StoreContextTypeName = "Windows.Services.Store.StoreContext, Windows, ContentType=WindowsRuntime";
         private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan InstallTimeout = TimeSpan.FromMinutes(15);
+        private readonly IStorePackageEnvironmentProvider _packageEnvironmentProvider;
+        private readonly IStoreUpdateQuery _storeUpdateQuery;
+
+        public StoreUpdateService()
+            : this(new WindowsStorePackageEnvironmentProvider(), new ReflectionStoreUpdateQuery())
+        {
+        }
+
+        internal StoreUpdateService(IStorePackageEnvironmentProvider packageEnvironmentProvider, IStoreUpdateQuery storeUpdateQuery)
+        {
+            _packageEnvironmentProvider = packageEnvironmentProvider ?? throw new ArgumentNullException(nameof(packageEnvironmentProvider));
+            _storeUpdateQuery = storeUpdateQuery ?? throw new ArgumentNullException(nameof(storeUpdateQuery));
+        }
 
         public async Task<StoreUpdateCheckResult> CheckForUpdatesAsync(CancellationToken cancellationToken)
         {
@@ -38,13 +51,14 @@ namespace PS7ScriptDesk.Shell.Services
 
             try
             {
-                PopulatePackageInfo(result);
+                ApplyPackageEnvironment(result, _packageEnvironmentProvider.ReadPackageEnvironment());
                 LogCheckStep(
                     "Store packaging state resolved.",
                     new Dictionary<string, object?>
                     {
                         ["isPackaged"] = result.IsPackaged,
                         ["isStoreManaged"] = result.IsStoreManaged,
+                        ["isDevelopmentMode"] = result.IsDevelopmentMode,
                         ["packageFamilyName"] = result.PackageFamilyName,
                         ["packageFullName"] = result.PackageFullName,
                         ["packageVersion"] = result.PackageVersion,
@@ -63,16 +77,17 @@ namespace PS7ScriptDesk.Shell.Services
 
                 if (!result.IsStoreManaged)
                 {
-                    result.PackagingKind = StoreUpdatePackagingKind.PackagedSideloadedOrTest;
+                    result.PackagingKind = ClassifyPackagedNonStoreInstall(result);
                     result.AvailabilityState = StoreUpdateAvailabilityState.ManualCheckRequired;
                     result.StoreUpdateCheckAvailable = false;
                     result.ShouldShowManualInstructions = true;
-                    result.StatusMessage = "This appears to be a sideloaded or test package. Microsoft Store update checks may not be available for this build.";
+                    result.StatusMessage = BuildNonStorePackageStatusMessage(result.PackagingKind);
                     LogCheckStep(
                         "The app appears packaged, but no Store-managed update path was confirmed for this build.",
                         new Dictionary<string, object?>
                         {
                             ["signatureKind"] = result.PackageSignatureKind,
+                            ["isDevelopmentMode"] = result.IsDevelopmentMode,
                             ["packageFamilyName"] = result.PackageFamilyName
                         });
                     return result;
@@ -80,95 +95,44 @@ namespace PS7ScriptDesk.Shell.Services
 
                 result.PackagingKind = StoreUpdatePackagingKind.StoreInstalledManaged;
 
-                var storeContextType = Type.GetType(StoreContextTypeName, throwOnError: false);
-                if (storeContextType is null)
+                var queryResult = await _storeUpdateQuery.CheckForUpdatesAsync(cancellationToken).ConfigureAwait(false);
+                result.StoreContextAvailable = queryResult.StoreContextAvailable;
+                result.RawStoreContext = queryResult.RawStoreContext;
+                result.RawUpdatesCollection = queryResult.RawUpdatesCollection;
+                result.PerPackageUpdateListReturned = queryResult.PerPackageUpdateListReturned;
+
+                if (queryResult.AvailabilityState != StoreUpdateAvailabilityState.ConfirmedUpdateAvailable)
                 {
-                    result.AvailabilityState = StoreUpdateAvailabilityState.UpdateCheckUnavailable;
+                    result.AvailabilityState = queryResult.AvailabilityState;
                     result.StoreUpdateCheckAvailable = false;
                     result.ShouldShowManualInstructions = true;
-                    result.StatusMessage = "Store update APIs were not available at runtime.";
-                    LogCheckStep("StoreContext type was not available.");
-                    return result;
-                }
-
-                var getDefaultMethod = storeContextType.GetMethod("GetDefault", BindingFlags.Public | BindingFlags.Static);
-                if (getDefaultMethod is null)
-                {
-                    result.AvailabilityState = StoreUpdateAvailabilityState.UpdateCheckUnavailable;
-                    result.StoreUpdateCheckAvailable = false;
-                    result.ShouldShowManualInstructions = true;
-                    result.StatusMessage = "StoreContext.GetDefault was not available at runtime.";
-                    LogCheckStep("StoreContext.GetDefault was not available.");
-                    return result;
-                }
-
-                var storeContext = getDefaultMethod.Invoke(null, null);
-                result.StoreContextAvailable = storeContext is not null;
-                LogCheckStep(
-                    "StoreContext availability evaluated.",
-                    new Dictionary<string, object?> { ["storeContextAvailable"] = result.StoreContextAvailable });
-
-                if (storeContext is null)
-                {
-                    result.AvailabilityState = StoreUpdateAvailabilityState.UpdateCheckUnavailable;
-                    result.StoreUpdateCheckAvailable = false;
-                    result.ShouldShowManualInstructions = true;
-                    result.StatusMessage = "StoreContext was unavailable for this packaged build.";
-                    return result;
-                }
-
-                var checkMethod = storeContextType.GetMethod("GetAppAndOptionalStorePackageUpdatesAsync", BindingFlags.Public | BindingFlags.Instance);
-                if (checkMethod is null)
-                {
-                    result.AvailabilityState = StoreUpdateAvailabilityState.UpdateCheckUnavailable;
-                    result.StoreUpdateCheckAvailable = false;
-                    result.ShouldShowManualInstructions = true;
-                    result.StatusMessage = "GetAppAndOptionalStorePackageUpdatesAsync was unavailable at runtime.";
-                    LogCheckStep("GetAppAndOptionalStorePackageUpdatesAsync was unavailable.");
-                    return result;
-                }
-
-                LogCheckStep("Calling GetAppAndOptionalStorePackageUpdatesAsync.");
-                var operation = checkMethod.Invoke(storeContext, null);
-                var updatesObject = await AwaitWinRtOperationAsync(operation, CheckTimeout, "GetAppAndOptionalStorePackageUpdatesAsync", cancellationToken).ConfigureAwait(false);
-
-                result.RawStoreContext = storeContext;
-                result.RawUpdatesCollection = updatesObject;
-                result.PerPackageUpdateListReturned = updatesObject is IEnumerable;
-
-                if (!result.PerPackageUpdateListReturned)
-                {
-                    result.AvailabilityState = StoreUpdateAvailabilityState.ManualCheckRequired;
-                    result.StoreUpdateCheckAvailable = false;
-                    result.ShouldShowManualInstructions = true;
-                    result.StatusMessage = "No per-package Microsoft Store update list was returned for this build. Use Microsoft Store -> Library -> Get updates.";
+                    result.StatusMessage = queryResult.StatusMessage;
                     LogCheckStep(
-                        "Store update query completed without a per-package update list. Treating the result as manual-check-required.",
+                        queryResult.LogMessage,
                         new Dictionary<string, object?>
                         {
                             ["packageFamilyName"] = result.PackageFamilyName,
-                            ["signatureKind"] = result.PackageSignatureKind
+                            ["signatureKind"] = result.PackageSignatureKind,
+                            ["storeContextAvailable"] = result.StoreContextAvailable
                         });
                     return result;
                 }
 
                 result.StoreUpdateCheckAvailable = true;
-
-                var updates = ExtractUpdates(updatesObject);
-                result.Updates = updates;
-                result.UpdateCount = updates.Count;
-                result.HasMandatoryUpdate = updates.Any(update => update.IsMandatory);
+                result.Updates = queryResult.Updates;
+                result.UpdateCount = queryResult.Updates.Count;
+                result.HasMandatoryUpdate = queryResult.Updates.Any(update => update.IsMandatory);
 
                 LogCheckStep(
                     "Store update query completed.",
                     new Dictionary<string, object?>
                     {
                         ["updateCount"] = result.UpdateCount,
-                        ["packageFamilyNames"] = string.Join(", ", updates.Select(update => update.PackageFamilyName)),
+                        ["packageFamilyNames"] = string.Join(", ", result.Updates.Select(update => update.PackageFamilyName)),
                         ["mandatoryUpdatePresent"] = result.HasMandatoryUpdate
                     });
 
-                foreach (var update in updates)
+                foreach (var update in result.Updates)
                 {
                     LogCheckStep(
                         "Store update candidate found.",
@@ -203,7 +167,7 @@ namespace PS7ScriptDesk.Shell.Services
                 {
                     result.PackagingKind = result.IsStoreManaged
                         ? StoreUpdatePackagingKind.StoreInstalledManaged
-                        : StoreUpdatePackagingKind.PackagedSideloadedOrTest;
+                        : ClassifyPackagedNonStoreInstall(result);
                 }
 
                 result.AvailabilityState = StoreUpdateAvailabilityState.UpdateCheckUnavailable;
@@ -227,6 +191,7 @@ namespace PS7ScriptDesk.Shell.Services
                         ["packagingKind"] = result.PackagingKind.ToString(),
                         ["availabilityState"] = result.AvailabilityState.ToString(),
                         ["isStoreManaged"] = result.IsStoreManaged,
+                        ["isDevelopmentMode"] = result.IsDevelopmentMode,
                         ["storeContextAvailable"] = result.StoreContextAvailable,
                         ["updateCount"] = result.UpdateCount,
                         ["hasMandatoryUpdate"] = result.HasMandatoryUpdate,
@@ -332,56 +297,213 @@ namespace PS7ScriptDesk.Shell.Services
             }
         }
 
-        private static void PopulatePackageInfo(StoreUpdateCheckResult result)
+        internal static void ApplyPackageEnvironment(StoreUpdateCheckResult result, StorePackageEnvironmentInfo packageEnvironment)
         {
-            var packageType = Type.GetType(PackageTypeName, throwOnError: false);
-            if (packageType is not null)
-            {
-                try
-                {
-                    var currentPackage = packageType.GetProperty("Current", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-                    if (currentPackage is not null)
-                    {
-                        result.IsPackaged = true;
-                        result.PackageSignatureKind = ReadStringProperty(currentPackage, "SignatureKind");
-                        result.IsStoreManaged = string.Equals(result.PackageSignatureKind, "Store", StringComparison.OrdinalIgnoreCase);
-                        result.PackageFullName = ReadStringProperty(currentPackage, "Id", "FullName");
-                        result.PackageFamilyName = ReadStringProperty(currentPackage, "Id", "FamilyName");
-                        result.PackageVersion = ReadPackageVersion(currentPackage);
-                    }
-                }
-                catch (TargetInvocationException ex)
-                {
-                    LogCheckException("Package identity lookup failed.", ex.InnerException ?? ex);
-                }
-                catch (Exception ex)
-                {
-                    LogCheckException("Package identity lookup failed.", ex);
-                }
-            }
+            ArgumentNullException.ThrowIfNull(result);
+            ArgumentNullException.ThrowIfNull(packageEnvironment);
 
-            var processPath = Environment.ProcessPath ?? string.Empty;
-            var baseDirectory = AppContext.BaseDirectory ?? string.Empty;
-            var packageFamilyName = Environment.GetEnvironmentVariable("APPX_PACKAGE_FAMILY_NAME") ?? string.Empty;
-            var inferredPackaged = processPath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
-                                   baseDirectory.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
-                                   !string.IsNullOrWhiteSpace(packageFamilyName);
+            var inferredPackagedFallback = !packageEnvironment.HasPackageIdentity && packageEnvironment.IsInferredPackagedFallback;
+            result.IsPackaged = packageEnvironment.HasPackageIdentity || inferredPackagedFallback;
+            result.IsDevelopmentMode = packageEnvironment.IsDevelopmentMode;
+            result.PackageSignatureKind = NormalizePackageSignatureKind(packageEnvironment.SignatureKind);
+            result.PackageFullName = packageEnvironment.PackageFullName;
+            result.PackageFamilyName = packageEnvironment.PackageFamilyName;
+            result.PackageVersion = packageEnvironment.PackageVersion;
+            result.IsStoreManaged = result.IsPackaged &&
+                                    !inferredPackagedFallback &&
+                                    !result.IsDevelopmentMode &&
+                                    IsStorePackageSignature(result.PackageSignatureKind);
 
-            if (!result.IsPackaged && inferredPackaged)
+            if (inferredPackagedFallback)
             {
-                result.IsPackaged = true;
-                result.IsStoreManaged = false;
-                result.PackageFamilyName = string.IsNullOrWhiteSpace(result.PackageFamilyName) ? packageFamilyName : result.PackageFamilyName;
                 result.PackageSignatureKind = string.IsNullOrWhiteSpace(result.PackageSignatureKind) ? "UnknownPackagedFallback" : result.PackageSignatureKind;
                 LogCheckStep(
                     "Packaged fallback detection inferred MSIX packaging from the startup environment.",
                     new Dictionary<string, object?>
                     {
-                        ["processPath"] = processPath,
-                        ["baseDirectory"] = baseDirectory,
+                        ["processPath"] = packageEnvironment.ProcessPath,
+                        ["baseDirectory"] = packageEnvironment.BaseDirectory,
                         ["packageFamilyName"] = result.PackageFamilyName,
                         ["signatureKind"] = result.PackageSignatureKind
                     });
+            }
+        }
+
+        private static StoreUpdatePackagingKind ClassifyPackagedNonStoreInstall(StoreUpdateCheckResult result)
+        {
+            if (result.IsDevelopmentMode ||
+                string.Equals(result.PackageSignatureKind, "Developer", StringComparison.OrdinalIgnoreCase))
+            {
+                return StoreUpdatePackagingKind.PackagedDeveloperOrTest;
+            }
+
+            return StoreUpdatePackagingKind.PackagedSideloaded;
+        }
+
+        private static string BuildNonStorePackageStatusMessage(StoreUpdatePackagingKind packagingKind)
+        {
+            return packagingKind == StoreUpdatePackagingKind.PackagedDeveloperOrTest
+                ? "This appears to be a developer or test package. Microsoft Store automatic update checks are not available for this build."
+                : "This appears to be a sideloaded package. Microsoft Store automatic update checks are not available for this build.";
+        }
+
+        private static bool IsStorePackageSignature(string signatureKind)
+        {
+            return string.Equals(signatureKind, "Store", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string NormalizePackageSignatureKind(object? signatureKind)
+        {
+            var text = signatureKind?.ToString()?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            if (string.Equals(text, "3", StringComparison.OrdinalIgnoreCase) ||
+                text.EndsWith(".Store", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(text, "Store", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Store";
+            }
+
+            if (string.Equals(text, "1", StringComparison.OrdinalIgnoreCase) ||
+                text.EndsWith(".Developer", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(text, "Developer", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Developer";
+            }
+
+            if (string.Equals(text, "2", StringComparison.OrdinalIgnoreCase) ||
+                text.EndsWith(".Enterprise", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(text, "Enterprise", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Enterprise";
+            }
+
+            if (string.Equals(text, "4", StringComparison.OrdinalIgnoreCase) ||
+                text.EndsWith(".System", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(text, "System", StringComparison.OrdinalIgnoreCase))
+            {
+                return "System";
+            }
+
+            return text;
+        }
+
+        private sealed class WindowsStorePackageEnvironmentProvider : IStorePackageEnvironmentProvider
+        {
+            public StorePackageEnvironmentInfo ReadPackageEnvironment()
+            {
+                var packageEnvironment = new StorePackageEnvironmentInfo();
+                var packageType = Type.GetType(PackageTypeName, throwOnError: false);
+                if (packageType is not null)
+                {
+                    try
+                    {
+                        var currentPackage = packageType.GetProperty("Current", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                        if (currentPackage is not null)
+                        {
+                            packageEnvironment.HasPackageIdentity = true;
+                            packageEnvironment.SignatureKind = NormalizePackageSignatureKind(ReadPropertyValue(currentPackage, "SignatureKind"));
+                            packageEnvironment.IsDevelopmentMode = ReadBooleanProperty(currentPackage, "IsDevelopmentMode") ?? false;
+                            packageEnvironment.PackageFullName = ReadStringProperty(currentPackage, "Id", "FullName");
+                            packageEnvironment.PackageFamilyName = ReadStringProperty(currentPackage, "Id", "FamilyName");
+                            packageEnvironment.PackageVersion = ReadPackageVersion(currentPackage);
+                        }
+                    }
+                    catch (TargetInvocationException ex)
+                    {
+                        LogCheckException("Package identity lookup failed.", ex.InnerException ?? ex);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogCheckException("Package identity lookup failed.", ex);
+                    }
+                }
+
+                packageEnvironment.ProcessPath = Environment.ProcessPath ?? string.Empty;
+                packageEnvironment.BaseDirectory = AppContext.BaseDirectory ?? string.Empty;
+                var packageFamilyName = Environment.GetEnvironmentVariable("APPX_PACKAGE_FAMILY_NAME") ?? string.Empty;
+                packageEnvironment.IsInferredPackagedFallback = !packageEnvironment.HasPackageIdentity &&
+                    (packageEnvironment.ProcessPath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
+                     packageEnvironment.BaseDirectory.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
+                     !string.IsNullOrWhiteSpace(packageFamilyName));
+
+                if (!packageEnvironment.HasPackageIdentity && packageEnvironment.IsInferredPackagedFallback)
+                {
+                    packageEnvironment.PackageFamilyName = packageFamilyName;
+                    packageEnvironment.SignatureKind = "UnknownPackagedFallback";
+                }
+
+                return packageEnvironment;
+            }
+        }
+
+        private sealed class ReflectionStoreUpdateQuery : IStoreUpdateQuery
+        {
+            public async Task<StoreUpdateQueryResult> CheckForUpdatesAsync(CancellationToken cancellationToken)
+            {
+                var storeContextType = Type.GetType(StoreContextTypeName, throwOnError: false);
+                if (storeContextType is null)
+                {
+                    LogCheckStep("StoreContext type was not available.");
+                    return StoreUpdateQueryResult.Unavailable(
+                        StoreUpdateAvailabilityState.UpdateCheckUnavailable,
+                        "Store update APIs were not available at runtime.",
+                        "StoreContext type was not available.");
+                }
+
+                var getDefaultMethod = storeContextType.GetMethod("GetDefault", BindingFlags.Public | BindingFlags.Static);
+                if (getDefaultMethod is null)
+                {
+                    LogCheckStep("StoreContext.GetDefault was not available.");
+                    return StoreUpdateQueryResult.Unavailable(
+                        StoreUpdateAvailabilityState.UpdateCheckUnavailable,
+                        "StoreContext.GetDefault was not available at runtime.",
+                        "StoreContext.GetDefault was not available.");
+                }
+
+                var storeContext = getDefaultMethod.Invoke(null, null);
+                LogCheckStep(
+                    "StoreContext availability evaluated.",
+                    new Dictionary<string, object?> { ["storeContextAvailable"] = storeContext is not null });
+
+                if (storeContext is null)
+                {
+                    return StoreUpdateQueryResult.Unavailable(
+                        StoreUpdateAvailabilityState.UpdateCheckUnavailable,
+                        "StoreContext was unavailable for this packaged build.",
+                        "StoreContext was unavailable for this packaged build.");
+                }
+
+                var checkMethod = storeContextType.GetMethod("GetAppAndOptionalStorePackageUpdatesAsync", BindingFlags.Public | BindingFlags.Instance);
+                if (checkMethod is null)
+                {
+                    LogCheckStep("GetAppAndOptionalStorePackageUpdatesAsync was unavailable.");
+                    return StoreUpdateQueryResult.Unavailable(
+                        StoreUpdateAvailabilityState.UpdateCheckUnavailable,
+                        "GetAppAndOptionalStorePackageUpdatesAsync was unavailable at runtime.",
+                        "GetAppAndOptionalStorePackageUpdatesAsync was unavailable.");
+                }
+
+                LogCheckStep("Calling GetAppAndOptionalStorePackageUpdatesAsync.");
+                var operation = checkMethod.Invoke(storeContext, null);
+                var updatesObject = await AwaitWinRtOperationAsync(operation, CheckTimeout, "GetAppAndOptionalStorePackageUpdatesAsync", cancellationToken).ConfigureAwait(false);
+                if (updatesObject is not IEnumerable)
+                {
+                    return StoreUpdateQueryResult.Unavailable(
+                        StoreUpdateAvailabilityState.ManualCheckRequired,
+                        "No per-package Microsoft Store update list was returned for this build. Use Microsoft Store -> Library -> Get updates.",
+                        "Store update query completed without a per-package update list. Treating the result as manual-check-required.",
+                        storeContext,
+                        updatesObject);
+                }
+
+                return StoreUpdateQueryResult.UpdatesReturned(
+                    storeContext,
+                    updatesObject,
+                    ExtractUpdates(updatesObject));
             }
         }
 
@@ -661,6 +783,94 @@ namespace PS7ScriptDesk.Shell.Services
         }
     }
 
+    internal interface IStorePackageEnvironmentProvider
+    {
+        StorePackageEnvironmentInfo ReadPackageEnvironment();
+    }
+
+    internal interface IStoreUpdateQuery
+    {
+        Task<StoreUpdateQueryResult> CheckForUpdatesAsync(CancellationToken cancellationToken);
+    }
+
+    internal sealed class StorePackageEnvironmentInfo
+    {
+        public bool HasPackageIdentity { get; set; }
+
+        public bool IsInferredPackagedFallback { get; set; }
+
+        public bool IsDevelopmentMode { get; set; }
+
+        public string SignatureKind { get; set; } = string.Empty;
+
+        public string PackageFullName { get; set; } = string.Empty;
+
+        public string PackageFamilyName { get; set; } = string.Empty;
+
+        public string PackageVersion { get; set; } = string.Empty;
+
+        public string ProcessPath { get; set; } = string.Empty;
+
+        public string BaseDirectory { get; set; } = string.Empty;
+    }
+
+    internal sealed class StoreUpdateQueryResult
+    {
+        private StoreUpdateQueryResult()
+        {
+        }
+
+        public StoreUpdateAvailabilityState AvailabilityState { get; private set; }
+
+        public string StatusMessage { get; private set; } = string.Empty;
+
+        public string LogMessage { get; private set; } = string.Empty;
+
+        public bool StoreContextAvailable { get; private set; }
+
+        public bool PerPackageUpdateListReturned { get; private set; }
+
+        public object? RawStoreContext { get; private set; }
+
+        public object? RawUpdatesCollection { get; private set; }
+
+        public List<StoreUpdatePackageInfo> Updates { get; private set; } = new();
+
+        public static StoreUpdateQueryResult UpdatesReturned(object storeContext, object updatesCollection, List<StoreUpdatePackageInfo> updates)
+        {
+            return new StoreUpdateQueryResult
+            {
+                AvailabilityState = StoreUpdateAvailabilityState.ConfirmedUpdateAvailable,
+                StatusMessage = "Microsoft Store update query completed.",
+                LogMessage = "Store update query returned a per-package update list.",
+                StoreContextAvailable = true,
+                PerPackageUpdateListReturned = true,
+                RawStoreContext = storeContext,
+                RawUpdatesCollection = updatesCollection,
+                Updates = updates ?? new List<StoreUpdatePackageInfo>()
+            };
+        }
+
+        public static StoreUpdateQueryResult Unavailable(
+            StoreUpdateAvailabilityState availabilityState,
+            string statusMessage,
+            string logMessage,
+            object? storeContext = null,
+            object? updatesCollection = null)
+        {
+            return new StoreUpdateQueryResult
+            {
+                AvailabilityState = availabilityState,
+                StatusMessage = statusMessage ?? string.Empty,
+                LogMessage = logMessage ?? string.Empty,
+                StoreContextAvailable = storeContext is not null,
+                PerPackageUpdateListReturned = false,
+                RawStoreContext = storeContext,
+                RawUpdatesCollection = updatesCollection
+            };
+        }
+    }
+
     public sealed class StoreUpdateCheckResult
     {
         public StoreUpdatePackagingKind PackagingKind { get; set; }
@@ -670,6 +880,8 @@ namespace PS7ScriptDesk.Shell.Services
         public bool IsPackaged { get; set; }
 
         public bool IsStoreManaged { get; set; }
+
+        public bool IsDevelopmentMode { get; set; }
 
         public string PackageFamilyName { get; set; } = string.Empty;
 
@@ -718,6 +930,8 @@ namespace PS7ScriptDesk.Shell.Services
         UnpackagedLocalBuild = 1,
         PackagedSideloadedOrTest = 2,
         StoreInstalledManaged = 3,
+        PackagedDeveloperOrTest = 4,
+        PackagedSideloaded = 5,
     }
 
     public enum StoreUpdateAvailabilityState

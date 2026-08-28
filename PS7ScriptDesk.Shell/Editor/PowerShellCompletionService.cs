@@ -56,6 +56,7 @@ namespace PS7ScriptDesk.Shell.Editor
         private string? _completionEngineWarmupRuntimePath;
         private string? _completionEngineReadyRuntimePath;
         private MetadataInitialLoadDiagnostics? _activeMetadataInitialLoadDiagnostics;
+        private EditorMetadataWarmupReason _activeMetadataWarmupReason = EditorMetadataWarmupReason.None;
         private string? _loadedMetadataRuntimePath;
         private EditorMetadataSnapshotHealth _loadedMetadataHealth = EditorMetadataSnapshotHealth.Empty;
         private bool _loadedPersistedMetadataForRuntime;
@@ -259,7 +260,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 RaiseCompletionEngineStatus(
                     new PowerShellCompletionEngineStatus(
                         PowerShellCompletionEnginePhase.Failed,
-                        "PowerShell IntelliSense failed; see log",
+                        "IntelliSense: Failed; see log",
                         normalizedRuntimePath,
                         "PowerShell 7 was not found or could not be launched. Install PowerShell 7 or configure the pwsh.exe path."));
                 return;
@@ -279,7 +280,7 @@ namespace PS7ScriptDesk.Shell.Editor
                     _completionEngineReadyRuntimePath = normalizedRuntimePath;
                     alreadyReadyStatus = new PowerShellCompletionEngineStatus(
                         PowerShellCompletionEnginePhase.Ready,
-                        "PowerShell IntelliSense ready",
+                        "IntelliSense: Ready",
                         normalizedRuntimePath,
                         "The live PowerShell completion engine is already available.");
                 }
@@ -320,7 +321,7 @@ namespace PS7ScriptDesk.Shell.Editor
             RaiseCompletionEngineStatus(
                 new PowerShellCompletionEngineStatus(
                     PowerShellCompletionEnginePhase.Initializing,
-                    "PowerShell IntelliSense initializing...",
+                    "IntelliSense: Warming up...",
                     normalizedRuntimePath,
                     "Starting the live PowerShell completion engine in the background."));
         }
@@ -344,7 +345,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 RaiseMetadataWarmupStatus(
                     new EditorMetadataWarmupStatus(
                         EditorMetadataWarmupPhase.Failed,
-                        "PowerShell IntelliSense failed; see log",
+                        "IntelliSense: Failed; see log",
                         NormalizePath(runtimeInfo.LaunchExecutablePath),
                         detailText: invalidRuntimeDiagnostics is null
                             ? invalidRuntimeDetail
@@ -427,7 +428,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 RaiseMetadataWarmupStatus(
                     new EditorMetadataWarmupStatus(
                         EditorMetadataWarmupPhase.Scheduled,
-                        "Checking PowerShell IntelliSense metadata",
+                        "IntelliSense: Warming up...",
                         normalizedRuntimePath,
                         detailText: "Checking whether a saved full metadata cache can be reused for this PowerShell runtime.",
                         isLoadedFromCache: true,
@@ -445,7 +446,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 RaiseMetadataWarmupStatus(
                     new EditorMetadataWarmupStatus(
                         EditorMetadataWarmupPhase.Completed,
-                        "PowerShell IntelliSense ready",
+                        "IntelliSense: Ready",
                         normalizedRuntimePath,
                         loadedCount,
                         loadedCount,
@@ -491,11 +492,7 @@ namespace PS7ScriptDesk.Shell.Editor
             RaiseMetadataWarmupStatus(
                 new EditorMetadataWarmupStatus(
                     loadedFromCache ? EditorMetadataWarmupPhase.RefreshingCachedMetadata : EditorMetadataWarmupPhase.Scheduled,
-                    forceRebuild
-                        ? "Refreshing PowerShell IntelliSense metadata"
-                        : loadedFromCache
-                            ? "Refreshing PowerShell IntelliSense metadata"
-                            : "PowerShell IntelliSense initializing...",
+                    "IntelliSense: Warming up...",
                     normalizedRuntimePath,
                     detailText: detailText,
                     commandCount: cachedHealth.CommandCount,
@@ -504,6 +501,8 @@ namespace PS7ScriptDesk.Shell.Editor
                     getChildItemParameterCount: cachedHealth.GetChildItemParameterCount,
                     isLoadedFromCache: loadedFromCache,
                     reason: warmupReason));
+
+            RaiseCoreReadyStatusIfPossible(normalizedRuntimePath, warmupReason, "Full command and parameter metadata will continue warming in the background.");
 
             if (isUserInitiated)
             {
@@ -532,9 +531,30 @@ namespace PS7ScriptDesk.Shell.Editor
 
         private void RaiseMetadataWarmupStatus(EditorMetadataWarmupStatus status)
         {
+            if (status is null)
+            {
+                return;
+            }
+
             _activeMetadataInitialLoadDiagnostics?.RecordUiStatus(status);
+            DeveloperDiagnostics.LogInfo(
+                "EditorMetadata",
+                "Metadata warmup readiness status changed.",
+                new Dictionary<string, object?>
+                {
+                    ["phase"] = status.Phase.ToString(),
+                    ["reason"] = status.Reason.ToString(),
+                    ["runtimePath"] = status.RuntimePath,
+                    ["processedCount"] = status.ProcessedCount,
+                    ["totalCount"] = status.TotalCount,
+                    ["commandCount"] = status.CommandCount,
+                    ["quickInfoCount"] = status.QuickInfoCount,
+                    ["isLoadedFromCache"] = status.IsLoadedFromCache,
+                    ["detail"] = status.DetailText
+                });
+
             var handler = MetadataWarmupStatusChanged;
-            if (handler is null || status is null)
+            if (handler is null)
             {
                 return;
             }
@@ -547,6 +567,43 @@ namespace PS7ScriptDesk.Shell.Editor
             {
                 // UI listeners should never break background metadata warmup.
             }
+        }
+
+        private void RaiseCoreReadyStatusIfPossible(string normalizedRuntimePath, EditorMetadataWarmupReason reason, string detailText)
+        {
+            if (string.IsNullOrWhiteSpace(normalizedRuntimePath))
+            {
+                return;
+            }
+
+            EditorMetadataWarmupReason activeReason;
+            bool shouldRaise;
+            lock (_syncRoot)
+            {
+                shouldRaise =
+                    !_disposed &&
+                    string.Equals(_completionEngineReadyRuntimePath, normalizedRuntimePath, StringComparison.OrdinalIgnoreCase) &&
+                    _metadataBuilderProcess is not null &&
+                    !_metadataBuilderProcess.HasExited &&
+                    string.Equals(_metadataBuilderRuntimePath, normalizedRuntimePath, StringComparison.OrdinalIgnoreCase) &&
+                    !RuntimeHasReadyMetadataSnapshot(normalizedRuntimePath);
+                activeReason = _activeMetadataWarmupReason;
+            }
+
+            if (!shouldRaise)
+            {
+                return;
+            }
+
+            RaiseMetadataWarmupStatus(
+                new EditorMetadataWarmupStatus(
+                    EditorMetadataWarmupPhase.CoreReady,
+                    "IntelliSense: Warming up...",
+                    normalizedRuntimePath,
+                    detailText: string.IsNullOrWhiteSpace(detailText)
+                        ? "Core completions are available while full command and parameter metadata continues warming in the background."
+                        : detailText.Trim(),
+                    reason: activeReason != EditorMetadataWarmupReason.None ? activeReason : reason));
         }
 
         private void RaiseCompletionEngineStatus(PowerShellCompletionEngineStatus status)
@@ -608,10 +665,14 @@ namespace PS7ScriptDesk.Shell.Editor
                 RaiseCompletionEngineStatus(
                     new PowerShellCompletionEngineStatus(
                         PowerShellCompletionEnginePhase.Ready,
-                        "PowerShell IntelliSense ready",
+                        "IntelliSense: Ready",
                         normalizedRuntimePath,
                         "The live PowerShell completion engine is ready.",
                         stopwatch.ElapsedMilliseconds));
+                RaiseCoreReadyStatusIfPossible(
+                    normalizedRuntimePath,
+                    EditorMetadataWarmupReason.None,
+                    $"The live completion engine became available in {stopwatch.ElapsedMilliseconds:N0} ms while full command metadata continues warming.");
             }
             catch (OperationCanceledException) when (ownerCancellationTokenSource.IsCancellationRequested || _disposed)
             {
@@ -625,7 +686,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 RaiseCompletionEngineStatus(
                     new PowerShellCompletionEngineStatus(
                         PowerShellCompletionEnginePhase.Failed,
-                        "PowerShell IntelliSense failed; see log",
+                        "IntelliSense: Failed; see log",
                         normalizedRuntimePath,
                         $"The live PowerShell completion engine could not be started: {ex.Message}",
                         stopwatch.ElapsedMilliseconds));
@@ -1051,7 +1112,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 RaiseMetadataWarmupStatus(
                     new EditorMetadataWarmupStatus(
                         EditorMetadataWarmupPhase.Failed,
-                        "PowerShell IntelliSense failed; see log",
+                        "IntelliSense: Failed; see log",
                         normalizedRuntimePath,
                         detailText: AppendMetadataLogSupportHint("PS7 ScriptDesk could not locate its helper executable to build the metadata cache.", performanceLogPath),
                         reason: warmupReason));
@@ -1099,7 +1160,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 RaiseMetadataWarmupStatus(
                     new EditorMetadataWarmupStatus(
                         readyCacheAlreadyLoaded ? EditorMetadataWarmupPhase.Warning : EditorMetadataWarmupPhase.Failed,
-                        readyCacheAlreadyLoaded ? "PowerShell IntelliSense degraded; cached metadata still in use." : "PowerShell IntelliSense failed; see log",
+                        readyCacheAlreadyLoaded ? "IntelliSense: Degraded; cached metadata still in use" : "IntelliSense: Failed; see log",
                         normalizedRuntimePath,
                         detailText: readyCacheAlreadyLoaded
                             ? AppendMetadataLogSupportHint($"PS7 ScriptDesk kept using the last known-good metadata snapshot, but could not start the refresh helper: {ex.Message}", performanceLogPath)
@@ -1121,10 +1182,16 @@ namespace PS7ScriptDesk.Shell.Editor
                 _metadataBuilderProcess = process;
                 _metadataBuilderCancellationTokenSource = builderCancellationTokenSource;
                 _metadataBuilderRuntimePath = normalizedRuntimePath;
+                _activeMetadataWarmupReason = warmupReason;
                 _activeMetadataInitialLoadDiagnostics = startupDiagnostics;
                 _metadataBuilderStdoutReaderTask = MonitorMetadataBuilderProcessAsync(process, runtimeInfo, readyCacheAlreadyLoaded, warmupReason, performanceLogPath, builderCancellationTokenSource, startupDiagnostics);
                 _metadataBuilderStderrReaderTask = DrainMetadataBuilderErrorsAsync(process, builderCancellationTokenSource, performanceLogPath);
             }
+
+            RaiseCoreReadyStatusIfPossible(
+                normalizedRuntimePath,
+                warmupReason,
+                "Core completions are available while full command and parameter metadata continues warming in the background.");
         }
 
         private async Task MonitorMetadataBuilderProcessAsync(
@@ -1215,10 +1282,12 @@ namespace PS7ScriptDesk.Shell.Editor
             {
                 lock (_syncRoot)
                 {
+                    var clearedCurrentProcess = false;
                     if (ReferenceEquals(_metadataBuilderProcess, process))
                     {
                         _metadataBuilderProcess = null;
                         _metadataBuilderRuntimePath = normalizedRuntimePath;
+                        clearedCurrentProcess = true;
                     }
 
                     if (ReferenceEquals(_metadataBuilderCancellationTokenSource, builderCancellationTokenSource))
@@ -1229,6 +1298,11 @@ namespace PS7ScriptDesk.Shell.Editor
                     if (ReferenceEquals(_activeMetadataInitialLoadDiagnostics, startupDiagnostics))
                     {
                         _activeMetadataInitialLoadDiagnostics = null;
+                    }
+
+                    if (clearedCurrentProcess)
+                    {
+                        _activeMetadataWarmupReason = EditorMetadataWarmupReason.None;
                     }
                 }
 
@@ -1281,11 +1355,12 @@ namespace PS7ScriptDesk.Shell.Editor
             switch (message.Phase)
             {
                 case EditorMetadataWarmupPhase.BuildingCommandCatalog:
+                case EditorMetadataWarmupPhase.DiscoveringModules:
                 case EditorMetadataWarmupPhase.LoadingCommandMetadata:
                     RaiseMetadataWarmupStatus(
                         new EditorMetadataWarmupStatus(
                             hasReadyMetadata ? EditorMetadataWarmupPhase.RefreshingCachedMetadata : message.Phase,
-                            hasReadyMetadata ? "Refreshing PowerShell IntelliSense metadata" : message.Message,
+                            "IntelliSense: Warming up...",
                             normalizedRuntimePath,
                             message.ProcessedCount,
                             message.TotalCount,
@@ -1315,7 +1390,7 @@ namespace PS7ScriptDesk.Shell.Editor
                         RaiseMetadataWarmupStatus(
                             new EditorMetadataWarmupStatus(
                                 EditorMetadataWarmupPhase.Completed,
-                                "PowerShell IntelliSense ready",
+                                "IntelliSense: Ready",
                                 normalizedRuntimePath,
                                 snapshot.QuickInfos.Count,
                                 snapshot.QuickInfos.Count,
@@ -1377,7 +1452,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 RaiseMetadataWarmupStatus(
                     new EditorMetadataWarmupStatus(
                         EditorMetadataWarmupPhase.Warning,
-                        "PowerShell IntelliSense degraded; cached metadata still in use.",
+                        "IntelliSense: Degraded; cached metadata still in use",
                         normalizedRuntimePath,
                         detailText: AppendMetadataLogSupportHint($"PS7 ScriptDesk is still using the last known-good metadata snapshot. Refresh error: {safeDetailText}", performanceLogPath),
                         commandCount: metadataHealth.CommandCount,
@@ -1393,7 +1468,7 @@ namespace PS7ScriptDesk.Shell.Editor
             RaiseMetadataWarmupStatus(
                 new EditorMetadataWarmupStatus(
                     EditorMetadataWarmupPhase.Failed,
-                    "PowerShell IntelliSense failed; see log",
+                    "IntelliSense: Failed; see log",
                     normalizedRuntimePath,
                     detailText: AppendMetadataLogSupportHint(safeDetailText, performanceLogPath),
                     reason: warmupReason));

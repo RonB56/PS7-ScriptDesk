@@ -17,6 +17,21 @@
     <SolidColorBrush x:Key="Theme.Text.Secondary" Color="#9FB2C9"/>
     <SolidColorBrush x:Key="Theme.Text.Inverse" Color="#0F172A"/>
 
+    <SolidColorBrush x:Key="Theme.ToolTip.Background" Color="#1F2937"/>
+    <SolidColorBrush x:Key="Theme.ToolTip.Foreground" Color="#E5EEF9"/>
+    <SolidColorBrush x:Key="Theme.ToolTip.SecondaryForeground" Color="#9FB2C9"/>
+    <SolidColorBrush x:Key="Theme.ToolTip.Border" Color="#475569"/>
+
+    <SolidColorBrush x:Key="Theme.Completion.Background" Color="#1F2937"/>
+    <SolidColorBrush x:Key="Theme.Completion.Foreground" Color="#E5EEF9"/>
+    <SolidColorBrush x:Key="Theme.Completion.SecondaryForeground" Color="#9FB2C9"/>
+    <SolidColorBrush x:Key="Theme.Completion.Border" Color="#475569"/>
+    <SolidColorBrush x:Key="Theme.Completion.HoverBackground" Color="#314159"/>
+    <SolidColorBrush x:Key="Theme.Completion.HoverForeground" Color="#F8FBFF"/>
+    <SolidColorBrush x:Key="Theme.Completion.SelectedBackground" Color="#60A5FA"/>
+    <SolidColorBrush x:Key="Theme.Completion.SelectedForeground" Color="#0F172A"/>
+    <SolidColorBrush x:Key="Theme.Completion.DisabledForeground" Color="#64748B"/>
+
     <SolidColorBrush x:Key="Theme.Accent.Primary" Color="#60A5FA"/>
     <SolidColorBrush x:Key="Theme.Accent.Hover" Color="#93C5FD"/>
     <SolidColorBrush x:Key="Theme.Accent.Pressed" Color="#3B82F6"/>
@@ -35,6 +50,13 @@
 
     <SolidColorBrush x:Key="Theme.Menu.Background" Color="#1B2432"/>
     <SolidColorBrush x:Key="Theme.Menu.Foreground" Color="#E5EEF9"/>
+    <SolidColorBrush x:Key="Theme.Menu.HoverBackground" Color="#314159"/>
+    <SolidColorBrush x:Key="Theme.Menu.HoverForeground" Color="#F8FBFF"/>
+    <SolidColorBrush x:Key="Theme.Menu.SelectedBackground" Color="#60A5FA"/>
+    <SolidColorBrush x:Key="Theme.Menu.SelectedForeground" Color="#0F172A"/>
+    <SolidColorBrush x:Key="Theme.Menu.DisabledForeground" Color="#64748B"/>
+    <SolidColorBrush x:Key="Theme.Menu.Border" Color="#475569"/>
+    <SolidColorBrush x:Key="Theme.Menu.Separator" Color="#334155"/>
 
     <SolidColorBrush x:Key="Theme.Selection.Background" Color="#1D4ED8"/>
 

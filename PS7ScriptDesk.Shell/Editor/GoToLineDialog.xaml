@@ -8,6 +8,8 @@
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
+        Background="{DynamicResource Theme.App.Background}"
+        Foreground="{DynamicResource Theme.Text.Primary}"
         Loaded="Window_Loaded"
         PreviewKeyDown="Window_PreviewKeyDown"
         help:ContextHelp.Key="GoToLine.Dialog">
@@ -21,7 +23,7 @@
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10" help:ContextHelp.Key="GoToLine.Dialog">
             <TextBlock Text="Line number" VerticalAlignment="Center" Margin="0,0,10,0" help:ContextHelp.Key="GoToLine.LineNumber" />
             <TextBlock x:Name="RangeHintText"
-                       Foreground="DimGray"
+                       Foreground="{DynamicResource Theme.Text.Secondary}"
                        FontSize="11"
                        VerticalAlignment="Center"
                        help:ContextHelp.Key="GoToLine.LineNumber" />
@@ -39,15 +41,15 @@
             <Button x:Name="OkButton"
                     Content="Go"
                     IsDefault="True"
-                    Padding="10,4"
                     Margin="0,0,6,0"
+                    Style="{StaticResource IdeDialogPrimaryButtonStyle}"
                     Click="OkButton_Click"
                     IsEnabled="False"
                     help:ContextHelp.Key="GoToLine.Go" />
             <Button Content="Cancel"
                     IsCancel="True"
-                    Padding="10,4"
                     Margin="6,0,0,0"
+                    Style="{StaticResource IdeDialogSecondaryButtonStyle}"
                     Click="CancelButton_Click"
                     help:ContextHelp.Key="GoToLine.Dialog" />
         </UniformGrid>

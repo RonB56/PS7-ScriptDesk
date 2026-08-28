@@ -49,9 +49,9 @@
         </Style>
 
         <Style x:Key="ToolbarIconViewboxStyle" TargetType="Viewbox">
-            <Setter Property="Width" Value="14" />
-            <Setter Property="Height" Value="14" />
-            <Setter Property="Margin" Value="0,0,5,0" />
+            <Setter Property="Width" Value="13" />
+            <Setter Property="Height" Value="13" />
+            <Setter Property="Margin" Value="0,0,4,0" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
 
@@ -108,8 +108,8 @@
 
         <Border x:Name="AdministratorModeBanner"
                 DockPanel.Dock="Top"
-                Background="#B91C1C"
-                BorderBrush="#FCA5A5"
+                Background="{DynamicResource Theme.Status.Error.Background}"
+                BorderBrush="{DynamicResource Theme.Status.Error.Border}"
                 BorderThickness="0,0,0,1"
                 Padding="12,8"
                 Visibility="{Binding AdministratorModeBannerVisibility, RelativeSource={RelativeSource AncestorType=Window}}"
@@ -120,13 +120,13 @@
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="ADMINISTRATOR MODE"
-                           Foreground="White"
+                           Foreground="{DynamicResource Theme.Status.Error.Foreground}"
                            FontWeight="Bold"
                            VerticalAlignment="Center"
                            Margin="0,0,12,0" />
                 <TextBlock Grid.Column="1"
                            Text="{Binding AdministratorModeBannerDetail, RelativeSource={RelativeSource AncestorType=Window}}"
-                           Foreground="White"
+                           Foreground="{DynamicResource Theme.Status.Error.Foreground}"
                            TextWrapping="Wrap"
                            VerticalAlignment="Center" />
             </Grid>
@@ -189,6 +189,20 @@
                           Header="Debug Pane _Dock Back"
                           Click="DockDebugPaneMenuItem_Click"
                           Visibility="Collapsed" />
+                <Separator />
+                <MenuItem Header="_Workspace Layout" help:ContextHelp.Key="View.Menu">
+                    <MenuItem Header="_Editor Maximized"
+                              Click="WorkspaceEditorMaximized_Click" />
+                    <MenuItem Header="_Console Maximized"
+                              Click="WorkspaceConsoleMaximized_Click" />
+                    <MenuItem Header="_Editor + Console Horizontal Split"
+                              Click="WorkspaceHorizontalSplit_Click" />
+                    <MenuItem Header="Editor + Console _Side-by-Side Split"
+                              Click="WorkspaceSideBySideSplit_Click" />
+                    <Separator />
+                    <MenuItem Header="_Restore Default Workspace"
+                              Click="WorkspaceRestoreDefault_Click" />
+                </MenuItem>
                 <Separator />
                 <MenuItem Header="Zoom _In"  InputGestureText="Ctrl+=" Command="{Binding ZoomInCommand}" help:ContextHelp.Key="View.Zoom" />
                 <MenuItem Header="Zoom _Out" InputGestureText="Ctrl+-" Command="{Binding ZoomOutCommand}" help:ContextHelp.Key="View.Zoom" />
@@ -321,6 +335,8 @@
                           help:ContextHelp.Key="Help.Context" />
                 <MenuItem Header="PS7 ScriptDesk _Help" Click="HelpOverview_Click" help:ContextHelp.Key="App.Overview" />
                 <Separator />
+                <MenuItem Header="Check for _Updates" Click="CheckForUpdates_Click" help:ContextHelp.Key="App.StoreUpdate" />
+                <Separator />
                 <MenuItem Header="_About" Click="About_Click" help:ContextHelp.Key="Help.About" />
             </MenuItem>
         </Menu>
@@ -382,24 +398,30 @@
 
                 <Button Command="{Binding CloseTabCommand}"
                         help:ContextHelp.Key="Command.CloseTab"
-                        Style="{StaticResource IdeToolbarIconButtonStyle}"
+                        Style="{StaticResource IdeToolbarButtonStyle}"
                         ToolTip="Close Tab (Ctrl+W)"
                         AutomationProperties.Name="Close Tab">
-                    <Viewbox Style="{StaticResource ToolbarIconOnlyViewboxStyle}">
-                        <Path Data="M 2,0 L 8,6 L 14,0 L 16,2 L 10,8 L 16,14 L 14,16 L 8,10 L 2,16 L 0,14 L 6,8 L 0,2 Z"
-                              Style="{StaticResource ToolbarIconNeutralPathStyle}" />
-                    </Viewbox>
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Style="{StaticResource ToolbarIconViewboxStyle}">
+                            <Path Data="M 2,0 L 8,6 L 14,0 L 16,2 L 10,8 L 16,14 L 14,16 L 8,10 L 2,16 L 0,14 L 6,8 L 0,2 Z"
+                                  Style="{StaticResource ToolbarIconNeutralPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Close" VerticalAlignment="Center" />
+                    </StackPanel>
                 </Button>
 
                 <Button Command="{Binding CloseAllTabsCommand}"
                         help:ContextHelp.Key="Command.CloseAll"
-                        Style="{StaticResource IdeToolbarIconButtonStyle}"
+                        Style="{StaticResource IdeToolbarButtonStyle}"
                         ToolTip="Close All Tabs (Ctrl+Shift+W)"
                         AutomationProperties.Name="Close All Tabs">
-                    <Viewbox Style="{StaticResource ToolbarIconOnlyViewboxStyle}">
-                        <Path Data="M 0,2 H 11 V 4 H 0 Z M 2,6 L 6,10 L 10,6 L 12,8 L 8,12 L 12,16 L 10,18 L 6,14 L 2,18 L 0,16 L 4,12 L 0,8 Z M 12,2 H 16 V 4 H 12 Z"
-                              Style="{StaticResource ToolbarIconNeutralPathStyle}" />
-                    </Viewbox>
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Style="{StaticResource ToolbarIconViewboxStyle}">
+                            <Path Data="M 0,2 H 11 V 4 H 0 Z M 2,6 L 6,10 L 10,6 L 12,8 L 8,12 L 12,16 L 10,18 L 6,14 L 2,18 L 0,16 L 4,12 L 0,8 Z M 12,2 H 16 V 4 H 12 Z"
+                                  Style="{StaticResource ToolbarIconNeutralPathStyle}" />
+                        </Viewbox>
+                        <TextBlock Text="Close All" VerticalAlignment="Center" />
+                    </StackPanel>
                 </Button>
 
                 <Separator Style="{StaticResource IdeToolbarSeparatorStyle}" />
@@ -429,7 +451,7 @@
                             <Path Data="M 0,2 H 3 V 14 H 0 Z M 5,2 L 15,8 L 5,14 Z"
                                   Style="{StaticResource ToolbarIconPositivePathStyle}" />
                         </Viewbox>
-                        <TextBlock Text="Selection" VerticalAlignment="Center" />
+                        <TextBlock Text="Run Selection" VerticalAlignment="Center" />
                     </StackPanel>
                 </Button>
 
@@ -591,50 +613,51 @@
             <StatusBarItem help:ContextHelp.Key="Status.Version">
                 <TextBlock Text="{Binding VersionText}" />
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.General">
                 <TextBlock Text="{Binding StatusText}" />
             </StatusBarItem>
-            <Separator Visibility="{Binding HasSessionRestoreNotice, Converter={StaticResource BooleanToVisibilityConverter}}" />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}"
+                       Visibility="{Binding HasSessionRestoreNotice, Converter={StaticResource BooleanToVisibilityConverter}}" />
             <StatusBarItem Visibility="{Binding HasSessionRestoreNotice, Converter={StaticResource BooleanToVisibilityConverter}}">
                 <TextBlock Text="{Binding SessionRestoreNoticeText}"
                            ToolTip="{Binding SessionRestoreNoticeToolTip}" />
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Caret">
                 <TextBlock Text="{Binding SelectedTab.CaretDisplayText, TargetNullValue='Ln 1, Col 1'}" />
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Lines">
                 <TextBlock Text="{Binding SelectedTab.EditorMetricsText, TargetNullValue=Lines: 1}" />
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Selection">
                 <TextBlock Text="{Binding SelectedTab.SelectionDisplayText, TargetNullValue=Selection: None}" />
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Breakpoints">
                 <TextBlock Text="{Binding SelectedTab.BreakpointDisplayText, TargetNullValue=Breakpoints: None}" />
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Runtime">
                 <TextBlock Text="{Binding RuntimeText}" />
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Workspace">
                 <TextBlock Text="{Binding WorkspaceText}" />
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Zoom">
                 <TextBlock Text="{Binding ZoomLevelText}" />
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Execution">
                 <TextBlock Text="{Binding ExecutionProgressText}"
                            Foreground="{DynamicResource Theme.Status.Warning.Foreground}"
                            FontWeight="SemiBold" />
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem x:Name="EditorMetadataStatusItem"
                            help:ContextHelp.Key="Editor.Metadata"
                            Visibility="Collapsed">
@@ -662,7 +685,7 @@
                     </StackPanel>
                 </Border>
             </StatusBarItem>
-            <Separator />
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Help.Context">
                 <ToggleButton Style="{StaticResource StatusBarHelpToggleButtonStyle}"
                               ToolTip="Turn advanced context help on or off"
@@ -692,11 +715,11 @@
             </StatusBarItem>
         </StatusBar>
 
-        <Grid Margin="8">
+        <Grid Margin="4">
             <Grid.RowDefinitions>
                 <RowDefinition x:Name="EditorRowDefinition" Height="*" />
-                <RowDefinition Height="6" />
-                <RowDefinition x:Name="ConsoleRowDefinition" Height="230" />
+                <RowDefinition x:Name="EditorConsoleRowSplitterDefinition" Height="6" />
+                <RowDefinition x:Name="ConsoleRowDefinition" Height="180" />
             </Grid.RowDefinitions>
 
             <Grid.ColumnDefinitions>
@@ -705,6 +728,10 @@
                 <ColumnDefinition x:Name="ExplorerSplitterColumnDefinition" Width="6" />
 
                 <ColumnDefinition x:Name="EditorColumnDefinition" Width="*" />
+
+                <ColumnDefinition x:Name="ConsoleSideSplitterColumnDefinition" Width="0" />
+
+                <ColumnDefinition x:Name="ConsoleSideColumnDefinition" Width="0" MinWidth="0" />
 
                 <ColumnDefinition x:Name="DebugPanelSplitterColumn" Width="0" />
 
@@ -715,7 +742,7 @@
                     Grid.RowSpan="3"
                     Grid.Column="0"
                     help:ContextHelp.Key="Explorer.Area"
-                    Padding="10"
+                    Padding="8"
                     Style="{StaticResource IdePaneBorderStyle}"
                     BorderThickness="0,0,1,0"
                     Margin="0"
@@ -733,7 +760,10 @@
 
                     <DockPanel Grid.Row="0"
                                LastChildFill="False"
-                               Margin="0,0,0,10">
+                               Margin="0,0,0,6">
+                        <TextBlock DockPanel.Dock="Left"
+                                   Text="Explorer"
+                                   Style="{StaticResource IdeSectionHeaderTextStyle}" />
                         <Button x:Name="CloseExplorerPanelButton"
                                 DockPanel.Dock="Right"
                                 Style="{StaticResource PanelCloseButtonStyle}"
@@ -745,7 +775,7 @@
                     <GroupBox Grid.Row="1"
                               Header="PowerShell Runtime"
                               help:ContextHelp.Key="Runtime.Area"
-                              Margin="0,0,0,10"
+                              Margin="0,0,0,6"
                               Padding="0">
                         <Grid>
                             <Grid.RowDefinitions>
@@ -753,100 +783,91 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" MinHeight="38" />
-                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
 
                             <Grid Grid.Row="0"
-                                  Grid.Column="0"
-                                  Margin="0,0,8,6"
+                                  Margin="0,0,0,4"
                                   help:ContextHelp.Key="Runtime.Area">
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
 
-                                <TextBlock Grid.Row="0"
-                                           Text="{Binding PreferredRuntimeText}"
-                                           FontWeight="SemiBold"
-                                           TextWrapping="NoWrap"
-                                           TextTrimming="CharacterEllipsis"
-                                           ToolTip="{Binding PreferredRuntimeText}" />
+                                <StackPanel Grid.Column="0"
+                                            Margin="0,0,8,0">
+                                    <TextBlock Text="{Binding SelectedRuntimeCompactText}"
+                                               Style="{StaticResource IdeToolWindowPrimaryTextStyle}"
+                                               ToolTip="{Binding SelectedRuntimeCompactText}" />
 
-                                <TextBlock Grid.Row="1"
-                                           Margin="0,2,0,0"
-                                           Text="{Binding SelectedRuntimeCompactText}"
-                                           TextWrapping="NoWrap"
-                                           TextTrimming="CharacterEllipsis"
-                                           ToolTip="{Binding SelectedRuntimeCompactText}" />
+                                    <TextBlock Margin="0,1,0,0"
+                                               Text="{Binding RunningRuntimeCompactText}"
+                                               Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                               TextWrapping="NoWrap"
+                                               Visibility="{Binding HasRunningRuntimeCompactText, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                               ToolTip="{Binding RunningRuntimeCompactText}" />
+                                </StackPanel>
+
+                                <Button Grid.Column="1"
+                                        help:ContextHelp.Key="Runtime.Refresh"
+                                        Content="{Binding RefreshRuntimesButtonText}"
+                                        Command="{Binding RefreshRuntimesCommand}"
+                                        Style="{StaticResource IdeSecondaryButtonStyle}"
+                                        MinWidth="76"
+                                        VerticalAlignment="Top" />
                             </Grid>
 
-                            <Button Grid.Row="0"
-                                    Grid.Column="1"
-                                    help:ContextHelp.Key="Runtime.Refresh"
-                                    Content="{Binding RefreshRuntimesButtonText}"
-                                    Command="{Binding RefreshRuntimesCommand}"
-                                    Style="{StaticResource IdeSecondaryButtonStyle}"
-                                    MinWidth="126"
-                                    VerticalAlignment="Top" />
+                            <Grid Grid.Row="1"
+                                  Margin="0,0,0,4"
+                                  help:ContextHelp.Key="Runtime.Path">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
 
-                            <TextBlock Grid.Row="1"
-                                       Grid.ColumnSpan="2"
-                                       Text="Executable Path"
-                                       FontWeight="SemiBold"
-                                       Margin="0,0,0,3" />
+                                <TextBlock Grid.Column="0"
+                                           Text="Path"
+                                           Style="{StaticResource IdeToolWindowLabelTextStyle}"
+                                           Margin="0,0,6,0" />
 
-                            <Border Grid.Row="2"
-                                    Grid.ColumnSpan="2"
-                                    Background="Transparent"
-                                    BorderThickness="0"
-                                    Padding="0"
-                                    Margin="0,0,0,8"
-                                    help:ContextHelp.Key="Runtime.Path">
-                                <TextBox Text="{Binding SelectedRuntimePathOnlyText, Mode=OneWay}"
-                                         IsReadOnly="True"
-                                         BorderThickness="0"
-                                         Background="Transparent"
-                                         ToolTip="{Binding SelectedRuntimePathOnlyText}"
-                                         HorizontalScrollBarVisibility="Auto" />
-                            </Border>
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding SelectedRuntimePathOnlyText, Mode=OneWay}"
+                                           Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                           TextWrapping="NoWrap"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding SelectedRuntimePathOnlyText}" />
+                            </Grid>
 
-                            <TextBlock Grid.Row="3"
-                                       Grid.ColumnSpan="2"
-                                       Text="{Binding RuntimeListHeaderText}"
-                                       FontWeight="SemiBold"
-                                       Margin="0,0,0,3" />
+                            <Grid Grid.Row="2"
+                                  Margin="0,0,0,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
 
-                            <Border Grid.Row="4"
-                                    Grid.ColumnSpan="2"
-                                    Margin="0,0,0,6"
-                                    MinHeight="38"
-                                    Padding="0,2"
-                                    VerticalAlignment="Top"
-                                    Background="Transparent"
-                                    BorderThickness="0"
-                                    help:ContextHelp.Key="Runtime.Area">
-                                <TextBlock Foreground="{DynamicResource Theme.Text.Secondary}"
-                                           TextWrapping="Wrap"
-                                           Text="{Binding RuntimeSelectionStatusText}" />
-                            </Border>
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding RuntimeListHeaderText}"
+                                           Style="{StaticResource IdeToolWindowLabelTextStyle}" />
 
-                            <ListBox Grid.Row="5"
+                                <TextBlock Grid.Column="1"
+                                           Margin="8,0,0,0"
+                                           Text="{Binding RuntimeSelectionStatusText}"
+                                           Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                           TextWrapping="NoWrap"
+                                           ToolTip="{Binding RuntimeSelectionStatusText}" />
+                            </Grid>
+
+                            <ListBox Grid.Row="3"
                                      help:ContextHelp.Key="Runtime.List"
-                                     Grid.ColumnSpan="2"
-                                     Margin="0,0,0,2"
-                                     MinHeight="96"
-                                     MaxHeight="160"
+                                     Margin="0"
+                                     MinHeight="64"
+                                     MaxHeight="112"
                                      IsEnabled="{Binding IsRuntimeListEnabled}"
                                      ScrollViewer.CanContentScroll="True"
                                      ScrollViewer.VerticalScrollBarVisibility="Auto"
                                      VirtualizingPanel.IsVirtualizing="True"
                                      VirtualizingPanel.VirtualizationMode="Recycling"
                                      ItemsSource="{Binding DetectedRuntimes}"
+                                     ItemContainerStyle="{StaticResource IdeToolWindowListBoxItemStyle}"
                                      SelectedItem="{Binding SelectedRuntimeItem}">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
@@ -857,18 +878,47 @@
                         </Grid>
                     </GroupBox>
 
-                    <StackPanel Grid.Row="2" Margin="0,0,0,10" help:ContextHelp.Key="Explorer.WorkspaceSummary">
-                        <TextBlock Text="{Binding OpenTabCountText}" Margin="0,0,0,4" />
-                        <TextBlock Text="{Binding WorkspaceFileCountText}" Margin="0,0,0,4" />
-                        <TextBlock Text="{Binding WorkspaceFolderCountText}" Margin="0,0,0,4" />
-                        <TextBlock Text="{Binding CurrentWorkspaceText}" TextWrapping="Wrap" Margin="0,0,0,4" />
-                        <TextBlock Text="{Binding SelectedWorkspacePathText}" TextWrapping="Wrap" Margin="0,0,0,4" />
-                    </StackPanel>
+                    <Grid Grid.Row="2"
+                          Margin="0,0,0,6"
+                          help:ContextHelp.Key="Explorer.WorkspaceSummary">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
 
-                    <StackPanel Grid.Row="3" Margin="0,0,0,10" help:ContextHelp.Key="Explorer.WorkspaceFilter">
+                        <WrapPanel Grid.Row="0"
+                                   Margin="0,0,0,2">
+                            <TextBlock Text="{Binding OpenTabCountText}"
+                                       Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                       TextWrapping="NoWrap"
+                                       Margin="0,0,8,0" />
+                            <TextBlock Text="{Binding WorkspaceFileCountText}"
+                                       Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                       TextWrapping="NoWrap"
+                                       Margin="0,0,8,0" />
+                            <TextBlock Text="{Binding WorkspaceFolderCountText}"
+                                       Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                       TextWrapping="NoWrap" />
+                        </WrapPanel>
+
+                        <TextBlock Grid.Row="1"
+                                   Text="{Binding CurrentWorkspaceText}"
+                                   Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                   TextWrapping="NoWrap"
+                                   Margin="0,0,0,1"
+                                   ToolTip="{Binding CurrentWorkspaceText}" />
+                        <TextBlock Grid.Row="2"
+                                   Text="{Binding SelectedWorkspacePathText}"
+                                   Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                   TextWrapping="NoWrap"
+                                   ToolTip="{Binding SelectedWorkspacePathText}" />
+                    </Grid>
+
+                    <StackPanel Grid.Row="3" Margin="0,0,0,6" help:ContextHelp.Key="Explorer.WorkspaceFilter">
                         <TextBlock Text="Workspace Filter"
-                                   FontWeight="SemiBold"
-                                   Margin="0,0,0,4" />
+                                   Style="{StaticResource IdeToolWindowLabelTextStyle}"
+                                   Margin="0,0,0,2" />
 
                         <Grid>
                             <Grid.RowDefinitions>
@@ -881,7 +931,8 @@
                                          help:ContextHelp.Key="Explorer.WorkspaceFilter"
                                          Text="{Binding WorkspaceFilterText, UpdateSourceTrigger=PropertyChanged}"
                                          VerticalContentAlignment="Center"
-                                         Padding="6,2,6,2"
+                                         Padding="6,1,6,1"
+                                         MinHeight="24"
                                          ToolTip="Type to filter the already-loaded workspace. Filtering now uses the cached workspace instead of rescanning the drive each time." />
                                 <TextBlock Text="Type to filter loaded workspace"
                                            Margin="8,0,0,0"
@@ -902,22 +953,22 @@
                                 </TextBlock>
                             </Grid>
 
-                            <WrapPanel Grid.Row="1" Margin="0,8,0,0">
+                            <WrapPanel Grid.Row="1" Margin="0,4,0,0">
                                 <Button help:ContextHelp.Key="Explorer.WorkspaceRefresh"
                                         Content="{Binding RefreshWorkspaceButtonText}"
                                         Command="{Binding RefreshWorkspaceCommand}"
                                         IsEnabled="{Binding IsWorkspaceCommandsEnabled}"
                                         Style="{StaticResource IdeSecondaryButtonStyle}"
-                                        Margin="0,0,6,6"
-                                        MinWidth="68" />
+                                        Margin="0,0,4,4"
+                                        MinWidth="62" />
 
                                 <Button help:ContextHelp.Key="Command.OpenFolder"
                                         Content="Open Folder"
                                         Command="{Binding OpenWorkspaceFolderCommand}"
                                         IsEnabled="{Binding IsWorkspaceCommandsEnabled}"
                                         Style="{StaticResource IdeSecondaryButtonStyle}"
-                                        Margin="0,0,6,6"
-                                        MinWidth="86"
+                                        Margin="0,0,4,4"
+                                        MinWidth="80"
                                         ToolTip="Choose a workspace folder and load it into the explorer pane." />
 
                                 <Button help:ContextHelp.Key="Explorer.ShowInExplorer"
@@ -925,8 +976,8 @@
                                         Command="{Binding ShowWorkspaceFolderInExplorerCommand}"
                                         IsEnabled="{Binding IsWorkspaceCommandsEnabled}"
                                         Style="{StaticResource IdeSecondaryButtonStyle}"
-                                        Margin="0,0,0,6"
-                                        MinWidth="104"
+                                        Margin="0,0,0,4"
+                                        MinWidth="96"
                                         ToolTip="Open the current workspace folder in Windows Explorer. If a file is selected, Windows Explorer will highlight it there." />
                             </WrapPanel>
                         </Grid>
@@ -945,9 +996,8 @@
 
                             <TextBlock Grid.Row="0"
                                        Text="{Binding WorkspaceLoadingText}"
-                                       Foreground="{DynamicResource Theme.Text.Secondary}"
-                                       TextWrapping="Wrap"
-                                       Margin="0,0,0,6" />
+                                       Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                       Margin="0,0,0,4" />
 
                             <TreeView x:Name="WorkspaceTree"
                                       help:ContextHelp.Key="Explorer.WorkspaceTree"
@@ -989,13 +1039,15 @@
 
                             <TextBlock Grid.Row="0"
                                        Text="{Binding ActiveDocumentText}"
-                                       Margin="0,0,0,10"
-                                       TextWrapping="Wrap" />
+                                       Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                       Margin="0,0,0,6"
+                                       ToolTip="{Binding ActiveDocumentText}" />
 
                             <ListBox Grid.Row="1"
                                      help:ContextHelp.Key="Explorer.OpenTabs"
                                      MinHeight="0"
                                      ItemsSource="{Binding OpenTabs}"
+                                     ItemContainerStyle="{StaticResource IdeToolWindowListBoxItemStyle}"
                                      SelectedItem="{Binding SelectedTab}">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
@@ -1017,73 +1069,16 @@
             <Border x:Name="EditorPaneBorder" Grid.Row="0"
                     help:ContextHelp.Key="Editor.Area"
                     Grid.Column="2"
-                    Padding="10"
+                    Padding="6"
                     Style="{StaticResource IdePaneBorderStyle}"
                     BorderThickness="0"
-                    Margin="0,0,0,8">
+                    Margin="0,0,0,4">
                 <Grid>
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <Grid Grid.Row="0" Margin="0,0,0,4">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
-
-                        <Border Grid.Row="0"
-                                help:ContextHelp.Key="Editor.ActiveDocument"
-                                Style="{StaticResource IdeCompactEditorHeaderPanelStyle}">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="*" MinWidth="80" />
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-
-                                <TextBlock Grid.Column="0"
-                                           Text="{Binding ActiveDocumentText}"
-                                           FontWeight="SemiBold"
-                                           FontSize="{StaticResource Theme.FontSize.Caption}"
-                                           TextWrapping="NoWrap"
-                                           TextTrimming="CharacterEllipsis"
-                                           MaxWidth="280"
-                                           ToolTip="{Binding ActiveDocumentText}" />
-
-                                <TextBlock Grid.Column="1"
-                                           Margin="14,0,0,0"
-                                           Text="{Binding SelectedTab.FilePath, StringFormat=Path: {0}, TargetNullValue=Path: Unsaved document}"
-                                           FontSize="{StaticResource Theme.FontSize.Caption}"
-                                           Foreground="{DynamicResource Theme.Text.Secondary}"
-                                           TextWrapping="NoWrap"
-                                           TextTrimming="CharacterEllipsis"
-                                           ToolTip="{Binding SelectedTab.FilePath, TargetNullValue=Unsaved document}" />
-
-                                <TextBlock Grid.Column="2"
-                                           Margin="14,0,0,0"
-                                           Text="{Binding SelectedTab.SelectionDisplayText, TargetNullValue=Selection: None}"
-                                           FontSize="{StaticResource Theme.FontSize.Caption}"
-                                           Foreground="{DynamicResource Theme.Text.Secondary}"
-                                           TextWrapping="NoWrap"
-                                           TextTrimming="CharacterEllipsis"
-                                           ToolTip="{Binding SelectedTab.SelectionDisplayText, TargetNullValue=Selection: None}" />
-
-                                <TextBlock Grid.Column="3"
-                                           Margin="14,0,0,0"
-                                           Text="{Binding SelectedTab.BreakpointDisplayText, TargetNullValue=Breakpoints: None}"
-                                           FontSize="{StaticResource Theme.FontSize.Caption}"
-                                           Foreground="{DynamicResource Theme.Text.Secondary}"
-                                           TextWrapping="NoWrap"
-                                           TextTrimming="CharacterEllipsis"
-                                           MaxWidth="260"
-                                           ToolTip="{Binding SelectedTab.BreakpointDisplayText, TargetNullValue=Breakpoints: None}" />
-                            </Grid>
-                        </Border>
-                    </Grid>
-
-                    <Grid Grid.Row="1">
+                    <Grid Grid.Row="0">
                         <TabControl ItemsSource="{Binding OpenTabs}"
                                     help:ContextHelp.Key="Editor.TabStrip"
                                     ItemContainerStyle="{StaticResource IdeCompactEditorTabItemStyle}"
@@ -1132,7 +1127,8 @@
                                     <StackPanel Orientation="Horizontal" help:ContextHelp.Key="Editor.TabStrip">
                                         <TextBlock Text="{Binding DisplayTitle}"
                                                    VerticalAlignment="Center"
-                                                   Margin="0,0,6,0" />
+                                                   Margin="0,0,6,0"
+                                                   ToolTip="{Binding FilePath, TargetNullValue=Unsaved document}" />
                                         <Button Content="x"
                                                 help:ContextHelp.Key="Editor.CloseTabButton"
                                                 Width="16"
@@ -1265,14 +1261,23 @@
                 </Grid>
             </Border>
 
-            <GridSplitter Grid.Row="1"
+            <GridSplitter x:Name="EditorConsoleRowSplitter"
+                          Grid.Row="1"
                           Grid.Column="2"
                           Style="{StaticResource IdeRowSplitterStyle}" />
 
-            <Border Grid.Row="2"
+            <GridSplitter x:Name="EditorConsoleColumnSplitter"
+                          Grid.Row="0"
+                          Grid.RowSpan="3"
+                          Grid.Column="3"
+                          Style="{StaticResource IdeColumnSplitterStyle}"
+                          Visibility="Collapsed" />
+
+            <Border x:Name="ConsolePaneBorder"
+                    Grid.Row="2"
                     help:ContextHelp.Key="Console.Area"
                     Grid.Column="2"
-                    Padding="10,8"
+                    Padding="6"
                     Style="{StaticResource IdePaneBorderStyle}"
                     BorderThickness="0,1,0,0">
                 <Grid>
@@ -1281,7 +1286,7 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <Grid Grid.Row="0" Margin="0,0,0,4">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
@@ -1331,7 +1336,8 @@
                                 <Border.Style>
                                     <Style TargetType="Border" BasedOn="{StaticResource BottomPaneHeaderBadgeBorderStyle}">
                                         <Setter Property="Visibility" Value="Collapsed" />
-                                        <Setter Property="Background" Value="#7F1D1D" />
+                                        <Setter Property="Background" Value="{DynamicResource Theme.Status.Error.Background}" />
+                                        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Status.Error.Border}" />
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding SelectedTab.HasSyntaxErrors}" Value="True">
                                                 <Setter Property="Visibility" Value="Visible" />
@@ -1340,7 +1346,7 @@
                                     </Style>
                                 </Border.Style>
                                 <TextBlock Text="{Binding SelectedTab.DiagnosticErrorCount, StringFormat={}{0} errors}"
-                                           Foreground="#FEE2E2"
+                                           Foreground="{DynamicResource Theme.Status.Error.Foreground}"
                                            FontSize="11"
                                            FontWeight="Bold" />
                             </Border>
@@ -1349,7 +1355,8 @@
                                 <Border.Style>
                                     <Style TargetType="Border" BasedOn="{StaticResource BottomPaneHeaderBadgeBorderStyle}">
                                         <Setter Property="Visibility" Value="Collapsed" />
-                                        <Setter Property="Background" Value="#78350F" />
+                                        <Setter Property="Background" Value="{DynamicResource Theme.Status.Warning.Background}" />
+                                        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Status.Warning.Border}" />
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding SelectedTab.HasDiagnosticWarnings}" Value="True">
                                                 <Setter Property="Visibility" Value="Visible" />
@@ -1358,7 +1365,7 @@
                                     </Style>
                                 </Border.Style>
                                 <TextBlock Text="{Binding SelectedTab.DiagnosticWarningCount, StringFormat={}{0} warnings}"
-                                           Foreground="#FEF3C7"
+                                           Foreground="{DynamicResource Theme.Status.Warning.Foreground}"
                                            FontSize="11"
                                            FontWeight="Bold" />
                             </Border>
@@ -1367,7 +1374,7 @@
 
                     <Grid Grid.Row="1">
                         <Grid x:Name="ConsoleBottomPane"
-                              Margin="4">
+                              Margin="0">
                             <Grid.Style>
                                 <Style TargetType="Grid">
                                     <Setter Property="Visibility" Value="Visible" />
@@ -1391,7 +1398,7 @@
                             </Grid.RowDefinitions>
 
                             <!-- Console header: session status, Reset Console button -->
-                            <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                            <DockPanel Grid.Row="0" Margin="0,0,0,4">
                                 <TextBlock Text="{Binding ConsoleSessionText}"
                                            VerticalAlignment="Center"
                                            Foreground="{DynamicResource Theme.Text.Secondary}"
@@ -1419,7 +1426,7 @@
                         </Grid>
 
                         <Grid x:Name="DiagnosticsBottomPane"
-                              Margin="4">
+                              Margin="0">
                             <Grid.Style>
                                 <Style TargetType="Grid">
                                     <Setter Property="Visibility" Value="Collapsed" />
@@ -1437,7 +1444,7 @@
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
 
-                            <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                            <DockPanel Grid.Row="0" Margin="0,0,0,4">
                                 <StackPanel Orientation="Vertical" DockPanel.Dock="Left">
                                     <TextBlock Text="Problems"
                                                Style="{StaticResource IdeSectionHeaderTextStyle}"
@@ -1482,23 +1489,36 @@
 
                                                     <Border Grid.Column="0"
                                                             Padding="6,2"
-                                                            CornerRadius="8"
+                                                            CornerRadius="4"
                                                             VerticalAlignment="Top"
                                                             Margin="0,0,8,0">
                                                         <Border.Style>
                                                             <Style TargetType="Border">
-                                                                <Setter Property="Background" Value="#DC2626" />
+                                                                <Setter Property="Background" Value="{DynamicResource Theme.Status.Error.Background}" />
+                                                                <Setter Property="BorderBrush" Value="{DynamicResource Theme.Status.Error.Border}" />
+                                                                <Setter Property="BorderThickness" Value="1" />
                                                                 <Style.Triggers>
                                                                     <DataTrigger Binding="{Binding IsWarning}" Value="True">
-                                                                        <Setter Property="Background" Value="#F59E0B" />
+                                                                        <Setter Property="Background" Value="{DynamicResource Theme.Status.Warning.Background}" />
+                                                                        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Status.Warning.Border}" />
                                                                     </DataTrigger>
                                                                 </Style.Triggers>
                                                             </Style>
                                                         </Border.Style>
                                                         <TextBlock Text="{Binding Severity}"
-                                                                   Foreground="White"
                                                                    FontWeight="SemiBold"
-                                                                   FontSize="11" />
+                                                                   FontSize="11">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource Theme.Status.Error.Foreground}" />
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsWarning}" Value="True">
+                                                                            <Setter Property="Foreground" Value="{DynamicResource Theme.Status.Warning.Foreground}" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
                                                     </Border>
 
                                                     <StackPanel Grid.Column="1">
@@ -1518,7 +1538,7 @@
                         </Grid>
 
                         <Grid x:Name="DebugOutputBottomPane"
-                              Margin="4">
+                              Margin="0">
                             <Grid.Style>
                                 <Style TargetType="Grid">
                                     <Setter Property="Visibility" Value="Collapsed" />
@@ -1536,7 +1556,7 @@
                             </Grid.RowDefinitions>
 
                             <TextBlock Text="Debugger Process Output"
-                                       Margin="0,0,0,6"
+                                       Margin="0,0,0,4"
                                        Style="{StaticResource IdeSectionHeaderTextStyle}"
                                        help:ContextHelp.Key="Debug.Area" />
 
@@ -1553,7 +1573,7 @@
                         </Grid>
 
                         <Grid x:Name="ActivityBottomPane"
-                              Margin="4">
+                              Margin="0">
                             <Grid.Style>
                                 <Style TargetType="Grid">
                                     <Setter Property="Visibility" Value="Collapsed" />
@@ -1571,7 +1591,7 @@
                             </Grid.RowDefinitions>
 
                             <TextBlock Text="Application Activity"
-                                       Margin="0,0,0,6"
+                                       Margin="0,0,0,4"
                                        Style="{StaticResource IdeSectionHeaderTextStyle}" />
 
                             <TextBox Grid.Row="1"
@@ -1590,7 +1610,7 @@
             <!-- Debug splitter — only visible when debug panel is open -->
             <GridSplitter Grid.Row="0"
                           Grid.RowSpan="3"
-                          Grid.Column="3"
+                          Grid.Column="5"
                           x:Name="DebugPanelSplitter"
                           Style="{StaticResource IdeColumnSplitterStyle}"
                           Visibility="Collapsed" />
@@ -1600,8 +1620,8 @@
                     help:ContextHelp.Key="Debug.Area"
                     Grid.Row="0"
                     Grid.RowSpan="3"
-                    Grid.Column="4"
-                    Padding="10"
+                    Grid.Column="6"
+                    Padding="8"
                     Style="{StaticResource IdePaneBorderStyle}"
                     BorderThickness="1,0,0,0"
                     Visibility="Collapsed">
@@ -1613,13 +1633,15 @@
 
                     <DockPanel Grid.Row="0"
                                LastChildFill="False"
-                               Margin="0,0,0,8">
+                               Margin="0,0,0,6">
                         <StackPanel Orientation="Horizontal"
                                     DockPanel.Dock="Right">
                             <Button x:Name="PopOutDebugPaneButton"
                                     Content="Pop Out"
                                     Style="{StaticResource IdeSecondaryButtonStyle}"
                                     Margin="0,0,8,0"
+                                    ToolTip="Pop out debug pane"
+                                    AutomationProperties.Name="Pop out debug pane"
                                     Click="PopOutDebugPaneButton_Click" />
                             <Button x:Name="CloseDebugPanelButton"
                                     Style="{StaticResource PanelCloseButtonStyle}"
@@ -1627,6 +1649,9 @@
                                     AutomationProperties.Name="Hide Debug panel"
                                     Click="CloseDebugPanelButton_Click" />
                         </StackPanel>
+                        <TextBlock DockPanel.Dock="Left"
+                                   Text="Debug"
+                                   Style="{StaticResource IdeSectionHeaderTextStyle}" />
                     </DockPanel>
 
                     <Grid Grid.Row="1">
@@ -1637,9 +1662,10 @@
 
                             <!-- Variables tab -->
                             <TabItem Header="Variables" help:ContextHelp.Key="Debug.Variables">
-                                <Grid>
+                                <Grid Margin="0,4,0,0">
                                     <DataGrid x:Name="DebugVariablesGrid"
                                               help:ContextHelp.Key="Debug.Variables"
+                                              Style="{StaticResource IdeToolWindowDataGridStyle}"
                                               AutoGenerateColumns="False"
                                               IsReadOnly="True"
                                               CanUserAddRows="False"
@@ -1654,7 +1680,7 @@
                                             <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*" />
                                         </DataGrid.Columns>
                                     </DataGrid>
-                                    <TextBlock Text="No variables to show.">
+                                    <TextBlock Text="No variables available.">
                                         <TextBlock.Style>
                                             <Style TargetType="TextBlock" BasedOn="{StaticResource IdeEmptyPaneTextStyle}">
                                                 <Style.Triggers>
@@ -1670,9 +1696,10 @@
 
                             <!-- Call Stack tab -->
                             <TabItem Header="Call Stack" help:ContextHelp.Key="Debug.CallStack">
-                                <Grid>
+                                <Grid Margin="0,4,0,0">
                                     <DataGrid x:Name="DebugCallStackGrid"
                                               help:ContextHelp.Key="Debug.CallStack"
+                                              Style="{StaticResource IdeToolWindowDataGridStyle}"
                                               AutoGenerateColumns="False"
                                               IsReadOnly="True"
                                               CanUserAddRows="False"
@@ -1687,7 +1714,7 @@
                                             <DataGridTextColumn Header="Line"     Binding="{Binding LineNumber}"   Width="45" />
                                         </DataGrid.Columns>
                                     </DataGrid>
-                                    <TextBlock Text="No call stack to show.">
+                                    <TextBlock Text="No active call stack.">
                                         <TextBlock.Style>
                                             <Style TargetType="TextBlock" BasedOn="{StaticResource IdeEmptyPaneTextStyle}">
                                                 <Style.Triggers>
@@ -1703,7 +1730,7 @@
 
                             <!-- Breakpoints tab -->
                             <TabItem Header="Breakpoints" help:ContextHelp.Key="Debug.Breakpoints">
-                                <Grid>
+                                <Grid Margin="0,4,0,0">
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="*" />
                                         <RowDefinition Height="Auto" />
@@ -1712,6 +1739,7 @@
                                     <DataGrid x:Name="DebugBreakpointsGrid"
                                               help:ContextHelp.Key="Debug.Breakpoints"
                                               Grid.Row="0"
+                                              Style="{StaticResource IdeToolWindowDataGridStyle}"
                                               AutoGenerateColumns="False"
                                               IsReadOnly="False"
                                               CanUserAddRows="False"
@@ -1727,7 +1755,7 @@
                                         </DataGrid.Columns>
                                     </DataGrid>
                                     <TextBlock Grid.Row="0"
-                                               Text="No breakpoints to show.">
+                                               Text="No breakpoints configured.">
                                         <TextBlock.Style>
                                             <Style TargetType="TextBlock" BasedOn="{StaticResource IdeEmptyPaneTextStyle}">
                                                 <Style.Triggers>
@@ -1788,10 +1816,10 @@
                 Margin="0,104,20,0"
                 IsHitTestVisible="False">
             <Border x:Name="MetadataToastCard"
-                    Style="{StaticResource PanelCardBorderStyle}"
+                    Style="{StaticResource IdeDialogPanelStyle}"
                     Background="{DynamicResource Theme.Surface.Primary}"
-                    BorderBrush="{DynamicResource Theme.Accent.Primary}"
-                    BorderThickness="1.5"
+                    BorderBrush="{DynamicResource Theme.Border.Strong}"
+                    BorderThickness="1"
                     Padding="16">
                 <Grid>
                     <Grid.RowDefinitions>
@@ -1811,14 +1839,15 @@
                             Width="36"
                             Height="36"
                             Margin="0,0,12,0"
-                            CornerRadius="18"
-                            Background="#FFE8F2FF"
-                            BorderBrush="#FF4A90E2"
+                            CornerRadius="4"
+                            Background="{DynamicResource Theme.Surface.Secondary}"
+                            BorderBrush="{DynamicResource Theme.Border.Subtle}"
                             BorderThickness="1">
                         <TextBlock x:Name="MetadataToastGlyph"
                                    Text="⏳"
                                    FontSize="18"
                                    FontWeight="Bold"
+                                   Foreground="{DynamicResource Theme.Icon.Accent}"
                                    HorizontalAlignment="Center"
                                    VerticalAlignment="Center" />
                     </Border>

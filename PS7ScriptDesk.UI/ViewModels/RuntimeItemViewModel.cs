@@ -38,9 +38,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public bool IsPreferred { get; }
 
-        public string DisplayText => IsPreferred
-            ? $"{DisplayName} [Preferred]"
-            : DisplayName;
+        public string DisplayText => DisplayName;
 
         public string DetailSummary => string.IsNullOrWhiteSpace(Architecture)
             ? $"{DisplayName} | Edition: {Edition} | Source: {DiscoverySource}"

@@ -10,7 +10,7 @@
         WindowStartupLocation="CenterOwner"
         Background="{DynamicResource Theme.App.Background}"
         AutomationProperties.Name="About PS7 ScriptDesk">
-    <Grid Margin="20" KeyboardNavigation.TabNavigation="Cycle">
+    <Grid Margin="18" KeyboardNavigation.TabNavigation="Cycle">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -19,44 +19,44 @@
         </Grid.RowDefinitions>
 
         <Border Grid.Row="0"
-                Padding="18"
-                Style="{StaticResource PanelCardBorderStyle}">
+                Padding="0,0,0,14"
+                BorderBrush="{DynamicResource Theme.Border.Subtle}"
+                BorderThickness="0,0,0,1">
             <StackPanel>
                 <TextBlock x:Name="ProductNameText"
-                           FontSize="{StaticResource Theme.FontSize.Heading}"
-                           FontWeight="Bold"
+                           FontSize="{StaticResource Theme.FontSize.Section}"
+                           FontWeight="SemiBold"
                            Foreground="{DynamicResource Theme.Text.Primary}"
                            AutomationProperties.Name="Product name" />
                 <TextBlock x:Name="VersionText"
-                           Margin="0,8,0,0"
-                           FontSize="16"
+                           Margin="0,4,0,0"
+                           FontSize="{StaticResource Theme.FontSize.Body}"
                            FontWeight="SemiBold"
-                           Foreground="{DynamicResource Theme.Accent.Primary}"
+                           Foreground="{DynamicResource Theme.Text.Secondary}"
                            AutomationProperties.Name="Running application version" />
             </StackPanel>
         </Border>
 
         <TextBlock x:Name="DescriptionText"
                    Grid.Row="1"
-                   Margin="4,18,4,0"
+                   Margin="0,14,0,0"
                    TextWrapping="Wrap"
                    Foreground="{DynamicResource Theme.Text.Primary}"
                    AutomationProperties.Name="Product description" />
 
         <TextBlock x:Name="PackageMetadataText"
                    Grid.Row="2"
-                   Margin="4,14,4,0"
+                   Margin="0,12,0,0"
                    TextWrapping="Wrap"
                    Foreground="{DynamicResource Theme.Text.Secondary}"
                    AutomationProperties.Name="Package metadata status" />
 
         <Button Grid.Row="3"
-                Margin="0,24,0,0"
-                Width="96"
+                Margin="0,18,0,0"
                 HorizontalAlignment="Right"
-                Padding="12,6"
                 Content="Close"
                 IsDefault="True"
+                Style="{StaticResource IdeDialogPrimaryButtonStyle}"
                 Click="CloseButton_Click"
                 AutomationProperties.Name="Close About window" />
     </Grid>

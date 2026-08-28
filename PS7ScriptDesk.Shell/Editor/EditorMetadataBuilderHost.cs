@@ -446,6 +446,7 @@ namespace PS7ScriptDesk.Shell.Editor
                         AppLogger.Warning("EditorMetadataBuilder", $"Worker reported failure status: {message.DetailText}");
                     }
                     else if (message.Phase == EditorMetadataWarmupPhase.BuildingCommandCatalog ||
+                             message.Phase == EditorMetadataWarmupPhase.DiscoveringModules ||
                              message.Phase == EditorMetadataWarmupPhase.LoadingCommandMetadata ||
                              message.Phase == EditorMetadataWarmupPhase.Completed)
                     {
@@ -1144,6 +1145,7 @@ try {
     }
     Write-Status -Phase {{(int)EditorMetadataWarmupPhase.BuildingCommandCatalog}} -Message 'Building first-run editor metadata' -ProcessedCount $allCommands.Count -TotalCount $allCommands.Count -DetailText ("Collected {0} commands in {1} ms." -f $allCommands.Count, $catalogStopwatch.ElapsedMilliseconds)
 
+    Write-Status -Phase {{(int)EditorMetadataWarmupPhase.DiscoveringModules}} -Message 'Discovering PowerShell modules' -ProcessedCount 0 -TotalCount 0 -DetailText 'Computing the module fingerprint used to decide whether the metadata cache is still current.'
     $moduleFingerprintStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $moduleFingerprint = @(
         Get-Module -ListAvailable -ErrorAction SilentlyContinue |
@@ -1152,7 +1154,7 @@ try {
     ) -join [Environment]::NewLine
     $moduleFingerprintStopwatch.Stop()
     Write-PerformanceLog ("Module discovery/fingerprint time: {0} ms." -f $moduleFingerprintStopwatch.ElapsedMilliseconds)
-    Write-Status -Phase {{(int)EditorMetadataWarmupPhase.BuildingCommandCatalog}} -Message 'Building first-run editor metadata' -ProcessedCount $allCommands.Count -TotalCount $allCommands.Count -DetailText ("Computed module fingerprint in {0} ms." -f $moduleFingerprintStopwatch.ElapsedMilliseconds)
+    Write-Status -Phase {{(int)EditorMetadataWarmupPhase.DiscoveringModules}} -Message 'Discovering PowerShell modules' -ProcessedCount $allCommands.Count -TotalCount $allCommands.Count -DetailText ("Computed module fingerprint in {0} ms." -f $moduleFingerprintStopwatch.ElapsedMilliseconds)
 
     $distinctCommandStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $distinctCommands = New-Object System.Collections.ArrayList

@@ -6,7 +6,6 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Media;
-using MediaColor = System.Windows.Media.Color;
 using WpfContextMenu = System.Windows.Controls.ContextMenu;
 using WpfMenuItem = System.Windows.Controls.MenuItem;
 using WpfButton = System.Windows.Controls.Button;
@@ -306,8 +305,7 @@ namespace PS7ScriptDesk.Shell.Help
                 new TextBlock
                 {
                     Text = body,
-                    TextWrapping = TextWrapping.Wrap,
-                    Foreground = new SolidColorBrush(MediaColor.FromRgb(30, 30, 30))
+                    TextWrapping = TextWrapping.Wrap
                 });
         }
 
@@ -319,15 +317,16 @@ namespace PS7ScriptDesk.Shell.Help
                 var textBlock = new TextBlock
                 {
                     TextWrapping = TextWrapping.Wrap,
-                    Margin = new Thickness(0, i == 0 ? 0 : 6, 0, 0),
-                    Foreground = new SolidColorBrush(MediaColor.FromRgb(30, 30, 30))
+                    Margin = new Thickness(0, i == 0 ? 0 : 6, 0, 0)
                 };
+                textBlock.SetResourceReference(TextBlock.ForegroundProperty, "Theme.Text.Primary");
 
-                textBlock.Inlines.Add(new Run(section.IsNumbered ? $"{i + 1}. " : "• ")
+                var markerRun = new Run(section.IsNumbered ? $"{i + 1}. " : "• ")
                 {
-                    FontWeight = FontWeights.SemiBold,
-                    Foreground = new SolidColorBrush(MediaColor.FromRgb(27, 78, 122))
-                });
+                    FontWeight = FontWeights.SemiBold
+                };
+                markerRun.SetResourceReference(TextElement.ForegroundProperty, "Theme.Accent.Primary");
+                textBlock.Inlines.Add(markerRun);
                 textBlock.Inlines.Add(new Run(section.Items[i]));
                 panel.Children.Add(textBlock);
             }
@@ -337,12 +336,10 @@ namespace PS7ScriptDesk.Shell.Help
 
         private Border CreateSectionContainer(string heading, UIElement content)
         {
-            return new Border
+            var border = new Border
             {
                 Margin = new Thickness(0, 0, 0, 12),
                 Padding = new Thickness(14),
-                Background = new SolidColorBrush(MediaColor.FromRgb(248, 250, 252)),
-                BorderBrush = new SolidColorBrush(MediaColor.FromRgb(207, 219, 231)),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(8),
                 Child = new StackPanel
@@ -355,12 +352,22 @@ namespace PS7ScriptDesk.Shell.Help
                             FontSize = 16,
                             FontWeight = FontWeights.Bold,
                             Margin = new Thickness(0, 0, 0, 8),
-                            Foreground = new SolidColorBrush(MediaColor.FromRgb(21, 46, 79))
                         },
                         content
                     }
                 }
             };
+            border.SetResourceReference(Border.BackgroundProperty, "Theme.Surface.Secondary");
+            border.SetResourceReference(Border.BorderBrushProperty, "Theme.Border.Subtle");
+
+            var headingText = (TextBlock)((StackPanel)border.Child).Children[0];
+            headingText.SetResourceReference(TextBlock.ForegroundProperty, "Theme.Text.Primary");
+            if (content is TextBlock contentTextBlock)
+            {
+                contentTextBlock.SetResourceReference(TextBlock.ForegroundProperty, "Theme.Text.Primary");
+            }
+
+            return border;
         }
 
         private void CloseButton_Click(object sender, RoutedEventArgs e)

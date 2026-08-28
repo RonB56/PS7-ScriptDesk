@@ -451,7 +451,7 @@ namespace PS7ScriptDesk.Shell
             {
                 try
                 {
-                    var updateWindow = new StoreUpdateWindow(storeUpdateService, storeUpdateCheckResult, isMandatory: false)
+                    var updateWindow = new StoreUpdateWindow(storeUpdateService, storeUpdateCheckResult, isMandatory: storeUpdateCheckResult.HasMandatoryUpdate)
                     {
                         Owner = shellWindow
                     };

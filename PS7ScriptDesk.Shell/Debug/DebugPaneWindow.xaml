@@ -9,6 +9,8 @@
         MinHeight="260"
         WindowStartupLocation="Manual"
         ShowInTaskbar="False"
+        Background="{DynamicResource Theme.App.Background}"
+        Foreground="{DynamicResource Theme.Text.Primary}"
         help:ContextHelp.Key="Debug.Area"
         Loaded="Window_Loaded"
         PreviewKeyDown="Window_PreviewKeyDown">
@@ -20,12 +22,11 @@
 
         <DockPanel Grid.Row="0" Margin="0,0,0,8">
             <TextBlock Text="Debug"
-                       FontSize="16"
-                       FontWeight="SemiBold"
+                       Style="{DynamicResource IdeSectionHeaderTextStyle}"
                        VerticalAlignment="Center" />
             <Button DockPanel.Dock="Right"
                     Content="Dock Back"
-                    Padding="10,4"
+                    Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
                     Click="DockBackButton_Click"
                     help:ContextHelp.Key="Debug.Area" />
         </DockPanel>
@@ -36,6 +37,7 @@
             <TabItem Header="Variables"
                      help:ContextHelp.Key="Debug.Variables">
                 <DataGrid x:Name="DebugVariablesGrid"
+                          Style="{DynamicResource IdeToolWindowDataGridStyle}"
                           AutoGenerateColumns="False"
                           IsReadOnly="True"
                           CanUserAddRows="False"
@@ -55,6 +57,7 @@
             <TabItem Header="Call Stack"
                      help:ContextHelp.Key="Debug.CallStack">
                 <DataGrid x:Name="DebugCallStackGrid"
+                          Style="{DynamicResource IdeToolWindowDataGridStyle}"
                           AutoGenerateColumns="False"
                           IsReadOnly="True"
                           CanUserAddRows="False"
@@ -81,6 +84,7 @@
 
                     <DataGrid x:Name="DebugBreakpointsGrid"
                               Grid.Row="0"
+                              Style="{DynamicResource IdeToolWindowDataGridStyle}"
                               AutoGenerateColumns="False"
                               IsReadOnly="False"
                               CanUserAddRows="False"
@@ -99,7 +103,7 @@
                     <Button Grid.Row="1"
                             Content="Remove Selected"
                             Margin="0,6,0,0"
-                            Padding="10,4"
+                            Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
                             HorizontalAlignment="Right"
                             Click="RemoveSelectedBreakpointButton_Click"
                             help:ContextHelp.Key="Debug.RemoveBreakpoint" />

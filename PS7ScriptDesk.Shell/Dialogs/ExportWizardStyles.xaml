@@ -1,6 +1,6 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <!-- These styles are deliberately opt-in so Export as EXE retains a clear workflow without changing shared controls. -->
+    <!-- These styles are deliberately opt-in so export and publishing workflows stay denser than the main shell. -->
     <Style x:Key="WizardFocusVisualStyle" TargetType="Control">
         <Setter Property="Template">
             <Setter.Value>
@@ -16,8 +16,9 @@
         <Setter Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
         <Setter Property="Foreground" Value="{DynamicResource Theme.Accent.Foreground}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="Padding" Value="16,7" />
-        <Setter Property="MinWidth" Value="104" />
+        <Setter Property="Padding" Value="12,5" />
+        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="MinWidth" Value="96" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="FocusVisualStyle" Value="{StaticResource WizardFocusVisualStyle}" />
         <Setter Property="Template">
@@ -41,8 +42,9 @@
         <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Strong}" />
         <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="Padding" Value="16,7" />
-        <Setter Property="MinWidth" Value="88" />
+        <Setter Property="Padding" Value="12,5" />
+        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="MinWidth" Value="84" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="FocusVisualStyle" Value="{StaticResource WizardFocusVisualStyle}" />
         <Setter Property="Template">
@@ -69,14 +71,14 @@
     </Style>
 
     <Style x:Key="WizardContentPanelStyle" TargetType="Border" BasedOn="{StaticResource SubtlePanelBorderStyle}">
-        <Setter Property="Padding" Value="18" />
-        <Setter Property="CornerRadius" Value="5" />
+        <Setter Property="Padding" Value="14" />
+        <Setter Property="CornerRadius" Value="4" />
     </Style>
 
     <Style x:Key="WizardSectionCardStyle" TargetType="Border" BasedOn="{StaticResource SubtlePanelBorderStyle}">
-        <Setter Property="Padding" Value="12" />
+        <Setter Property="Padding" Value="10" />
         <Setter Property="CornerRadius" Value="4" />
-        <Setter Property="Margin" Value="0,0,0,8" />
+        <Setter Property="Margin" Value="0,0,0,6" />
     </Style>
 
     <Style x:Key="WizardPageHostStyle" TargetType="TabControl">
@@ -92,8 +94,8 @@
     </Style>
 
     <Style x:Key="WizardStepTabItemStyle" TargetType="TabItem">
-        <Setter Property="Padding" Value="10,8" />
-        <Setter Property="Margin" Value="0,0,6,0" />
+        <Setter Property="Padding" Value="8,5" />
+        <Setter Property="Margin" Value="0,0,4,0" />
         <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
         <Setter Property="Tag" Value="Future" />
         <Setter Property="FocusVisualStyle" Value="{StaticResource WizardFocusVisualStyle}" />
@@ -114,8 +116,8 @@
     </Style>
 
     <Style x:Key="WizardPresetListBoxItemStyle" TargetType="ListBoxItem">
-        <Setter Property="Padding" Value="12,10" />
-        <Setter Property="Margin" Value="0,0,0,6" />
+        <Setter Property="Padding" Value="10,7" />
+        <Setter Property="Margin" Value="0,0,0,4" />
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="FocusVisualStyle" Value="{StaticResource WizardFocusVisualStyle}" />
         <Setter Property="Template">

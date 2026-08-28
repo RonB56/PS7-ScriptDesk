@@ -9,6 +9,7 @@ using PS7ScriptDesk.Shell.Help;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection("WpfUi")]
 public sealed class AboutWindowPresentationTests
 {
     [Fact]

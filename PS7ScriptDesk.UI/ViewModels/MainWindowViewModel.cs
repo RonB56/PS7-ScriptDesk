@@ -319,6 +319,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 {
                     _isDebugSessionActive = value;
                     OnPropertyChanged();
+                    OnPropertyChanged(nameof(IsRuntimeListEnabled));
+                    OnPropertyChanged(nameof(RuntimeSelectionStatusText));
                     RefreshCommandStates();
                 }
             }
@@ -451,6 +453,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 {
                     _isExecutionRunning = value;
                     OnPropertyChanged();
+                    OnPropertyChanged(nameof(IsRuntimeListEnabled));
+                    OnPropertyChanged(nameof(RuntimeSelectionStatusText));
                     RefreshCommandStates();
 
                     if (value)
@@ -473,6 +477,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 if (_isStopInProgress != value)
                 {
                     _isStopInProgress = value;
+                    OnPropertyChanged(nameof(IsRuntimeListEnabled));
+                    OnPropertyChanged(nameof(RuntimeSelectionStatusText));
                     RefreshCommandStates();
                 }
             }
@@ -608,11 +614,31 @@ namespace PS7ScriptDesk.UI.ViewModels
                 : $"Applying workspace filter '{_workspaceFilterText}'... please wait.")
             : "Tip: very large folders can take a few seconds to appear after Open Folder or Refresh.";
 
-        public string RuntimeSelectionStatusText => IsRuntimeDiscoveryInProgress
-            ? "Detecting runtimes... please wait for refresh to complete before changing the selection."
-            : "Select the runtime you want to use for Run and Terminal.";
+        public string RuntimeSelectionStatusText
+        {
+            get
+            {
+                if (IsRuntimeDiscoveryInProgress)
+                {
+                    return "Detecting runtimes... please wait for refresh to complete before changing the selection.";
+                }
 
-        public bool IsRuntimeListEnabled => !IsRuntimeDiscoveryInProgress && DetectedRuntimes.Count > 0;
+                if (IsExecutionRunning || _liveConsoleService.IsCommandInProgress || IsStopInProgress || IsDebugSessionActive)
+                {
+                    return "Runtime selection is locked while execution, debugging, or console recovery is active.";
+                }
+
+                return "Select the runtime you want to use for Run and Terminal.";
+            }
+        }
+
+        public bool IsRuntimeListEnabled =>
+            !IsRuntimeDiscoveryInProgress &&
+            !IsExecutionRunning &&
+            !_liveConsoleService.IsCommandInProgress &&
+            !IsStopInProgress &&
+            !IsDebugSessionActive &&
+            DetectedRuntimes.Count > 0;
 
         public bool IsWorkspaceCommandsEnabled => !IsWorkspaceLoading;
 
@@ -668,16 +694,21 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 if (_selectedRuntimeItem != value)
                 {
+                    var previousRuntime = _selectedRuntimeItem?.RuntimeInfo;
                     _selectedRuntimeItem = value;
                     OnPropertyChanged();
                     OnPropertyChanged(nameof(RuntimeDetailsText));
                     OnPropertyChanged(nameof(RuntimePathText));
                     OnPropertyChanged(nameof(SelectedRuntimeCompactText));
                     OnPropertyChanged(nameof(SelectedRuntimePathOnlyText));
+                    OnPropertyChanged(nameof(RunningRuntimeCompactText));
+                    OnPropertyChanged(nameof(HasRunningRuntimeCompactText));
                     OnPropertyChanged(nameof(EffectiveRuntimeItem));
                     OnPropertyChanged(nameof(EffectiveRuntimeInfo));
                     OnPropertyChanged(nameof(EffectiveRuntimeExecutablePath));
                     _selectedRuntimeExecutablePathToRestore = _selectedRuntimeItem?.RuntimeInfo.LaunchExecutablePath;
+                    RefreshRuntimeStatePresentation();
+                    LogRuntimeSelectionChanged(previousRuntime, _selectedRuntimeItem?.RuntimeInfo);
                     RefreshCommandStates();
                 }
             }
@@ -708,15 +739,51 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public string RuntimeCountText => $"Detected Runtimes: {DetectedRuntimes.Count}";
 
-        public string PreferredRuntimeText =>
-            _preferredRuntimeItem is null
-                ? "Preferred runtime: none detected"
-                : $"Preferred runtime: {_preferredRuntimeItem.DisplayName}";
+        public string SelectedRuntimeCompactText
+        {
+            get
+            {
+                var selectedRuntime = SelectedRuntimeItem?.RuntimeInfo;
+                var runningRuntime = GetRunningRuntime();
 
-        public string SelectedRuntimeCompactText =>
-            SelectedRuntimeItem is null
-                ? "Selected runtime: none"
-                : $"Selected runtime: {SelectedRuntimeItem.DisplayText} ({SelectedRuntimeItem.Edition})";
+                if (selectedRuntime is null && runningRuntime is null)
+                {
+                    return "No PowerShell runtime selected";
+                }
+
+                if (selectedRuntime is null)
+                {
+                    return $"{runningRuntime!.DisplayName} - Running";
+                }
+
+                if (runningRuntime is not null && RuntimePathsMatch(selectedRuntime, runningRuntime))
+                {
+                    return $"{runningRuntime.DisplayName} - Running";
+                }
+
+                return $"{selectedRuntime.DisplayName} - Selected";
+            }
+        }
+
+        public string RunningRuntimeCompactText
+        {
+            get
+            {
+                var selectedRuntime = SelectedRuntimeItem?.RuntimeInfo;
+                var runningRuntime = GetRunningRuntime();
+
+                if (selectedRuntime is null || runningRuntime is null)
+                {
+                    return selectedRuntime is null ? string.Empty : "Terminal not started";
+                }
+
+                return RuntimePathsMatch(selectedRuntime, runningRuntime)
+                    ? string.Empty
+                    : $"{runningRuntime.DisplayName} - Running";
+            }
+        }
+
+        public bool HasRunningRuntimeCompactText => !string.IsNullOrWhiteSpace(RunningRuntimeCompactText);
 
         public string SelectedRuntimePathOnlyText =>
             SelectedRuntimeItem is null
@@ -1646,7 +1713,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 $"Startup runtime seeded without a duplicate identity probe. DisplayPath='{runtime.ExecutablePath}', LaunchPath='{runtime.LaunchExecutablePath}', Version={runtime.VersionText}.");
 
             OnPropertyChanged(nameof(RuntimeCountText));
-            OnPropertyChanged(nameof(PreferredRuntimeText));
+            OnPropertyChanged(nameof(RunningRuntimeCompactText));
             OnPropertyChanged(nameof(RuntimeListHeaderText));
             OnPropertyChanged(nameof(RuntimeDetailsText));
             OnPropertyChanged(nameof(RuntimePathText));
@@ -1679,7 +1746,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             DetectedRuntimes.Clear();
             DetectedRuntimes.Add(runtimeItem);
             _preferredRuntimeItem = runtimeItem;
-            _selectedRuntimeItem = runtimeItem;
+            SelectedRuntimeItem = runtimeItem;
             _selectedRuntimeExecutablePathToRestore = runtime.LaunchExecutablePath;
             RuntimeText = $"Runtime: Checking PowerShell runtime ({runtime.DisplayName})...";
             StatusText = "Checking PowerShell runtime...";
@@ -3689,10 +3756,10 @@ namespace PS7ScriptDesk.UI.ViewModels
                     }
 
                     SelectedRuntimeItem = runtimeToSelect ?? _preferredRuntimeItem;
-                    RuntimeText = discoveryResult.SummaryText;
+                    RefreshRuntimeStatePresentation();
 
                     OnPropertyChanged(nameof(RuntimeCountText));
-                    OnPropertyChanged(nameof(PreferredRuntimeText));
+                    OnPropertyChanged(nameof(RunningRuntimeCompactText));
                     OnPropertyChanged(nameof(RuntimeListHeaderText));
 
                     if (logOperation)
@@ -3705,7 +3772,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                         }
                         else
                         {
-                            AppendOutputLine($"Preferred runtime: {_preferredRuntimeItem.DisplayName}");
+                            AppendOutputLine($"Selected runtime: {SelectedRuntimeItem?.DisplayName ?? _preferredRuntimeItem.DisplayName}");
                         }
 
                         foreach (var runtimeItem in DetectedRuntimes)
@@ -3718,7 +3785,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     {
                         StatusText = _preferredRuntimeItem is null
                             ? "PowerShell 7 was not found or could not be launched"
-                            : $"Runtime discovery refreshed - {_preferredRuntimeItem.DisplayName} preferred";
+                            : $"Runtime discovery refreshed - {SelectedRuntimeItem?.DisplayName ?? _preferredRuntimeItem.DisplayName} selected";
                     }
                     else if (_preferredRuntimeItem is null)
                     {
@@ -3726,7 +3793,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     }
                     else
                     {
-                        StatusText = $"Runtime discovery completed - {_preferredRuntimeItem.DisplayName} preferred";
+                        StatusText = $"Runtime discovery completed - {SelectedRuntimeItem?.DisplayName ?? _preferredRuntimeItem.DisplayName} selected";
                     }
 
                     UpdateConsoleSessionPresentation();
@@ -3791,13 +3858,31 @@ namespace PS7ScriptDesk.UI.ViewModels
                     PostToUi(() =>
                     {
                         UpdateConsoleSessionPresentation();
+                        RefreshRuntimeStatePresentation();
                         StatusText = $"PowerShell terminal ready: {runtime.DisplayName}";
                         AppLogger.Info("Console", $"PowerShell terminal ready using {runtime.DisplayName}; CurrentDirectory={_liveConsoleService.CurrentWorkingDirectory ?? startupDirectory}");
+                        DeveloperDiagnostics.LogStateTransition(
+                            "Runtime",
+                            "TerminalRuntime",
+                            "Starting",
+                            "Running",
+                            "PowerShell terminal session started with the selected runtime.",
+                            new Dictionary<string, object?>
+                            {
+                                ["selectedRuntimePath"] = SelectedRuntimeItem?.RuntimeInfo.LaunchExecutablePath,
+                                ["runningRuntimePath"] = _liveConsoleService.ActiveRuntime?.LaunchExecutablePath,
+                                ["runningRuntimeVersion"] = _liveConsoleService.ActiveRuntime?.VersionText,
+                                ["forceRestart"] = forceRestart
+                            });
                     });
                 }
                 else
                 {
-                    PostToUi(UpdateConsoleSessionPresentation);
+                    PostToUi(() =>
+                    {
+                        UpdateConsoleSessionPresentation();
+                        RefreshRuntimeStatePresentation();
+                    });
                 }
             }
             catch (Exception ex)
@@ -4018,7 +4103,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 $"Runtime marked invalid after launch verification failure. Path='{runtime.LaunchExecutablePath}', Source='{source}', Reason='{failureReason}'.");
 
             OnPropertyChanged(nameof(RuntimeCountText));
-            OnPropertyChanged(nameof(PreferredRuntimeText));
+            OnPropertyChanged(nameof(RunningRuntimeCompactText));
             OnPropertyChanged(nameof(RuntimeListHeaderText));
             OnPropertyChanged(nameof(RuntimeDetailsText));
             OnPropertyChanged(nameof(RuntimePathText));
@@ -4027,6 +4112,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             OnPropertyChanged(nameof(EffectiveRuntimeItem));
             OnPropertyChanged(nameof(EffectiveRuntimeInfo));
             OnPropertyChanged(nameof(EffectiveRuntimeExecutablePath));
+            RefreshRuntimeStatePresentation();
             RefreshCommandStates();
             UpdateConsoleSessionPresentation();
 
@@ -4127,7 +4213,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             RuntimeText = $"Runtime: {runtime.DisplayName}";
             OnPropertyChanged(nameof(RuntimeCountText));
-            OnPropertyChanged(nameof(PreferredRuntimeText));
+            OnPropertyChanged(nameof(RunningRuntimeCompactText));
             OnPropertyChanged(nameof(RuntimeListHeaderText));
             OnPropertyChanged(nameof(RuntimeDetailsText));
             OnPropertyChanged(nameof(RuntimePathText));
@@ -4136,6 +4222,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             OnPropertyChanged(nameof(EffectiveRuntimeItem));
             OnPropertyChanged(nameof(EffectiveRuntimeInfo));
             OnPropertyChanged(nameof(EffectiveRuntimeExecutablePath));
+            RefreshRuntimeStatePresentation();
             RefreshCommandStates();
             UpdateConsoleSessionPresentation();
         }
@@ -4171,6 +4258,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 ConsoleSessionText = "ConPTY terminal: starting";
                 _consolePromptText = "PS >";
                 OnPropertyChanged(nameof(ConsolePromptText));
+                OnPropertyChanged(nameof(RunningRuntimeCompactText));
+                RefreshRuntimeStatePresentation();
                 return;
             }
 
@@ -4179,6 +4268,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 ConsoleSessionText = "ConPTY terminal: not started";
                 _consolePromptText = "PS >";
                 OnPropertyChanged(nameof(ConsolePromptText));
+                OnPropertyChanged(nameof(RunningRuntimeCompactText));
+                RefreshRuntimeStatePresentation();
                 return;
             }
 
@@ -4187,6 +4278,82 @@ namespace PS7ScriptDesk.UI.ViewModels
             ConsoleSessionText = $"ConPTY terminal: {runtime.DisplayName} running ({activityText}, {directoryText})";
             _consolePromptText = string.IsNullOrWhiteSpace(currentDirectory) ? "PS >" : $"PS {currentDirectory}>";
             OnPropertyChanged(nameof(ConsolePromptText));
+            OnPropertyChanged(nameof(RunningRuntimeCompactText));
+            RefreshRuntimeStatePresentation();
+        }
+
+        private void RefreshRuntimeStatePresentation()
+        {
+            RuntimeText = BuildRuntimeText();
+            OnPropertyChanged(nameof(SelectedRuntimeCompactText));
+            OnPropertyChanged(nameof(RunningRuntimeCompactText));
+            OnPropertyChanged(nameof(HasRunningRuntimeCompactText));
+            OnPropertyChanged(nameof(IsRuntimeListEnabled));
+            OnPropertyChanged(nameof(RuntimeSelectionStatusText));
+        }
+
+        private string BuildRuntimeText()
+        {
+            var selectedRuntime = SelectedRuntimeItem?.RuntimeInfo;
+            var runningRuntime = GetRunningRuntime();
+
+            if (selectedRuntime is null && runningRuntime is null)
+            {
+                return "Runtime: none selected";
+            }
+
+            if (selectedRuntime is null)
+            {
+                return $"Runtime: {runningRuntime!.DisplayName} - Running";
+            }
+
+            if (runningRuntime is null)
+            {
+                return $"Runtime: {selectedRuntime.DisplayName} - Selected; terminal not started";
+            }
+
+            return RuntimePathsMatch(selectedRuntime, runningRuntime)
+                ? $"Runtime: {runningRuntime.DisplayName} - Running"
+                : $"Runtime: {runningRuntime.DisplayName} - Running; {selectedRuntime.DisplayName} - Selected";
+        }
+
+        private PowerShellRuntimeInfo? GetRunningRuntime()
+        {
+            return _liveConsoleService.IsSessionRunning
+                ? _liveConsoleService.ActiveRuntime
+                : null;
+        }
+
+        private static bool RuntimePathsMatch(PowerShellRuntimeInfo left, PowerShellRuntimeInfo right)
+        {
+            return string.Equals(
+                NormalizeStoredRuntimePath(left.LaunchExecutablePath),
+                NormalizeStoredRuntimePath(right.LaunchExecutablePath),
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void LogRuntimeSelectionChanged(PowerShellRuntimeInfo? previousRuntime, PowerShellRuntimeInfo? selectedRuntime)
+        {
+            var previousPath = previousRuntime?.LaunchExecutablePath ?? string.Empty;
+            var selectedPath = selectedRuntime?.LaunchExecutablePath ?? string.Empty;
+
+            if (string.Equals(previousPath, selectedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            DeveloperDiagnostics.LogStateTransition(
+                "Runtime",
+                "RuntimeSelection",
+                string.IsNullOrWhiteSpace(previousPath) ? "None" : previousRuntime?.DisplayName ?? "Unknown",
+                string.IsNullOrWhiteSpace(selectedPath) ? "None" : selectedRuntime?.DisplayName ?? "Unknown",
+                "Selected PowerShell runtime changed.",
+                new Dictionary<string, object?>
+                {
+                    ["previousRuntimePath"] = previousPath,
+                    ["selectedRuntimePath"] = selectedPath,
+                    ["selectedRuntimeVersion"] = selectedRuntime?.VersionText
+                });
         }
 
         private async Task OnRefreshWorkspaceAsync()
@@ -4764,6 +4931,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         {
             // The pwsh.exe process exited unexpectedly or the user/script called exit.
             // Ensure Run/Reset recover even if the helper sentinel was never echoed.
+            var runtimeToRestart = EffectiveRuntimeInfo;
             PostToUi(() =>
             {
                 var hadExecutionState = IsExecutionRunning;
@@ -4772,7 +4940,14 @@ namespace PS7ScriptDesk.UI.ViewModels
                 IsExecutionRunning = false;
                 IsStopInProgress = false;
 
-                StatusText = "PowerShell terminal exited. Use Reset Console to start a new session.";
+                StatusText = runtimeToRestart is null
+                    ? "PowerShell terminal exited. Use Refresh Runtimes or Reset Console to start a new session."
+                    : "PowerShell terminal exited; restarting the embedded session...";
+                AppendApplicationActivityFragmentCore(
+                    runtimeToRestart is null
+                        ? "PowerShell terminal exited. No selected runtime was available for automatic restart."
+                        : "PowerShell terminal exited, likely because a script or command ended the session. ScriptDesk is restarting the embedded PowerShell terminal."
+                    + Environment.NewLine);
                 AppLogger.Info(
                     "Console",
                     $"PowerShell terminal session termination observed by ViewModel. Cleared execution state. HadExecutionState={hadExecutionState}, HadStopState={hadStopState}, SessionRunning={_liveConsoleService.IsSessionRunning}, CommandInProgress={_liveConsoleService.IsCommandInProgress}.");
@@ -4784,6 +4959,104 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (Volatile.Read(ref _resetConsoleInProgress) == 0)
             {
                 RequestTerminalFocusAfterExecutionCompletion();
+            }
+
+            if (runtimeToRestart is not null && Volatile.Read(ref _resetConsoleInProgress) == 0)
+            {
+                _ = RestartConsoleAfterUnexpectedTerminationAsync(runtimeToRestart);
+            }
+        }
+
+        private async Task RestartConsoleAfterUnexpectedTerminationAsync(PowerShellRuntimeInfo runtime)
+        {
+            if (!await _consoleRecoveryGate.WaitAsync(0).ConfigureAwait(false))
+            {
+                PostToUi(() =>
+                {
+                    StatusText = "PowerShell terminal exited; waiting for the current recovery operation";
+                    RefreshCommandStates();
+                });
+                AppLogger.Info("Console", "Automatic terminal restart after process exit was skipped because another recovery operation is active.");
+                return;
+            }
+
+            try
+            {
+                Interlocked.Exchange(ref _resetConsoleInProgress, 1);
+                PostToUi(() => IsStopInProgress = true);
+
+                AppLogger.Info("Console", $"Automatically restarting PowerShell terminal after process exit using {runtime.DisplayName}.");
+                DeveloperDiagnostics.LogStateTransition(
+                    "Terminal",
+                    "AutoRestartAfterProcessExit",
+                    "Terminated",
+                    "RestartingSession",
+                    "PowerShell terminal process exited; automatic owned-session restart started.",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtime"] = runtime.DisplayName,
+                        ["runtimePath"] = runtime.ExecutablePath
+                    });
+
+                await EnsureConsoleSessionAsync(runtime, forceRestart: false, logOperation: true).ConfigureAwait(false);
+
+                PostToUi(() =>
+                {
+                    IsExecutionRunning = false;
+                    IsStopInProgress = false;
+                    StatusText = $"PowerShell terminal restarted with {runtime.DisplayName}";
+                    AppendApplicationActivityFragmentCore(
+                        $"PowerShell terminal restarted with {runtime.DisplayName}. You can run scripts again."
+                        + Environment.NewLine);
+                    RefreshCommandStates();
+                    UpdateConsoleSessionPresentation();
+                });
+
+                DeveloperDiagnostics.LogStateTransition(
+                    "Terminal",
+                    "AutoRestartAfterProcessExit",
+                    "RestartingSession",
+                    "Running",
+                    "PowerShell terminal process exit recovery completed with a replacement session.",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtime"] = runtime.DisplayName,
+                        ["runtimePath"] = runtime.ExecutablePath
+                    });
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Console", "Automatic terminal restart after process exit failed.", ex);
+                DeveloperDiagnostics.LogException(
+                    "Terminal",
+                    ex,
+                    "Automatic terminal restart after process exit failed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtime"] = runtime.DisplayName,
+                        ["runtimePath"] = runtime.ExecutablePath
+                    });
+
+                PostToUi(() =>
+                {
+                    IsExecutionRunning = false;
+                    IsStopInProgress = false;
+                    StatusText = "PowerShell terminal exited; automatic restart failed";
+                    AppendApplicationActivityFragmentCore(
+                        $"PowerShell terminal exited and automatic restart failed: {ex.Message}{Environment.NewLine}");
+                    RefreshCommandStates();
+                    UpdateConsoleSessionPresentation();
+                });
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _resetConsoleInProgress, 0);
+                _consoleRecoveryGate.Release();
+                PostToUi(() =>
+                {
+                    IsStopInProgress = false;
+                    RefreshCommandStates();
+                });
             }
         }
 
