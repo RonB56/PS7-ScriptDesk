@@ -24,6 +24,22 @@ namespace PS7ScriptDesk.Domain.Models
 
         public string? WorkspaceLayoutMode { get; set; } = "HorizontalSplit";
 
+        public bool IsBottomToolWindowVisible { get; set; }
+
+        public bool IsBottomToolWindowFloating { get; set; }
+
+        public string? SelectedBottomToolTab { get; set; } = "Problems";
+
+        public double? DockedBottomToolWindowHeight { get; set; }
+
+        public double? BottomToolWindowWidth { get; set; }
+
+        public double? BottomToolWindowHeight { get; set; }
+
+        public double? BottomToolWindowLeft { get; set; }
+
+        public double? BottomToolWindowTop { get; set; }
+
         public double? WorkspaceSectionHeight { get; set; }
 
         public double? OpenTabsSectionHeight { get; set; }

@@ -182,6 +182,18 @@
                           IsCheckable="True"
                           IsChecked="False"
                           Click="ShowDebugPanel_Click" />
+                <MenuItem x:Name="ShowBottomToolWindowMenuItem"
+                          Header="Show _Problems / Activity"
+                          IsCheckable="True"
+                          IsChecked="False"
+                          Click="ShowBottomToolWindow_Click" />
+                <MenuItem x:Name="PopOutBottomToolWindowMenuItem"
+                          Header="Problems / Activity Pop O_ut"
+                          Click="PopOutBottomToolWindowMenuItem_Click" />
+                <MenuItem x:Name="DockBottomToolWindowMenuItem"
+                          Header="Problems / Activity _Dock Back"
+                          Click="DockBottomToolWindowMenuItem_Click"
+                          Visibility="Collapsed" />
                 <MenuItem x:Name="PopOutDebugPaneMenuItem"
                           Header="Debug Pane Pop _Out"
                           Click="PopOutDebugPaneMenuItem_Click" />
@@ -1283,7 +1295,9 @@
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
+                        <RowDefinition x:Name="ConsoleContentRowDefinition" Height="*" MinHeight="160" />
+                        <RowDefinition x:Name="BottomToolWindowSplitterRowDefinition" Height="0" />
+                        <RowDefinition x:Name="BottomToolWindowRowDefinition" Height="0" MinHeight="0" />
                     </Grid.RowDefinitions>
 
                     <Grid Grid.Row="0" Margin="0,0,0,4">
@@ -1302,30 +1316,6 @@
                                           Style="{StaticResource IdeBottomPaneTabToggleButtonStyle}"
                                           Click="ConsoleBottomPaneTab_Click"
                                           help:ContextHelp.Key="Console.Area" />
-
-                            <ToggleButton x:Name="DiagnosticsBottomPaneTab"
-                                          MinWidth="82"
-                                          Margin="0,0,2,0"
-                                          Content="Problems"
-                                          Style="{StaticResource IdeBottomPaneTabToggleButtonStyle}"
-                                          Click="DiagnosticsBottomPaneTab_Click"
-                                          help:ContextHelp.Key="Editor.SyntaxPanel" />
-
-                            <ToggleButton x:Name="DebugOutputBottomPaneTab"
-                                          MinWidth="98"
-                                          Margin="0,0,2,0"
-                                          Content="Debug Output"
-                                          ToolTip="Output from the separate PowerShell debugger process"
-                                          Style="{StaticResource IdeBottomPaneTabToggleButtonStyle}"
-                                          Click="DebugOutputBottomPaneTab_Click"
-                                          help:ContextHelp.Key="Debug.Area" />
-
-                            <ToggleButton x:Name="ActivityBottomPaneTab"
-                                          MinWidth="72"
-                                          Content="Activity"
-                                          ToolTip="Application messages and operation details"
-                                          Style="{StaticResource IdeBottomPaneTabToggleButtonStyle}"
-                                          Click="ActivityBottomPaneTab_Click" />
                         </StackPanel>
 
                         <StackPanel Grid.Column="1"
@@ -1375,22 +1365,6 @@
                     <Grid Grid.Row="1">
                         <Grid x:Name="ConsoleBottomPane"
                               Margin="0">
-                            <Grid.Style>
-                                <Style TargetType="Grid">
-                                    <Setter Property="Visibility" Value="Visible" />
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsChecked, ElementName=DiagnosticsBottomPaneTab}" Value="True">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding IsChecked, ElementName=ActivityBottomPaneTab}" Value="True">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding IsChecked, ElementName=DebugOutputBottomPaneTab}" Value="True">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Grid.Style>
 
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
@@ -1424,6 +1398,90 @@
                                                       Grid.Row="1"
                                                       help:ContextHelp.Key="Console.Output" />
                         </Grid>
+                    </Grid>
+
+                    <GridSplitter x:Name="BottomToolWindowSplitter"
+                          Grid.Row="2"
+                          Style="{StaticResource IdeRowSplitterStyle}"
+                          Visibility="Collapsed" />
+
+            <Border x:Name="BottomToolWindowBorder"
+                    Grid.Row="3"
+                    Padding="6"
+                    Style="{StaticResource IdePaneBorderStyle}"
+                    BorderThickness="0,1,0,0"
+                    Visibility="Collapsed">
+                <Grid x:Name="BottomToolWindowDockHost">
+                    <Grid x:Name="BottomToolWindowContent">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <DockPanel Grid.Row="0" Margin="0,0,0,4">
+                            <TextBlock Text="Problems / Debug Output / Activity"
+                                       VerticalAlignment="Center"
+                                       Style="{StaticResource IdeSectionHeaderTextStyle}" />
+
+                            <StackPanel DockPanel.Dock="Right"
+                                        Orientation="Horizontal"
+                                        HorizontalAlignment="Right">
+                                <Button x:Name="BottomToolWindowPopOutButton"
+                                        Content="Pop Out"
+                                        Style="{StaticResource IdeSecondaryButtonStyle}"
+                                        Margin="0,0,8,0"
+                                        ToolTip="Pop out Problems, Debug Output, and Activity together"
+                                        AutomationProperties.Name="Pop out Problems, Debug Output, and Activity"
+                                        Click="PopOutBottomToolWindowButton_Click" />
+                                <Button x:Name="BottomToolWindowDockBackButton"
+                                        Content="Dock Back"
+                                        Style="{StaticResource IdeSecondaryButtonStyle}"
+                                        Margin="0,0,8,0"
+                                        Visibility="Collapsed"
+                                        ToolTip="Dock Problems, Debug Output, and Activity below the console"
+                                        AutomationProperties.Name="Dock back Problems, Debug Output, and Activity"
+                                        Click="DockBottomToolWindowButton_Click" />
+                                <Button x:Name="BottomToolWindowHideButton"
+                                        Style="{StaticResource PanelCloseButtonStyle}"
+                                        ToolTip="Hide Problems, Debug Output, and Activity"
+                                        AutomationProperties.Name="Hide Problems, Debug Output, and Activity"
+                                        Click="HideBottomToolWindowButton_Click" />
+                            </StackPanel>
+                        </DockPanel>
+
+                        <Grid Grid.Row="1" Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <ToggleButton x:Name="BottomProblemsToolTab"
+                                          Grid.Column="0"
+                                          IsChecked="True"
+                                          Content="Problems"
+                                          Style="{StaticResource IdeBottomPaneTabToggleButtonStyle}"
+                                          Click="BottomProblemsToolTab_Click"
+                                          help:ContextHelp.Key="Editor.SyntaxPanel" />
+
+                            <ToggleButton x:Name="BottomDebugOutputToolTab"
+                                          Grid.Column="1"
+                                          Content="Debug Output"
+                                          ToolTip="Output from the separate PowerShell debugger process"
+                                          Style="{StaticResource IdeBottomPaneTabToggleButtonStyle}"
+                                          Click="BottomDebugOutputToolTab_Click"
+                                          help:ContextHelp.Key="Debug.Area" />
+
+                            <ToggleButton x:Name="BottomActivityToolTab"
+                                          Grid.Column="2"
+                                          Content="Activity"
+                                          ToolTip="Application messages and operation details"
+                                          Style="{StaticResource IdeBottomPaneTabToggleButtonStyle}"
+                                          Click="BottomActivityToolTab_Click" />
+                        </Grid>
+
+                        <Grid Grid.Row="2">
 
                         <Grid x:Name="DiagnosticsBottomPane"
                               Margin="0">
@@ -1431,7 +1489,7 @@
                                 <Style TargetType="Grid">
                                     <Setter Property="Visibility" Value="Collapsed" />
                                     <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsChecked, ElementName=DiagnosticsBottomPaneTab}" Value="True">
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=BottomProblemsToolTab}" Value="True">
                                             <Setter Property="Visibility" Value="Visible" />
                                         </DataTrigger>
                                     </Style.Triggers>
@@ -1543,7 +1601,7 @@
                                 <Style TargetType="Grid">
                                     <Setter Property="Visibility" Value="Collapsed" />
                                     <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsChecked, ElementName=DebugOutputBottomPaneTab}" Value="True">
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=BottomDebugOutputToolTab}" Value="True">
                                             <Setter Property="Visibility" Value="Visible" />
                                         </DataTrigger>
                                     </Style.Triggers>
@@ -1578,7 +1636,7 @@
                                 <Style TargetType="Grid">
                                     <Setter Property="Visibility" Value="Collapsed" />
                                     <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsChecked, ElementName=ActivityBottomPaneTab}" Value="True">
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=BottomActivityToolTab}" Value="True">
                                             <Setter Property="Visibility" Value="Visible" />
                                         </DataTrigger>
                                     </Style.Triggers>
@@ -1605,6 +1663,9 @@
                                      ToolTip="Application notifications, warnings, and operation details. Interactive PowerShell output remains in Console." />
                         </Grid>
                     </Grid>
+                </Grid>
+                </Grid>
+            </Border>
                 </Grid>
             </Border>
             <!-- Debug splitter — only visible when debug panel is open -->

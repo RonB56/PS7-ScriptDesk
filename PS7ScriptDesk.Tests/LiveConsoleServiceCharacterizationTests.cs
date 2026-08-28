@@ -8,6 +8,19 @@ namespace PS7ScriptDesk.Tests;
 public sealed class LiveConsoleServiceCharacterizationTests
 {
     [Fact]
+    public void InitialPromptRoute_PreservesPowerShellCursorControlSequences()
+    {
+        using var service = new LiveConsoleService();
+        var rawOutput = new List<string>();
+        service.RawOutputReceived += (_, output) => rawOutput.Add(output);
+
+        const string initialPrompt = "\x1b[2J\x1b[HPS C:\\PowerShell Scripts>\x1b[1C\x1b[?25h";
+        Publish(service, initialPrompt, _ => { });
+
+        Assert.Equal(initialPrompt, string.Concat(rawOutput));
+    }
+
+    [Fact]
     public void RawOutputRoute_PreservesAnsiAndChunkOrder_WhileRemovingNullBytes()
     {
         using var service = new LiveConsoleService();

@@ -14,8 +14,12 @@ public sealed class FirstRunWorkspaceRefinementTests
         Assert.False(settings.IsExplorerVisible);
         Assert.False(settings.IsDebugPanelVisible);
         Assert.Equal("HorizontalSplit", settings.WorkspaceLayoutMode);
+        Assert.False(settings.IsBottomToolWindowVisible);
+        Assert.False(settings.IsBottomToolWindowFloating);
+        Assert.Equal("Problems", settings.SelectedBottomToolTab);
         Assert.Null(settings.ConsoleHeight);
         Assert.Null(settings.ConsoleSideWidth);
+        Assert.Null(settings.DockedBottomToolWindowHeight);
     }
 
     [Fact]
@@ -28,9 +32,17 @@ public sealed class FirstRunWorkspaceRefinementTests
             IsExplorerVisible = true,
             IsDebugPanelVisible = true,
             WorkspaceLayoutMode = "SideBySideSplit",
+            IsBottomToolWindowVisible = true,
+            IsBottomToolWindowFloating = true,
+            SelectedBottomToolTab = "Activity",
             ExplorerWidth = 255,
             ConsoleHeight = 300,
             ConsoleSideWidth = 460,
+            DockedBottomToolWindowHeight = 190,
+            BottomToolWindowWidth = 720,
+            BottomToolWindowHeight = 420,
+            BottomToolWindowLeft = 50,
+            BottomToolWindowTop = 60,
             DockedDebugPanelWidth = 260
         };
 
@@ -39,9 +51,17 @@ public sealed class FirstRunWorkspaceRefinementTests
         Assert.True(settings.IsExplorerVisible);
         Assert.True(settings.IsDebugPanelVisible);
         Assert.Equal("SideBySideSplit", settings.WorkspaceLayoutMode);
+        Assert.True(settings.IsBottomToolWindowVisible);
+        Assert.True(settings.IsBottomToolWindowFloating);
+        Assert.Equal("Activity", settings.SelectedBottomToolTab);
         Assert.Equal(255, settings.ExplorerWidth);
         Assert.Equal(300, settings.ConsoleHeight);
         Assert.Equal(460, settings.ConsoleSideWidth);
+        Assert.Equal(190, settings.DockedBottomToolWindowHeight);
+        Assert.Equal(720, settings.BottomToolWindowWidth);
+        Assert.Equal(420, settings.BottomToolWindowHeight);
+        Assert.Equal(50, settings.BottomToolWindowLeft);
+        Assert.Equal(60, settings.BottomToolWindowTop);
         Assert.Equal(260, settings.DockedDebugPanelWidth);
     }
 
@@ -53,6 +73,10 @@ public sealed class FirstRunWorkspaceRefinementTests
         Assert.Contains("ApplyWorkspaceLayoutMode(RestoreWorkspaceLayoutMode(_loadedSettings.WorkspaceLayoutMode), \"SettingsRestore\");", mainCode, StringComparison.Ordinal);
         Assert.Contains("settings.WorkspaceLayoutMode = _workspaceLayoutMode.ToString();", mainCode, StringComparison.Ordinal);
         Assert.Contains("settings.ConsoleSideWidth = _lastKnownConsoleSideWidth;", mainCode, StringComparison.Ordinal);
+        Assert.Contains("settings.IsBottomToolWindowVisible = _isBottomToolWindowVisible;", mainCode, StringComparison.Ordinal);
+        Assert.Contains("settings.IsBottomToolWindowFloating = _isBottomToolWindowFloating;", mainCode, StringComparison.Ordinal);
+        Assert.Contains("settings.SelectedBottomToolTab = _selectedBottomToolTab.ToString();", mainCode, StringComparison.Ordinal);
+        Assert.Contains("settings.DockedBottomToolWindowHeight = _lastKnownBottomToolWindowHeight;", mainCode, StringComparison.Ordinal);
         Assert.Contains("settings.IsDebugPanelVisible = DebugPanelBorder.Visibility == Visibility.Visible;", mainCode, StringComparison.Ordinal);
         Assert.Contains("settings.DockedDebugPanelWidth = _lastKnownDebugPanelWidth;", mainCode, StringComparison.Ordinal);
         Assert.Contains("return WorkspaceLayoutMode.HorizontalSplit;", mainCode, StringComparison.Ordinal);
@@ -62,20 +86,24 @@ public sealed class FirstRunWorkspaceRefinementTests
     public void MainWindow_FirstRunWorkspaceKeepsOnlyConsoleBottomPaneVisible()
     {
         var mainXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml");
-        var consolePaneXaml = ExtractBetween(mainXaml, "<Border x:Name=\"ConsolePaneBorder\"", "<!-- Debug splitter");
+        var consolePaneXaml = ExtractBetween(mainXaml, "<Border x:Name=\"ConsolePaneBorder\"", "<GridSplitter x:Name=\"BottomToolWindowSplitter\"");
+        var bottomToolWindowXaml = ExtractBetween(mainXaml, "<Border x:Name=\"BottomToolWindowBorder\"", "<!-- Debug splitter");
         var mainCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
 
         Assert.Contains("x:Name=\"ConsoleRowDefinition\" Height=\"180\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"BottomToolWindowSplitterRowDefinition\" Height=\"0\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"BottomToolWindowRowDefinition\" Height=\"0\" MinHeight=\"0\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("private const double DefaultConsoleHeight = 180;", mainCode, StringComparison.Ordinal);
         Assert.Contains("private WorkspaceLayoutMode _workspaceLayoutMode = WorkspaceLayoutMode.HorizontalSplit;", mainCode, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"ConsoleBottomPaneTab\"", consolePaneXaml, StringComparison.Ordinal);
         Assert.Contains("IsChecked=\"True\"", consolePaneXaml, StringComparison.Ordinal);
-        Assert.Contains("x:Name=\"DiagnosticsBottomPaneTab\"", consolePaneXaml, StringComparison.Ordinal);
-        Assert.Contains("x:Name=\"DebugOutputBottomPaneTab\"", consolePaneXaml, StringComparison.Ordinal);
-        Assert.Contains("x:Name=\"ActivityBottomPaneTab\"", consolePaneXaml, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"Visibility\" Value=\"Collapsed\" />", ExtractBetween(consolePaneXaml, "<Grid x:Name=\"DiagnosticsBottomPane\"", "<Grid x:Name=\"DebugOutputBottomPane\""), StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"Visibility\" Value=\"Collapsed\" />", ExtractBetween(consolePaneXaml, "<Grid x:Name=\"DebugOutputBottomPane\"", "<Grid x:Name=\"ActivityBottomPane\""), StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"Visibility\" Value=\"Collapsed\" />", ExtractBetween(consolePaneXaml, "<Grid x:Name=\"ActivityBottomPane\"", "</Border>"), StringComparison.Ordinal);
+        Assert.DoesNotContain("DiagnosticsBottomPane", consolePaneXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("DebugOutputBottomPane", consolePaneXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ActivityBottomPane", consolePaneXaml, StringComparison.Ordinal);
+        Assert.Contains("Visibility=\"Collapsed\"", bottomToolWindowXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"DiagnosticsBottomPane\"", bottomToolWindowXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"DebugOutputBottomPane\"", bottomToolWindowXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"ActivityBottomPane\"", bottomToolWindowXaml, StringComparison.Ordinal);
     }
 
     [Fact]

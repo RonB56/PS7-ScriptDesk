@@ -54,8 +54,11 @@ namespace PS7ScriptDesk.Shell
         private const double MinimumExplorerWidth = 190;
         private const double MinimumConsoleHeight = 160;
         private const double MinimumConsoleSideWidth = 260;
+        private const double MinimumBottomToolWindowHeight = 120;
+        private const double BottomToolWindowSplitterThickness = 6;
         private const double DefaultConsoleHeight = 180;
         private const double DefaultConsoleSideWidth = 420;
+        private const double DefaultBottomToolWindowHeight = 180;
         private const double MinimumExplorerSectionHeight = 120;
         private const double DebugPanelWidth = 220;
         private const double MinimumDebugPanelWidth = 160;
@@ -98,6 +101,10 @@ namespace PS7ScriptDesk.Shell
         private const string RecentScriptMenuItemTagPrefix = "RecentScript:";
         private const double DefaultDebugPaneWindowWidth = 420;
         private const double DefaultDebugPaneWindowHeight = 480;
+        private const double DefaultBottomToolWindowWidth = 640;
+        private const double DefaultFloatingBottomToolWindowHeight = 360;
+        private const double MinimumSavedBottomToolWindowWidth = 360;
+        private const double MinimumSavedBottomToolWindowHeight = 220;
         private static readonly HashSet<string> HiddenDebugVariableNames = new(StringComparer.OrdinalIgnoreCase)
         {
             "?",
@@ -217,6 +224,7 @@ namespace PS7ScriptDesk.Shell
         private double _lastKnownExplorerWidth = 220;
         private double _lastKnownConsoleHeight = DefaultConsoleHeight;
         private double _lastKnownConsoleSideWidth = DefaultConsoleSideWidth;
+        private double _lastKnownBottomToolWindowHeight = DefaultBottomToolWindowHeight;
         private double _lastKnownDebugPanelWidth = DebugPanelWidth;
         private string _lastFindText = string.Empty;
         private string _lastReplaceText = string.Empty;
@@ -230,6 +238,7 @@ namespace PS7ScriptDesk.Shell
         private string? _activeDebugLaunchPath;
         private string? _activeDebugSnapshotPath;
         private int _debugPanelRefreshVersion;
+        private BottomToolWindow? _bottomToolWindow;
         private DebugPaneWindow? _debugPaneWindow;
         private ExportProgressWindow? _exportProgressWindow;
         private IReadOnlyList<DebugVariableInfo>? _currentDebugVariables;
@@ -244,6 +253,18 @@ namespace PS7ScriptDesk.Shell
         }
 
         private WorkspaceLayoutMode _workspaceLayoutMode = WorkspaceLayoutMode.HorizontalSplit;
+        private enum BottomToolTab
+        {
+            Problems,
+            DebugOutput,
+            Activity
+        }
+
+        private BottomToolTab _selectedBottomToolTab = BottomToolTab.Problems;
+        private bool _isBottomToolWindowVisible;
+        private bool _isBottomToolWindowFloating;
+        private bool _isSynchronizingBottomToolWindowTab;
+        private Rect? _lastBottomToolWindowBounds;
         private IReadOnlyList<DebugCallStackFrame>? _currentDebugCallStack;
         private ObservableCollection<BreakpointRow>? _currentBreakpointRows;
         private int _selectedDebugTabIndex;
@@ -341,9 +362,30 @@ namespace PS7ScriptDesk.Shell
                 _lastKnownConsoleSideWidth = _loadedSettings.ConsoleSideWidth!.Value;
             }
 
+            if (IsUsableLength(_loadedSettings.DockedBottomToolWindowHeight, MinimumBottomToolWindowHeight))
+            {
+                _lastKnownBottomToolWindowHeight = _loadedSettings.DockedBottomToolWindowHeight!.Value;
+            }
+
             if (IsUsableLength(_loadedSettings.DockedDebugPanelWidth, MinimumDebugPanelWidth))
             {
                 _lastKnownDebugPanelWidth = _loadedSettings.DockedDebugPanelWidth!.Value;
+            }
+
+            _selectedBottomToolTab = RestoreBottomToolTab(_loadedSettings.SelectedBottomToolTab);
+            _isBottomToolWindowVisible = _loadedSettings.IsBottomToolWindowVisible;
+            _isBottomToolWindowFloating = _loadedSettings.IsBottomToolWindowFloating;
+
+            if (IsFiniteCoordinate(_loadedSettings.BottomToolWindowLeft) &&
+                IsFiniteCoordinate(_loadedSettings.BottomToolWindowTop) &&
+                IsUsableLength(_loadedSettings.BottomToolWindowWidth, MinimumSavedBottomToolWindowWidth) &&
+                IsUsableLength(_loadedSettings.BottomToolWindowHeight, MinimumSavedBottomToolWindowHeight))
+            {
+                _lastBottomToolWindowBounds = new Rect(
+                    _loadedSettings.BottomToolWindowLeft!.Value,
+                    _loadedSettings.BottomToolWindowTop!.Value,
+                    _loadedSettings.BottomToolWindowWidth!.Value,
+                    _loadedSettings.BottomToolWindowHeight!.Value);
             }
 
             InitializeComponent();
@@ -510,7 +552,22 @@ namespace PS7ScriptDesk.Shell
 
                 // Notify the service that a host is attached (triggers session bookkeeping).
                 var hostAttachStopwatch = Stopwatch.StartNew();
-                await ViewModel.InitializeTerminalHostAsync(IntPtr.Zero, 120, 30);
+                var terminalHostWidth = TerminalConsole.ActualWidth > 0
+                    ? Math.Max(1, (int)Math.Round(TerminalConsole.ActualWidth))
+                    : 120;
+                var terminalHostHeight = TerminalConsole.ActualHeight > 0
+                    ? Math.Max(1, (int)Math.Round(TerminalConsole.ActualHeight))
+                    : 30;
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "Initializing terminal host with the measured WPF terminal bounds.",
+                    new Dictionary<string, object?>
+                    {
+                        ["widthPixels"] = terminalHostWidth,
+                        ["heightPixels"] = terminalHostHeight,
+                        ["usedFallbackBounds"] = TerminalConsole.ActualWidth <= 0 || TerminalConsole.ActualHeight <= 0
+                    });
+                await ViewModel.InitializeTerminalHostAsync(IntPtr.Zero, terminalHostWidth, terminalHostHeight);
                 _terminalHostAttached = true;
                 DeveloperDiagnostics.LogOperationStop(
                     "Startup",
@@ -1879,68 +1936,487 @@ namespace PS7ScriptDesk.Shell
         private void ConsoleBottomPaneTab_Click(object sender, RoutedEventArgs e)
         {
             ConsoleBottomPaneTab.IsChecked = true;
-            DiagnosticsBottomPaneTab.IsChecked = false;
-            DebugOutputBottomPaneTab.IsChecked = false;
-            ActivityBottomPaneTab.IsChecked = false;
             DeveloperDiagnostics.LogUserAction("UI", "BottomPaneConsoleTabSelected", "Console bottom pane tab selected.");
             Dispatcher.BeginInvoke(new Action(() => TerminalConsole.FocusTerminal()), System.Windows.Threading.DispatcherPriority.Loaded);
         }
 
-        private void DiagnosticsBottomPaneTab_Click(object sender, RoutedEventArgs e)
+        private void BottomProblemsToolTab_Click(object sender, RoutedEventArgs e)
         {
-            ConsoleBottomPaneTab.IsChecked = false;
-            DiagnosticsBottomPaneTab.IsChecked = true;
-            DebugOutputBottomPaneTab.IsChecked = false;
-            ActivityBottomPaneTab.IsChecked = false;
-
-            var errorCount = ViewModel?.SelectedTab?.DiagnosticErrorCount ?? 0;
-            var warningCount = ViewModel?.SelectedTab?.DiagnosticWarningCount ?? 0;
-            DeveloperDiagnostics.LogUserAction(
-                "UI",
-                "BottomPaneDiagnosticsTabSelected",
-                "Diagnostics bottom pane tab selected.",
-                new Dictionary<string, object?>
-                {
-                    ["errorCount"] = errorCount,
-                    ["warningCount"] = warningCount
-                });
+            SelectBottomToolTab(BottomToolTab.Problems, "UserSelected");
         }
 
-        private void DebugOutputBottomPaneTab_Click(object sender, RoutedEventArgs e)
+        private void BottomDebugOutputToolTab_Click(object sender, RoutedEventArgs e)
         {
-            SelectDebugOutputBottomPane("User selected the dedicated debugger output pane.");
+            SelectBottomToolTab(BottomToolTab.DebugOutput, "UserSelected");
         }
 
         private void SelectDebugOutputBottomPane(string reason)
         {
-            ConsoleBottomPaneTab.IsChecked = false;
-            DiagnosticsBottomPaneTab.IsChecked = false;
-            DebugOutputBottomPaneTab.IsChecked = true;
-            ActivityBottomPaneTab.IsChecked = false;
+            ShowBottomToolWindow(BottomToolTab.DebugOutput, reason);
+        }
+
+        private void BottomActivityToolTab_Click(object sender, RoutedEventArgs e)
+        {
+            SelectBottomToolTab(BottomToolTab.Activity, "UserSelected");
+        }
+
+        private void ShowBottomToolWindow_Click(object sender, RoutedEventArgs e)
+        {
+            if (ShowBottomToolWindowMenuItem.IsChecked)
+            {
+                ShowBottomToolWindow(_selectedBottomToolTab, "ViewMenu");
+            }
+            else
+            {
+                HideBottomToolWindow("ViewMenu");
+            }
+        }
+
+        private void PopOutBottomToolWindowButton_Click(object sender, RoutedEventArgs e)
+        {
+            PopOutBottomToolWindow("HeaderButton");
+        }
+
+        private void PopOutBottomToolWindowMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            PopOutBottomToolWindow("ViewMenu");
+        }
+
+        private void DockBottomToolWindowButton_Click(object sender, RoutedEventArgs e)
+        {
+            DockBottomToolWindow("HeaderButton");
+        }
+
+        private void DockBottomToolWindowMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            DockBottomToolWindow("ViewMenu");
+        }
+
+        private void HideBottomToolWindowButton_Click(object sender, RoutedEventArgs e)
+        {
+            HideBottomToolWindow("HeaderButton");
+        }
+
+        private void ShowBottomToolWindow(BottomToolTab selectedTab, string reason)
+        {
+            SelectBottomToolTab(selectedTab, reason);
+            _isBottomToolWindowVisible = true;
+
+            if (_isBottomToolWindowFloating)
+            {
+                PopOutBottomToolWindow(reason);
+            }
+            else
+            {
+                ApplyBottomToolWindowPresentationState(reason);
+            }
+
             DeveloperDiagnostics.LogUserAction(
-                "Debugger",
-                "BottomPaneDebugOutputTabSelected",
-                reason,
+                "UI",
+                "BottomToolWindowShown",
+                "Problems / Debug Output / Activity tool group shown.",
+                BuildBottomToolWindowDiagnostics(reason));
+        }
+
+        private void HideBottomToolWindow(string reason)
+        {
+            CaptureDockedBottomToolWindowHeight();
+            CaptureBottomToolWindowBounds();
+
+            var bottomToolWindow = _bottomToolWindow;
+            if (bottomToolWindow is not null)
+            {
+                bottomToolWindow.DockBackRequested -= BottomToolWindow_DockBackRequested;
+                bottomToolWindow.Closed -= BottomToolWindow_Closed;
+                bottomToolWindow.LocationChanged -= BottomToolWindow_LocationChanged;
+                bottomToolWindow.SizeChanged -= BottomToolWindow_SizeChanged;
+                bottomToolWindow.ClearToolContent();
+                _bottomToolWindow = null;
+                bottomToolWindow.CloseForOwnerShutdown();
+            }
+
+            _isBottomToolWindowVisible = false;
+            EnsureBottomToolWindowContentDocked();
+            ApplyBottomToolWindowPresentationState(reason);
+
+            DeveloperDiagnostics.LogUserAction(
+                "UI",
+                "BottomToolWindowHidden",
+                "Problems / Debug Output / Activity tool group hidden.",
+                BuildBottomToolWindowDiagnostics(reason));
+        }
+
+        private void PopOutBottomToolWindow(string reason)
+        {
+            CaptureDockedBottomToolWindowHeight();
+            _isBottomToolWindowVisible = true;
+            _isBottomToolWindowFloating = true;
+
+            if (_bottomToolWindow is { IsLoaded: true } existingWindow)
+            {
+                ApplyBottomToolWindowPresentationState(reason);
+                existingWindow.Activate();
+                DeveloperDiagnostics.LogDecision(
+                    "UI",
+                    "BottomToolWindowPopOut",
+                    "Existing floating bottom tool window activated.",
+                    "ReuseExistingWindow",
+                    BuildBottomToolWindowDiagnostics(reason));
+                return;
+            }
+
+            var bottomToolWindow = new BottomToolWindow
+            {
+                Owner = this
+            };
+
+            _bottomToolWindow = bottomToolWindow;
+            bottomToolWindow.DockBackRequested += BottomToolWindow_DockBackRequested;
+            bottomToolWindow.Closed += BottomToolWindow_Closed;
+            bottomToolWindow.LocationChanged += BottomToolWindow_LocationChanged;
+            bottomToolWindow.SizeChanged += BottomToolWindow_SizeChanged;
+
+            RestoreBottomToolWindowBounds(bottomToolWindow);
+            EnsureBottomToolWindowContentFloating(bottomToolWindow);
+            ApplyBottomToolWindowPresentationState(reason);
+            bottomToolWindow.Show();
+
+            DeveloperDiagnostics.LogUserAction(
+                "UI",
+                "BottomToolWindowPoppedOut",
+                "Problems / Debug Output / Activity tool group popped out.",
+                BuildBottomToolWindowDiagnostics(reason));
+        }
+
+        private void DockBottomToolWindow(string reason)
+        {
+            CaptureBottomToolWindowBounds();
+
+            var bottomToolWindow = _bottomToolWindow;
+            if (bottomToolWindow is not null)
+            {
+                bottomToolWindow.DockBackRequested -= BottomToolWindow_DockBackRequested;
+                bottomToolWindow.Closed -= BottomToolWindow_Closed;
+                bottomToolWindow.LocationChanged -= BottomToolWindow_LocationChanged;
+                bottomToolWindow.SizeChanged -= BottomToolWindow_SizeChanged;
+                bottomToolWindow.ClearToolContent();
+                _bottomToolWindow = null;
+            }
+
+            _isBottomToolWindowVisible = true;
+            _isBottomToolWindowFloating = false;
+            EnsureBottomToolWindowContentDocked();
+            ApplyBottomToolWindowPresentationState(reason);
+            bottomToolWindow?.CloseForDockBack();
+
+            DeveloperDiagnostics.LogUserAction(
+                "UI",
+                "BottomToolWindowDocked",
+                "Problems / Debug Output / Activity tool group docked below the console.",
+                BuildBottomToolWindowDiagnostics(reason));
+        }
+
+        private void SelectBottomToolTab(BottomToolTab selectedTab, string reason)
+        {
+            if (_isSynchronizingBottomToolWindowTab)
+            {
+                return;
+            }
+
+            var previousTab = _selectedBottomToolTab;
+            _selectedBottomToolTab = selectedTab;
+            _isSynchronizingBottomToolWindowTab = true;
+            try
+            {
+                BottomProblemsToolTab.IsChecked = selectedTab == BottomToolTab.Problems;
+                BottomDebugOutputToolTab.IsChecked = selectedTab == BottomToolTab.DebugOutput;
+                BottomActivityToolTab.IsChecked = selectedTab == BottomToolTab.Activity;
+            }
+            finally
+            {
+                _isSynchronizingBottomToolWindowTab = false;
+            }
+
+            if (previousTab == selectedTab && string.Equals(reason, "SettingsRestore", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            DeveloperDiagnostics.LogInfo(
+                selectedTab == BottomToolTab.DebugOutput ? "Debugger" : "UI",
+                "Bottom tool window selected tab changed.",
+                BuildBottomToolWindowDiagnostics(reason, previousTab));
+        }
+
+        private void RestoreBottomToolWindowFromSettings()
+        {
+            _selectedBottomToolTab = RestoreBottomToolTab(_loadedSettings.SelectedBottomToolTab);
+            SelectBottomToolTab(_selectedBottomToolTab, "SettingsRestore");
+
+            if (!_isBottomToolWindowVisible)
+            {
+                ApplyBottomToolWindowPresentationState("SettingsRestore");
+                return;
+            }
+
+            if (_isBottomToolWindowFloating)
+            {
+                PopOutBottomToolWindow("SettingsRestore");
+            }
+            else
+            {
+                ApplyBottomToolWindowPresentationState("SettingsRestore");
+            }
+        }
+
+        private void ApplyBottomToolWindowPresentationState(string reason)
+        {
+            var dockedVisible =
+                _isBottomToolWindowVisible &&
+                !_isBottomToolWindowFloating &&
+                _workspaceLayoutMode != WorkspaceLayoutMode.EditorMaximized;
+
+            if (dockedVisible)
+            {
+                EnsureBottomToolWindowContentDocked();
+                BottomToolWindowSplitterRowDefinition.Height = new GridLength(BottomToolWindowSplitterThickness, GridUnitType.Pixel);
+                BottomToolWindowRowDefinition.Height = new GridLength(Math.Max(_lastKnownBottomToolWindowHeight, MinimumBottomToolWindowHeight), GridUnitType.Pixel);
+                BottomToolWindowRowDefinition.MinHeight = MinimumBottomToolWindowHeight;
+                BottomToolWindowSplitter.Visibility = Visibility.Visible;
+                BottomToolWindowBorder.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                BottomToolWindowSplitter.Visibility = Visibility.Collapsed;
+                BottomToolWindowBorder.Visibility = Visibility.Collapsed;
+                BottomToolWindowSplitterRowDefinition.Height = new GridLength(0, GridUnitType.Pixel);
+                BottomToolWindowRowDefinition.Height = new GridLength(0, GridUnitType.Pixel);
+                BottomToolWindowRowDefinition.MinHeight = 0;
+            }
+
+            ApplyHorizontalConsoleRegionHeight(dockedVisible);
+
+            BottomToolWindowPopOutButton.Visibility = _isBottomToolWindowFloating ? Visibility.Collapsed : Visibility.Visible;
+            BottomToolWindowDockBackButton.Visibility = _isBottomToolWindowFloating ? Visibility.Visible : Visibility.Collapsed;
+            ShowBottomToolWindowMenuItem.IsChecked = _isBottomToolWindowVisible;
+            PopOutBottomToolWindowMenuItem.IsEnabled = _isBottomToolWindowVisible && !_isBottomToolWindowFloating;
+            DockBottomToolWindowMenuItem.IsEnabled = _isBottomToolWindowVisible && _isBottomToolWindowFloating;
+            DockBottomToolWindowMenuItem.Visibility = _isBottomToolWindowVisible && _isBottomToolWindowFloating ? Visibility.Visible : Visibility.Collapsed;
+            PopOutBottomToolWindowMenuItem.Visibility = _isBottomToolWindowVisible && _isBottomToolWindowFloating ? Visibility.Collapsed : Visibility.Visible;
+
+            DeveloperDiagnostics.LogInfo(
+                "UI",
+                "Bottom tool window presentation state applied.",
+                BuildBottomToolWindowDiagnostics(reason));
+        }
+
+        private void EnsureBottomToolWindowContentDocked()
+        {
+            if (BottomToolWindowContent.Parent is ContentControl contentControl)
+            {
+                contentControl.Content = null;
+            }
+            else if (BottomToolWindowContent.Parent is System.Windows.Controls.Panel panel && !ReferenceEquals(panel, BottomToolWindowDockHost))
+            {
+                panel.Children.Remove(BottomToolWindowContent);
+            }
+
+            if (!BottomToolWindowDockHost.Children.Contains(BottomToolWindowContent))
+            {
+                BottomToolWindowDockHost.Children.Clear();
+                BottomToolWindowDockHost.Children.Add(BottomToolWindowContent);
+            }
+        }
+
+        private void EnsureBottomToolWindowContentFloating(BottomToolWindow bottomToolWindow)
+        {
+            if (BottomToolWindowContent.Parent is System.Windows.Controls.Panel panel)
+            {
+                panel.Children.Remove(BottomToolWindowContent);
+            }
+            else if (BottomToolWindowContent.Parent is ContentControl contentControl)
+            {
+                contentControl.Content = null;
+            }
+
+            bottomToolWindow.SetToolContent(BottomToolWindowContent);
+        }
+
+        private void BottomToolWindow_DockBackRequested(object? sender, EventArgs e)
+        {
+            DockBottomToolWindow("FloatingWindowRequest");
+        }
+
+        private void BottomToolWindow_Closed(object? sender, EventArgs e)
+        {
+            if (sender is not BottomToolWindow bottomToolWindow)
+            {
+                return;
+            }
+
+            CaptureBottomToolWindowBounds(bottomToolWindow);
+
+            if (ReferenceEquals(_bottomToolWindow, bottomToolWindow))
+            {
+                bottomToolWindow.DockBackRequested -= BottomToolWindow_DockBackRequested;
+                bottomToolWindow.Closed -= BottomToolWindow_Closed;
+                bottomToolWindow.LocationChanged -= BottomToolWindow_LocationChanged;
+                bottomToolWindow.SizeChanged -= BottomToolWindow_SizeChanged;
+                bottomToolWindow.ClearToolContent();
+                _bottomToolWindow = null;
+                _isBottomToolWindowFloating = false;
+                EnsureBottomToolWindowContentDocked();
+                ApplyBottomToolWindowPresentationState("FloatingWindowClosed");
+            }
+
+            DeveloperDiagnostics.LogInfo(
+                "UI",
+                "Floating bottom tool window closed.",
+                BuildBottomToolWindowDiagnostics("FloatingWindowClosed"));
+        }
+
+        private void BottomToolWindow_LocationChanged(object? sender, EventArgs e)
+        {
+            if (sender is BottomToolWindow bottomToolWindow)
+            {
+                CaptureBottomToolWindowBounds(bottomToolWindow);
+            }
+        }
+
+        private void BottomToolWindow_SizeChanged(object? sender, SizeChangedEventArgs e)
+        {
+            if (sender is BottomToolWindow bottomToolWindow)
+            {
+                CaptureBottomToolWindowBounds(bottomToolWindow);
+            }
+        }
+
+        private void CaptureDockedBottomToolWindowHeight()
+        {
+            if (!_isBottomToolWindowFloating &&
+                BottomToolWindowBorder.Visibility == Visibility.Visible &&
+                BottomToolWindowRowDefinition.ActualHeight >= MinimumBottomToolWindowHeight)
+            {
+                _lastKnownBottomToolWindowHeight = BottomToolWindowRowDefinition.ActualHeight;
+            }
+        }
+
+        private void ApplyHorizontalConsoleRegionHeight(bool dockedBottomToolVisible)
+        {
+            if (_workspaceLayoutMode is not (WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit))
+            {
+                return;
+            }
+
+            var consoleHeight = Math.Max(_lastKnownConsoleHeight, MinimumConsoleHeight);
+            if (dockedBottomToolVisible)
+            {
+                consoleHeight += BottomToolWindowSplitterThickness + Math.Max(_lastKnownBottomToolWindowHeight, MinimumBottomToolWindowHeight);
+            }
+
+            ConsoleRowDefinition.Height = new GridLength(consoleHeight, GridUnitType.Pixel);
+        }
+
+        private void CaptureBottomToolWindowBounds()
+        {
+            if (_bottomToolWindow is not null)
+            {
+                CaptureBottomToolWindowBounds(_bottomToolWindow);
+            }
+        }
+
+        private void CaptureBottomToolWindowBounds(BottomToolWindow bottomToolWindow)
+        {
+            if (bottomToolWindow.WindowState != WindowState.Normal)
+            {
+                return;
+            }
+
+            if (!IsFiniteCoordinate(bottomToolWindow.Left) ||
+                !IsFiniteCoordinate(bottomToolWindow.Top) ||
+                !IsUsableLength(bottomToolWindow.Width, MinimumSavedBottomToolWindowWidth) ||
+                !IsUsableLength(bottomToolWindow.Height, MinimumSavedBottomToolWindowHeight))
+            {
+                return;
+            }
+
+            _lastBottomToolWindowBounds = new Rect(bottomToolWindow.Left, bottomToolWindow.Top, bottomToolWindow.Width, bottomToolWindow.Height);
+        }
+
+        private void RestoreBottomToolWindowBounds(BottomToolWindow bottomToolWindow)
+        {
+            var fallbackBounds = new Rect(
+                Left + 48,
+                Top + 64,
+                DefaultBottomToolWindowWidth,
+                DefaultFloatingBottomToolWindowHeight);
+            var hasVisibleSavedBounds = _lastBottomToolWindowBounds is Rect savedBounds && IsWindowBoundsVisible(savedBounds);
+            var restoredBounds = hasVisibleSavedBounds ? savedBounds : fallbackBounds;
+
+            bottomToolWindow.Left = restoredBounds.Left;
+            bottomToolWindow.Top = restoredBounds.Top;
+            bottomToolWindow.Width = restoredBounds.Width;
+            bottomToolWindow.Height = restoredBounds.Height;
+
+            DeveloperDiagnostics.LogInfo(
+                "UI",
+                "Bottom tool window size and position restored.",
                 new Dictionary<string, object?>
                 {
-                    ["debugOutputLength"] = ViewModel?.DebuggerOutputText?.Length ?? 0
+                    ["left"] = restoredBounds.Left,
+                    ["top"] = restoredBounds.Top,
+                    ["width"] = restoredBounds.Width,
+                    ["height"] = restoredBounds.Height,
+                    ["usedFallback"] = !hasVisibleSavedBounds
                 });
         }
 
-        private void ActivityBottomPaneTab_Click(object sender, RoutedEventArgs e)
+        private static bool IsWindowBoundsVisible(Rect bounds)
         {
-            ConsoleBottomPaneTab.IsChecked = false;
-            DiagnosticsBottomPaneTab.IsChecked = false;
-            DebugOutputBottomPaneTab.IsChecked = false;
-            ActivityBottomPaneTab.IsChecked = true;
-            DeveloperDiagnostics.LogUserAction(
-                "UI",
-                "BottomPaneActivityTabSelected",
-                "Application activity bottom pane tab selected.",
-                new Dictionary<string, object?>
-                {
-                    ["activityLength"] = ViewModel?.ApplicationActivityText?.Length ?? 0
-                });
+            if (!IsFiniteCoordinate(bounds.Left) ||
+                !IsFiniteCoordinate(bounds.Top) ||
+                !IsUsableLength(bounds.Width, MinimumSavedBottomToolWindowWidth) ||
+                !IsUsableLength(bounds.Height, MinimumSavedBottomToolWindowHeight))
+            {
+                return false;
+            }
+
+            var virtualScreen = new Rect(
+                SystemParameters.VirtualScreenLeft,
+                SystemParameters.VirtualScreenTop,
+                SystemParameters.VirtualScreenWidth,
+                SystemParameters.VirtualScreenHeight);
+
+            return virtualScreen.IntersectsWith(bounds);
+        }
+
+        private static BottomToolTab RestoreBottomToolTab(string? persistedTab)
+        {
+            if (Enum.TryParse<BottomToolTab>(persistedTab, ignoreCase: true, out var tab))
+            {
+                return tab;
+            }
+
+            return BottomToolTab.Problems;
+        }
+
+        private Dictionary<string, object?> BuildBottomToolWindowDiagnostics(string reason, BottomToolTab? previousTab = null)
+        {
+            return new Dictionary<string, object?>
+            {
+                ["reason"] = reason,
+                ["visible"] = _isBottomToolWindowVisible,
+                ["floating"] = _isBottomToolWindowFloating,
+                ["selectedTab"] = _selectedBottomToolTab.ToString(),
+                ["previousTab"] = previousTab?.ToString(),
+                ["dockedHeight"] = _lastKnownBottomToolWindowHeight,
+                ["floatingWindowOpen"] = _bottomToolWindow is not null,
+                ["workspaceLayoutMode"] = _workspaceLayoutMode.ToString(),
+                ["debugOutputLength"] = ViewModel?.DebuggerOutputText?.Length ?? 0,
+                ["activityLength"] = ViewModel?.ApplicationActivityText?.Length ?? 0,
+                ["errorCount"] = ViewModel?.SelectedTab?.DiagnosticErrorCount ?? 0,
+                ["warningCount"] = ViewModel?.SelectedTab?.DiagnosticWarningCount ?? 0
+            };
         }
 
 
@@ -5449,6 +5925,7 @@ namespace PS7ScriptDesk.Shell
 
                 _intelliSenseService.MetadataWarmupStatusChanged -= IntelliSenseService_MetadataWarmupStatusChanged;
                 _intelliSenseService.CompletionEngineStatusChanged -= IntelliSenseService_CompletionEngineStatusChanged;
+                _bottomToolWindow?.CloseForOwnerShutdown();
                 _debugPaneWindow?.CloseForOwnerShutdown();
                 _exportProgressWindow?.CloseForOwnerShutdown();
                 DisposeLiveSyntaxPumps();
@@ -5603,6 +6080,11 @@ namespace PS7ScriptDesk.Shell
                 _lastKnownConsoleSideWidth = _loadedSettings.ConsoleSideWidth!.Value;
             }
 
+            if (IsUsableLength(_loadedSettings.DockedBottomToolWindowHeight, MinimumBottomToolWindowHeight))
+            {
+                _lastKnownBottomToolWindowHeight = _loadedSettings.DockedBottomToolWindowHeight!.Value;
+            }
+
             if (IsUsableLength(_loadedSettings.DockedDebugPanelWidth, MinimumDebugPanelWidth))
             {
                 _lastKnownDebugPanelWidth = _loadedSettings.DockedDebugPanelWidth!.Value;
@@ -5633,6 +6115,7 @@ namespace PS7ScriptDesk.Shell
             ApplyWorkspaceLayoutMode(RestoreWorkspaceLayoutMode(_loadedSettings.WorkspaceLayoutMode), "SettingsRestore");
             ApplyExplorerVisibilityLayout();
             SetDebugPanelVisible(_loadedSettings.IsDebugPanelVisible);
+            RestoreBottomToolWindowFromSettings();
 
             if (_loadedSettings.StartMaximized)
             {
@@ -6565,6 +7048,7 @@ namespace PS7ScriptDesk.Shell
         private void ApplyWorkspaceLayoutMode(WorkspaceLayoutMode mode, string source)
         {
             var previousMode = _workspaceLayoutMode;
+            CaptureDockedBottomToolWindowHeight();
             CaptureWorkspaceLayoutSizes();
             _workspaceLayoutMode = mode;
 
@@ -6625,6 +7109,8 @@ namespace PS7ScriptDesk.Shell
                     break;
             }
 
+            ApplyBottomToolWindowPresentationState(source);
+
             if (ViewModel is not null && !string.Equals(source, "SettingsRestore", StringComparison.Ordinal))
             {
                 ViewModel.StatusText = mode switch
@@ -6643,7 +7129,10 @@ namespace PS7ScriptDesk.Shell
                 ["previousMode"] = previousMode.ToString(),
                 ["mode"] = mode.ToString(),
                 ["lastKnownConsoleHeight"] = _lastKnownConsoleHeight,
-                ["lastKnownConsoleSideWidth"] = _lastKnownConsoleSideWidth
+                ["lastKnownConsoleSideWidth"] = _lastKnownConsoleSideWidth,
+                ["bottomToolWindowVisible"] = _isBottomToolWindowVisible,
+                ["bottomToolWindowFloating"] = _isBottomToolWindowFloating,
+                ["lastKnownBottomToolWindowHeight"] = _lastKnownBottomToolWindowHeight
             };
 
             if (string.Equals(source, "SettingsRestore", StringComparison.Ordinal))
@@ -6665,7 +7154,17 @@ namespace PS7ScriptDesk.Shell
             if ((_workspaceLayoutMode is WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit) &&
                 ConsoleRowDefinition.ActualHeight >= MinimumConsoleHeight)
             {
-                _lastKnownConsoleHeight = ConsoleRowDefinition.ActualHeight;
+                var consoleHeight = ConsoleRowDefinition.ActualHeight;
+                if (BottomToolWindowBorder.Visibility == Visibility.Visible && !_isBottomToolWindowFloating)
+                {
+                    consoleHeight -= BottomToolWindowSplitterRowDefinition.ActualHeight;
+                    consoleHeight -= BottomToolWindowRowDefinition.ActualHeight;
+                }
+
+                if (consoleHeight >= MinimumConsoleHeight)
+                {
+                    _lastKnownConsoleHeight = consoleHeight;
+                }
             }
 
             if (_workspaceLayoutMode == WorkspaceLayoutMode.SideBySideSplit &&
@@ -6727,7 +7226,9 @@ namespace PS7ScriptDesk.Shell
             var settings = ViewModel?.CreateApplicationSettingsSnapshot() ?? new ApplicationSettings();
             var restoreBounds = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
             CaptureDebugPaneWindowBounds();
+            CaptureBottomToolWindowBounds();
             CaptureWorkspaceLayoutSizes();
+            CaptureDockedBottomToolWindowHeight();
 
             if (IsUsableLength(restoreBounds.Width, MinWidth))
             {
@@ -6761,15 +7262,13 @@ namespace PS7ScriptDesk.Shell
 
             settings.ExplorerWidth = _lastKnownExplorerWidth;
 
-            if (_workspaceLayoutMode is WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit &&
-                ConsoleRowDefinition.ActualHeight >= MinimumConsoleHeight)
-            {
-                _lastKnownConsoleHeight = ConsoleRowDefinition.ActualHeight;
-            }
-
             settings.ConsoleHeight = _lastKnownConsoleHeight;
             settings.ConsoleSideWidth = _lastKnownConsoleSideWidth;
             settings.WorkspaceLayoutMode = _workspaceLayoutMode.ToString();
+            settings.IsBottomToolWindowVisible = _isBottomToolWindowVisible;
+            settings.IsBottomToolWindowFloating = _isBottomToolWindowFloating;
+            settings.SelectedBottomToolTab = _selectedBottomToolTab.ToString();
+            settings.DockedBottomToolWindowHeight = _lastKnownBottomToolWindowHeight;
             settings.IsDebugPanelVisible = DebugPanelBorder.Visibility == Visibility.Visible;
             settings.DockedDebugPanelWidth = _lastKnownDebugPanelWidth;
 
@@ -6799,6 +7298,25 @@ namespace PS7ScriptDesk.Shell
                         ["top"] = debugPaneBounds.Top,
                         ["width"] = debugPaneBounds.Width,
                         ["height"] = debugPaneBounds.Height
+                    });
+            }
+
+            if (_lastBottomToolWindowBounds is Rect bottomToolWindowBounds)
+            {
+                settings.BottomToolWindowWidth = bottomToolWindowBounds.Width;
+                settings.BottomToolWindowHeight = bottomToolWindowBounds.Height;
+                settings.BottomToolWindowLeft = bottomToolWindowBounds.Left;
+                settings.BottomToolWindowTop = bottomToolWindowBounds.Top;
+
+                DeveloperDiagnostics.LogInfo(
+                    "UI",
+                    "Bottom tool window size and position saved.",
+                    new Dictionary<string, object?>
+                    {
+                        ["left"] = bottomToolWindowBounds.Left,
+                        ["top"] = bottomToolWindowBounds.Top,
+                        ["width"] = bottomToolWindowBounds.Width,
+                        ["height"] = bottomToolWindowBounds.Height
                     });
             }
 

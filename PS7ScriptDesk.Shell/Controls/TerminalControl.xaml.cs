@@ -237,10 +237,6 @@ namespace PS7ScriptDesk.Shell.Controls
                     });
                   });
 
-                  window.setTimeout(function() {
-                    fitTerminal('startup.timeout50');
-                    focusTerminal('startup.timeout50');
-                  }, 50);
                 }
 
                 // Re-focus on mouse activation so the helper textarea becomes the
@@ -260,7 +256,6 @@ namespace PS7ScriptDesk.Shell.Controls
 
                 // Re-focus when the WebView2 host window gains focus (e.g. Alt+Tab back).
                 window.addEventListener('focus', function() {
-                  fitTerminal('window.focus');
                   focusTerminal('window.focus');
                 });
 
@@ -429,6 +424,8 @@ namespace PS7ScriptDesk.Shell.Controls
         private bool                   _firstOutputQueuedLogged;
         private bool                   _firstOutputPostedLogged;
         private bool                   _firstInputReceivedLogged;
+        private bool                   _firstInputObservedForDiagnostics;
+        private bool                   _firstOutputAfterInputLogged;
         private int                    _inputInfoLogCount;
         private bool                   _clipboardCopyFailureEpisodeActive;
         private bool                   _clipboardPasteReadFailureEpisodeActive;
@@ -591,6 +588,8 @@ namespace PS7ScriptDesk.Shell.Controls
         /// </summary>
         public void BeginTerminalOutputGeneration(int generation)
         {
+            _firstInputObservedForDiagnostics = false;
+            _firstOutputAfterInputLogged = false;
             var result = _outputFlowController.ActivateGeneration(generation);
             ReportDiscardedTerminalOutput(result, "session-start");
         }
@@ -632,7 +631,14 @@ namespace PS7ScriptDesk.Shell.Controls
             {
                 _firstOutputQueuedLogged = true;
                 AppLogger.Info("Terminal", $"Queued terminal output before xterm.js was ready. Length={data.Length}.");
-                DeveloperDiagnostics.LogInfo("Terminal", "Terminal output queued before xterm.js was ready.", new Dictionary<string, object?> { ["length"] = data.Length });
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "First terminal output observed before xterm.js was ready.",
+                    new Dictionary<string, object?>
+                    {
+                        ["length"] = data.Length,
+                        ["vtControlSummary"] = SummarizeVtControls(data)
+                    });
             }
 
             var enqueueResult = _outputFlowController.Enqueue(generation, data);
@@ -656,7 +662,28 @@ namespace PS7ScriptDesk.Shell.Controls
             {
                 _firstOutputPostedLogged = true;
                 AppLogger.Info("Terminal", $"Posting first terminal output chunk to xterm.js. Length={data.Length}.");
-                DeveloperDiagnostics.LogInfo("Terminal", "First terminal output chunk posted to xterm.js.", new Dictionary<string, object?> { ["length"] = data.Length });
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "First terminal output chunk posted to xterm.js.",
+                    new Dictionary<string, object?>
+                    {
+                        ["length"] = data.Length,
+                        ["vtControlSummary"] = SummarizeVtControls(data)
+                    });
+            }
+
+            if (_firstInputObservedForDiagnostics && !_firstOutputAfterInputLogged)
+            {
+                _firstOutputAfterInputLogged = true;
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "First terminal output after the first xterm input was observed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["length"] = data.Length,
+                        ["vtControlSummary"] = SummarizeVtControls(data),
+                        ["contentOmitted"] = true
+                    });
             }
 
             RequestOutputFlush(enqueueResult.ScheduleFlush);
@@ -1237,6 +1264,7 @@ namespace PS7ScriptDesk.Shell.Controls
                                 if (!_firstInputReceivedLogged)
                                 {
                                     _firstInputReceivedLogged = true;
+                                    _firstInputObservedForDiagnostics = true;
                                     AppLogger.Info("Terminal", $"Received first xterm.js input message from WebView2. Length={data.Length}, ContentOmitted=True.");
                                 }
                                 else if (_inputInfoLogCount < 4)
@@ -1400,6 +1428,39 @@ namespace PS7ScriptDesk.Shell.Controls
         private void RaiseTerminalActivated(string source)
         {
             TerminalActivated?.Invoke(source);
+        }
+
+        private static string SummarizeVtControls(string data)
+        {
+            if (string.IsNullOrEmpty(data))
+            {
+                return "(none)";
+            }
+
+            var controls = new List<string>();
+            for (var index = 0; index + 2 < data.Length && controls.Count < 12; index++)
+            {
+                if (data[index] != '\x1b' || data[index + 1] != '[')
+                {
+                    continue;
+                }
+
+                var end = index + 2;
+                while (end < data.Length && (data[end] < '@' || data[end] > '~'))
+                {
+                    end++;
+                }
+
+                if (end >= data.Length)
+                {
+                    break;
+                }
+
+                controls.Add($"CSI {data[(index + 2)..(end + 1)]}");
+                index = end;
+            }
+
+            return controls.Count == 0 ? "(none)" : string.Join(", ", controls);
         }
 
     }

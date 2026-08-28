@@ -1,0 +1,18 @@
+<Window x:Class="PS7ScriptDesk.Shell.BottomToolWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
+        Title="Problems / Debug Output / Activity"
+        Width="640"
+        Height="360"
+        MinWidth="360"
+        MinHeight="220"
+        WindowStartupLocation="Manual"
+        ShowInTaskbar="False"
+        Background="{DynamicResource Theme.App.Background}"
+        Foreground="{DynamicResource Theme.Text.Primary}"
+        help:ContextHelp.Key="Debug.Area"
+        Loaded="Window_Loaded"
+        PreviewKeyDown="Window_PreviewKeyDown">
+    <ContentControl x:Name="ToolContentHost" Margin="8" />
+</Window>

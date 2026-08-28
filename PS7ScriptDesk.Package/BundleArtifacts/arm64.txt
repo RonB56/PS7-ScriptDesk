@@ -1,6 +1,6 @@
-MainPackage=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\bin\ARM64\Debug\PS7ScriptDesk.Package_1.0.72.0_ARM64_Debug.msix
-SymbolPackage=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\obj\ARM64\Debug\Symbols\PS7ScriptDesk.Package_1.0.72.0_ARM64_Debug.appxsym
-ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\bin\ARM64\Debug\PS7ScriptDesk.Package_1.0.72.0_scale-100.msix
-ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\bin\ARM64\Debug\PS7ScriptDesk.Package_1.0.72.0_scale-125.msix
-ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\bin\ARM64\Debug\PS7ScriptDesk.Package_1.0.72.0_scale-150.msix
-ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\bin\ARM64\Debug\PS7ScriptDesk.Package_1.0.72.0_scale-400.msix
+MainPackage=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\bin\ARM64\Release\PS7ScriptDesk.Package_1.0.74.0_ARM64.msix
+SymbolPackage=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\obj\ARM64\Release\Symbols\PS7ScriptDesk.Package_1.0.74.0_ARM64.appxsym
+ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\bin\ARM64\Release\PS7ScriptDesk.Package_1.0.74.0_scale-100.msix
+ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\bin\ARM64\Release\PS7ScriptDesk.Package_1.0.74.0_scale-125.msix
+ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\bin\ARM64\Release\PS7ScriptDesk.Package_1.0.74.0_scale-150.msix
+ResourcePack=C:\Users\rbarn\source\repos\PowerShellStudio\PS7ScriptDesk.Package\bin\ARM64\Release\PS7ScriptDesk.Package_1.0.74.0_scale-400.msix

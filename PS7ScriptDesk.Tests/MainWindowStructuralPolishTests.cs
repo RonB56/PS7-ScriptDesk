@@ -66,11 +66,11 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("private const double MinimumExplorerWidth = 190;", mainCode, StringComparison.Ordinal);
         Assert.Contains("private double _lastKnownExplorerWidth = 220;", mainCode, StringComparison.Ordinal);
         Assert.Contains("private const double DebugPanelWidth = 220;", mainCode, StringComparison.Ordinal);
-        Assert.Equal(5, CountOccurrences(mainXaml, "GridSplitter"));
+        Assert.Equal(6, CountOccurrences(mainXaml, "GridSplitter"));
         Assert.Contains("<Setter Property=\"ResizeDirection\" Value=\"Columns\" />", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"ResizeDirection\" Value=\"Rows\" />", appXaml, StringComparison.Ordinal);
         Assert.Equal(3, CountOccurrences(mainXaml, "Style=\"{StaticResource IdeColumnSplitterStyle}\""));
-        Assert.Equal(2, CountOccurrences(mainXaml, "Style=\"{StaticResource IdeRowSplitterStyle}\""));
+        Assert.Equal(3, CountOccurrences(mainXaml, "Style=\"{StaticResource IdeRowSplitterStyle}\""));
         Assert.Contains("ExplorerColumnDefinition.Width = new GridLength(Math.Max(_lastKnownExplorerWidth, MinimumExplorerWidth), GridUnitType.Pixel)", mainCode, StringComparison.Ordinal);
         Assert.Contains("if (IsUsableLength(_loadedSettings.ExplorerWidth, MinimumExplorerWidth))", mainCode, StringComparison.Ordinal);
     }
@@ -139,9 +139,12 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("Command=\"{Binding ShowWorkspaceFolderInExplorerCommand}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding RestartConsoleCommand}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Click=\"ConsoleBottomPaneTab_Click\"", mainXaml, StringComparison.Ordinal);
-        Assert.Contains("Click=\"DiagnosticsBottomPaneTab_Click\"", mainXaml, StringComparison.Ordinal);
-        Assert.Contains("Click=\"DebugOutputBottomPaneTab_Click\"", mainXaml, StringComparison.Ordinal);
-        Assert.Contains("Click=\"ActivityBottomPaneTab_Click\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"BottomProblemsToolTab_Click\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"BottomDebugOutputToolTab_Click\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"BottomActivityToolTab_Click\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"PopOutBottomToolWindowButton_Click\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"DockBottomToolWindowButton_Click\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"HideBottomToolWindowButton_Click\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Click=\"PopOutDebugPaneButton_Click\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Click=\"CloseDebugPanelButton_Click\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Click=\"DebugBreakpointRemove_Click\"", mainXaml, StringComparison.Ordinal);

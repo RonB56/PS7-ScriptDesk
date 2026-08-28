@@ -32,6 +32,12 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.Contains("output_ack", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("BeginTerminalOutputGeneration", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("Acknowledge(generation, sequence)", terminalControlSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("startup.timeout50", terminalControlSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("fitTerminal('window.focus')", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("ResizeObserver", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("signalReady('startup.raf2')", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("SummarizeVtControls", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("First terminal output after the first xterm input was observed", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("write: function (d, callback)", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("term.write(d, callback)", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("DebuggerOutputText", viewModelSource, StringComparison.Ordinal);
@@ -130,6 +136,18 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.Contains("white: '#F2F2F2', brightWhite: '#FFFFFF'", terminalControlSource, StringComparison.Ordinal);
         Assert.DoesNotContain("background: '#EAF2FB'", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("type: 'terminal_theme_applied'", terminalControlSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TerminalStartup_UsesMeasuredHostBoundsInsteadOfPlaceholderGeometry()
+    {
+        var shellSource = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "MainWindow.xaml.cs");
+
+        Assert.Contains("TerminalConsole.ActualWidth", shellSource, StringComparison.Ordinal);
+        Assert.Contains("TerminalConsole.ActualHeight", shellSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("InitializeTerminalHostAsync(IntPtr.Zero, 120, 30)", shellSource, StringComparison.Ordinal);
     }
 
     [Fact]
