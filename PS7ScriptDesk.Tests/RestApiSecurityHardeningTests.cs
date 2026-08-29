@@ -225,6 +225,20 @@ public sealed class RestApiSecurityHardeningTests : IDisposable
         Assert.DoesNotContain(_apiKeyVariableName, body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task EndpointDiscoveryAuthentication_MissingKeyReturns401WithoutExposingSecret()
+    {
+        await using var host = await StartSecurityHostAsync();
+        using var client = host.CreateClient();
+
+        using var response = await client.GetAsync(ApiEndpointDiscoveryMapper.DiscoveryRoute);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.DoesNotContain(ApiKeyValue, body, StringComparison.Ordinal);
+        Assert.DoesNotContain(_apiKeyVariableName, body, StringComparison.Ordinal);
+    }
+
     private async Task<RunningRestApiProofHost> StartSecurityHostAsync(Action<ApiRuntimeOptions>? configureRuntime = null)
     {
         var contentRoot = CreateSecurityContentRoot(configureRuntime);

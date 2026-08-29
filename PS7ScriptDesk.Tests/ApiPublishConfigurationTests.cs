@@ -28,6 +28,7 @@ public sealed class ApiPublishConfigurationTests
         Assert.Equal(TimeSpan.FromSeconds(10), configuration.Runtime.QueueWaitTimeout);
         Assert.Equal(TimeSpan.FromSeconds(30), configuration.Runtime.DefaultInvocationTimeout);
         Assert.Equal(1024 * 1024, configuration.Runtime.RequestBodySizeLimitBytes);
+        Assert.Equal(64 * 1024, configuration.Runtime.WebSocketMessageSizeLimitBytes);
         Assert.Equal(1000, configuration.Runtime.ResponseItemLimit);
         Assert.Equal(5 * 1024 * 1024, configuration.Runtime.ResponseByteLimit);
         Assert.Equal(8, configuration.Runtime.SerializationDepth);
@@ -37,15 +38,14 @@ public sealed class ApiPublishConfigurationTests
     [Theory]
     [InlineData(ApiTransport.WebSocket)]
     [InlineData(ApiTransport.ServerSentEvents)]
-    public void ForwardCompatibleTransports_AreRejectedForPhase2(ApiTransport transport)
+    public void StreamingTransports_AreAcceptedBySharedEndpointValidation(ApiTransport transport)
     {
         var configuration = ValidConfiguration();
         configuration.Transport = transport;
 
         var result = _validator.Validate(configuration, MetadataForBasicFunction());
 
-        Assert.False(result.IsValid);
-        Assert.Contains(result.Errors, error => error.Code == "API003");
+        Assert.True(result.IsValid);
     }
 
     [Fact]
@@ -54,6 +54,7 @@ public sealed class ApiPublishConfigurationTests
         var configuration = ValidConfiguration();
         var endpoint = configuration.Endpoints[0];
         endpoint.EndpointId = "stable-system-info";
+        endpoint.Transport = ApiTransport.WebSocket;
         endpoint.DisplayName = "System Info";
         endpoint.TimeoutOverride = TimeSpan.FromSeconds(12);
         endpoint.RequiresAuthentication = false;
@@ -69,9 +70,20 @@ public sealed class ApiPublishConfigurationTests
         Assert.DoesNotContain("$type", json, StringComparison.OrdinalIgnoreCase);
         Assert.NotNull(roundTripped);
         Assert.Equal("stable-system-info", roundTripped!.Endpoints[0].EndpointId);
+        Assert.Equal(ApiTransport.WebSocket, roundTripped.Endpoints[0].Transport);
         Assert.Equal(TimeSpan.FromSeconds(12), roundTripped.Endpoints[0].TimeoutOverride);
         Assert.False(roundTripped.Endpoints[0].RequiresAuthentication);
         Assert.True(roundTripped.OpenApi.EnableSwaggerUiForPublishedApi);
+    }
+
+    [Fact]
+    public void EndpointTransport_FallsBackToRootTransportForLegacyConfigurations()
+    {
+        var configuration = ValidConfiguration();
+        configuration.Transport = ApiTransport.ServerSentEvents;
+
+        Assert.Null(configuration.Endpoints[0].Transport);
+        Assert.Equal(ApiTransport.ServerSentEvents, ApiTransportFacts.ResolveEndpointTransport(configuration, configuration.Endpoints[0]));
     }
 
     [Fact]
@@ -93,10 +105,32 @@ public sealed class ApiPublishConfigurationTests
     public void WebSocketAndSseDoNotNeedProtocolSpecificSettings()
     {
         var configuration = ValidConfiguration();
-        configuration.Transport = ApiTransport.WebSocket;
+        configuration.Endpoints[0].Transport = ApiTransport.WebSocket;
 
         Assert.NotNull(configuration.Endpoints[0].Rest);
-        Assert.Contains(_validator.Validate(configuration, MetadataForBasicFunction()).Errors, error => error.Code == "API003");
+        Assert.True(_validator.Validate(configuration, MetadataForBasicFunction()).IsValid);
+
+        configuration.Endpoints[0].Transport = ApiTransport.ServerSentEvents;
+
+        Assert.True(_validator.Validate(configuration, MetadataForBasicFunction()).IsValid);
+    }
+
+    [Fact]
+    public void StreamingEndpoints_RejectBindingsThatCannotBeRepresentedByTheirTransport()
+    {
+        var sseBody = ValidConfiguration();
+        sseBody.Endpoints[0].Transport = ApiTransport.ServerSentEvents;
+        sseBody.Endpoints[0].ParameterBindings[0].Source = ApiParameterSource.Body;
+
+        var sseRoute = ConfigurationWithRoute("/api/{computerName}");
+        sseRoute.Endpoints[0].Transport = ApiTransport.ServerSentEvents;
+
+        var webSocketRoute = ConfigurationWithRoute("/api/{computerName}");
+        webSocketRoute.Endpoints[0].Transport = ApiTransport.WebSocket;
+
+        Assert.Contains(_validator.Validate(sseBody, MetadataForBasicFunction()).Errors, error => error.Code == "API078");
+        Assert.Contains(_validator.Validate(sseRoute, MetadataForBasicFunction()).Errors, error => error.Code == "API077");
+        Assert.Contains(_validator.Validate(webSocketRoute, MetadataForBasicFunction()).Errors, error => error.Code == "API077");
     }
 
     [Fact]
@@ -374,6 +408,7 @@ public sealed class ApiPublishConfigurationTests
         configuration.Runtime.QueueWaitTimeout = TimeSpan.Zero;
         configuration.Runtime.DefaultInvocationTimeout = TimeSpan.Zero;
         configuration.Runtime.RequestBodySizeLimitBytes = 0;
+        configuration.Runtime.WebSocketMessageSizeLimitBytes = 0;
         configuration.Runtime.ResponseItemLimit = 0;
         configuration.Runtime.ResponseByteLimit = 0;
         configuration.Runtime.SerializationDepth = 99;
@@ -387,6 +422,7 @@ public sealed class ApiPublishConfigurationTests
         Assert.Contains(result.Errors, error => error.Code == "API026");
         Assert.Contains(result.Errors, error => error.Code == "API027");
         Assert.Contains(result.Errors, error => error.Code == "API028");
+        Assert.Contains(result.Errors, error => error.Code == "API035");
         Assert.Contains(result.Errors, error => error.Code == "API029");
         Assert.Contains(result.Errors, error => error.Code == "API030");
         Assert.Contains(result.Errors, error => error.Code == "API031");

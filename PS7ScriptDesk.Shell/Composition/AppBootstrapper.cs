@@ -1,5 +1,7 @@
 ﻿using System.Collections.Generic;
 using PS7ScriptDesk.Application.Diagnostics;
+using PS7ScriptDesk.Application.Interfaces;
+using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.Infrastructure.Services;
 using PS7ScriptDesk.PowerShell.Services;
@@ -10,8 +12,9 @@ namespace PS7ScriptDesk.Shell.Composition
 {
     public static class AppBootstrapper
     {
-        public static MainWindow CreateMainWindow(ApplicationSettingsService applicationSettingsService, ApplicationSettings applicationSettings, PowerShellRuntimeInfo? startupRuntimeInfo)
+        public static MainWindow CreateMainWindow(ApplicationSettingsService applicationSettingsService, ApplicationSettings applicationSettings, PowerShellRuntimeInfo? startupRuntimeInfo, IUiScaleService? uiScaleService = null)
         {
+            uiScaleService ??= new UiScaleService(applicationSettings.UiScalePercent);
             var workspaceService = new WorkspaceService();
             var fileDocumentService = new FileDocumentService();
             var workspaceFolderService = new WorkspaceFolderService();
@@ -42,9 +45,10 @@ namespace PS7ScriptDesk.Shell.Composition
                 applicationSettings,
                 startupRuntimeInfo,
                 exeExportWizardService,
-                restApiPublishWizardService);
+                restApiPublishWizardService,
+                uiScaleService);
 
-            var window = new MainWindow(applicationSettingsService, applicationSettings)
+            var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService)
             {
                 DataContext = viewModel
             };

@@ -43,6 +43,7 @@ public sealed class OpenApiDocumentBuilder
     private static IEnumerable<ApiEndpointConfiguration> IncludedEndpoints(ApiPublishConfiguration configuration)
         => configuration.Endpoints
             .Where(endpoint => endpoint.IsEnabled &&
+                               ApiTransportFacts.ResolveEndpointTransport(configuration, endpoint) == ApiTransport.Rest &&
                                endpoint.Rest.IncludeInOpenApi &&
                                endpoint.Rest.Method is ApiHttpMethod.Get or ApiHttpMethod.Post)
             .OrderBy(endpoint => NormalizeRouteTemplate(endpoint.Rest.RouteTemplate), StringComparer.Ordinal)

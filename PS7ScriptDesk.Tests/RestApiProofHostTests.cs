@@ -65,6 +65,46 @@ public sealed class RestApiProofHostTests
     }
 
     [Fact]
+    public void ApiEndpointResolver_RequiresSelectedTransportWhenProvided()
+    {
+        var configuration = ApiPublishConfiguration.CreateDefaultForScriptPath("TestApi.ps1");
+        var endpoint = new ApiEndpointConfiguration
+        {
+            EndpointId = "published-status",
+            IsEnabled = true,
+            Transport = ApiTransport.WebSocket,
+            PowerShellFunctionName = "Get-SystemInfo"
+        };
+        configuration.Endpoints = [endpoint];
+
+        var webSocket = ApiEndpointResolver.Shared.ResolveByEndpointId(configuration, "published-status", ApiTransport.WebSocket);
+        var rest = ApiEndpointResolver.Shared.ResolveByEndpointId(configuration, "published-status", ApiTransport.Rest);
+
+        Assert.True(webSocket.IsSuccess);
+        Assert.False(rest.IsSuccess);
+        Assert.Equal("EndpointNotFound", rest.ErrorCode);
+    }
+
+    [Fact]
+    public async Task EndpointDiscovery_ReportsEffectiveTransportsAndTransportSpecificPaths()
+    {
+        await using var host = await StartHostAsync();
+        using var client = host.CreateClient();
+
+        using var response = await client.GetAsync("/api/endpoints");
+        var body = await response.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var endpoints = json.RootElement.GetProperty("endpoints").EnumerateArray().ToList();
+        Assert.Contains(endpoints, endpoint =>
+            endpoint.GetProperty("endpointId").GetString() == "poc-get-systeminfo" &&
+            endpoint.GetProperty("transport").GetString() == ApiTransport.Rest.ToString() &&
+            endpoint.GetProperty("method").GetString() == "GET" &&
+            endpoint.GetProperty("path").GetString() == "/api/systeminfo");
+    }
+
+    [Fact]
     public void ApiEndpointParameterBinder_PreservesRequiredOptionalAndScalarConversionBehavior()
     {
         using var bodyDocument = JsonDocument.Parse(

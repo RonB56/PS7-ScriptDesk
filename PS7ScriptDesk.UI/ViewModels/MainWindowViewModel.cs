@@ -16,6 +16,7 @@ using System.Windows.Input;
 using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Interfaces;
+using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.UI.Commands;
 
@@ -52,6 +53,11 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly RelayCommand _zoomInCommand;
         private readonly RelayCommand _zoomOutCommand;
         private readonly RelayCommand _resetZoomCommand;
+        private readonly RelayCommand _increaseUiScaleCommand;
+        private readonly RelayCommand _decreaseUiScaleCommand;
+        private readonly RelayCommand _resetUiScaleCommand;
+        private readonly RelayCommand _setUiScaleCommand;
+        private readonly IUiScaleService _uiScaleService;
 
         private readonly string _applicationVersionText;
 
@@ -139,7 +145,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             ApplicationSettings? initialSettings = null,
             PowerShellRuntimeInfo? startupRuntimeInfo = null,
             IExeExportWizardService? exeExportWizardService = null,
-            IRestApiPublishWizardService? restApiPublishWizardService = null)
+            IRestApiPublishWizardService? restApiPublishWizardService = null,
+            IUiScaleService? uiScaleService = null)
         {
             _fileDocumentService = fileDocumentService;
             _runtimeService = runtimeService;
@@ -149,6 +156,14 @@ namespace PS7ScriptDesk.UI.ViewModels
             _exeExportService = exeExportService;
             _exeExportWizardService = exeExportWizardService;
             _restApiPublishWizardService = restApiPublishWizardService;
+            _uiScaleService = uiScaleService ?? new UiScaleService(initialSettings?.UiScalePercent);
+            if (initialSettings is not null)
+            {
+                _uiScaleService.SetPercentage(
+                    _uiScaleService.NormalizePersistedPercentage(initialSettings.UiScalePercent),
+                    "SettingsRestore");
+            }
+            _uiScaleService.ScaleChanged += UiScaleService_ScaleChanged;
             _uiSynchronizationContext = SynchronizationContext.Current;
             _startupRuntimeInfo = startupRuntimeInfo;
             _applicationVersionText = GetApplicationVersionText();
@@ -194,6 +209,14 @@ namespace PS7ScriptDesk.UI.ViewModels
             ZoomOutCommand    = _zoomOutCommand;
             _resetZoomCommand = new RelayCommand(() => EditorZoomLevel = 13.0);
             ResetZoomCommand  = _resetZoomCommand;
+            _increaseUiScaleCommand = new RelayCommand(() => _uiScaleService.Increase("KeyboardOrMenu"));
+            IncreaseUiScaleCommand = _increaseUiScaleCommand;
+            _decreaseUiScaleCommand = new RelayCommand(() => _uiScaleService.Decrease("KeyboardOrMenu"));
+            DecreaseUiScaleCommand = _decreaseUiScaleCommand;
+            _resetUiScaleCommand = new RelayCommand(() => _uiScaleService.Reset("KeyboardOrMenu"));
+            ResetUiScaleCommand = _resetUiScaleCommand;
+            _setUiScaleCommand = new RelayCommand(SetUiScaleFromCommandParameter);
+            SetUiScaleCommand = _setUiScaleCommand;
 
             // Subscribe to live-console completion events so the Run button re-enables
             // when a script finishes executing (1A) and when the session terminates (e.g.
@@ -521,8 +544,18 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
         }
 
-        /// <summary>Status bar display text for the current zoom level.</summary>
-        public string ZoomLevelText => $"{(int)Math.Round(_editorZoomLevel)} pt";
+        /// <summary>Status bar display text for the editor font-size zoom level.</summary>
+        public string ZoomLevelText => $"Editor: {(int)Math.Round(_editorZoomLevel)} pt";
+
+        // -------------------------------------------------------------------------
+        // Application UI Scale
+        // -------------------------------------------------------------------------
+
+        public int UiScalePercentage => _uiScaleService.CurrentPercentage;
+
+        public string UiScaleText => $"UI: {UiScalePercentage}%";
+
+        public IReadOnlyList<int> SupportedUiScalePercentages => _uiScaleService.SupportedPercentages;
 
         // -------------------------------------------------------------------------
         // Theme (5B)
@@ -856,6 +889,11 @@ namespace PS7ScriptDesk.UI.ViewModels
         public ICommand ZoomInCommand    { get; }
         public ICommand ZoomOutCommand   { get; }
         public ICommand ResetZoomCommand { get; }
+
+        public ICommand IncreaseUiScaleCommand { get; }
+        public ICommand DecreaseUiScaleCommand { get; }
+        public ICommand ResetUiScaleCommand { get; }
+        public ICommand SetUiScaleCommand { get; }
 
         public void BindToCurrentSynchronizationContext()
         {
@@ -1301,6 +1339,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             var settings = new ApplicationSettings
             {
                 IsExplorerVisible = IsExplorerVisible,
+                UiScalePercent = UiScalePercentage,
                 LastWorkspaceFolderPath = !string.IsNullOrWhiteSpace(_currentWorkspaceFolderPath) && Directory.Exists(_currentWorkspaceFolderPath)
                     ? _currentWorkspaceFolderPath
                     : null,
@@ -1381,6 +1420,21 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             ApplySessionRestoreNotice(restoreSummary);
+        }
+
+        private void SetUiScaleFromCommandParameter(object? parameter)
+        {
+            if (int.TryParse(parameter?.ToString(), out var percentage))
+            {
+                _uiScaleService.SetPercentage(percentage, "Menu");
+            }
+        }
+
+        private void UiScaleService_ScaleChanged(object? sender, EventArgs e)
+        {
+            OnPropertyChanged(nameof(UiScalePercentage));
+            OnPropertyChanged(nameof(UiScaleText));
+            OnPropertyChanged(nameof(SupportedUiScalePercentages));
         }
 
         private sealed class FileMetadataSnapshot

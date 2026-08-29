@@ -18,7 +18,8 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
         RunspacePoolLease poolLease,
         int retainedStreamLimit,
         CancellationToken cancellationToken,
-        Func<ApiInvocationStatus> cancellationStatusProvider)
+        Func<ApiInvocationStatus> cancellationStatusProvider,
+        PowerShellInvocationStreamSink? streamSink = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(poolLease);
@@ -26,6 +27,13 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         using var powerShell = System.Management.Automation.PowerShell.Create();
+        using var input = new PSDataCollection<PSObject>();
+        using var output = new PSDataCollection<PSObject>();
+        using var invocationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var liveRecordSubscriptions = streamSink is null
+            ? Array.Empty<Action>()
+            : AttachLiveRecordHandlers(output, powerShell.Streams, streamSink, invocationCancellation);
+        input.Complete();
         powerShell.RunspacePool = poolLease.Pool;
         powerShell.AddCommand(request.FunctionName, useLocalScope: true);
         foreach (var parameter in request.Parameters)
@@ -36,10 +44,11 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
         IAsyncResult? asyncResult;
         try
         {
-            asyncResult = powerShell.BeginInvoke();
+            asyncResult = powerShell.BeginInvoke<PSObject, PSObject>(input, output);
         }
         catch (Exception ex)
         {
+            DetachLiveRecordHandlers(liveRecordSubscriptions);
             stopwatch.Stop();
             _logger?.LogError(ex, "PowerShell invocation could not start for function {FunctionName}.", request.FunctionName);
             var status = PowerShellFailureClassifier.ClassifyTerminatingException(ex);
@@ -58,37 +67,37 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
         });
 
         var cancellationSignal = new TaskCompletionSource<ApiInvocationStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var cancellationRegistration = cancellationToken.Register(() =>
+        using var cancellationRegistration = invocationCancellation.Token.Register(() =>
             cancellationSignal.TrySetResult(cancellationStatusProvider()));
-
-        var completedTask = await Task.WhenAny(completion, cancellationSignal.Task);
-        if (completedTask == cancellationSignal.Task)
-        {
-            var status = await cancellationSignal.Task;
-            await StopPowerShellAsync(powerShell, request.FunctionName);
-            var settled = await Task.WhenAny(completion, Task.Delay(StopCleanupTimeout));
-            stopwatch.Stop();
-            poolLease.RequestPoolRebuild = true;
-
-            if (settled == completion)
-            {
-                TryEndInvoke(powerShell, asyncResult);
-            }
-
-            return ApiInvocationResult.Failure(
-                status,
-                status == ApiInvocationStatus.InvocationTimedOut
-                    ? "The PowerShell invocation timed out."
-                    : "The PowerShell invocation was canceled.",
-                CaptureStreams(powerShell.Streams, retainedStreamLimit),
-                stopwatch.Elapsed,
-                poolLease.Generation,
-                requiresPoolRebuild: true);
-        }
 
         try
         {
-            var output = powerShell.EndInvoke(asyncResult);
+            var completedTask = await Task.WhenAny(completion, cancellationSignal.Task);
+            if (completedTask == cancellationSignal.Task)
+            {
+                var status = await cancellationSignal.Task;
+                await StopPowerShellAsync(powerShell, request.FunctionName);
+                var settled = await Task.WhenAny(completion, Task.Delay(StopCleanupTimeout));
+                stopwatch.Stop();
+                poolLease.RequestPoolRebuild = true;
+
+                if (settled == completion)
+                {
+                    TryEndInvoke(powerShell, asyncResult);
+                }
+
+                return ApiInvocationResult.Failure(
+                    status,
+                    status == ApiInvocationStatus.InvocationTimedOut
+                        ? "The PowerShell invocation timed out."
+                        : "The PowerShell invocation was canceled.",
+                    CaptureStreams(powerShell.Streams, retainedStreamLimit),
+                    stopwatch.Elapsed,
+                    poolLease.Generation,
+                    requiresPoolRebuild: true);
+            }
+
+            powerShell.EndInvoke(asyncResult);
             stopwatch.Stop();
             var streams = CaptureStreams(powerShell.Streams, retainedStreamLimit);
             if (powerShell.HadErrors || powerShell.Streams.Error.Count > 0)
@@ -136,6 +145,128 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
                 streams,
                 stopwatch.Elapsed,
                 poolLease.Generation);
+        }
+        finally
+        {
+            DetachLiveRecordHandlers(liveRecordSubscriptions);
+        }
+    }
+
+    private IReadOnlyList<Action> AttachLiveRecordHandlers(
+        PSDataCollection<PSObject> output,
+        PSDataStreams streams,
+        PowerShellInvocationStreamSink streamSink,
+        CancellationTokenSource invocationCancellation)
+    {
+        var subscriptions = new List<Action>(6);
+
+        EventHandler<DataAddedEventArgs> outputHandler = (_, args) =>
+            PublishLiveRecord(
+                PowerShellInvocationStreamRecord.ForOutput(output[args.Index]),
+                streamSink,
+                invocationCancellation);
+        output.DataAdded += outputHandler;
+        subscriptions.Add(() => output.DataAdded -= outputHandler);
+
+        AttachStreamHandler(
+            streams.Warning,
+            PowerShellInvocationStreamKind.Warning,
+            record => record.Message,
+            streamSink,
+            invocationCancellation,
+            subscriptions);
+        AttachStreamHandler(
+            streams.Verbose,
+            PowerShellInvocationStreamKind.Verbose,
+            record => record.Message,
+            streamSink,
+            invocationCancellation,
+            subscriptions);
+        AttachStreamHandler(
+            streams.Debug,
+            PowerShellInvocationStreamKind.Debug,
+            record => record.Message,
+            streamSink,
+            invocationCancellation,
+            subscriptions);
+        AttachStreamHandler(
+            streams.Information,
+            PowerShellInvocationStreamKind.Information,
+            record => record.MessageData?.ToString() ?? string.Empty,
+            streamSink,
+            invocationCancellation,
+            subscriptions);
+        AttachStreamHandler(
+            streams.Error,
+            PowerShellInvocationStreamKind.Error,
+            FormatSafeErrorRecord,
+            streamSink,
+            invocationCancellation,
+            subscriptions);
+
+        _logger?.LogInformation("PowerShell live stream handlers attached.");
+        return subscriptions;
+    }
+
+    private void AttachStreamHandler<TRecord>(
+        PSDataCollection<TRecord> stream,
+        PowerShellInvocationStreamKind kind,
+        Func<TRecord, string?> messageFactory,
+        PowerShellInvocationStreamSink streamSink,
+        CancellationTokenSource invocationCancellation,
+        List<Action> subscriptions)
+    {
+        EventHandler<DataAddedEventArgs> handler = (_, args) =>
+            PublishLiveRecord(
+                PowerShellInvocationStreamRecord.ForStream(kind, Cap(SanitizeStreamMessage(messageFactory(stream[args.Index])))),
+                streamSink,
+                invocationCancellation);
+        stream.DataAdded += handler;
+        subscriptions.Add(() => stream.DataAdded -= handler);
+    }
+
+    private void PublishLiveRecord(
+        PowerShellInvocationStreamRecord record,
+        PowerShellInvocationStreamSink streamSink,
+        CancellationTokenSource invocationCancellation)
+    {
+        if (invocationCancellation.IsCancellationRequested)
+        {
+            return;
+        }
+
+        try
+        {
+            if (streamSink.PublishAsync(record, invocationCancellation.Token).AsTask().GetAwaiter().GetResult())
+            {
+                return;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "PowerShell live stream record publisher failed.");
+        }
+
+        invocationCancellation.Cancel();
+    }
+
+    private static void DetachLiveRecordHandlers(IReadOnlyList<Action> subscriptions)
+    {
+        foreach (var unsubscribe in subscriptions)
+        {
+            try
+            {
+                unsubscribe();
+            }
+            catch
+            {
+            }
         }
     }
 

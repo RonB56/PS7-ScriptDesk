@@ -46,16 +46,27 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
         Assert.True(File.Exists(Path.Combine(destination, "Config", "api.ps7api.json")));
         Assert.True(File.Exists(Path.Combine(destination, "Scripts", "Phase7Api.ps1")));
         Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "Api", "RestEndpointMapper.cs")));
+        Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "Api", "ApiEndpointDiscoveryMapper.cs")));
         Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "Api", "ApiKeyAuthenticationService.cs")));
         Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "PowerShell", "PowerShellInvocationCoordinator.cs")));
+        Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.Domain", "Models", "ApiStreamingInvocationModels.cs")));
+        Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "PowerShell", "ApiStreamingInvocation.cs")));
+        Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "PowerShell", "PowerShellInvocationStreamSink.cs")));
+        Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "ServerSentEvents", "SseEndpointMapper.cs")));
+        Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "WebSockets", "WebSocketEndpointMapper.cs")));
+        Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "WebSockets", "WebSocketProtocol.cs")));
 
         Assert.Equal(
             await File.ReadAllBytesAsync(sourcePath),
             await File.ReadAllBytesAsync(Path.Combine(destination, "Scripts", "Phase7Api.ps1")));
 
         var projectText = await File.ReadAllTextAsync(Path.Combine(destination, "Phase7GeneratedApi.csproj"));
+        var programText = await File.ReadAllTextAsync(Path.Combine(destination, "Program.cs"));
         Assert.DoesNotContain("ProjectReference", projectText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("PowerShellStudio", projectText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("MapSseEndpoints", programText, StringComparison.Ordinal);
+        Assert.Contains("UseWebSockets", programText, StringComparison.Ordinal);
+        Assert.Contains("MapWebSocketEndpoints", programText, StringComparison.Ordinal);
 
         var allGeneratedText = string.Join(
             "\n",
@@ -70,6 +81,12 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
         using var configDocument = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(destination, "Config", "api.ps7api.json")));
         Assert.Equal("Phase7Api.ps1", configDocument.RootElement.GetProperty("sourceScript").GetString());
         Assert.Equal(string.Empty, configDocument.RootElement.GetProperty("output").GetProperty("outputDirectory").GetString());
+        Assert.Contains(
+            configDocument.RootElement.GetProperty("endpoints").EnumerateArray(),
+            endpoint => endpoint.GetProperty("transport").GetString() == ApiTransport.ServerSentEvents.ToString());
+        Assert.Contains(
+            configDocument.RootElement.GetProperty("endpoints").EnumerateArray(),
+            endpoint => endpoint.GetProperty("transport").GetString() == ApiTransport.WebSocket.ToString());
     }
 
     [Fact]
@@ -183,6 +200,24 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
             Assert.Contains("Offline OpenAPI viewer", swaggerText, StringComparison.Ordinal);
             Assert.DoesNotContain("https://unpkg.com", swaggerText, StringComparison.OrdinalIgnoreCase);
 
+            using var discovery = await client.GetAsync("/api/endpoints");
+            Assert.Equal(HttpStatusCode.OK, discovery.StatusCode);
+            var discoveryText = await discovery.Content.ReadAsStringAsync();
+            Assert.Contains("phase7-sse-get-computer", discoveryText, StringComparison.Ordinal);
+            Assert.Contains("/sse/phase7-sse-get-computer", discoveryText, StringComparison.Ordinal);
+            Assert.Contains("phase7-ws-get-computer", discoveryText, StringComparison.Ordinal);
+            Assert.Contains("/ws/phase7-ws-get-computer", discoveryText, StringComparison.Ordinal);
+
+            using var sse = await client.GetAsync("/sse/phase7-sse-get-computer?computerName=SSE01&view=Detail", HttpCompletionOption.ResponseHeadersRead);
+            Assert.Equal(HttpStatusCode.OK, sse.StatusCode);
+            Assert.Equal("text/event-stream", sse.Content.Headers.ContentType?.MediaType);
+            var sseEvents = await ReadSseEventsUntilTerminalAsync(sse);
+            Assert.Equal("InvocationCompleted", sseEvents[^1].EventType);
+            Assert.Equal("success", sseEvents[^1].Data.GetProperty("statusCode").GetString());
+            var sseOutput = Assert.Single(sseEvents, item => item.EventType == "Output");
+            Assert.Equal("SSE01", sseOutput.Data.GetProperty("payload").GetProperty("computerName").GetString());
+            Assert.Equal("Detail", sseOutput.Data.GetProperty("payload").GetProperty("view").GetString());
+
             using var failure = await client.GetAsync("/api/phase7/failure/BROKEN");
             Assert.Equal(HttpStatusCode.InternalServerError, failure.StatusCode);
             var problem = await failure.Content.ReadAsStringAsync();
@@ -222,6 +257,7 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
             new ApiEndpointConfiguration
             {
                 EndpointId = "phase7-get-computer",
+                Transport = ApiTransport.Rest,
                 PowerShellFunctionName = "Get-Phase7Computer",
                 DisplayName = "Get phase 7 computer",
                 Rest =
@@ -255,6 +291,7 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
             new ApiEndpointConfiguration
             {
                 EndpointId = "phase7-set-computer",
+                Transport = ApiTransport.Rest,
                 PowerShellFunctionName = "Set-Phase7Computer",
                 DisplayName = "Set phase 7 computer",
                 Rest =
@@ -296,6 +333,7 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
             new ApiEndpointConfiguration
             {
                 EndpointId = "phase7-failure",
+                Transport = ApiTransport.Rest,
                 PowerShellFunctionName = "Invoke-Phase7Failure",
                 DisplayName = "Phase 7 failure",
                 Rest =
@@ -314,6 +352,74 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
                         Source = ApiParameterSource.Route,
                         Name = "computerName",
                         Required = ApiRequiredBehavior.Required,
+                        TypeName = "string"
+                    }
+                ]
+            },
+            new ApiEndpointConfiguration
+            {
+                EndpointId = "phase7-sse-get-computer",
+                Transport = ApiTransport.ServerSentEvents,
+                PowerShellFunctionName = "Get-Phase7Computer",
+                DisplayName = "Stream phase 7 computer",
+                Rest =
+                {
+                    Method = ApiHttpMethod.Get,
+                    RouteTemplate = "/api/phase7/sse/computers",
+                    OperationId = "phase7SseGetComputer",
+                    Tags = ["Phase 7"],
+                    IncludeInOpenApi = false
+                },
+                ParameterBindings =
+                [
+                    new ApiParameterBindingConfiguration
+                    {
+                        PowerShellParameterName = "ComputerName",
+                        Source = ApiParameterSource.Query,
+                        Name = "computerName",
+                        Required = ApiRequiredBehavior.Required,
+                        TypeName = "string"
+                    },
+                    new ApiParameterBindingConfiguration
+                    {
+                        PowerShellParameterName = "View",
+                        Source = ApiParameterSource.Query,
+                        Name = "view",
+                        Required = ApiRequiredBehavior.Optional,
+                        TypeName = "string"
+                    }
+                ]
+            },
+            new ApiEndpointConfiguration
+            {
+                EndpointId = "phase7-ws-get-computer",
+                Transport = ApiTransport.WebSocket,
+                PowerShellFunctionName = "Get-Phase7Computer",
+                DisplayName = "WebSocket phase 7 computer",
+                Rest =
+                {
+                    Method = ApiHttpMethod.Get,
+                    RouteTemplate = "/api/phase7/ws/computers",
+                    OperationId = "phase7WsGetComputer",
+                    Tags = ["Phase 7"],
+                    IncludeInOpenApi = false
+                },
+                ParameterBindings =
+                [
+                    new ApiParameterBindingConfiguration
+                    {
+                        PowerShellParameterName = "ComputerName",
+                        Source = ApiParameterSource.Query,
+                        Name = "computerName",
+                        Required = ApiRequiredBehavior.Required,
+                        TypeName = "string"
+                    },
+                    new ApiParameterBindingConfiguration
+                    {
+                        PowerShellParameterName = "View",
+                        Source = ApiParameterSource.Query,
+                        Name = "view",
+                        Required = ApiRequiredBehavior.Optional,
                         TypeName = "string"
                     }
                 ]
@@ -380,6 +486,68 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
         }
 
         throw new TimeoutException("Generated API did not become ready.", lastException);
+    }
+
+    private static async Task<List<SseEvent>> ReadSseEventsUntilTerminalAsync(HttpResponseMessage response)
+    {
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        var events = new List<SseEvent>();
+        while (true)
+        {
+            var item = await ReadNextSseEventAsync(reader);
+            events.Add(item);
+            if (item.Data.GetProperty("isTerminal").GetBoolean())
+            {
+                return events;
+            }
+        }
+    }
+
+    private static async Task<SseEvent> ReadNextSseEventAsync(StreamReader reader)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        string? eventType = null;
+        long? id = null;
+        var data = new StringBuilder();
+
+        while (true)
+        {
+            var line = await reader.ReadLineAsync(timeout.Token);
+            if (line is null)
+            {
+                throw new EndOfStreamException("The SSE stream ended before a complete event was received.");
+            }
+
+            if (line.Length == 0)
+            {
+                if (data.Length == 0)
+                {
+                    continue;
+                }
+
+                using var document = JsonDocument.Parse(data.ToString());
+                return new SseEvent(eventType, id ?? 0, document.RootElement.Clone());
+            }
+
+            if (line.StartsWith("event: ", StringComparison.Ordinal))
+            {
+                eventType = line["event: ".Length..];
+            }
+            else if (line.StartsWith("id: ", StringComparison.Ordinal))
+            {
+                id = long.Parse(line["id: ".Length..], System.Globalization.CultureInfo.InvariantCulture);
+            }
+            else if (line.StartsWith("data: ", StringComparison.Ordinal))
+            {
+                if (data.Length > 0)
+                {
+                    data.Append('\n');
+                }
+
+                data.Append(line["data: ".Length..]);
+            }
+        }
     }
 
     private static async Task StopProcessAsync(Process process)
@@ -495,6 +663,8 @@ function Invoke-Phase7Secret {
     'must not be public'
 }
 """;
+
+    private sealed record SseEvent(string? EventType, long Id, JsonElement Data);
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 }

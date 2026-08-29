@@ -78,6 +78,9 @@ namespace PS7ScriptDesk.Domain.Models
         /// <summary>Editor font-size zoom level in points.  Null = default (13 pt).</summary>
         public double? EditorZoomLevel { get; set; }
 
+        /// <summary>Application-wide interface scale percentage. Null = default (100%).</summary>
+        public int? UiScalePercent { get; set; }
+
         /// <summary>Optional editor text-selection background color as a #RRGGBB value. Null = active theme default.</summary>
         public string? EditorSelectionBackgroundHex { get; set; }
 

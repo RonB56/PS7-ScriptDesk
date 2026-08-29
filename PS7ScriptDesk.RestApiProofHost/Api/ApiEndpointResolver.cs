@@ -6,7 +6,10 @@ public sealed class ApiEndpointResolver
 {
     public static ApiEndpointResolver Shared { get; } = new();
 
-    public ApiEndpointResolutionResult ResolveByEndpointId(ApiPublishConfiguration configuration, string? endpointId)
+    public ApiEndpointResolutionResult ResolveByEndpointId(
+        ApiPublishConfiguration configuration,
+        string? endpointId,
+        ApiTransport? requiredTransport = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
@@ -19,7 +22,8 @@ public sealed class ApiEndpointResolver
 
         var matches = configuration.Endpoints
             .Where(endpoint => endpoint.IsEnabled &&
-                               string.Equals(endpoint.EndpointId, endpointId.Trim(), StringComparison.OrdinalIgnoreCase))
+                               string.Equals(endpoint.EndpointId, endpointId.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                               (requiredTransport is null || ApiTransportFacts.ResolveEndpointTransport(configuration, endpoint) == requiredTransport.Value))
             .ToList();
 
         return matches.Count switch

@@ -15,6 +15,7 @@ using PS7ScriptDesk.Infrastructure.Services;
 using PS7ScriptDesk.PowerShell.Services;
 using PS7ScriptDesk.Shell.Composition;
 using PS7ScriptDesk.Shell.Services;
+using PS7ScriptDesk.Application.Services;
 
 namespace PS7ScriptDesk.Shell
 {
@@ -79,6 +80,21 @@ namespace PS7ScriptDesk.Shell
             AppLogger.Info("App", "Base startup completed.");
             DeveloperDiagnostics.LogInfo("Startup", "Base application startup completed.");
 
+            var applicationSettingsService = new ApplicationSettingsService();
+            var applicationSettings = applicationSettingsService.LoadSettings();
+            var uiScaleService = new UiScaleService(applicationSettings.UiScalePercent);
+            applicationSettings.UiScalePercent = uiScaleService.CurrentPercentage;
+            UiScaleServiceHost.SetCurrent(uiScaleService);
+            UiScaleBehavior.EnableForApplication(this);
+            DeveloperDiagnostics.LogInfo(
+                "Startup",
+                "Application UI Scale was loaded before window creation.",
+                new Dictionary<string, object?>
+                {
+                    ["settingsPath"] = applicationSettingsService.SettingsFilePath,
+                    ["uiScalePercentage"] = uiScaleService.CurrentPercentage
+                });
+
             if (ShouldLaunchConsolePrototype(startupArgs))
             {
                 var prototypeWindow = new ConsolePrototypeWindow();
@@ -91,8 +107,6 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            var applicationSettingsService = new ApplicationSettingsService();
-            var applicationSettings = applicationSettingsService.LoadSettings();
             DeveloperDiagnostics.LogInfo(
                 "Startup",
                 "Loaded settings for startup runtime validation.",
@@ -114,7 +128,7 @@ namespace PS7ScriptDesk.Shell
             applicationSettings.SelectedRuntimeExecutablePath = startupRuntime.LaunchExecutablePath;
             SafeSaveSettings(applicationSettingsService, applicationSettings, startupRuntime);
 
-            var shellWindow = AppBootstrapper.CreateMainWindow(applicationSettingsService, applicationSettings, startupRuntime);
+            var shellWindow = AppBootstrapper.CreateMainWindow(applicationSettingsService, applicationSettings, startupRuntime, uiScaleService);
             MainWindow = shellWindow;
             AppLogger.Info("App", "Main window created.");
             DeveloperDiagnostics.LogInfo("Startup", "Main window created by AppBootstrapper.");

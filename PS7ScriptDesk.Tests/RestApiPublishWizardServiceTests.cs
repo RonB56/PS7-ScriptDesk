@@ -17,6 +17,7 @@ public sealed class RestApiPublishWizardServiceTests
 
         var endpoint = Assert.Single(endpoints);
         Assert.Equal("Get-Widget", endpoint.PowerShellFunctionName);
+        Assert.Equal(ApiTransport.Rest, endpoint.Transport);
         Assert.Equal(ApiHttpMethod.Get, endpoint.Rest.Method);
         Assert.Equal("/api/get-widget", endpoint.Rest.RouteTemplate);
         Assert.Equal("getWidget", endpoint.Rest.OperationId);
@@ -72,8 +73,8 @@ public sealed class RestApiPublishWizardServiceTests
         Assert.Equal(
             [ApiPublishTargetArchitecture.WinX64, ApiPublishTargetArchitecture.WinArm64, ApiPublishTargetArchitecture.Both],
             options.Select(option => option.Architecture).ToArray());
-        Assert.Contains(options, option => option.DisplayName == "win-x64");
-        Assert.Contains(options, option => option.DisplayName == "win-arm64");
+        Assert.Contains(options, option => option.DisplayName == "Windows x64");
+        Assert.Contains(options, option => option.DisplayName == "Windows ARM64");
     }
 
     [Fact]
@@ -189,7 +190,12 @@ public sealed class RestApiPublishWizardServiceTests
         var xaml = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "PS7ScriptDesk.Shell", "Dialogs", "RestApiPublishWizardWindow.xaml"));
 
         Assert.Contains("x:Name=\"SecurityModeBox\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("DisplayMemberPath=\"DisplayName\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"DiscoveryUrlBox\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Header=\"Transport\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("SelectedItemBinding=\"{Binding Transport", xaml, StringComparison.Ordinal);
+        Assert.Contains("TextSearch.TextPath=\"DisplayName\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("<ComboBox.ItemTemplate>", xaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding DisplayName}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("SelectedValuePath=\"Mode\"", xaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Tag=\"JwtBearer\"", xaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Tag=\"WindowsAuthentication\"", xaml, StringComparison.Ordinal);
@@ -222,6 +228,60 @@ public sealed class RestApiPublishWizardServiceTests
     }
 
     [Fact]
+    public void WizardXaml_LocalTestKeepsCommandsStatusResultsAndNavigationOutsideConfigurationScroll()
+    {
+        var xaml = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "PS7ScriptDesk.Shell", "Dialogs", "RestApiPublishWizardWindow.xaml"));
+        var localTestStart = xaml.IndexOf("<TabItem Header=\"Local Test\">", StringComparison.Ordinal);
+        var buildPublishStart = xaml.IndexOf("<TabItem Header=\"Build / Publish\">", localTestStart, StringComparison.Ordinal);
+
+        Assert.True(localTestStart >= 0);
+        Assert.True(buildPublishStart > localTestStart);
+
+        var localTest = xaml[localTestStart..buildPublishStart];
+        var configurationScrollStart = localTest.IndexOf("<ScrollViewer Grid.Row=\"2\"", StringComparison.Ordinal);
+        var configurationScrollEnd = localTest.IndexOf("</ScrollViewer>", configurationScrollStart, StringComparison.Ordinal);
+        var splitterStart = localTest.IndexOf("x:Name=\"LocalTestResultsSplitter\"", StringComparison.Ordinal);
+        var resultsStart = localTest.IndexOf("<Grid Grid.Row=\"4\"", StringComparison.Ordinal);
+
+        Assert.True(configurationScrollStart >= 0);
+        Assert.True(configurationScrollEnd > configurationScrollStart);
+        Assert.True(splitterStart > configurationScrollEnd);
+        Assert.True(resultsStart > splitterStart);
+        Assert.DoesNotContain("MaxHeight=\"255\"", localTest, StringComparison.Ordinal);
+        Assert.Contains("<WrapPanel Grid.Row=\"0\">", localTest, StringComparison.Ordinal);
+        Assert.Contains("<RowDefinition Height=\"4*\" MinHeight=\"160\" />", localTest, StringComparison.Ordinal);
+        Assert.Contains("<RowDefinition Height=\"5*\" MinHeight=\"180\" />", localTest, StringComparison.Ordinal);
+        Assert.Contains("Style=\"{StaticResource IdeRowSplitterStyle}\"", localTest, StringComparison.Ordinal);
+        Assert.Contains("Resize configuration and results", localTest, StringComparison.Ordinal);
+        Assert.Contains("<RowDefinition Height=\"2*\" MinHeight=\"100\" />", localTest, StringComparison.Ordinal);
+        Assert.Contains("<RowDefinition Height=\"*\" MinHeight=\"64\" />", localTest, StringComparison.Ordinal);
+        Assert.Contains("Header=\"Selected event details\"", localTest, StringComparison.Ordinal);
+        Assert.Contains("Click=\"SaveButton_Click\"", localTest, StringComparison.Ordinal);
+        Assert.Contains("Click=\"StartTestButton_Click\"", localTest, StringComparison.Ordinal);
+        Assert.Contains("Click=\"RestartTestButton_Click\"", localTest, StringComparison.Ordinal);
+        Assert.Contains("Click=\"StopTestButton_Click\"", localTest, StringComparison.Ordinal);
+        Assert.Contains("Click=\"StopInvocationButton_Click\"", localTest, StringComparison.Ordinal);
+
+        foreach (var control in new[] { "SaveButton", "StartTestButton", "RestartTestButton", "StopTestButton", "StopInvocationButton", "LocalTestStatusText" })
+        {
+            var controlIndex = localTest.IndexOf($"x:Name=\"{control}\"", StringComparison.Ordinal);
+            Assert.True(controlIndex >= 0, $"Expected {control} in Local Test layout.");
+            Assert.True(controlIndex < configurationScrollStart, $"Expected {control} outside the configuration scroll viewer.");
+        }
+
+        foreach (var control in new[] { "LocalTestResponseSummaryText", "LocalTestResponseBox", "LocalTestEventGrid", "LocalTestEventDetailsBox", "CopySelectedEventButton", "CopyAllEventsButton", "CopyResponseButton", "ClearResultsButton" })
+        {
+            var controlIndex = localTest.IndexOf($"x:Name=\"{control}\"", StringComparison.Ordinal);
+            Assert.True(controlIndex >= resultsStart, $"Expected {control} in the persistent results region.");
+        }
+
+        var navigationStart = xaml.IndexOf("x:Name=\"BackButton\"", StringComparison.Ordinal);
+        Assert.True(navigationStart > buildPublishStart);
+        Assert.Contains("x:Name=\"CancelButton\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"CloseButton_Click\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void WizardConstructor_InitializesBuildPublishFirstDisplayState()
     {
         var code = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "PS7ScriptDesk.Shell", "Dialogs", "RestApiPublishWizardWindow.xaml.cs"));
@@ -230,6 +290,9 @@ public sealed class RestApiPublishWizardServiceTests
         Assert.Contains("TargetArchitectureBox.ItemsSource = CreatePublishTargetOptions()", code, StringComparison.Ordinal);
         Assert.Contains("TargetArchitectureBox.SelectedValue = ApiPublishTargetArchitecture.WinX64", code, StringComparison.Ordinal);
         Assert.Contains("RefreshBuildPublishStatus(\"Ready to generate the REST API project.\")", code, StringComparison.Ordinal);
+        Assert.Contains("TransportOptions", code, StringComparison.Ordinal);
+        Assert.Contains("ExecuteWebSocketLocalTestAsync", code, StringComparison.Ordinal);
+        Assert.Contains("ExecuteSseLocalTestAsync", code, StringComparison.Ordinal);
     }
 
     [Fact]

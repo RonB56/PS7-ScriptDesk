@@ -14,6 +14,7 @@
         Loaded="Window_Loaded"
         ContentRendered="Window_ContentRendered"
         Closing="Window_Closing"
+        Closed="Window_Closed"
         PreviewKeyDown="Window_PreviewKeyDown"
         PreviewGotKeyboardFocus="Window_PreviewGotKeyboardFocus"
         AllowDrop="True">
@@ -214,7 +215,23 @@
                     <Separator />
                     <MenuItem Header="_Restore Default Workspace"
                               Click="WorkspaceRestoreDefault_Click" />
-                </MenuItem>
+                    </MenuItem>
+                    <Separator />
+                <MenuItem x:Name="UiScaleMenuItem"
+                          Header="_UI Scale"
+                          help:ContextHelp.Key="View.UiScale" />
+                <MenuItem Header="Increase UI Scale"
+                          InputGestureText="Ctrl+Alt+="
+                          Command="{Binding IncreaseUiScaleCommand}"
+                          help:ContextHelp.Key="View.UiScale" />
+                <MenuItem Header="Decrease UI Scale"
+                          InputGestureText="Ctrl+Alt+-"
+                          Command="{Binding DecreaseUiScaleCommand}"
+                          help:ContextHelp.Key="View.UiScale" />
+                <MenuItem Header="Reset UI Scale"
+                          InputGestureText="Ctrl+Alt+0"
+                          Command="{Binding ResetUiScaleCommand}"
+                          help:ContextHelp.Key="View.UiScale" />
                 <Separator />
                 <MenuItem Header="Zoom _In"  InputGestureText="Ctrl+=" Command="{Binding ZoomInCommand}" help:ContextHelp.Key="View.Zoom" />
                 <MenuItem Header="Zoom _Out" InputGestureText="Ctrl+-" Command="{Binding ZoomOutCommand}" help:ContextHelp.Key="View.Zoom" />
@@ -662,6 +679,11 @@
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Zoom">
                 <TextBlock Text="{Binding ZoomLevelText}" />
+            </StatusBarItem>
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
+            <StatusBarItem help:ContextHelp.Key="Status.UiScale">
+                <TextBlock Text="{Binding UiScaleText}"
+                           ToolTip="Application interface scale. Editor Zoom and terminal font size are separate settings." />
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Execution">

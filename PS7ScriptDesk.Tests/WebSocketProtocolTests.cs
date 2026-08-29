@@ -314,6 +314,21 @@ public sealed class WebSocketProtocolTests
     }
 
     [Fact]
+    public void CreateMessageTooLargeFailure_ConstructsTerminalProtocolErrorPayload()
+    {
+        var failure = WebSocketProtocolParser.Shared.CreateMessageTooLargeFailure();
+        var envelope = WebSocketProtocolMessageFactory.CreateProtocolError(
+            failure,
+            DateTimeOffset.Parse("2026-08-26T14:30:00Z"));
+
+        Assert.Equal(WebSocketMessageTypes.ProtocolError, envelope.Type);
+        Assert.Equal(WebSocketProtocolErrorCodes.MessageTooLarge, envelope.Payload.Code);
+        Assert.True(envelope.Payload.TerminalConnection);
+        Assert.DoesNotContain("secret", envelope.Payload.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("stack", envelope.Payload.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void CreateRequestError_ConstructsSanitizedValidationErrorPayload()
     {
         var parseResult = WebSocketProtocolParser.Shared.ParseTextMessage(

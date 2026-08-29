@@ -1,6 +1,7 @@
 ﻿<Application x:Class="PS7ScriptDesk.Shell.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:shell="clr-namespace:PS7ScriptDesk.Shell"
              xmlns:sys="clr-namespace:System;assembly=mscorlib">
     <Application.Resources>
         <ResourceDictionary>
@@ -37,7 +38,9 @@
             <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
             <Setter Property="FontFamily" Value="{StaticResource Theme.FontFamily}" />
             <Setter Property="FontSize" Value="{StaticResource Theme.FontSize.Body}" />
+            <Setter Property="shell:UiScaleBehavior.IsEnabled" Value="True" />
         </Style>
+
 
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />

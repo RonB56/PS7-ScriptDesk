@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.RestApiProofHost.Api;
 using PS7ScriptDesk.RestApiProofHost.PowerShell;
 
@@ -42,6 +43,7 @@ public static class WebSocketProtocolErrorCodes
     public const string InvalidFieldType = "invalidFieldType";
     public const string InvalidRequestId = "invalidRequestId";
     public const string UnknownMessageType = "unknownMessageType";
+    public const string MessageTooLarge = "messageTooLarge";
     public const string ExecutableFieldNotAllowed = "executableFieldNotAllowed";
     public const string RequestValidationFailure = "requestValidationFailure";
 }
@@ -203,6 +205,13 @@ public sealed class WebSocketProtocolParser
             WebSocketProtocolErrorCodes.BinaryNotSupported,
             "Binary messages are not supported.",
             "The WebSocket protocol accepts UTF-8 JSON text messages only.",
+            terminalConnection: true);
+
+    public WebSocketProtocolValidationFailure CreateMessageTooLargeFailure()
+        => WebSocketProtocolValidationFailure.ProtocolError(
+            WebSocketProtocolErrorCodes.MessageTooLarge,
+            "Message too large.",
+            "The WebSocket message exceeds the configured size limit.",
             terminalConnection: true);
 
     private static WebSocketProtocolParseResult ParseInvokeMessage(
@@ -661,6 +670,27 @@ public static class WebSocketProtocolMessageFactory
                 elapsedMilliseconds),
             timestamp);
     }
+
+    public static WebSocketProtocolEnvelope<WebSocketStreamingEventPayload> CreateStreamingEvent(
+        string requestId,
+        ApiStreamingInvocationEvent item)
+        => WebSocketProtocolEnvelope<WebSocketStreamingEventPayload>.Create(
+            WebSocketMessageTypes.Event,
+            requestId,
+            new WebSocketStreamingEventPayload(
+                item.InvocationId,
+                item.EndpointId,
+                item.ConnectionId,
+                item.SessionId,
+                item.Sequence,
+                item.Timestamp,
+                item.Kind.ToString(),
+                item.Payload,
+                item.Message,
+                item.StatusCode,
+                item.ElapsedMilliseconds,
+                item.IsTerminal),
+            item.Timestamp);
 }
 
 public sealed record WebSocketProtocolEnvelope<TPayload>(
@@ -702,6 +732,20 @@ public sealed record WebSocketCancelPayload(string? Reason);
 public sealed record WebSocketAcceptedPayload(string EndpointId, string State = "accepted", int? QueuePosition = null);
 
 public sealed record WebSocketEventPayload(string EventType, long Sequence, string? Message = null);
+
+public sealed record WebSocketStreamingEventPayload(
+    string InvocationId,
+    string EndpointId,
+    string? ConnectionId,
+    string? SessionId,
+    long Sequence,
+    DateTimeOffset Timestamp,
+    string EventType,
+    object? Payload = null,
+    string? Message = null,
+    string? StatusCode = null,
+    long? ElapsedMilliseconds = null,
+    bool Terminal = false);
 
 public sealed record WebSocketResultPayload(object? Result, long ElapsedMilliseconds, long? ResultBytes = null)
 {

@@ -67,10 +67,7 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
         ValidateRuntime(configuration.Runtime, result);
         ValidateSecurity(configuration.Security, result);
 
-        if (configuration.Transport == ApiTransport.Rest)
-        {
-            ValidateRestEndpoints(configuration, metadata, result);
-        }
+        ValidateEndpoints(configuration, metadata, result);
 
         return result;
     }
@@ -86,14 +83,9 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
             result.AddError("API002", $"Schema version {configuration.SchemaVersion.ToString(CultureInfo.InvariantCulture)} is not supported by this version of PS7 ScriptDesk.", "$.schemaVersion");
         }
 
-        if (configuration.Transport is ApiTransport.WebSocket or ApiTransport.ServerSentEvents)
+        if (!ApiTransportFacts.IsSupported(configuration.Transport))
         {
-            result.AddError("API003", $"{configuration.Transport} transport is reserved for a future phase and is not supported by REST V1.", "$.transport");
-        }
-
-        if (configuration.Transport != ApiTransport.Rest)
-        {
-            result.AddError("API004", "Only REST transport can be validated for Phase 2.", "$.transport");
+            result.AddError("API004", "The selected API transport is not supported.", "$.transport");
         }
 
         if (string.IsNullOrWhiteSpace(configuration.SourceScript))
@@ -127,6 +119,8 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
             result.AddError("API027", "Default invocation timeout must be greater than zero.", "$.runtime.defaultInvocationTimeout");
         if (runtime.RequestBodySizeLimitBytes <= 0)
             result.AddError("API028", "Request body size limit must be greater than zero.", "$.runtime.requestBodySizeLimitBytes");
+        if (runtime.WebSocketMessageSizeLimitBytes <= 0)
+            result.AddError("API035", "WebSocket message size limit must be greater than zero.", "$.runtime.webSocketMessageSizeLimitBytes");
         if (runtime.ResponseItemLimit <= 0)
             result.AddError("API029", "Response item limit must be greater than zero.", "$.runtime.responseItemLimit");
         if (runtime.ResponseByteLimit <= 0)
@@ -138,6 +132,8 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
 
         if (runtime.RequestBodySizeLimitBytes > 10 * 1024 * 1024)
             result.AddWarning("API033", "Request body size limit is unusually high for a generated PowerShell API.", "$.runtime.requestBodySizeLimitBytes");
+        if (runtime.WebSocketMessageSizeLimitBytes > 10 * 1024 * 1024)
+            result.AddWarning("API036", "WebSocket message size limit is unusually high for a generated PowerShell API.", "$.runtime.webSocketMessageSizeLimitBytes");
         if (runtime.DefaultInvocationTimeout > TimeSpan.FromMinutes(5))
             result.AddWarning("API034", "Default invocation timeout is unusually long for REST V1.", "$.runtime.defaultInvocationTimeout");
     }
@@ -170,7 +166,7 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
         }
     }
 
-    private static void ValidateRestEndpoints(ApiPublishConfiguration configuration, ApiMetadataResult? metadata, ApiPublishValidationResult result)
+    private static void ValidateEndpoints(ApiPublishConfiguration configuration, ApiMetadataResult? metadata, ApiPublishValidationResult result)
     {
         var endpointIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var methodRoutes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -200,29 +196,34 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
                 result.AddError("API053", "Endpoint timeout override must be greater than zero.", $"{endpointPath}.timeoutOverride", endpointId);
             }
 
-            ValidateRestOptions(endpoint, endpointPath, endpointId, methodRoutes, result, out var routeTokens);
-            ValidateBindings(endpoint, endpointPath, endpointId, routeTokens, result);
+            if (endpoint.Transport.HasValue && !ApiTransportFacts.IsSupported(endpoint.Transport.Value))
+            {
+                result.AddError("API054", "The endpoint transport is not supported.", $"{endpointPath}.transport", endpointId);
+            }
+
+            var transport = ApiTransportFacts.ResolveEndpointTransport(configuration, endpoint);
+            var routeTokens = transport == ApiTransport.Rest
+                ? ValidateRestOptions(endpoint, endpointPath, endpointId, methodRoutes, result)
+                : ValidateStreamingOptions(endpoint, endpointPath, endpointId, transport, result);
+            ValidateBindings(endpoint, endpointPath, endpointId, transport, routeTokens, result);
             ValidateFunctionMetadata(endpoint, endpointPath, endpointId, metadata, result);
         }
     }
 
-    private static void ValidateRestOptions(
+    private static IReadOnlySet<string> ValidateRestOptions(
         ApiEndpointConfiguration endpoint,
         string endpointPath,
         string? endpointId,
         HashSet<string> methodRoutes,
-        ApiPublishValidationResult result,
-        out IReadOnlySet<string> routeTokens)
+        ApiPublishValidationResult result)
     {
-        routeTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
         if (endpoint.Rest.Method is not (ApiHttpMethod.Get or ApiHttpMethod.Post))
         {
             result.AddError("API060", "REST V1 supports only GET and POST endpoints.", $"{endpointPath}.rest.method", endpointId);
         }
 
         var routeResult = ValidateRoute(endpoint.Rest.RouteTemplate);
-        routeTokens = routeResult.Tokens;
+        var routeTokens = routeResult.Tokens;
         foreach (var diagnostic in routeResult.Errors)
         {
             result.AddError(diagnostic.Code, diagnostic.Message, $"{endpointPath}.rest.routeTemplate", endpointId);
@@ -241,17 +242,45 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
         {
             result.AddError("API062", "REST success status code must be a 2xx value.", $"{endpointPath}.rest.successStatusCode", endpointId);
         }
+
+        return routeTokens;
+    }
+
+    private static IReadOnlySet<string> ValidateStreamingOptions(
+        ApiEndpointConfiguration endpoint,
+        string endpointPath,
+        string? endpointId,
+        ApiTransport transport,
+        ApiPublishValidationResult result)
+    {
+        if (!ApiTransportFacts.IsSupported(transport))
+        {
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        if (endpoint.Rest.IncludeInOpenApi)
+        {
+            result.AddWarning(
+                "API063",
+                $"{ApiTransportFacts.GetDisplayName(transport)} endpoints are not included in the OpenAPI document; endpoint discovery reports their transport URLs instead.",
+                $"{endpointPath}.rest.includeInOpenApi",
+                endpointId);
+        }
+
+        return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     }
 
     private static void ValidateBindings(
         ApiEndpointConfiguration endpoint,
         string endpointPath,
         string? endpointId,
+        ApiTransport transport,
         IReadOnlySet<string> routeTokens,
         ApiPublishValidationResult result)
     {
         var parameters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var externalNamesBySource = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var streamingPayloadNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var routeBindingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var bindingIndex = 0; bindingIndex < endpoint.ParameterBindings.Count; bindingIndex++)
@@ -274,6 +303,16 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
                 result.AddError("API072", "External parameter name is required for route, query, body, and header bindings.", $"{bindingPath}.name", endpointId, parameterName);
             }
 
+            if (transport != ApiTransport.Rest && binding.Source == ApiParameterSource.Route)
+            {
+                result.AddError("API077", $"{ApiTransportFacts.GetDisplayName(transport)} endpoints cannot use route-bound PowerShell parameters because the transport route is reserved for the endpoint ID.", $"{bindingPath}.source", endpointId, parameterName);
+            }
+
+            if (transport == ApiTransport.ServerSentEvents && binding.Source == ApiParameterSource.Body)
+            {
+                result.AddError("API078", "Server-Sent Events endpoints cannot use JSON body parameter binding; use query, header, or server-defined bindings.", $"{bindingPath}.source", endpointId, parameterName);
+            }
+
             if (binding.Source == ApiParameterSource.Route)
             {
                 if (!routeTokens.Contains(binding.Name))
@@ -284,7 +323,9 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
                 routeBindingNames.Add(binding.Name);
             }
 
-            if (endpoint.Rest.Method == ApiHttpMethod.Get && binding.Source == ApiParameterSource.Body)
+            if (transport == ApiTransport.Rest &&
+                endpoint.Rest.Method == ApiHttpMethod.Get &&
+                binding.Source == ApiParameterSource.Body)
             {
                 result.AddError("API074", "GET endpoints cannot use JSON body parameter binding in REST V1.", $"{bindingPath}.source", endpointId, parameterName);
             }
@@ -295,10 +336,19 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
             }
             else
             {
-                var externalKey = $"{binding.Source}:{binding.Name}";
+                var externalKey = ApiTransportFacts.IsStreaming(transport) && binding.Source != ApiParameterSource.Header
+                    ? $"Payload:{binding.Name}"
+                    : $"{binding.Source}:{binding.Name}";
                 if (!externalNamesBySource.Add(externalKey))
                 {
                     result.AddError("API075", "External parameter names must be unique within the same binding source.", $"{bindingPath}.name", endpointId, parameterName);
+                }
+
+                if (transport == ApiTransport.WebSocket &&
+                    binding.Source is ApiParameterSource.Body or ApiParameterSource.Query &&
+                    !streamingPayloadNames.Add(binding.Name))
+                {
+                    result.AddError("API079", "WebSocket payload parameter names must be unique.", $"{bindingPath}.name", endpointId, parameterName);
                 }
             }
         }

@@ -5,6 +5,8 @@ using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.RestApiProofHost.Api;
 using PS7ScriptDesk.RestApiProofHost.PowerShell;
 using PS7ScriptDesk.PowerShell.Services;
+using PS7ScriptDesk.RestApiProofHost.ServerSentEvents;
+using PS7ScriptDesk.RestApiProofHost.WebSockets;
 
 namespace PS7ScriptDesk.RestApiProofHost.Hosting;
 
@@ -41,6 +43,7 @@ public static class RestApiProofHostFactory
         builder.Services.AddSingleton(configuration);
         builder.Services.AddSingleton(metadata);
         builder.Services.AddSingleton<ApiKeyAuthenticationService>();
+        builder.Services.AddSingleton(ApiEndpointParameterBinder.Shared);
         builder.Services.AddSingleton(RestParameterBinder.Shared);
         builder.Services.AddSingleton<OpenApiDocumentBuilder>();
         builder.Services.AddSingleton(PowerShellResultNormalizer.Shared);
@@ -49,9 +52,13 @@ public static class RestApiProofHostFactory
         builder.Services.AddSingleton<PowerShellInvocationCoordinator>();
 
         var app = builder.Build();
+        app.UseWebSockets();
         app.MapGet("/healthz", () => Results.Json(new { status = "Ready" }, ApiJsonOptions.Shared));
+        ApiEndpointDiscoveryMapper.MapEndpointDiscovery(app);
         OpenApiEndpointMapper.MapOpenApiEndpoints(app);
         RestEndpointMapper.MapConfiguredEndpoints(app);
+        SseEndpointMapper.MapSseEndpoints(app);
+        WebSocketEndpointMapper.MapWebSocketEndpoints(app);
 
         var coordinator = app.Services.GetRequiredService<PowerShellInvocationCoordinator>();
         try

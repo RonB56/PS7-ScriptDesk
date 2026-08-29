@@ -126,6 +126,7 @@ public sealed class RestApiPublishWizardService : IRestApiPublishWizardService
                 return new ApiEndpointConfiguration
                 {
                     EndpointId = ApiEndpointConfiguration.CreateStableEndpointId(function.Name),
+                    Transport = ApiTransport.Rest,
                     PowerShellFunctionName = function.Name,
                     DisplayName = function.Name,
                     Description = function.CommentHelp?.Synopsis ?? string.Empty,

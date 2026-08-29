@@ -28,12 +28,14 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
     private static readonly RuntimeSourceFile[] RuntimeSourceFiles =
     [
         new("PS7ScriptDesk.ApiProjectRuntime.Domain.Models.ApiPublishConfiguration.cs", "Runtime/PS7ScriptDesk.Domain/Models/ApiPublishConfiguration.cs"),
+        new("PS7ScriptDesk.ApiProjectRuntime.Domain.Models.ApiStreamingInvocationModels.cs", "Runtime/PS7ScriptDesk.Domain/Models/ApiStreamingInvocationModels.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.Domain.Models.ApiMetadataResult.cs", "Runtime/PS7ScriptDesk.Domain/Models/ApiMetadataResult.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.Application.Interfaces.IApiMetadataService.cs", "Runtime/PS7ScriptDesk.Application/Interfaces/IApiMetadataService.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.Application.Interfaces.IApiPublishConfigurationValidator.cs", "Runtime/PS7ScriptDesk.Application/Interfaces/IApiPublishConfigurationValidator.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.Application.Services.ApiPublishConfigurationValidator.cs", "Runtime/PS7ScriptDesk.Application/Services/ApiPublishConfigurationValidator.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.PowerShell.Services.PowerShellApiMetadataService.cs", "Runtime/PS7ScriptDesk.PowerShell/Services/PowerShellApiMetadataService.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiEndpointParameterBinder.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/Api/ApiEndpointParameterBinder.cs"),
+        new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiEndpointDiscoveryMapper.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/Api/ApiEndpointDiscoveryMapper.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiEndpointResolver.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/Api/ApiEndpointResolver.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiInvocationErrorDescriptorMapper.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/Api/ApiInvocationErrorDescriptorMapper.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiKeyAuthenticationService.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/Api/ApiKeyAuthenticationService.cs"),
@@ -45,13 +47,17 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.RestParameterBinder.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/Api/RestParameterBinder.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.ApiInvocationRequest.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/ApiInvocationRequest.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.ApiInvocationResult.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/ApiInvocationResult.cs"),
+        new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.ApiStreamingInvocation.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/ApiStreamingInvocation.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.IPowerShellFunctionInvoker.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/IPowerShellFunctionInvoker.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellFailureClassifier.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/PowerShellFailureClassifier.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellFunctionInvoker.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/PowerShellFunctionInvoker.cs"),
+        new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellInvocationStreamSink.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/PowerShellInvocationStreamSink.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellInvocationCoordinator.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/PowerShellInvocationCoordinator.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellInvocationMetrics.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/PowerShellInvocationMetrics.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellResultNormalizer.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/PowerShellResultNormalizer.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.RunspacePoolManager.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/RunspacePoolManager.cs"),
+        new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.ServerSentEvents.SseEndpointMapper.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/ServerSentEvents/SseEndpointMapper.cs"),
+        new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.WebSockets.WebSocketEndpointMapper.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/WebSockets/WebSocketEndpointMapper.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.WebSockets.WebSocketProtocol.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/WebSockets/WebSocketProtocol.cs")
     ];
 
@@ -464,6 +470,8 @@ using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.PowerShell.Services;
 using PS7ScriptDesk.RestApiProofHost.Api;
 using PS7ScriptDesk.RestApiProofHost.PowerShell;
+using PS7ScriptDesk.RestApiProofHost.ServerSentEvents;
+using PS7ScriptDesk.RestApiProofHost.WebSockets;
 
 var builder = WebApplication.CreateBuilder(args);
 var contentRoot = builder.Environment.ContentRootPath;
@@ -484,6 +492,7 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddSingleton(configuration);
 builder.Services.AddSingleton(metadata);
 builder.Services.AddSingleton<ApiKeyAuthenticationService>();
+builder.Services.AddSingleton(ApiEndpointParameterBinder.Shared);
 builder.Services.AddSingleton(RestParameterBinder.Shared);
 builder.Services.AddSingleton<OpenApiDocumentBuilder>();
 builder.Services.AddSingleton(PowerShellResultNormalizer.Shared);
@@ -492,9 +501,13 @@ builder.Services.AddSingleton<IPowerShellFunctionInvoker, PowerShellFunctionInvo
 builder.Services.AddSingleton<PowerShellInvocationCoordinator>();
 
 var app = builder.Build();
+app.UseWebSockets();
 app.MapGet("/healthz", () => Results.Json(new { status = "Ready" }, ApiJsonOptions.Shared));
+ApiEndpointDiscoveryMapper.MapEndpointDiscovery(app);
 OpenApiEndpointMapper.MapOpenApiEndpoints(app);
 RestEndpointMapper.MapConfiguredEndpoints(app);
+SseEndpointMapper.MapSseEndpoints(app);
+WebSocketEndpointMapper.MapWebSocketEndpoints(app);
 
 var coordinator = app.Services.GetRequiredService<PowerShellInvocationCoordinator>();
 await coordinator.InitializeAsync(

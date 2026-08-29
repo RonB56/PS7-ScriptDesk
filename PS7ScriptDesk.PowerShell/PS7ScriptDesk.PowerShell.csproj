@@ -24,12 +24,14 @@
 
   <ItemGroup>
     <EmbeddedResource Include="..\PS7ScriptDesk.Domain\Models\ApiPublishConfiguration.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Domain.Models.ApiPublishConfiguration.cs" />
+    <EmbeddedResource Include="..\PS7ScriptDesk.Domain\Models\ApiStreamingInvocationModels.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Domain.Models.ApiStreamingInvocationModels.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.Domain\Models\ApiMetadataResult.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Domain.Models.ApiMetadataResult.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.Application\Interfaces\IApiMetadataService.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Application.Interfaces.IApiMetadataService.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.Application\Interfaces\IApiPublishConfigurationValidator.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Application.Interfaces.IApiPublishConfigurationValidator.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.Application\Services\ApiPublishConfigurationValidator.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Application.Services.ApiPublishConfigurationValidator.cs" />
     <EmbeddedResource Include="Services\PowerShellApiMetadataService.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.PowerShell.Services.PowerShellApiMetadataService.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\Api\ApiEndpointParameterBinder.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiEndpointParameterBinder.cs" />
+    <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\Api\ApiEndpointDiscoveryMapper.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiEndpointDiscoveryMapper.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\Api\ApiEndpointResolver.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiEndpointResolver.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\Api\ApiInvocationErrorDescriptorMapper.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiInvocationErrorDescriptorMapper.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\Api\ApiKeyAuthenticationService.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiKeyAuthenticationService.cs" />
@@ -41,13 +43,17 @@
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\Api\RestParameterBinder.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.RestParameterBinder.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\ApiInvocationRequest.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.ApiInvocationRequest.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\ApiInvocationResult.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.ApiInvocationResult.cs" />
+    <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\ApiStreamingInvocation.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.ApiStreamingInvocation.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\IPowerShellFunctionInvoker.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.IPowerShellFunctionInvoker.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\PowerShellFailureClassifier.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellFailureClassifier.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\PowerShellFunctionInvoker.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellFunctionInvoker.cs" />
+    <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\PowerShellInvocationStreamSink.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellInvocationStreamSink.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\PowerShellInvocationCoordinator.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellInvocationCoordinator.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\PowerShellInvocationMetrics.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellInvocationMetrics.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\PowerShellResultNormalizer.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.PowerShellResultNormalizer.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\PowerShell\RunspacePoolManager.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.RunspacePoolManager.cs" />
+    <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\ServerSentEvents\SseEndpointMapper.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.ServerSentEvents.SseEndpointMapper.cs" />
+    <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\WebSockets\WebSocketEndpointMapper.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.WebSockets.WebSocketEndpointMapper.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\WebSockets\WebSocketProtocol.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.WebSockets.WebSocketProtocol.cs" />
   </ItemGroup>
 

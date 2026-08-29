@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text.Json.Serialization;
 
 namespace PS7ScriptDesk.Domain.Models;
 
@@ -119,6 +120,8 @@ public sealed class ApiEndpointConfiguration
 {
     public string EndpointId { get; set; } = string.Empty;
     public bool IsEnabled { get; set; } = true;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ApiTransport? Transport { get; set; }
     public string PowerShellFunctionName { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
@@ -157,6 +160,49 @@ public sealed class ApiEndpointConfiguration
         var value = string.IsNullOrWhiteSpace(functionName) ? "endpoint" : functionName.Trim();
         return $"ps-{value.Replace('_', '-').ToLowerInvariant()}";
     }
+}
+
+public static class ApiTransportFacts
+{
+    public static bool IsSupported(ApiTransport transport)
+        => transport is ApiTransport.Rest or ApiTransport.WebSocket or ApiTransport.ServerSentEvents;
+
+    public static ApiTransport ResolveEndpointTransport(ApiPublishConfiguration configuration, ApiEndpointConfiguration endpoint)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(endpoint);
+        return endpoint.Transport ?? configuration.Transport;
+    }
+
+    public static bool IsStreaming(ApiTransport transport)
+        => transport is ApiTransport.WebSocket or ApiTransport.ServerSentEvents;
+
+    public static string GetDisplayName(ApiTransport transport)
+        => transport switch
+        {
+            ApiTransport.Rest => "REST",
+            ApiTransport.WebSocket => "WebSocket",
+            ApiTransport.ServerSentEvents => "Server-Sent Events",
+            _ => "Unknown"
+        };
+
+    public static string GetEndpointPath(ApiEndpointConfiguration endpoint, ApiTransport transport)
+        => transport switch
+        {
+            ApiTransport.Rest => string.IsNullOrWhiteSpace(endpoint.Rest.RouteTemplate) ? "/" : endpoint.Rest.RouteTemplate,
+            ApiTransport.WebSocket => $"/ws/{endpoint.EndpointId}",
+            ApiTransport.ServerSentEvents => $"/sse/{endpoint.EndpointId}",
+            _ => string.Empty
+        };
+
+    public static string GetEndpointMethod(ApiEndpointConfiguration endpoint, ApiTransport transport)
+        => transport switch
+        {
+            ApiTransport.Rest => endpoint.Rest.Method.ToString().ToUpperInvariant(),
+            ApiTransport.ServerSentEvents => ApiHttpMethod.Get.ToString().ToUpperInvariant(),
+            ApiTransport.WebSocket => "WEBSOCKET",
+            _ => string.Empty
+        };
 }
 
 public sealed class ApiRestEndpointOptions
@@ -207,6 +253,7 @@ public sealed class ApiRuntimeOptions
     public TimeSpan QueueWaitTimeout { get; set; } = TimeSpan.FromSeconds(10);
     public TimeSpan DefaultInvocationTimeout { get; set; } = TimeSpan.FromSeconds(30);
     public int RequestBodySizeLimitBytes { get; set; } = 1 * 1024 * 1024;
+    public int WebSocketMessageSizeLimitBytes { get; set; } = 64 * 1024;
     public int ResponseItemLimit { get; set; } = 1000;
     public int ResponseByteLimit { get; set; } = 5 * 1024 * 1024;
     public int SerializationDepth { get; set; } = 8;

@@ -230,6 +230,74 @@
       "parameterBindings": []
     },
     {
+      "endpointId": "poc-live-timing",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-LiveStreamingTiming",
+      "displayName": "Live Streaming Timing",
+      "description": "Emits delayed output records so live transport streaming can be verified.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/live/timing",
+        "operationId": "liveStreamingTiming",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": []
+    },
+    {
+      "endpointId": "poc-live-streams",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-LiveStreamingStreams",
+      "displayName": "Live Streaming Streams",
+      "description": "Emits every supported PowerShell stream type for live transport verification.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/live/streams",
+        "operationId": "liveStreamingStreams",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": []
+    },
+    {
+      "endpointId": "poc-live-pressure",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-LiveStreamingPressure",
+      "displayName": "Live Streaming Pressure",
+      "description": "Emits many records so live transport slow-consumer behavior can be exercised.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/live/pressure",
+        "operationId": "liveStreamingPressure",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": [
+        {
+          "powerShellParameterName": "Count",
+          "source": "Query",
+          "name": "count",
+          "required": "Optional",
+          "typeName": "int"
+        }
+      ]
+    },
+    {
+      "endpointId": "poc-live-cancellation",
+      "isEnabled": true,
+      "powerShellFunctionName": "Invoke-LiveStreamingCancellation",
+      "displayName": "Live Streaming Cancellation",
+      "description": "Emits one record before waiting so client disconnect cancellation can be measured.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/live/cancellation",
+        "operationId": "liveStreamingCancellation",
+        "includeInOpenApi": false
+      },
+      "parameterBindings": []
+    },
+    {
       "endpointId": "poc-phase6-get-computer",
       "isEnabled": true,
       "powerShellFunctionName": "Get-Phase6Computer",

@@ -7,5 +7,6 @@ public interface IPowerShellFunctionInvoker
         RunspacePoolLease poolLease,
         int retainedStreamLimit,
         CancellationToken cancellationToken,
-        Func<ApiInvocationStatus> cancellationStatusProvider);
+        Func<ApiInvocationStatus> cancellationStatusProvider,
+        PowerShellInvocationStreamSink? streamSink = null);
 }

@@ -145,6 +145,58 @@ function Invoke-Phase5BOversizedOutput {
     'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
 }
 
+function Invoke-LiveStreamingTiming {
+    [CmdletBinding()]
+    param()
+
+    'first'
+    [System.Threading.Thread]::Sleep(600)
+    'second'
+    [System.Threading.Thread]::Sleep(600)
+    'third'
+}
+
+function Invoke-LiveStreamingStreams {
+    [CmdletBinding()]
+    param()
+
+    'out-1'
+    $PSCmdlet.WriteWarning('warn-1')
+    Write-Verbose 'verbose-1' -Verbose
+    Write-Debug 'debug-1' -Debug
+    Write-Information 'info-1' -InformationAction Continue
+
+    $exception = [System.InvalidOperationException]::new('live-stream-secret C:\Sensitive\Hidden.ps1')
+    $record = [System.Management.Automation.ErrorRecord]::new(
+        $exception,
+        'LiveStreamingNonTerminatingError',
+        [System.Management.Automation.ErrorCategory]::InvalidOperation,
+        $null)
+    $PSCmdlet.WriteError($record)
+
+    'out-after-error'
+}
+
+function Invoke-LiveStreamingPressure {
+    [CmdletBinding()]
+    param(
+        [int]$Count = 12
+    )
+
+    foreach ($index in 1..$Count) {
+        "pressure-$index"
+    }
+}
+
+function Invoke-LiveStreamingCancellation {
+    [CmdletBinding()]
+    param()
+
+    'before-cancel'
+    [System.Threading.Thread]::Sleep(5000)
+    'after-cancel'
+}
+
 function Get-Phase6Computer {
     [CmdletBinding()]
     param(

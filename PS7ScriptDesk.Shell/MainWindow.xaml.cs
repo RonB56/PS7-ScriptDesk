@@ -12,6 +12,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -37,6 +38,7 @@ using ICSharpCode.AvalonEdit.Folding;
 using ICSharpCode.AvalonEdit.Rendering;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Interfaces;
+using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.Shell.Debug;
@@ -198,6 +200,7 @@ namespace PS7ScriptDesk.Shell
         private readonly BraceFoldingStrategy _foldingStrategy = new();
         private readonly HashSet<TextEditor> _editorTextSynchronizationInProgress = new();
         private readonly IApplicationSettingsService _applicationSettingsService;
+        private readonly IUiScaleService _uiScaleService;
         private readonly ApplicationSettings _loadedSettings;
         private readonly PowerShellIntelliSenseService _intelliSenseService = new();
         private readonly InProcessPowerShellSyntaxDiagnosticsService _liveSyntaxDiagnosticsService = new();
@@ -329,11 +332,12 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        public MainWindow(IApplicationSettingsService applicationSettingsService, ApplicationSettings loadedSettings)
+        public MainWindow(IApplicationSettingsService applicationSettingsService, ApplicationSettings loadedSettings, IUiScaleService? uiScaleService = null)
         {
             DeveloperDiagnostics.LogMethodEntry("UI", "MainWindow constructor entry.");
             _applicationSettingsService = applicationSettingsService;
             _loadedSettings = loadedSettings ?? new ApplicationSettings();
+            _uiScaleService = uiScaleService ?? UiScaleServiceHost.Current;
             var processElevation = CurrentProcessElevation.TryGetIsElevated();
             _administratorModeBannerState = AdministratorModeBannerState.Create(processElevation == true);
             DeveloperDiagnostics.LogDecision(
@@ -389,6 +393,8 @@ namespace PS7ScriptDesk.Shell
             }
 
             InitializeComponent();
+            InitializeUiScaleMenu();
+            _uiScaleService.ScaleChanged += UiScaleService_ScaleChanged;
 
             _intelliSenseService.MetadataWarmupStatusChanged += IntelliSenseService_MetadataWarmupStatusChanged;
             _intelliSenseService.CompletionEngineStatusChanged += IntelliSenseService_CompletionEngineStatusChanged;
@@ -767,12 +773,36 @@ namespace PS7ScriptDesk.Shell
 
             var isCtrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
             var isShift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
+            var isAlt = (Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt;
 
             // xterm owns terminal-focused key combinations so PSReadLine and console
             // applications receive their normal Ctrl/F-key input. The terminal's one
             // documented app override (Ctrl+Shift+F6) is raised by xterm itself.
             if (TerminalConsole.IsKeyboardFocusWithin)
             {
+                return;
+            }
+
+            // Ctrl+Alt variants are reserved for application UI Scale. The existing
+            // Ctrl+=, Ctrl+-, and Ctrl+0 shortcuts remain editor zoom controls.
+            if (isCtrl && isAlt && !isShift && (e.Key == Key.OemPlus || e.Key == Key.Add))
+            {
+                e.Handled = true;
+                ViewModel.IncreaseUiScaleCommand.Execute(null);
+                return;
+            }
+
+            if (isCtrl && isAlt && !isShift && (e.Key == Key.OemMinus || e.Key == Key.Subtract))
+            {
+                e.Handled = true;
+                ViewModel.DecreaseUiScaleCommand.Execute(null);
+                return;
+            }
+
+            if (isCtrl && isAlt && !isShift && e.Key == Key.D0)
+            {
+                e.Handled = true;
+                ViewModel.ResetUiScaleCommand.Execute(null);
                 return;
             }
 
@@ -6212,6 +6242,58 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
+        private void InitializeUiScaleMenu()
+        {
+            UiScaleMenuItem.Items.Clear();
+            foreach (var percentage in _uiScaleService.SupportedPercentages)
+            {
+                var menuItem = new WpfMenuItem
+                {
+                    Header = $"{percentage}%",
+                    IsCheckable = true,
+                    Tag = percentage,
+                    ToolTip = $"Set application UI Scale to {percentage}%"
+                };
+                AutomationProperties.SetName(menuItem, $"UI Scale {percentage} percent");
+                menuItem.Click += UiScalePresetMenuItem_Click;
+                UiScaleMenuItem.Items.Add(menuItem);
+            }
+
+            RefreshUiScaleMenuChecks();
+        }
+
+        private void UiScalePresetMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is WpfMenuItem { Tag: int percentage })
+            {
+                _uiScaleService.SetPercentage(percentage, "Menu");
+            }
+        }
+
+        private void UiScaleService_ScaleChanged(object? sender, EventArgs e)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(RefreshUiScaleMenuChecks), DispatcherPriority.DataBind);
+                return;
+            }
+
+            RefreshUiScaleMenuChecks();
+        }
+
+        private void RefreshUiScaleMenuChecks()
+        {
+            foreach (var item in UiScaleMenuItem.Items.OfType<WpfMenuItem>())
+            {
+                item.IsChecked = item.Tag is int percentage && percentage == _uiScaleService.CurrentPercentage;
+            }
+        }
+
+        private void Window_Closed(object? sender, EventArgs e)
+        {
+            _uiScaleService.ScaleChanged -= UiScaleService_ScaleChanged;
+        }
+
         private void ViewModel_ExeExportProgressChanged(object? sender, ExeExportProgressUpdate update)
         {
             if (update is null)
@@ -7264,6 +7346,7 @@ namespace PS7ScriptDesk.Shell
 
             settings.StartMaximized = WindowState == WindowState.Maximized;
             settings.IsExplorerVisible = ViewModel?.IsExplorerVisible ?? settings.IsExplorerVisible;
+            settings.UiScalePercent = _uiScaleService.CurrentPercentage;
             settings.IsContextHelpEnabled = IsContextHelpEnabled;
             CopyDeveloperDiagnosticsSettings(_loadedSettings, settings);
 

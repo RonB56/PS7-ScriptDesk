@@ -10,7 +10,9 @@ public static class RestEndpointMapper
     {
         var configuration = app.Services.GetRequiredService<ApiPublishConfiguration>();
 
-        foreach (var endpoint in configuration.Endpoints.Where(endpoint => endpoint.IsEnabled))
+        foreach (var endpoint in configuration.Endpoints.Where(endpoint =>
+                     endpoint.IsEnabled &&
+                     ApiTransportFacts.ResolveEndpointTransport(configuration, endpoint) == ApiTransport.Rest))
         {
             var capturedEndpoint = endpoint;
             if (capturedEndpoint.Rest.Method == ApiHttpMethod.Get)

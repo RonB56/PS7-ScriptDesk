@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using PS7ScriptDesk.Domain.Models;
+using PS7ScriptDesk.RestApiProofHost.Api;
 
 namespace PS7ScriptDesk.RestApiProofHost.PowerShell;
 
@@ -66,6 +67,12 @@ public sealed class PowerShellInvocationCoordinator : IAsyncDisposable
     }
 
     public async Task<ApiInvocationResult> InvokeAsync(ApiInvocationRequest request, CancellationToken cancellationToken)
+        => await InvokeCoreAsync(request, cancellationToken, streamSink: null).ConfigureAwait(false);
+
+    private async Task<ApiInvocationResult> InvokeCoreAsync(
+        ApiInvocationRequest request,
+        CancellationToken cancellationToken,
+        PowerShellInvocationStreamSink? streamSink)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (_disposed || _shutdown.IsCancellationRequested)
@@ -155,7 +162,8 @@ public sealed class PowerShellInvocationCoordinator : IAsyncDisposable
                 lease,
                 _runtimeOptions.MaximumRetainedStreamEntries,
                 invocationCancellation.Token,
-                () => ClassifyCancellation(cancellationToken, timeoutSource.Token));
+                () => ClassifyCancellation(cancellationToken, timeoutSource.Token),
+                streamSink);
 
             TrackResult(result);
             stopwatch.Stop();
@@ -195,6 +203,46 @@ public sealed class PowerShellInvocationCoordinator : IAsyncDisposable
 
             _admissionSlots.Release();
         }
+    }
+
+    public Task<ApiStreamingInvocationSession> StartStreamingInvocationAsync(
+        ApiStreamingInvocationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(request.InvocationId))
+        {
+            throw new ArgumentException("InvocationId is required.", nameof(request));
+        }
+
+        if (string.IsNullOrWhiteSpace(request.EndpointId))
+        {
+            throw new ArgumentException("EndpointId is required.", nameof(request));
+        }
+
+        if (string.IsNullOrWhiteSpace(request.FunctionName))
+        {
+            throw new ArgumentException("FunctionName is required.", nameof(request));
+        }
+
+        ArgumentNullException.ThrowIfNull(request.Parameters);
+        if (request.EventCapacity <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "Event capacity must be positive.");
+        }
+
+        var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdown.Token);
+        var events = new ApiStreamingInvocationEventChannel(request.EventCapacity);
+        var session = new ApiStreamingInvocationSession(request, events, linkedCancellation);
+        _logger?.LogInformation(
+            "Started streaming PowerShell invocation {InvocationId} for endpoint {EndpointId} with event capacity {EventCapacity}.",
+            request.InvocationId,
+            request.EndpointId,
+            request.EventCapacity);
+
+        var producer = ProduceStreamingInvocationAsync(session);
+        session.AttachCompletion(producer);
+        return Task.FromResult(session);
     }
 
     public PowerShellInvocationMetricsSnapshot CreateMetricsSnapshot()
@@ -275,4 +323,262 @@ public sealed class PowerShellInvocationCoordinator : IAsyncDisposable
                 break;
         }
     }
+
+    private async Task ProduceStreamingInvocationAsync(ApiStreamingInvocationSession session)
+    {
+        var request = session.Request;
+        using var eventGate = new SemaphoreSlim(1, 1);
+        long sequence = 0;
+        var terminalWritten = false;
+        LiveStreamingFailure? liveStreamingFailure = null;
+        var liveStreamingFailureGate = new object();
+
+        ApiStreamingInvocationEvent CreateEvent(
+            ApiStreamingInvocationEventKind kind,
+            object? payload = null,
+            string? message = null,
+            string? statusCode = null,
+            long? elapsedMilliseconds = null)
+            => new(
+                request.InvocationId,
+                request.EndpointId,
+                request.ConnectionId,
+                request.SessionId,
+                Interlocked.Increment(ref sequence),
+                kind,
+                DateTimeOffset.UtcNow,
+                payload,
+                message,
+                statusCode,
+                elapsedMilliseconds);
+
+        async ValueTask<bool> PublishDataAsync(
+            ApiStreamingInvocationEventKind kind,
+            object? payload = null,
+            string? message = null,
+            string? statusCode = null,
+            long? elapsedMilliseconds = null)
+        {
+            await eventGate.WaitAsync(session.CancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (terminalWritten)
+                {
+                    return false;
+                }
+
+                return await session.WriteDataAsync(
+                    CreateEvent(kind, payload, message, statusCode, elapsedMilliseconds),
+                    session.CancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                eventGate.Release();
+            }
+        }
+
+        async ValueTask PublishTerminalAsync(
+            ApiStreamingInvocationEventKind kind,
+            string? message = null,
+            string? statusCode = null,
+            long? elapsedMilliseconds = null)
+        {
+            await eventGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                if (terminalWritten)
+                {
+                    return;
+                }
+
+                terminalWritten = true;
+                await session.WriteTerminalAsync(
+                    CreateEvent(kind, message: message, statusCode: statusCode, elapsedMilliseconds: elapsedMilliseconds)).ConfigureAwait(false);
+            }
+            finally
+            {
+                eventGate.Release();
+            }
+        }
+
+        bool TrySetLiveStreamingFailure(string safeMessage, string statusCode)
+        {
+            lock (liveStreamingFailureGate)
+            {
+                if (liveStreamingFailure is not null)
+                {
+                    return false;
+                }
+
+                liveStreamingFailure = new LiveStreamingFailure(safeMessage, statusCode);
+                _logger?.LogWarning(
+                    "Live streaming PowerShell invocation {InvocationId} stopped before completion with status {StatusCode}.",
+                    request.InvocationId,
+                    statusCode);
+                return true;
+            }
+        }
+
+        LiveStreamingFailure? GetLiveStreamingFailure()
+        {
+            lock (liveStreamingFailureGate)
+            {
+                return liveStreamingFailure;
+            }
+        }
+
+        try
+        {
+            await PublishDataAsync(ApiStreamingInvocationEventKind.InvocationStarted);
+
+            var liveSink = new PowerShellInvocationStreamSink(async (record, _) =>
+            {
+                var failure = GetLiveStreamingFailure();
+                if (failure is not null)
+                {
+                    return false;
+                }
+
+                switch (record.Kind)
+                {
+                    case PowerShellInvocationStreamKind.Output:
+                    {
+                        if (record.Output is null)
+                        {
+                            return true;
+                        }
+
+                        var normalized = PowerShellResultNormalizer.Shared.Normalize(
+                            [record.Output],
+                            _runtimeOptions,
+                            ApiJsonOptions.Shared);
+                        if (!normalized.IsSuccess)
+                        {
+                            TrySetLiveStreamingFailure(
+                                normalized.SafeMessage,
+                                GetStatusCode(StatusForNormalizationFailure(normalized.FailureKind)));
+                            session.Cancel();
+                            return false;
+                        }
+
+                        return await PublishDataAsync(ApiStreamingInvocationEventKind.Output, normalized.Value).ConfigureAwait(false);
+                    }
+                    case PowerShellInvocationStreamKind.Warning:
+                        return await PublishDataAsync(ApiStreamingInvocationEventKind.Warning, record.Message, record.Message).ConfigureAwait(false);
+                    case PowerShellInvocationStreamKind.Verbose:
+                        return await PublishDataAsync(ApiStreamingInvocationEventKind.Verbose, record.Message, record.Message).ConfigureAwait(false);
+                    case PowerShellInvocationStreamKind.Debug:
+                        return await PublishDataAsync(ApiStreamingInvocationEventKind.Debug, record.Message, record.Message).ConfigureAwait(false);
+                    case PowerShellInvocationStreamKind.Information:
+                        return await PublishDataAsync(ApiStreamingInvocationEventKind.Information, record.Message, record.Message).ConfigureAwait(false);
+                    case PowerShellInvocationStreamKind.Error:
+                        return await PublishDataAsync(ApiStreamingInvocationEventKind.Error, record.Message, record.Message).ConfigureAwait(false);
+                    default:
+                        return await PublishDataAsync(ApiStreamingInvocationEventKind.Error, record.Message, record.Message).ConfigureAwait(false);
+                }
+            });
+
+            var result = await InvokeCoreAsync(
+                new ApiInvocationRequest
+                {
+                    FunctionName = request.FunctionName,
+                    Parameters = request.Parameters,
+                    Timeout = request.Timeout
+                },
+                session.CancellationToken,
+                liveSink).ConfigureAwait(false);
+
+            var liveFailure = GetLiveStreamingFailure();
+            if (liveFailure is not null)
+            {
+                await PublishTerminalAsync(
+                    ApiStreamingInvocationEventKind.InvocationFailed,
+                    liveFailure.SafeMessage,
+                    liveFailure.StatusCode,
+                    ToElapsedMilliseconds(result.Elapsed));
+                return;
+            }
+
+            if (result.IsSuccess)
+            {
+                await PublishTerminalAsync(
+                    ApiStreamingInvocationEventKind.InvocationCompleted,
+                    statusCode: "success",
+                    elapsedMilliseconds: ToElapsedMilliseconds(result.Elapsed));
+                return;
+            }
+
+            var terminalKind = result.Status == ApiInvocationStatus.CallerCanceled
+                ? ApiStreamingInvocationEventKind.InvocationCanceled
+                : ApiStreamingInvocationEventKind.InvocationFailed;
+            await PublishTerminalAsync(
+                terminalKind,
+                GetSafeFailureMessage(result),
+                GetStatusCode(result.Status),
+                ToElapsedMilliseconds(result.Elapsed));
+        }
+        catch (OperationCanceledException)
+        {
+            await PublishTerminalAsync(
+                ApiStreamingInvocationEventKind.InvocationCanceled,
+                "The streaming PowerShell invocation was canceled.",
+                GetStreamingCancellationStatusCode());
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Internal streaming PowerShell invocation failure {InvocationId}.", request.InvocationId);
+            await PublishTerminalAsync(
+                ApiStreamingInvocationEventKind.InvocationFailed,
+                "The streaming PowerShell invocation failed internally.",
+                "internal-failure");
+        }
+        finally
+        {
+            _logger?.LogInformation(
+                "Completed streaming PowerShell invocation {InvocationId} with {EventCount} events.",
+                request.InvocationId,
+                sequence);
+        }
+
+        string GetStreamingCancellationStatusCode()
+            => _shutdown.IsCancellationRequested ? "host-shutdown" : "caller-canceled";
+    }
+
+    private static long ToElapsedMilliseconds(TimeSpan elapsed)
+        => Math.Max(0, (long)Math.Round(elapsed.TotalMilliseconds));
+
+    private static ApiInvocationStatus StatusForNormalizationFailure(NormalizationFailureKind failureKind)
+        => failureKind is NormalizationFailureKind.ItemLimitExceeded or NormalizationFailureKind.ByteLimitExceeded
+            ? ApiInvocationStatus.SerializationOutputLimitFailure
+            : ApiInvocationStatus.NormalizationFailure;
+
+    private static string GetSafeFailureMessage(ApiInvocationResult result)
+        => result.Status == ApiInvocationStatus.InternalFailure
+            ? "The streaming PowerShell invocation failed internally."
+            : string.IsNullOrWhiteSpace(result.SafeMessage)
+            ? "The streaming PowerShell invocation failed."
+            : result.SafeMessage;
+
+    private static string GetStatusCode(ApiInvocationStatus status)
+        => status switch
+        {
+            ApiInvocationStatus.RequestBindingFailure => "request-binding-failure",
+            ApiInvocationStatus.InvalidFunction => "invalid-function",
+            ApiInvocationStatus.QueueFull => "queue-full",
+            ApiInvocationStatus.QueueWaitTimedOut => "queue-wait-timeout",
+            ApiInvocationStatus.CallerCanceled => "caller-canceled",
+            ApiInvocationStatus.InvocationTimedOut => "invocation-timeout",
+            ApiInvocationStatus.PowerShellTerminatingFailure => "powershell-terminating-failure",
+            ApiInvocationStatus.PowerShellNonTerminatingError => "powershell-nonterminating-error",
+            ApiInvocationStatus.PowerShellParameterBindingFailure => "powershell-parameter-binding-failure",
+            ApiInvocationStatus.PowerShellValidationFailure => "powershell-validation-failure",
+            ApiInvocationStatus.PowerShellFailure => "powershell-failure",
+            ApiInvocationStatus.NormalizationFailure => "normalization-failure",
+            ApiInvocationStatus.SerializationOutputLimitFailure => "serialization-output-limit-failure",
+            ApiInvocationStatus.HostUnavailable => "host-unavailable",
+            ApiInvocationStatus.InternalFailure => "internal-failure",
+            _ => "invocation-failure"
+        };
+
+    private sealed record LiveStreamingFailure(string SafeMessage, string StatusCode);
 }

@@ -525,10 +525,10 @@ namespace PS7ScriptDesk.Shell.Help
                 ["View.Menu"] = Topic(
                     "View.Menu",
                     "View menu",
-                    "The View menu controls layout choices such as the explorer, debug panels, zoom, and theme.",
+                    "The View menu controls layout choices such as the explorer, debug panels, UI Scale, editor zoom, and theme.",
                     "Use it when you want to change how the shell looks or how much information is shown.",
                     "View settings affect the shell layout and readability, but do not change your script logic.",
-                    related: new[] { "View.Explorer", "View.DebugPanels", "View.ThemeMenu", "View.Zoom" }),
+                    related: new[] { "View.Explorer", "View.DebugPanels", "View.UiScale", "View.Zoom", "View.ThemeMenu" }),
 
                 ["View.Explorer"] = Topic(
                     "View.Explorer",
@@ -558,6 +558,18 @@ namespace PS7ScriptDesk.Shell.Help
                         "Reset Zoom: Ctrl+0",
                         "You can also hold Ctrl and use the mouse wheel over the editor."),
                     related: new[] { "Status.Zoom", "Editor.Surface" }),
+
+                ["View.UiScale"] = Topic(
+                    "View.UiScale",
+                    "UI Scale",
+                    "UI Scale changes the size of the ScriptDesk interface, including its windows, menus, toolbars, panes, and dialogs.",
+                    "Use it when the overall application interface is difficult to read without changing Windows display scaling.",
+                    "UI Scale is independent of editor font-size zoom and terminal font-size preferences. It ranges from 75% to 200% and applies immediately.",
+                    Section("Shortcuts", false,
+                        "Increase UI Scale: Ctrl+Alt+=",
+                        "Decrease UI Scale: Ctrl+Alt+-",
+                        "Reset UI Scale: Ctrl+Alt+0"),
+                    related: new[] { "Status.UiScale", "View.Zoom", "App.Settings" }),
 
                 ["View.ThemeMenu"] = Topic(
                     "View.ThemeMenu",
@@ -1253,7 +1265,11 @@ namespace PS7ScriptDesk.Shell.Help
                 ["Status.Zoom"] = StatusTopic(
                     "Status.Zoom",
                     "Zoom summary",
-                    "Shows the current editor zoom level."),
+                    "Shows the current editor font-size zoom level."),
+                ["Status.UiScale"] = StatusTopic(
+                    "Status.UiScale",
+                    "UI Scale summary",
+                    "Shows the current application-wide UI Scale percentage."),
                 ["Status.Execution"] = StatusTopic(
                     "Status.Execution",
                     "Execution progress",

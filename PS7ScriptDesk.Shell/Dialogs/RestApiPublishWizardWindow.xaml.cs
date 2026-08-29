@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Net.Http;
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
@@ -15,6 +16,7 @@ using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.Shell.Help;
+using PS7ScriptDesk.Shell.Services;
 using WpfKeyEventArgs = System.Windows.Input.KeyEventArgs;
 using WpfTextBox = System.Windows.Controls.TextBox;
 
@@ -26,6 +28,7 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     private readonly ApiMetadataResult _metadata;
     private readonly IApiPublishConfigurationStore _configurationStore;
     private readonly IApiLocalTestHostService _localTestHostService;
+    private readonly ApiLocalTestConsoleService _localTestConsoleService;
     private readonly IApiBuildPublishService _buildPublishService;
     private ApiPublishConfiguration _configuration;
     private RestApiEndpointRow? _selectedEndpointRow;
@@ -34,6 +37,10 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     private bool _isInitializing;
     private bool _isLocalTestBusy;
     private bool _isBuildPublishBusy;
+    private string _localTestHostStatusText = "Local API test host is not running.";
+    private string _localTestConsoleStatusText = "Test idle.";
+    private Guid _activeConsoleSessionId;
+    private ApiLocalTestEventRow? _selectedEventRow;
 
     public RestApiPublishWizardWindow(
         ApiPublishWizardRequest request,
@@ -41,15 +48,19 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         ApiPublishConfiguration configuration,
         IApiPublishConfigurationStore configurationStore,
         IApiLocalTestHostService localTestHostService,
-        IApiBuildPublishService buildPublishService)
+        IApiBuildPublishService buildPublishService,
+        ApiLocalTestConsoleService? localTestConsoleService = null)
     {
         _request = request ?? throw new ArgumentNullException(nameof(request));
         _metadata = metadata ?? throw new ArgumentNullException(nameof(metadata));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _configurationStore = configurationStore ?? throw new ArgumentNullException(nameof(configurationStore));
         _localTestHostService = localTestHostService ?? throw new ArgumentNullException(nameof(localTestHostService));
+        _localTestConsoleService = localTestConsoleService ?? new ApiLocalTestConsoleService();
         _buildPublishService = buildPublishService ?? throw new ArgumentNullException(nameof(buildPublishService));
         _localTestHostService.StatusChanged += LocalTestHostService_StatusChanged;
+        _localTestConsoleService.StateChanged += LocalTestConsoleService_StateChanged;
+        _localTestConsoleService.EventReceived += LocalTestConsoleService_EventReceived;
         _isInitializing = true;
         try
         {
@@ -65,6 +76,7 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             TargetArchitectureBox.SelectedValue = ApiPublishTargetArchitecture.WinX64;
             RefreshBuildPublishStatus("Ready to generate the REST API project.");
             ApplyLocalTestStatus(_localTestHostService.CurrentStatus);
+            ApplyLocalTestConsoleState(_localTestConsoleService.State, _localTestConsoleService.SessionId, null);
         }
         finally
         {
@@ -81,11 +93,15 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
 
     public ObservableCollection<RestApiParameterBindingRow> EndpointParameterBindings { get; } = new();
 
+    public ObservableCollection<ApiLocalTestEventRow> EventRows { get; } = new();
+
     public ApiPublishConfiguration? Configuration { get; private set; }
 
     public string EndpointSummaryText { get; private set; } = string.Empty;
 
     public string SelectedEndpointParameterText { get; private set; } = "Select an endpoint to review its parameter bindings.";
+
+    public static IReadOnlyList<string> TransportOptions { get; } = Enum.GetNames<ApiTransport>();
 
     internal static IReadOnlyList<ApiSecurityMode> SupportedRestV1SecurityModes { get; } =
     [
@@ -121,8 +137,8 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     internal static IReadOnlyList<ApiPublishTargetArchitectureOption> CreatePublishTargetOptions()
         =>
         [
-            new(ApiPublishTargetArchitecture.WinX64, "win-x64"),
-            new(ApiPublishTargetArchitecture.WinArm64, "win-arm64"),
+            new(ApiPublishTargetArchitecture.WinX64, "Windows x64"),
+            new(ApiPublishTargetArchitecture.WinArm64, "Windows ARM64"),
             new(ApiPublishTargetArchitecture.Both, "Both")
         ];
 
@@ -180,7 +196,7 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         Endpoints.Clear();
         foreach (var endpoint in _configuration.Endpoints)
         {
-            Endpoints.Add(RestApiEndpointRow.FromConfiguration(endpoint));
+            Endpoints.Add(RestApiEndpointRow.FromConfiguration(endpoint, _configuration.Transport));
         }
     }
 
@@ -356,8 +372,9 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
 
     private void ApplyLocalTestStatus(ApiLocalTestHostStatus status)
     {
-        LocalTestStatusText.Text = status.StatusMessage;
+        _localTestHostStatusText = status.StatusMessage;
         BaseUrlBox.Text = status.BaseUrl?.ToString() ?? string.Empty;
+        DiscoveryUrlBox.Text = status.BaseUrl is null ? string.Empty : new Uri(status.BaseUrl, "/api/endpoints").ToString();
         OpenApiUrlBox.Text = status.OpenApiUrl?.ToString() ?? string.Empty;
         SwaggerUrlBox.Text = status.SwaggerUrl?.ToString() ?? string.Empty;
         if (status.Logs.Count > 0 && string.IsNullOrWhiteSpace(LocalTestResponseBox.Text))
@@ -370,14 +387,94 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         StartTestButton.IsEnabled = !_isLocalTestBusy && status.State != ApiLocalTestHostState.Running;
         OpenOpenApiButton.IsEnabled = !_isLocalTestBusy && status.State == ApiLocalTestHostState.Running && status.OpenApiUrl is not null;
         OpenViewerButton.IsEnabled = !_isLocalTestBusy && status.State == ApiLocalTestHostState.Running && status.SwaggerUrl is not null;
-        ExecuteRequestButton.IsEnabled = !_isLocalTestBusy && status.State == ApiLocalTestHostState.Running && _selectedEndpointRow is not null;
+        RefreshLocalTestStatusText();
+        UpdateLocalTestInvocationControls();
         RefreshLocalTestPreview();
+    }
+
+    private void ApplyLocalTestConsoleState(
+        ApiLocalTestSessionState state,
+        Guid sessionId,
+        ApiLocalTestConsoleResponse? response)
+    {
+        if (state == ApiLocalTestSessionState.Connecting)
+        {
+            _activeConsoleSessionId = sessionId;
+            EventRows.Clear();
+            _selectedEventRow = null;
+            LocalTestEventDetailsBox.Text = string.Empty;
+        }
+        else if (sessionId != Guid.Empty && sessionId != _activeConsoleSessionId)
+        {
+            return;
+        }
+
+        _localTestConsoleStatusText = state switch
+        {
+            ApiLocalTestSessionState.Connecting => "Test connecting...",
+            ApiLocalTestSessionState.Running => "Test running; live events appear as they arrive.",
+            ApiLocalTestSessionState.Canceling => "Test canceling...",
+            ApiLocalTestSessionState.Completed => "Test completed.",
+            ApiLocalTestSessionState.Failed => "Test failed.",
+            ApiLocalTestSessionState.Canceled => "Test canceled; the console is ready to reuse.",
+            _ => "Test idle."
+        };
+
+        if (response is not null)
+        {
+            ApplyLocalTestConsoleResponse(response, state);
+        }
+
+        RefreshLocalTestStatusText();
+        UpdateLocalTestInvocationControls();
+    }
+
+    private void ApplyLocalTestConsoleResponse(ApiLocalTestConsoleResponse response, ApiLocalTestSessionState state)
+    {
+        var status = response.StatusCode is int code
+            ? $"{code} {response.ReasonPhrase}".Trim()
+            : "No HTTP status";
+        var headers = response.Headers.Count == 0
+            ? string.Empty
+            : string.Join(Environment.NewLine, response.Headers.Select(header => $"{header.Key}: {header.Value}"));
+        LocalTestResponseBox.Text = string.Join(
+            Environment.NewLine,
+            new[]
+            {
+                status,
+                $"Endpoint: {response.EndpointUri}",
+                $"Elapsed: {response.ElapsedMilliseconds} ms",
+                string.IsNullOrWhiteSpace(headers) ? string.Empty : $"Headers:{Environment.NewLine}{headers}",
+                string.IsNullOrWhiteSpace(response.Body) ? response.UserMessage : response.Body
+            }.Where(line => !string.IsNullOrWhiteSpace(line)));
+        LocalTestResponseSummaryText.Text = $"{state}: {response.UserMessage} | {response.ElapsedMilliseconds} ms";
+        CopyResponseButton.IsEnabled = !string.IsNullOrWhiteSpace(LocalTestResponseBox.Text);
+        ClearResultsButton.IsEnabled = EventRows.Count > 0 || !string.IsNullOrWhiteSpace(LocalTestResponseBox.Text);
+    }
+
+    private void RefreshLocalTestStatusText()
+        => LocalTestStatusText.Text = $"Host: {_localTestHostStatusText} Test: {_localTestConsoleStatusText}";
+
+    private void UpdateLocalTestInvocationControls()
+    {
+        var hostRunning = _localTestHostService.CurrentStatus.State == ApiLocalTestHostState.Running;
+        var active = _localTestConsoleService.IsActive;
+        ExecuteRequestButton.IsEnabled = !_isLocalTestBusy && hostRunning && !active && _selectedEndpointRow is not null;
+        StopInvocationButton.IsEnabled = !_isLocalTestBusy && active && _localTestConsoleService.State != ApiLocalTestSessionState.Canceling;
+        ClearResultsButton.IsEnabled = EventRows.Count > 0 || !string.IsNullOrWhiteSpace(LocalTestResponseBox.Text);
     }
 
     private void RefreshMetadataSummary()
     {
         var publishableCount = _metadata.Functions.Count(function => function.IsPublishable);
-        EndpointSummaryText = $"{Endpoints.Count(endpoint => endpoint.IsEnabled)} enabled endpoint(s), {publishableCount} publishable function(s) detected.";
+        var transportSummary = Endpoints
+            .Where(endpoint => endpoint.IsEnabled)
+            .GroupBy(endpoint => endpoint.Transport)
+            .OrderBy(group => group.Key, StringComparer.Ordinal)
+            .Select(group => $"{group.Count()} {group.Key}")
+            .ToList();
+        var transportText = transportSummary.Count == 0 ? "none" : string.Join(", ", transportSummary);
+        EndpointSummaryText = $"{Endpoints.Count(endpoint => endpoint.IsEnabled)} enabled endpoint(s), {publishableCount} publishable function(s) detected. Transports: {transportText}.";
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(EndpointSummaryText)));
     }
 
@@ -403,6 +500,50 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         }
 
         ApplyLocalTestStatus(status);
+    }
+
+    private void LocalTestConsoleService_StateChanged(object? sender, ApiLocalTestSessionChangedEventArgs args)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => ApplyLocalTestConsoleState(args.State, args.SessionId, args.Response));
+            return;
+        }
+
+        ApplyLocalTestConsoleState(args.State, args.SessionId, args.Response);
+    }
+
+    private void LocalTestConsoleService_EventReceived(object? sender, ApiLocalTestEventReceivedEventArgs args)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => AppendLocalTestEvent(args));
+            return;
+        }
+
+        AppendLocalTestEvent(args);
+    }
+
+    private void AppendLocalTestEvent(ApiLocalTestEventReceivedEventArgs args)
+    {
+        if (args.SessionId != _activeConsoleSessionId)
+        {
+            return;
+        }
+
+        if (EventRows.Count >= _localTestConsoleService.EventBuffer.Capacity)
+        {
+            EventRows.RemoveAt(0);
+        }
+
+        EventRows.Add(args.Item);
+        if (args.WasTrimmed)
+        {
+            _localTestConsoleStatusText = $"Test running; older events trimmed ({_localTestConsoleService.EventBuffer.TrimmedCount} total).";
+            RefreshLocalTestStatusText();
+        }
+
+        UpdateLocalTestInvocationControls();
     }
 
     private void SectionList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -444,6 +585,26 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         {
             EndpointGrid.SelectedItem = _selectedEndpointRow;
         }
+    }
+
+    private void LocalTestEventGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _selectedEventRow = LocalTestEventGrid.SelectedItem as ApiLocalTestEventRow;
+        LocalTestEventDetailsBox.Text = _selectedEventRow is null
+            ? string.Empty
+            : string.Join(
+                Environment.NewLine,
+                new[]
+                {
+                    $"Sequence: {_selectedEventRow.Sequence}",
+                    $"Event: {_selectedEventRow.EventKind}",
+                    $"Stream: {_selectedEventRow.Stream}",
+                    $"Timestamp: {_selectedEventRow.Timestamp:O}",
+                    string.IsNullOrWhiteSpace(_selectedEventRow.TerminalStatus) ? string.Empty : $"Terminal: {_selectedEventRow.TerminalStatus}",
+                    $"Value: {_selectedEventRow.Value}",
+                    $"Normalized event JSON:{Environment.NewLine}{_selectedEventRow.SerializedJson}"
+                }.Where(line => !string.IsNullOrWhiteSpace(line)));
+        CopySelectedEventButton.IsEnabled = _selectedEventRow is not null;
     }
 
     private void NextButton_Click(object sender, RoutedEventArgs e)
@@ -527,15 +688,15 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        if (!TryCreateLocalTestRequest(out var preview, out var body, out _))
+        if (!TryCreateLocalTestPreview(out var preview))
         {
             TestRequestUrlBox.Text = string.Empty;
             TestRequestBodyBox.Text = string.Empty;
             return;
         }
 
-        TestRequestUrlBox.Text = preview.ToString();
-        TestRequestBodyBox.Text = body ?? string.Empty;
+        TestRequestUrlBox.Text = preview.EndpointUri.ToString();
+        TestRequestBodyBox.Text = preview.Payload ?? string.Empty;
     }
 
     private void ConfigurationEdited(object sender, RoutedEventArgs e)
@@ -583,6 +744,62 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     private async void StopTestButton_Click(object sender, RoutedEventArgs e)
         => await StopLocalTestAsync();
 
+    private void StopInvocationButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_localTestConsoleService.IsActive)
+        {
+            return;
+        }
+
+        DeveloperDiagnostics.LogUserAction(
+            "RestApiPublish",
+            "StopApiLocalTest",
+            "Canceling the active API local test invocation.",
+            new Dictionary<string, object?> { ["transport"] = _selectedEndpointRow?.Transport });
+        _localTestConsoleService.Cancel();
+    }
+
+    private void CopySelectedEventButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedEventRow is null)
+        {
+            return;
+        }
+
+        CopyToClipboard(string.Join(Environment.NewLine, [$"{_selectedEventRow.EventKind} ({_selectedEventRow.Stream})", _selectedEventRow.Value, _selectedEventRow.SerializedJson]));
+    }
+
+    private void CopyAllEventsButton_Click(object sender, RoutedEventArgs e)
+        => CopyToClipboard(string.Join(Environment.NewLine, EventRows.Select(row => $"{row.Sequence}\t{row.EventKind}\t{row.Stream}\t{row.Value}\t{row.Timestamp:O}\t{row.TerminalStatus}")));
+
+    private void CopyResponseButton_Click(object sender, RoutedEventArgs e)
+        => CopyToClipboard(LocalTestResponseBox.Text);
+
+    private void ClearResultsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_localTestConsoleService.IsActive)
+        {
+            return;
+        }
+
+        _localTestConsoleService.ClearResults();
+        EventRows.Clear();
+        _selectedEventRow = null;
+        LocalTestEventDetailsBox.Text = string.Empty;
+        LocalTestResponseBox.Clear();
+        LocalTestResponseSummaryText.Text = string.Empty;
+        CopySelectedEventButton.IsEnabled = false;
+        UpdateLocalTestInvocationControls();
+    }
+
+    private static void CopyToClipboard(string text)
+    {
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            System.Windows.Clipboard.SetText(text);
+        }
+    }
+
     private void OpenOpenApiButton_Click(object sender, RoutedEventArgs e)
         => OpenExternalUri(_localTestHostService.CurrentStatus.OpenApiUrl, "OpenAPI JSON");
 
@@ -619,53 +836,31 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
 
     private async void ExecuteRequestButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_isLocalTestBusy || !TryCreateLocalTestRequest(out var requestUri, out var body, out var method))
+        if (_isLocalTestBusy || _localTestConsoleService.IsActive || !TryCreateLocalTestPreview(out var preview))
         {
             return;
         }
 
-        SetLocalTestBusy(true);
-        try
-        {
-            using var client = new HttpClient();
-            using var request = new HttpRequestMessage(method, requestUri);
-            if (_configuration.Security.Mode == ApiSecurityMode.ApiKey &&
-                _selectedEndpointRow?.RequiresAuthentication == true &&
-                !string.IsNullOrWhiteSpace(LocalTestApiKeyBox.Password))
+        var headers = CreateLocalTestHeaders();
+        var request = new ApiLocalTestRequest(
+            preview.Transport,
+            preview.EndpointUri,
+            preview.Method,
+            preview.Payload,
+            headers,
+            TimeSpan.FromSeconds(30));
+        DeveloperDiagnostics.LogInfo(
+            "RestApiPublish",
+            "API local test request started from wizard.",
+            new Dictionary<string, object?>
             {
-                request.Headers.TryAddWithoutValidation("X-API-Key", LocalTestApiKeyBox.Password);
-            }
+                ["sourceFileName"] = Path.GetFileName(_request.SourceScriptPath),
+                ["transport"] = preview.Transport.ToString(),
+                ["endpointId"] = _selectedEndpointRow?.EndpointId,
+                ["method"] = preview.Method.Method
+            });
 
-            foreach (var header in EndpointParameterBindings.Where(row =>
-                         row.Source == ApiParameterSource.Header &&
-                         !string.IsNullOrWhiteSpace(row.Name) &&
-                         !string.IsNullOrWhiteSpace(row.TestValue)))
-            {
-                request.Headers.TryAddWithoutValidation(header.Name, header.TestValue);
-            }
-
-            if (body is not null)
-            {
-                request.Content = new StringContent(body, Encoding.UTF8, "application/json");
-            }
-
-            using var response = await client.SendAsync(request).ConfigureAwait(true);
-            var responseText = await response.Content.ReadAsStringAsync().ConfigureAwait(true);
-            LocalTestResponseBox.Text = $"{(int)response.StatusCode} {response.ReasonPhrase}{Environment.NewLine}{FormatJsonOrText(responseText)}";
-        }
-        catch (Exception ex)
-        {
-            DeveloperDiagnostics.LogException(
-                "RestApiPublish",
-                ex,
-                "REST API local test request failed from wizard.",
-                new Dictionary<string, object?> { ["sourceFileName"] = Path.GetFileName(_request.SourceScriptPath) });
-            LocalTestResponseBox.Text = ex.Message;
-        }
-        finally
-        {
-            SetLocalTestBusy(false);
-        }
+        await _localTestConsoleService.RunAsync(request).ConfigureAwait(true);
     }
 
     private void CloseButton_Click(object sender, RoutedEventArgs e)
@@ -679,9 +874,13 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
         CancelBuildPublishOperation();
+        _localTestConsoleService.Cancel();
         _localTestHostService.StatusChanged -= LocalTestHostService_StatusChanged;
+        _localTestConsoleService.StateChanged -= LocalTestConsoleService_StateChanged;
+        _localTestConsoleService.EventReceived -= LocalTestConsoleService_EventReceived;
         try
         {
+            await _localTestConsoleService.DisposeAsync().ConfigureAwait(true);
             await _localTestHostService.DisposeAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
@@ -866,11 +1065,9 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         }
     }
 
-    private bool TryCreateLocalTestRequest(out Uri requestUri, out string? body, out HttpMethod method)
+    private bool TryCreateLocalTestPreview(out LocalApiTestPreview preview)
     {
-        requestUri = new Uri("http://127.0.0.1/");
-        body = null;
-        method = HttpMethod.Get;
+        preview = new LocalApiTestPreview(ApiTransport.Rest, new Uri("http://127.0.0.1/"), HttpMethod.Get, null);
         var status = _localTestHostService.CurrentStatus;
         if (status.BaseUrl is null || _selectedEndpointRow is null)
         {
@@ -878,12 +1075,28 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         }
 
         var row = _selectedEndpointRow;
-        method = string.Equals(row.Method, ApiHttpMethod.Post.ToString(), StringComparison.OrdinalIgnoreCase)
+        var transport = Enum.TryParse<ApiTransport>(row.Transport, ignoreCase: true, out var parsedTransport)
+            ? parsedTransport
+            : ApiTransport.Rest;
+
+        preview = transport switch
+        {
+            ApiTransport.WebSocket => CreateWebSocketLocalTestPreview(status.BaseUrl, row),
+            ApiTransport.ServerSentEvents => CreateSseLocalTestPreview(status.BaseUrl, row),
+            _ => CreateRestLocalTestPreview(status.BaseUrl, row)
+        };
+        return true;
+    }
+
+    private LocalApiTestPreview CreateRestLocalTestPreview(Uri baseUrl, RestApiEndpointRow row)
+    {
+        var method = string.Equals(row.Method, ApiHttpMethod.Post.ToString(), StringComparison.OrdinalIgnoreCase)
             ? HttpMethod.Post
             : HttpMethod.Get;
         var route = string.IsNullOrWhiteSpace(row.RouteTemplate) ? "/" : row.RouteTemplate;
         var query = new List<string>();
         var bodyValues = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var parameter in EndpointParameterBindings)
         {
             if (parameter.Source == ApiParameterSource.ServerDefined)
@@ -891,9 +1104,7 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
                 continue;
             }
 
-            var apiName = string.IsNullOrWhiteSpace(parameter.Name)
-                ? parameter.PowerShellParameterName
-                : parameter.Name;
+            var apiName = ResolveApiParameterName(parameter);
             var value = parameter.TestValue ?? string.Empty;
             if (parameter.Source == ApiParameterSource.Route)
             {
@@ -915,18 +1126,103 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             relative += "?" + string.Join("&", query);
         }
 
-        requestUri = new Uri(status.BaseUrl, relative);
-        if (bodyValues.Count > 0)
+        var body = bodyValues.Count > 0
+            ? JsonSerializer.Serialize(bodyValues, new JsonSerializerOptions { WriteIndented = true })
+            : null;
+        return new LocalApiTestPreview(ApiTransport.Rest, new Uri(baseUrl, relative), method, body);
+    }
+
+    private LocalApiTestPreview CreateSseLocalTestPreview(Uri baseUrl, RestApiEndpointRow row)
+    {
+        var relative = $"sse/{Uri.EscapeDataString(row.EndpointId)}";
+        var query = EndpointParameterBindings
+            .Where(parameter => parameter.Source == ApiParameterSource.Query)
+            .Select(parameter => $"{Uri.EscapeDataString(ResolveApiParameterName(parameter))}={Uri.EscapeDataString(parameter.TestValue ?? string.Empty)}")
+            .ToList();
+        if (query.Count > 0)
         {
-            body = JsonSerializer.Serialize(bodyValues, new JsonSerializerOptions { WriteIndented = true });
-            if (method == HttpMethod.Get)
-            {
-                method = HttpMethod.Post;
-            }
+            relative += "?" + string.Join("&", query);
         }
 
-        return true;
+        return new LocalApiTestPreview(ApiTransport.ServerSentEvents, new Uri(baseUrl, relative), HttpMethod.Get, null);
     }
+
+    private LocalApiTestPreview CreateWebSocketLocalTestPreview(Uri baseUrl, RestApiEndpointRow row)
+    {
+        var endpointUri = new UriBuilder(new Uri(baseUrl, $"ws/{Uri.EscapeDataString(row.EndpointId)}"))
+        {
+            Scheme = string.Equals(baseUrl.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? "wss" : "ws"
+        }.Uri;
+        var parameters = EndpointParameterBindings
+            .Where(parameter => parameter.Source is ApiParameterSource.Body or ApiParameterSource.Query)
+            .ToDictionary(
+                ResolveApiParameterName,
+                parameter => ConvertTestValue(parameter.TestValue, parameter.TypeName),
+                StringComparer.OrdinalIgnoreCase);
+        var payload = JsonSerializer.Serialize(
+            new
+            {
+                protocol = "ps7scriptdesk.websocket",
+                protocolVersion = 1,
+                type = "invoke",
+                requestId = $"wizard-{Guid.NewGuid():N}",
+                payload = new
+                {
+                    endpointId = row.EndpointId,
+                    parameters,
+                    clientMetadata = new Dictionary<string, object?>()
+                }
+            },
+            new JsonSerializerOptions { WriteIndented = true });
+        return new LocalApiTestPreview(ApiTransport.WebSocket, endpointUri, HttpMethod.Get, payload);
+    }
+
+    private Task ExecuteHttpLocalTestAsync(LocalApiTestPreview preview)
+        => _localTestConsoleService.RunAsync(new ApiLocalTestRequest(
+            preview.Transport,
+            preview.EndpointUri,
+            preview.Method,
+            preview.Payload,
+            CreateLocalTestHeaders(),
+            TimeSpan.FromSeconds(30)));
+
+    private Task ExecuteSseLocalTestAsync(LocalApiTestPreview preview)
+        => ExecuteHttpLocalTestAsync(preview);
+
+    private Task ExecuteWebSocketLocalTestAsync(LocalApiTestPreview preview)
+        => ExecuteHttpLocalTestAsync(preview);
+
+    private Dictionary<string, string> CreateLocalTestHeaders()
+    {
+        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (_configuration.Security.Mode == ApiSecurityMode.ApiKey &&
+            _selectedEndpointRow?.RequiresAuthentication == true &&
+            !string.IsNullOrWhiteSpace(LocalTestApiKeyBox.Password))
+        {
+            headers["X-API-Key"] = LocalTestApiKeyBox.Password;
+        }
+
+        foreach (var header in EndpointParameterBindings.Where(row =>
+                     row.Source == ApiParameterSource.Header &&
+                     !string.IsNullOrWhiteSpace(row.Name) &&
+                     !string.IsNullOrWhiteSpace(row.TestValue)))
+        {
+            headers[header.Name] = header.TestValue;
+        }
+
+        return headers;
+    }
+
+    private static string ResolveApiParameterName(RestApiParameterBindingRow parameter)
+        => string.IsNullOrWhiteSpace(parameter.Name)
+            ? parameter.PowerShellParameterName
+            : parameter.Name;
+
+    private sealed record LocalApiTestPreview(
+        ApiTransport Transport,
+        Uri EndpointUri,
+        HttpMethod Method,
+        string? Payload);
 
     private static object? ConvertTestValue(string? value, string? typeName)
     {
@@ -949,24 +1245,6 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         }
 
         return text;
-    }
-
-    private static string FormatJsonOrText(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return string.Empty;
-        }
-
-        try
-        {
-            using var document = JsonDocument.Parse(text);
-            return JsonSerializer.Serialize(document.RootElement, new JsonSerializerOptions { WriteIndented = true });
-        }
-        catch (JsonException)
-        {
-            return text;
-        }
     }
 
     private static void EnsureInitialPageSelection(System.Windows.Controls.TabControl pages, System.Windows.Controls.ListBox sectionList)
@@ -1090,9 +1368,15 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         };
 }
 
-public sealed record RestApiSecurityModeOption(ApiSecurityMode Mode, string DisplayName, bool IsSelectable);
+public sealed record RestApiSecurityModeOption(ApiSecurityMode Mode, string DisplayName, bool IsSelectable)
+{
+    public override string ToString() => DisplayName;
+}
 
-public sealed record ApiPublishTargetArchitectureOption(ApiPublishTargetArchitecture Architecture, string DisplayName);
+public sealed record ApiPublishTargetArchitectureOption(ApiPublishTargetArchitecture Architecture, string DisplayName)
+{
+    public override string ToString() => DisplayName;
+}
 
 public sealed record RestApiSecurityModeUiState(
     bool ShowApiKeyControls,
@@ -1170,7 +1454,9 @@ public sealed class RestApiParameterBindingRow
 public sealed class RestApiEndpointRow
 {
     public bool IsEnabled { get; set; }
+    public string EndpointId { get; set; } = string.Empty;
     public string FunctionName { get; set; } = string.Empty;
+    public string Transport { get; set; } = ApiTransport.Rest.ToString();
     public string Method { get; set; } = ApiHttpMethod.Get.ToString();
     public string RouteTemplate { get; set; } = string.Empty;
     public string OperationId { get; set; } = string.Empty;
@@ -1178,11 +1464,13 @@ public sealed class RestApiEndpointRow
     public bool RequiresAuthentication { get; set; }
     public List<ApiParameterBindingConfiguration> ParameterBindings { get; set; } = new();
 
-    public static RestApiEndpointRow FromConfiguration(ApiEndpointConfiguration endpoint)
+    public static RestApiEndpointRow FromConfiguration(ApiEndpointConfiguration endpoint, ApiTransport defaultTransport)
         => new()
         {
             IsEnabled = endpoint.IsEnabled,
+            EndpointId = endpoint.EndpointId,
             FunctionName = endpoint.PowerShellFunctionName,
+            Transport = (endpoint.Transport ?? defaultTransport).ToString(),
             Method = endpoint.Rest.Method.ToString(),
             RouteTemplate = endpoint.Rest.RouteTemplate,
             OperationId = endpoint.Rest.OperationId,
@@ -1208,10 +1496,14 @@ public sealed class RestApiEndpointRow
         var method = Enum.TryParse<ApiHttpMethod>(Method, ignoreCase: true, out var parsedMethod)
             ? parsedMethod
             : ApiHttpMethod.Get;
+        var transport = Enum.TryParse<ApiTransport>(Transport, ignoreCase: true, out var parsedTransport)
+            ? parsedTransport
+            : ApiTransport.Rest;
         return new ApiEndpointConfiguration
         {
-            EndpointId = ApiEndpointConfiguration.CreateStableEndpointId(FunctionName),
+            EndpointId = string.IsNullOrWhiteSpace(EndpointId) ? ApiEndpointConfiguration.CreateStableEndpointId(FunctionName) : EndpointId,
             IsEnabled = IsEnabled,
+            Transport = transport,
             PowerShellFunctionName = FunctionName,
             DisplayName = FunctionName,
             Description = Description,
