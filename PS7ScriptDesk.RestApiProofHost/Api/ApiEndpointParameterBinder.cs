@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Management.Automation;
 using System.Text.Json;
 using PS7ScriptDesk.Domain.Models;
 
@@ -58,6 +59,18 @@ public sealed class ApiEndpointParameterBinder
                     $"Required parameter '{binding.Name}' is missing.");
             }
 
+            if (IsSwitchType(binding.TypeName) && IsDisabledSwitchValue(converted.Value))
+            {
+                if (IsRequired(binding))
+                {
+                    return ApiParameterBindingResult.Invalid(
+                        "MissingParameter",
+                        $"Required parameter '{binding.Name}' is missing.");
+                }
+
+                continue;
+            }
+
             values[binding.PowerShellParameterName] = converted.Value;
         }
 
@@ -97,6 +110,13 @@ public sealed class ApiEndpointParameterBinder
 
     private static bool IsMissingRequiredValue(object? value)
         => value is null || value is string text && string.IsNullOrWhiteSpace(text);
+
+    private static bool IsDisabledSwitchValue(object? value)
+        => value is SwitchParameter switchParameter && !switchParameter.IsPresent;
+
+    private static bool IsSwitchType(string typeName)
+        => string.Equals(typeName, "switch", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(typeName, "System.Management.Automation.SwitchParameter", StringComparison.OrdinalIgnoreCase);
 }
 
 public sealed class ApiParameterValueConverter
@@ -176,6 +196,22 @@ public sealed class ApiParameterValueConverter
                 : ApiConvertedParameterValue.Invalid("Expected a boolean value.");
         }
 
+        if (IsSwitchType(typeName))
+        {
+            if (element.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                return ApiConvertedParameterValue.Valid(new SwitchParameter(element.GetBoolean()));
+            }
+
+            if (element.ValueKind == JsonValueKind.String &&
+                bool.TryParse(element.GetString(), out var parsed))
+            {
+                return ApiConvertedParameterValue.Valid(new SwitchParameter(parsed));
+            }
+
+            return ApiConvertedParameterValue.Invalid("Expected a boolean switch value.");
+        }
+
         return ApiConvertedParameterValue.Valid(element.ToString());
     }
 
@@ -219,6 +255,13 @@ public sealed class ApiParameterValueConverter
                 : ApiConvertedParameterValue.Invalid("Expected a boolean value.");
         }
 
+        if (IsSwitchType(typeName))
+        {
+            return bool.TryParse(value, out var parsed)
+                ? ApiConvertedParameterValue.Valid(new SwitchParameter(parsed))
+                : ApiConvertedParameterValue.Invalid("Expected a boolean switch value.");
+        }
+
         return ApiConvertedParameterValue.Valid(value);
     }
 
@@ -244,6 +287,10 @@ public sealed class ApiParameterValueConverter
         => string.Equals(typeName, "bool", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(typeName, "boolean", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(typeName, "System.Boolean", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSwitchType(string typeName)
+        => string.Equals(typeName, "switch", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(typeName, "System.Management.Automation.SwitchParameter", StringComparison.OrdinalIgnoreCase);
 }
 
 public sealed record ApiParameterBindingValue(bool IsPresent, object? Value)

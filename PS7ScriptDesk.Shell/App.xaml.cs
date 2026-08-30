@@ -21,6 +21,8 @@ namespace PS7ScriptDesk.Shell
 {
     public partial class App : System.Windows.Application
     {
+        private static readonly UnhandledExceptionStormGate ExceptionStormGate = new();
+
         private static readonly string[] ConsolePrototypeSwitches =
         {
             "--console-prototype",
@@ -250,16 +252,44 @@ namespace PS7ScriptDesk.Shell
 
         private void ReportStartupException(string source, Exception exception)
         {
+            var decision = ExceptionStormGate.TryBeginPresentation(source, exception);
             AppLogger.Error("App", source, exception);
-            DeveloperDiagnostics.LogException("Startup", exception, source);
+            DeveloperDiagnostics.LogException(
+                "Startup",
+                exception,
+                source,
+                new Dictionary<string, object?>
+                {
+                    ["exceptionSignature"] = decision.Signature,
+                    ["occurrenceCount"] = decision.OccurrenceCount,
+                    ["visibleNotification"] = decision.ShouldPresent
+                });
+
             try
             {
                 var folderPath = ApplicationBranding.LocalApplicationDataRoot;
                 Directory.CreateDirectory(folderPath);
                 var logPath = Path.Combine(folderPath, "startup-error.log");
-                File.AppendAllText(
-                    logPath,
-                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {source}{Environment.NewLine}{exception}{Environment.NewLine}{new string('-', 80)}{Environment.NewLine}");
+                AppendRuntimeExceptionLog(logPath, source, exception, decision);
+
+                if (!decision.ShouldPresent)
+                {
+                    AppLogger.Warning(
+                        "App",
+                        $"Suppressed repeated runtime exception notification. Source={source}, Count={decision.OccurrenceCount}, Signature={decision.Signature}, Reason={decision.SuppressionReason}");
+                    DeveloperDiagnostics.LogWarning(
+                        "Startup",
+                        "Suppressed repeated runtime exception notification.",
+                        new Dictionary<string, object?>
+                        {
+                            ["source"] = source,
+                            ["exceptionType"] = exception.GetType().FullName,
+                            ["exceptionSignature"] = decision.Signature,
+                            ["occurrenceCount"] = decision.OccurrenceCount,
+                            ["reason"] = decision.SuppressionReason
+                        });
+                    return;
+                }
 
                 System.Windows.MessageBox.Show(
                     $"PS7 ScriptDesk hit a startup/runtime exception.\n\nSource: {source}\n\nDetails: {exception.Message}\n\nA log was written to:\n{logPath}",
@@ -271,6 +301,48 @@ namespace PS7ScriptDesk.Shell
             {
                 // Last-resort handler only.
             }
+            finally
+            {
+                if (decision.ShouldPresent)
+                {
+                    var summary = ExceptionStormGate.EndPresentation(decision.Signature);
+                    if (summary.OccurrenceCount > 1)
+                    {
+                        AppLogger.Warning(
+                            "App",
+                            $"Runtime exception notification covered repeated occurrences. Count={summary.OccurrenceCount}, FirstSeen={summary.FirstSeen:O}, LastSeen={summary.LastSeen:O}, Signature={summary.Signature}");
+                        DeveloperDiagnostics.LogWarning(
+                            "Startup",
+                            "Runtime exception notification covered repeated occurrences.",
+                            new Dictionary<string, object?>
+                            {
+                                ["exceptionSignature"] = summary.Signature,
+                                ["occurrenceCount"] = summary.OccurrenceCount,
+                                ["firstSeenUtc"] = summary.FirstSeen.UtcDateTime,
+                                ["lastSeenUtc"] = summary.LastSeen.UtcDateTime
+                            });
+                    }
+                }
+            }
+        }
+
+        private static void AppendRuntimeExceptionLog(
+            string logPath,
+            string source,
+            Exception exception,
+            UnhandledExceptionPresentationDecision decision)
+        {
+            var notification = decision.ShouldPresent
+                ? "visible-notification"
+                : "suppressed-notification";
+            File.AppendAllText(
+                logPath,
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {source} ({notification}){Environment.NewLine}" +
+                $"Type: {exception.GetType().FullName}{Environment.NewLine}" +
+                $"Signature: {decision.Signature}{Environment.NewLine}" +
+                $"OccurrenceCount: {decision.OccurrenceCount}{Environment.NewLine}" +
+                $"SuppressionReason: {decision.SuppressionReason ?? "(none)"}{Environment.NewLine}" +
+                $"{exception}{Environment.NewLine}{new string('-', 80)}{Environment.NewLine}");
         }
 
         private PowerShellRuntimeInfo? ResolveStartupRuntime(ApplicationSettings applicationSettings)

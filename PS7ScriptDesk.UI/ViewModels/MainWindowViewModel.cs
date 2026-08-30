@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -31,16 +32,24 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly IWorkspaceFolderService _workspaceFolderService;
         private readonly IUserPromptService _userPromptService;
         private readonly IExeExportService _exeExportService;
+        private readonly IDocumentRecoveryService _documentRecoveryService;
         private readonly IExeExportWizardService? _exeExportWizardService;
         private readonly IRestApiPublishWizardService? _restApiPublishWizardService;
+        private readonly IEditorExecutionAdapter? _editorExecutionAdapter;
+        private readonly EditorExecutionFeatureGate _editorExecutionFeatureGate;
+        private readonly IInteractiveTerminalCoordinator _interactiveTerminalCoordinator;
+        private readonly TerminalOutputMultiplexer _terminalOutputMultiplexer;
         private SynchronizationContext? _uiSynchronizationContext;
         private readonly SemaphoreSlim _consoleSessionGate = new(1, 1);
         private readonly SemaphoreSlim _consoleRecoveryGate = new(1, 1);
         private readonly TerminalFocusRestorePolicy _terminalFocusRestorePolicy = new();
+        private readonly TerminalRecoveryCircuitBreaker _terminalRecoveryCircuitBreaker = new();
         private CancellationTokenSource? _runtimeLaunchVerificationCancellationTokenSource;
         private int _runtimeLaunchVerificationGeneration;
         private bool _runtimeLaunchVerificationWarningShown;
         private bool _runtimeReplacementPromptShown;
+        private CancellationTokenSource? _structuredExecutionCancellation;
+        private Guid? _activeStructuredExecutionRequestId;
 
         private readonly RelayCommand _runCommand;
         private readonly RelayCommand _stopCommand;
@@ -101,6 +110,9 @@ namespace PS7ScriptDesk.UI.ViewModels
         private bool _isExeExportInProgress;
         private bool _isRestApiWizardOpen;
         private readonly List<string> _recentFilePaths = new();
+        private readonly Dictionary<string, PendingRecoveryWrite> _pendingRecoveryWrites = new(StringComparer.Ordinal);
+        private readonly IReadOnlyList<DocumentRecoveryCandidate> _startupRecoveryCandidates;
+        private bool _startupRecoveryProcessed;
         private string? _selectedRuntimeExecutablePathToRestore;
         private string? _selectedTabFilePathToRestore;
         private int _untitledCounter = 1;
@@ -146,7 +158,12 @@ namespace PS7ScriptDesk.UI.ViewModels
             PowerShellRuntimeInfo? startupRuntimeInfo = null,
             IExeExportWizardService? exeExportWizardService = null,
             IRestApiPublishWizardService? restApiPublishWizardService = null,
-            IUiScaleService? uiScaleService = null)
+            IUiScaleService? uiScaleService = null,
+            IDocumentRecoveryService? documentRecoveryService = null,
+            IEditorExecutionAdapter? editorExecutionAdapter = null,
+            EditorExecutionFeatureGate? editorExecutionFeatureGate = null,
+            IInteractiveTerminalCoordinator? interactiveTerminalCoordinator = null,
+            TerminalOutputMultiplexer? terminalOutputMultiplexer = null)
         {
             _fileDocumentService = fileDocumentService;
             _runtimeService = runtimeService;
@@ -154,8 +171,18 @@ namespace PS7ScriptDesk.UI.ViewModels
             _userPromptService = userPromptService;
             _liveConsoleService = liveConsoleService;
             _exeExportService = exeExportService;
+            _documentRecoveryService = documentRecoveryService ?? new NoOpDocumentRecoveryService();
             _exeExportWizardService = exeExportWizardService;
             _restApiPublishWizardService = restApiPublishWizardService;
+            _editorExecutionAdapter = editorExecutionAdapter;
+            _editorExecutionFeatureGate = editorExecutionFeatureGate ?? new EditorExecutionFeatureGate();
+            _interactiveTerminalCoordinator = interactiveTerminalCoordinator ?? new InteractiveTerminalCoordinator();
+            _terminalOutputMultiplexer = terminalOutputMultiplexer ?? new TerminalOutputMultiplexer();
+            _terminalOutputMultiplexer.OutputPublished += envelope => TerminalOutputPublished?.Invoke(envelope);
+            if (_editorExecutionAdapter is not null)
+            {
+                _editorExecutionAdapter.EventPublished += OnStructuredEditorExecutionEvent;
+            }
             _uiScaleService = uiScaleService ?? new UiScaleService(initialSettings?.UiScalePercent);
             if (initialSettings is not null)
             {
@@ -178,6 +205,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 $"This phase now hosts a ConPTY-backed PowerShell terminal process inside the application.{Environment.NewLine}";
 
             OpenTabs = new ObservableCollection<EditorTabViewModel>();
+            OpenTabs.CollectionChanged += OpenTabs_CollectionChanged;
             DetectedRuntimes = new ObservableCollection<RuntimeItemViewModel>();
 
             NewScriptCommand = new RelayCommand(OnNewScript);
@@ -226,6 +254,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _liveConsoleService.TerminalSessionStarted   += OnTerminalSessionStarted;
             _liveConsoleService.TerminalSessionStopping  += OnTerminalSessionStopping;
 
+            _startupRecoveryCandidates = _documentRecoveryService.GetRecoverableDocuments();
             RestorePersistedState(initialSettings);
             if (_startupRuntimeInfo is not null)
             {
@@ -236,13 +265,15 @@ namespace PS7ScriptDesk.UI.ViewModels
                 TrySeedPersistedRuntimeSelection();
             }
 
-            if (OpenTabs.Count == 0)
+            if (OpenTabs.Count == 0 && _startupRecoveryCandidates.Count == 0)
             {
                 CreateInitialTab();
             }
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
+
+        public event Action<TerminalOutputEnvelope>? TerminalOutputPublished;
 
         public string Title { get; }
 
@@ -981,6 +1012,17 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
+            if (_editorExecutionFeatureGate.IsStructuredExecutionEnabled)
+            {
+                await DispatchStructuredEditorExecutionAsync(
+                    $"{SelectedTab.Title} (selection)",
+                    selectedScriptText,
+                    EditorExecutionMode.RunSelection,
+                    executeInCurrentScope: true,
+                    sourceFilePath: null).ConfigureAwait(false);
+                return;
+            }
+
             // Run Selection intentionally executes inside the shared terminal session so
             // selected code can use the same variables, modules, and working directory as
             // previous commands. Keep this as status/log information instead of writing
@@ -1200,6 +1242,15 @@ namespace PS7ScriptDesk.UI.ViewModels
         /// <summary>Called after xterm/WebView2 renderer readiness is reported by the shell.</summary>
         public void NotifyTerminalRendererReady()
         {
+            var generation = Volatile.Read(ref _currentTerminalGeneration);
+            _interactiveTerminalCoordinator.TryReplaceGeneration(
+                generation,
+                InteractiveTerminalState.InteractiveIdleAtPrompt,
+                "Renderer reported ready; prompt readiness remains conservative until richer PSReadLine signals exist.");
+            _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
+                generation,
+                InteractiveTerminalState.InteractiveIdleAtPrompt,
+                "Renderer reported ready.");
             RequestTerminalFocusAfterReset(Volatile.Read(ref _currentTerminalGeneration), "RendererReady");
         }
 
@@ -1218,6 +1269,19 @@ namespace PS7ScriptDesk.UI.ViewModels
             _liveConsoleService.RawOutputReceived -= handler;
         }
 
+        public void PublishInteractiveTerminalOutput(int generation, string rawOutput)
+        {
+            if (string.IsNullOrEmpty(rawOutput))
+            {
+                return;
+            }
+
+            _terminalOutputMultiplexer.PublishInteractive(
+                generation,
+                EditorOutputStreamKind.VirtualTerminal,
+                rawOutput);
+        }
+
         /// <summary>
         /// Writes raw data directly to the ConPTY input pipe (keystroke forwarding
         /// from xterm.js). No sentinel is appended.
@@ -1231,6 +1295,11 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             try
             {
+                var inputState = data.Contains('\r') || data.Contains('\n')
+                    ? InteractiveTerminalState.InteractiveCommandRunning
+                    : InteractiveTerminalState.InteractiveInputEditing;
+                _interactiveTerminalCoordinator.SetState(inputState, "User input was forwarded to the interactive terminal.");
+                _terminalOutputMultiplexer.SetInteractiveState(inputState, "User input was forwarded to the interactive terminal.");
                 AppLogger.Debug("Console", $"ViewModel forwarding raw terminal input to LiveConsoleService. Length={data.Length}.");
                 await _liveConsoleService.WriteRawInputAsync(data).ConfigureAwait(false);
             }
@@ -1265,8 +1334,10 @@ namespace PS7ScriptDesk.UI.ViewModels
         {
             foreach (var tab in new List<EditorTabViewModel>(OpenTabs))
             {
+                FlushRecoverySnapshot(tab, "ApplicationClosePrompt");
                 if (!TryHandleUnsavedChanges(tab))
                 {
+                    FlushRecoverySnapshot(tab, "ApplicationCloseCanceled");
                     StatusText = "Application close canceled";
                     return false;
                 }
@@ -1282,6 +1353,351 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             return true;
+        }
+
+        public bool ProcessStartupDocumentRecovery()
+        {
+            if (_startupRecoveryProcessed)
+            {
+                return false;
+            }
+
+            _startupRecoveryProcessed = true;
+            if (_startupRecoveryCandidates.Count == 0)
+            {
+                return false;
+            }
+
+            var handledCount = 0;
+            foreach (var candidate in _startupRecoveryCandidates)
+            {
+                var decision = _userPromptService.ShowDocumentRecoveryPrompt(candidate);
+                DeveloperDiagnostics.LogDecision(
+                    "CrashRecovery",
+                    "StartupRecoveryDecision",
+                    "The user selected a startup recovery action.",
+                    decision.ToString(),
+                    new Dictionary<string, object?>
+                    {
+                        ["recoveryId"] = candidate.RecoveryId,
+                        ["originalPath"] = candidate.OriginalFilePath,
+                        ["isUntitled"] = candidate.IsUntitled,
+                        ["contentLength"] = candidate.Content?.Length ?? 0,
+                        ["originalFileStatus"] = candidate.OriginalFileStatus.ToString()
+                    });
+
+                switch (decision)
+                {
+                    case DocumentRecoveryAction.Restore:
+                        if (RestoreRecoveredDocument(candidate, selectTab: true) is not null)
+                        {
+                            handledCount++;
+                        }
+
+                        break;
+
+                    case DocumentRecoveryAction.SaveAs:
+                        var restoredTab = RestoreRecoveredDocument(candidate, selectTab: true);
+                        if (restoredTab is not null)
+                        {
+                            handledCount++;
+                            var saveAsPath = _userPromptService.ShowSaveFileDialog(GetSuggestedSaveFileName(restoredTab));
+                            if (!string.IsNullOrWhiteSpace(saveAsPath))
+                            {
+                                SaveTabAsCore(restoredTab, saveAsPath);
+                            }
+                        }
+
+                        break;
+
+                    case DocumentRecoveryAction.Discard:
+                        _documentRecoveryService.DiscardRecovery(candidate.RecoveryId);
+                        handledCount++;
+                        break;
+
+                    default:
+                        break;
+                }
+            }
+
+            if (handledCount > 0)
+            {
+                StatusText = $"Crash recovery processed {handledCount} item(s)";
+                OnPropertyChanged(nameof(OpenTabCountText));
+                OnPropertyChanged(nameof(ActiveDocumentText));
+                RefreshCommandStates();
+            }
+
+            if (OpenTabs.Count == 0)
+            {
+                CreateInitialTab();
+            }
+
+            return handledCount > 0;
+        }
+
+        public void FlushPendingRecoveryWrites()
+        {
+            foreach (var tab in OpenTabs.ToArray())
+            {
+                FlushRecoverySnapshot(tab, "ExplicitFlush");
+            }
+        }
+
+        private EditorTabViewModel? RestoreRecoveredDocument(DocumentRecoveryCandidate candidate, bool selectTab)
+        {
+            if (candidate is null || string.IsNullOrWhiteSpace(candidate.RecoveryId))
+            {
+                return null;
+            }
+
+            var tab = FindTabForRecovery(candidate);
+            if (tab is null)
+            {
+                tab = new EditorTabViewModel(
+                    string.IsNullOrWhiteSpace(candidate.DisplayName) ? "Recovered Untitled.ps1" : candidate.DisplayName,
+                    candidate.Content ?? string.Empty,
+                    candidate.OriginalFilePath,
+                    candidate.RecoveryId);
+                OpenTabs.Add(tab);
+            }
+            else
+            {
+                tab.SetRecoveryId(candidate.RecoveryId);
+                tab.Content = candidate.Content ?? string.Empty;
+            }
+
+            if (!string.IsNullOrWhiteSpace(candidate.OriginalFilePath))
+            {
+                tab.SetLastKnownFileState(
+                    candidate.OriginalLastWriteTimeUtc,
+                    candidate.OriginalLength,
+                    candidate.OriginalContentSha256);
+            }
+            else
+            {
+                tab.ClearLastKnownFileMetadata();
+            }
+
+            tab.MarkRecovered(BuildRecoveryNotice(candidate));
+            ScheduleRecoverySnapshot(tab, "RecoveredDocumentRestored");
+
+            if (selectTab)
+            {
+                SelectedTab = tab;
+            }
+
+            OnPropertyChanged(nameof(OpenTabCountText));
+            OnPropertyChanged(nameof(ActiveDocumentText));
+            return tab;
+        }
+
+        private EditorTabViewModel? FindTabForRecovery(DocumentRecoveryCandidate candidate)
+        {
+            if (!string.IsNullOrWhiteSpace(candidate.OriginalFilePath))
+            {
+                var normalizedPath = NormalizeStoredPath(candidate.OriginalFilePath);
+                if (normalizedPath is not null)
+                {
+                    foreach (var tab in OpenTabs)
+                    {
+                        if (!string.IsNullOrWhiteSpace(tab.FilePath) &&
+                            string.Equals(NormalizeStoredPath(tab.FilePath), normalizedPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return tab;
+                        }
+                    }
+                }
+            }
+
+            foreach (var tab in OpenTabs)
+            {
+                if (string.Equals(tab.RecoveryId, candidate.RecoveryId, StringComparison.Ordinal))
+                {
+                    return tab;
+                }
+            }
+
+            return null;
+        }
+
+        private static string BuildRecoveryNotice(DocumentRecoveryCandidate candidate)
+        {
+            var original = string.IsNullOrWhiteSpace(candidate.OriginalFilePath)
+                ? "This was an untitled document."
+                : $"Original file: {candidate.OriginalFilePath}";
+            return $"{original} {candidate.StatusDescription} Recovered content is temporary until you save it.";
+        }
+
+        private void OpenTabs_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+        {
+            if (e.OldItems is not null)
+            {
+                foreach (EditorTabViewModel tab in e.OldItems)
+                {
+                    tab.PropertyChanged -= EditorTab_PropertyChanged;
+                    CancelPendingRecoveryWrite(tab.RecoveryId);
+                    _documentRecoveryService.DiscardRecovery(tab.RecoveryId);
+                }
+            }
+
+            if (e.NewItems is not null)
+            {
+                foreach (EditorTabViewModel tab in e.NewItems)
+                {
+                    tab.PropertyChanged += EditorTab_PropertyChanged;
+                    ScheduleRecoverySnapshot(tab, "TabAdded");
+                }
+            }
+        }
+
+        private void EditorTab_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (sender is not EditorTabViewModel tab)
+            {
+                return;
+            }
+
+            if (string.Equals(e.PropertyName, nameof(EditorTabViewModel.Content), StringComparison.Ordinal) ||
+                string.Equals(e.PropertyName, nameof(EditorTabViewModel.IsDirty), StringComparison.Ordinal) ||
+                string.Equals(e.PropertyName, nameof(EditorTabViewModel.FilePath), StringComparison.Ordinal))
+            {
+                ScheduleRecoverySnapshot(tab, $"PropertyChanged:{e.PropertyName}");
+            }
+        }
+
+        private void ScheduleRecoverySnapshot(EditorTabViewModel tab, string reason)
+        {
+            if (tab is null)
+            {
+                return;
+            }
+
+            if (!tab.IsDirty)
+            {
+                CancelPendingRecoveryWrite(tab.RecoveryId);
+                _documentRecoveryService.DiscardRecovery(tab.RecoveryId);
+                return;
+            }
+
+            var snapshot = CreateRecoverySnapshot(tab);
+            if (snapshot is null)
+            {
+                return;
+            }
+
+            CancelPendingRecoveryWrite(tab.RecoveryId);
+            var pendingWrite = new PendingRecoveryWrite(snapshot);
+            var interval = Math.Max(250, _documentRecoveryService.RecoveryWriteDelay.TotalMilliseconds);
+            var timer = new System.Timers.Timer(interval)
+            {
+                AutoReset = false,
+                Enabled = false
+            };
+            timer.Elapsed += (_, _) =>
+            {
+                try
+                {
+                    _documentRecoveryService.SaveSnapshot(snapshot);
+                }
+                finally
+                {
+                    CancelPendingRecoveryWrite(snapshot.RecoveryId);
+                }
+            };
+            pendingWrite.Timer = timer;
+            _pendingRecoveryWrites[tab.RecoveryId] = pendingWrite;
+            timer.Start();
+
+            DeveloperDiagnostics.LogInfo(
+                "CrashRecovery",
+                "Recovery snapshot write scheduled.",
+                new Dictionary<string, object?>
+                {
+                    ["recoveryId"] = tab.RecoveryId,
+                    ["reason"] = reason,
+                    ["delayMilliseconds"] = interval,
+                    ["contentLength"] = snapshot.Content.Length,
+                    ["originalPath"] = snapshot.OriginalFilePath,
+                    ["isUntitled"] = snapshot.IsUntitled
+                });
+        }
+
+        private bool FlushRecoverySnapshot(EditorTabViewModel tab, string reason)
+        {
+            if (tab is null || !tab.IsDirty)
+            {
+                return false;
+            }
+
+            var snapshot = CreateRecoverySnapshot(tab);
+            if (snapshot is null)
+            {
+                return false;
+            }
+
+            CancelPendingRecoveryWrite(tab.RecoveryId);
+            var saved = _documentRecoveryService.SaveSnapshot(snapshot);
+            DeveloperDiagnostics.LogDecision(
+                "CrashRecovery",
+                "RecoverySnapshotFlush",
+                "Recovery snapshot flush requested.",
+                saved ? "Saved" : "Failed",
+                new Dictionary<string, object?>
+                {
+                    ["recoveryId"] = tab.RecoveryId,
+                    ["reason"] = reason,
+                    ["contentLength"] = snapshot.Content.Length,
+                    ["originalPath"] = snapshot.OriginalFilePath,
+                    ["isUntitled"] = snapshot.IsUntitled
+                });
+            return saved;
+        }
+
+        private DocumentRecoverySnapshot? CreateRecoverySnapshot(EditorTabViewModel tab)
+        {
+            if (tab is null || string.IsNullOrWhiteSpace(tab.RecoveryId))
+            {
+                return null;
+            }
+
+            return new DocumentRecoverySnapshot(
+                tab.RecoveryId,
+                NormalizeStoredPath(tab.FilePath),
+                tab.Title,
+                tab.Content ?? string.Empty,
+                DateTime.UtcNow,
+                tab.LastKnownFileWriteTimeUtc,
+                tab.LastKnownFileLength,
+                tab.LastKnownFileContentSha256,
+                string.IsNullOrWhiteSpace(tab.FilePath));
+        }
+
+        private void ClearRecoveryStateForTab(EditorTabViewModel tab, string reason)
+        {
+            CancelPendingRecoveryWrite(tab.RecoveryId);
+            _documentRecoveryService.DiscardRecovery(tab.RecoveryId);
+            tab.ClearRecoveryNotice();
+            DeveloperDiagnostics.LogInfo(
+                "CrashRecovery",
+                "Tab recovery state cleared.",
+                new Dictionary<string, object?>
+                {
+                    ["recoveryId"] = tab.RecoveryId,
+                    ["reason"] = reason,
+                    ["filePath"] = tab.FilePath
+                });
+        }
+
+        private void CancelPendingRecoveryWrite(string recoveryId)
+        {
+            if (!_pendingRecoveryWrites.Remove(recoveryId, out var pendingWrite))
+            {
+                return;
+            }
+
+            pendingWrite.Timer?.Stop();
+            pendingWrite.Timer?.Dispose();
         }
 
         public async Task<bool> ShutdownTerminalAsync(CancellationToken cancellationToken = default)
@@ -2700,6 +3116,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return true;
             }
 
+            FlushRecoverySnapshot(tab, "UnsavedChangesPrompt");
             var decision = _userPromptService.ShowUnsavedChangesPrompt(tab.Title);
 
             switch (decision)
@@ -2721,9 +3138,11 @@ namespace PS7ScriptDesk.UI.ViewModels
                     return SaveTabCore(tab);
 
                 case UnsavedChangesDecision.Discard:
+                    ClearRecoveryStateForTab(tab, "DiscardedByUser");
                     return true;
 
                 default:
+                    FlushRecoverySnapshot(tab, "CloseCanceledByUser");
                     StatusText = "Close canceled";
                     return false;
             }
@@ -3266,6 +3685,17 @@ namespace PS7ScriptDesk.UI.ViewModels
             // executing different disk content.
             var sourceFilePath = TryPrepareSavedScriptPathForVisibleRun(selectedTab);
 
+            if (_editorExecutionFeatureGate.IsStructuredExecutionEnabled)
+            {
+                await DispatchStructuredEditorExecutionAsync(
+                    selectedTab.Title,
+                    selectedTab.Content,
+                    EditorExecutionMode.ScriptCall,
+                    executeInCurrentScope: false,
+                    sourceFilePath: sourceFilePath).ConfigureAwait(false);
+                return;
+            }
+
             // Set BEFORE the first await so we are still on the UI thread and the button
             // disables synchronously (no flicker).  The flag is cleared by the sentinel
             // event when the script finishes, or in the catch block if dispatch fails.
@@ -3393,6 +3823,123 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
         }
 
+        private async Task DispatchStructuredEditorExecutionAsync(
+            string dispatchTitle,
+            string scriptContent,
+            EditorExecutionMode mode,
+            bool executeInCurrentScope,
+            string? sourceFilePath = null)
+        {
+            if (_editorExecutionAdapter is null)
+            {
+                StatusText = "Structured editor execution is enabled but no broker adapter is available";
+                AppLogger.Error("Console", "Structured editor execution was enabled without a configured adapter. No legacy fallback was attempted.");
+                DeveloperDiagnostics.LogWarning(
+                    "Terminal",
+                    "Structured editor execution was rejected because no adapter was configured.",
+                    new Dictionary<string, object?> { ["fallbackAttempted"] = false });
+                return;
+            }
+
+            var requestId = Guid.NewGuid();
+            if (!_terminalOutputMultiplexer.TryBeginEditorExecution(requestId, out var rejectionReason))
+            {
+                StatusText = rejectionReason;
+                AppLogger.Info("Console", $"Structured editor execution rejected by terminal admission policy. Reason={rejectionReason}");
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "StructuredEditorAdmission",
+                    "Structured editor execution was rejected by prompt-aware admission policy.",
+                    "Rejected",
+                    new Dictionary<string, object?>
+                    {
+                        ["interactiveState"] = _terminalOutputMultiplexer.InteractiveState.ToString(),
+                        ["reason"] = rejectionReason
+                });
+                return;
+            }
+
+            IsExecutionRunning = true;
+            _activeStructuredExecutionRequestId = requestId;
+            _structuredExecutionCancellation?.Dispose();
+            _structuredExecutionCancellation = new CancellationTokenSource();
+            StatusText = $"Running {dispatchTitle} through structured PowerShell broker...";
+
+            var request = new EditorExecutionRequest(
+                requestId,
+                _editorExecutionAdapter.Snapshot.SessionGeneration,
+                mode,
+                dispatchTitle,
+                scriptContent,
+                sourceFilePath,
+                !executeInCurrentScope && !string.IsNullOrWhiteSpace(sourceFilePath),
+                _liveConsoleService.CurrentWorkingDirectory,
+                executeInCurrentScope);
+
+            try
+            {
+                AppLogger.Info("Console", $"Structured editor execution dispatching '{dispatchTitle}'. RequestId={requestId:N}, Mode={mode}, CurrentScope={executeInCurrentScope}, FallbackAttempted=False.");
+                DeveloperDiagnostics.LogUserAction(
+                    "Terminal",
+                    "StructuredEditorRun",
+                    "Structured editor execution requested.",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["mode"] = mode.ToString(),
+                        ["sessionGeneration"] = request.SessionGeneration,
+                        ["terminalGeneration"] = _terminalOutputMultiplexer.InteractiveSnapshot.Generation,
+                        ["scriptLength"] = scriptContent?.Length ?? 0,
+                        ["savedPathUsed"] = request.IsSavedClean,
+                        ["fallbackAttempted"] = false,
+                        ["contentOmitted"] = true
+                    });
+
+                var result = await _editorExecutionAdapter.ExecuteAsync(request, _structuredExecutionCancellation.Token).ConfigureAwait(false);
+                PostToUi(() =>
+                {
+                    StatusText = result.Status switch
+                    {
+                        EditorExecutionStatus.Completed => $"{dispatchTitle} completed through structured broker",
+                        EditorExecutionStatus.Cancelled => $"{dispatchTitle} cancelled",
+                        EditorExecutionStatus.Rejected => result.ErrorMessage ?? "Structured editor execution rejected",
+                        _ => result.ErrorMessage ?? "Structured editor execution failed"
+                    };
+                    UpdateConsoleSessionPresentation();
+                });
+            }
+            catch (Exception ex)
+            {
+                PostToUi(() =>
+                {
+                    StatusText = "Structured editor execution failed";
+                    AppendOutputLine($"Structured editor execution failed: {ex.Message}");
+                });
+                AppLogger.Error("Console", $"Structured editor execution failed. RequestId={requestId:N}, FallbackAttempted=False.", ex);
+                DeveloperDiagnostics.LogException(
+                    "Terminal",
+                    ex,
+                    "Structured editor execution failed without falling back to legacy terminal injection.",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["fallbackAttempted"] = false
+                    });
+            }
+            finally
+            {
+                _terminalOutputMultiplexer.EndEditorExecution(requestId);
+                _activeStructuredExecutionRequestId = null;
+                _structuredExecutionCancellation?.Dispose();
+                _structuredExecutionCancellation = null;
+                PostToUi(() =>
+                {
+                    IsExecutionRunning = false;
+                    RefreshCommandStates();
+                });
+            }
+        }
+
         private async Task OnExecuteConsoleCommandAsync()
         {
             var commandText = ConsoleCommandText;
@@ -3455,6 +4002,23 @@ namespace PS7ScriptDesk.UI.ViewModels
         {
             if (IsStopInProgress)
             {
+                return;
+            }
+
+            if (_activeStructuredExecutionRequestId.HasValue && _structuredExecutionCancellation is not null)
+            {
+                StatusText = "Cancelling structured editor execution...";
+                AppLogger.Info("Console", $"Structured editor execution cancellation requested. RequestId={_activeStructuredExecutionRequestId.Value:N}.");
+                DeveloperDiagnostics.LogUserAction(
+                    "Terminal",
+                    "StructuredEditorInterrupt",
+                    "Interrupt routed to structured editor broker cancellation.",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = _activeStructuredExecutionRequestId.Value,
+                        ["interactiveInterruptAttempted"] = false
+                    });
+                _structuredExecutionCancellation.Cancel();
                 return;
             }
 
@@ -3647,7 +4211,17 @@ namespace PS7ScriptDesk.UI.ViewModels
                 }
 
                 StatusText = "Restarting PowerShell terminal...";
+                _terminalRecoveryCircuitBreaker.ResetForManualRetry();
                 AppLogger.Info("Console", $"Restarting PowerShell terminal using {runtimeToUse.DisplayName}. ActiveExecution={IsExecutionRunning}, CommandInProgress={_liveConsoleService.IsCommandInProgress}.");
+                DeveloperDiagnostics.LogUserAction(
+                    "Terminal",
+                    "ResetConsoleManualRetry",
+                    "Manual Reset Console cleared the automatic terminal recovery circuit breaker.",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtime"] = runtimeToUse.DisplayName,
+                        ["runtimePath"] = runtimeToUse.ExecutablePath
+                    });
 
                 try
                 {
@@ -4924,6 +5498,14 @@ namespace PS7ScriptDesk.UI.ViewModels
         private void OnTerminalSessionStarted(int generation)
         {
             _beginTerminalOutputGenerationSink?.Invoke(generation);
+            _interactiveTerminalCoordinator.TryReplaceGeneration(
+                generation,
+                InteractiveTerminalState.Starting,
+                "Interactive terminal session started.");
+            _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
+                generation,
+                InteractiveTerminalState.Starting,
+                "Interactive terminal session started.");
             var previousGeneration = Volatile.Read(ref _currentTerminalGeneration);
             if (generation < previousGeneration)
             {
@@ -4959,6 +5541,14 @@ namespace PS7ScriptDesk.UI.ViewModels
         private void OnTerminalSessionStopping(int generation)
         {
             _invalidateTerminalOutputGenerationSink?.Invoke(generation);
+            _interactiveTerminalCoordinator.TryReplaceGeneration(
+                generation,
+                InteractiveTerminalState.Stopping,
+                "Interactive terminal session is stopping.");
+            _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
+                generation,
+                InteractiveTerminalState.Stopping,
+                "Interactive terminal session is stopping.");
         }
 
         private void OnTerminalCommandCompleted()
@@ -4972,6 +5562,12 @@ namespace PS7ScriptDesk.UI.ViewModels
                 RefreshCommandStates();
                 UpdateConsoleSessionPresentation();
             });
+            _interactiveTerminalCoordinator.SetState(
+                InteractiveTerminalState.InteractiveIdleAtPrompt,
+                "Interactive command completed.");
+            _terminalOutputMultiplexer.SetInteractiveState(
+                InteractiveTerminalState.InteractiveIdleAtPrompt,
+                "Interactive command completed.");
 
             RequestTerminalInteractiveStateNormalization("CommandCompleted");
 
@@ -4983,6 +5579,12 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void OnSessionTerminated()
         {
+            _interactiveTerminalCoordinator.SetState(
+                InteractiveTerminalState.Unavailable,
+                "Interactive terminal session terminated.");
+            _terminalOutputMultiplexer.SetInteractiveState(
+                InteractiveTerminalState.Unavailable,
+                "Interactive terminal session terminated.");
             // The pwsh.exe process exited unexpectedly or the user/script called exit.
             // Ensure Run/Reset recover even if the helper sentinel was never echoed.
             var runtimeToRestart = EffectiveRuntimeInfo;
@@ -5023,6 +5625,41 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task RestartConsoleAfterUnexpectedTerminationAsync(PowerShellRuntimeInfo runtime)
         {
+            var recoveryDecision = _terminalRecoveryCircuitBreaker.TryBeginAutomaticRestart();
+            if (!recoveryDecision.IsAllowed)
+            {
+                PostToUi(() =>
+                {
+                    IsExecutionRunning = false;
+                    IsStopInProgress = false;
+                    StatusText = "PowerShell terminal unavailable. Automatic recovery paused; use Reset Console to retry.";
+                    if (recoveryDecision.ShouldNotifyUnavailable)
+                    {
+                        AppendApplicationActivityFragmentCore(
+                            "PowerShell terminal exited repeatedly. Automatic recovery is paused so the app stays usable. Use Reset Console to retry the embedded terminal."
+                            + Environment.NewLine);
+                    }
+
+                    RefreshCommandStates();
+                    UpdateConsoleSessionPresentation();
+                });
+                AppLogger.Warning(
+                    "Console",
+                    $"Automatic terminal recovery paused after repeated session exits. Attempts={recoveryDecision.AttemptCount}, MaxAttempts={recoveryDecision.MaxAttempts}, Runtime={runtime.DisplayName}.");
+                DeveloperDiagnostics.LogWarning(
+                    "Terminal",
+                    "Automatic terminal recovery was paused after repeated session exits.",
+                    new Dictionary<string, object?>
+                    {
+                        ["attemptCount"] = recoveryDecision.AttemptCount,
+                        ["maxAttempts"] = recoveryDecision.MaxAttempts,
+                        ["runtime"] = runtime.DisplayName,
+                        ["runtimePath"] = runtime.ExecutablePath,
+                        ["blockReason"] = recoveryDecision.BlockReason
+                    });
+                return;
+            }
+
             if (!await _consoleRecoveryGate.WaitAsync(0).ConfigureAwait(false))
             {
                 PostToUi(() =>
@@ -5039,7 +5676,15 @@ namespace PS7ScriptDesk.UI.ViewModels
                 Interlocked.Exchange(ref _resetConsoleInProgress, 1);
                 PostToUi(() => IsStopInProgress = true);
 
-                AppLogger.Info("Console", $"Automatically restarting PowerShell terminal after process exit using {runtime.DisplayName}.");
+                if (recoveryDecision.Backoff > TimeSpan.Zero)
+                {
+                    AppLogger.Info(
+                        "Console",
+                        $"Delaying automatic terminal restart after process exit. Attempt={recoveryDecision.AttemptCount}, MaxAttempts={recoveryDecision.MaxAttempts}, BackoffMs={recoveryDecision.Backoff.TotalMilliseconds}.");
+                    await Task.Delay(recoveryDecision.Backoff).ConfigureAwait(false);
+                }
+
+                AppLogger.Info("Console", $"Automatically restarting PowerShell terminal after process exit using {runtime.DisplayName}. Attempt={recoveryDecision.AttemptCount}, MaxAttempts={recoveryDecision.MaxAttempts}.");
                 DeveloperDiagnostics.LogStateTransition(
                     "Terminal",
                     "AutoRestartAfterProcessExit",
@@ -5049,7 +5694,10 @@ namespace PS7ScriptDesk.UI.ViewModels
                     new Dictionary<string, object?>
                     {
                         ["runtime"] = runtime.DisplayName,
-                        ["runtimePath"] = runtime.ExecutablePath
+                        ["runtimePath"] = runtime.ExecutablePath,
+                        ["attemptCount"] = recoveryDecision.AttemptCount,
+                        ["maxAttempts"] = recoveryDecision.MaxAttempts,
+                        ["backoffMilliseconds"] = recoveryDecision.Backoff.TotalMilliseconds
                     });
 
                 await EnsureConsoleSessionAsync(runtime, forceRestart: false, logOperation: true).ConfigureAwait(false);
@@ -5434,6 +6082,53 @@ namespace PS7ScriptDesk.UI.ViewModels
             });
         }
 
+        private void OnStructuredEditorExecutionEvent(EditorExecutionEvent executionEvent)
+        {
+            if (executionEvent.Kind != EditorExecutionEventKind.Output ||
+                executionEvent.Output is not { } output ||
+                _activeStructuredExecutionRequestId != output.RequestId)
+            {
+                return;
+            }
+
+            try
+            {
+                var visibleOutput = FormatStructuredEditorOutput(output);
+                if (string.IsNullOrEmpty(visibleOutput))
+                {
+                    return;
+                }
+
+                _terminalOutputMultiplexer.PublishEditor(output with { Payload = visibleOutput });
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Console", $"Structured editor output could not be published. RequestId={executionEvent.RequestId:N}, ErrorType={ex.GetType().Name}.", ex);
+                DeveloperDiagnostics.LogException(
+                    "Terminal",
+                    ex,
+                    "Structured editor output publication failed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = executionEvent.RequestId,
+                        ["sessionGeneration"] = executionEvent.SessionGeneration,
+                        ["contentOmitted"] = true
+                    });
+            }
+        }
+
+        private static string FormatStructuredEditorOutput(EditorOutputRecord output)
+        {
+            if (string.IsNullOrEmpty(output.Payload))
+            {
+                return string.Empty;
+            }
+
+            return output.StreamKind is EditorOutputStreamKind.VirtualTerminal or EditorOutputStreamKind.Native
+                ? output.Payload
+                : output.Payload + Environment.NewLine;
+        }
+
         private static bool ShouldSurfaceLifecycleMessageToUser(string? text)
         {
             if (string.IsNullOrWhiteSpace(text))
@@ -5617,7 +6312,10 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private bool CanStopScript()
         {
-            return _liveConsoleService.IsSessionRunning && _liveConsoleService.IsCommandInProgress && !IsStopInProgress && !IsRuntimeDiscoveryInProgress;
+            return ((_activeStructuredExecutionRequestId.HasValue && _structuredExecutionCancellation is not null) ||
+                    (_liveConsoleService.IsSessionRunning && _liveConsoleService.IsCommandInProgress)) &&
+                   !IsStopInProgress &&
+                   !IsRuntimeDiscoveryInProgress;
         }
 
         private bool CanRefreshRuntimes()
@@ -5738,6 +6436,32 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             return string.Join(".", displayParts);
+        }
+
+        private sealed class PendingRecoveryWrite
+        {
+            public PendingRecoveryWrite(DocumentRecoverySnapshot snapshot)
+            {
+                Snapshot = snapshot;
+            }
+
+            public DocumentRecoverySnapshot Snapshot { get; }
+
+            public System.Timers.Timer? Timer { get; set; }
+        }
+
+        private sealed class NoOpDocumentRecoveryService : IDocumentRecoveryService
+        {
+            public string RecoveryStorageDirectory => string.Empty;
+
+            public TimeSpan RecoveryWriteDelay => TimeSpan.FromSeconds(2);
+
+            public IReadOnlyList<DocumentRecoveryCandidate> GetRecoverableDocuments()
+                => Array.Empty<DocumentRecoveryCandidate>();
+
+            public bool SaveSnapshot(DocumentRecoverySnapshot snapshot) => false;
+
+            public bool DiscardRecovery(string recoveryId) => false;
         }
 
         private void OnPropertyChanged([CallerMemberName] string? propertyName = null)

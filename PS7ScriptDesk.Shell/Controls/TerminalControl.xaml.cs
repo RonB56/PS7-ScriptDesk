@@ -1,12 +1,15 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
 using PS7ScriptDesk.Application.Diagnostics;
+using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.UI.ViewModels;
 
 namespace PS7ScriptDesk.Shell.Controls
@@ -268,7 +271,21 @@ namespace PS7ScriptDesk.Shell.Controls
                 });
 
                 term.onData(function (data) { post({ type: 'input', data: data }); });
-                term.onResize(function (e)  { post({ type: 'resize', cols: e.cols, rows: e.rows }); });
+                var lastReportedCols = 0;
+                var lastReportedRows = 0;
+                term.onResize(function (e) {
+                  if (!e || e.cols <= 0 || e.rows <= 0) return;
+                  if (e.cols === lastReportedCols && e.rows === lastReportedRows) return;
+                  lastReportedCols = e.cols;
+                  lastReportedRows = e.rows;
+                  post({
+                    type: 'resize',
+                    cols: e.cols,
+                    rows: e.rows,
+                    clientWidth: terminalElement.clientWidth,
+                    clientHeight: terminalElement.clientHeight
+                  });
+                });
 
                 // ── Contextual terminal key handling ─────────────────────────────
                 // Preserve PSReadLine's Ctrl+A, Ctrl+F, and Ctrl+H bindings. Copy uses
@@ -310,10 +327,22 @@ namespace PS7ScriptDesk.Shell.Controls
                   post({ type: 'paste_request' });
                 });
 
-                var ro = new ResizeObserver(function () {
+                var resizeFramePending = false;
+                var resizeRequested = false;
+                var scheduleResizeFit = function () {
+                  resizeRequested = true;
+                  if (resizeFramePending) return;
+                  resizeFramePending = true;
                   window.requestAnimationFrame(function() {
+                    resizeFramePending = false;
+                    if (!resizeRequested) return;
+                    resizeRequested = false;
+                    if (terminalElement.clientWidth <= 0 || terminalElement.clientHeight <= 0) return;
                     fitTerminal('resizeObserver');
                   });
+                };
+                var ro = new ResizeObserver(function () {
+                  scheduleResizeFit();
                 });
                 ro.observe(terminalElement);
 
@@ -419,6 +448,8 @@ namespace PS7ScriptDesk.Shell.Controls
         // ── State ────────────────────────────────────────────────────────────────
 
         private readonly TerminalOutputFlowController _outputFlowController = new();
+        private readonly TerminalProtocolOutputFilter _terminalProtocolOutputFilter = new();
+        private readonly TerminalResizePolicy _terminalResizePolicy = new();
         private volatile bool          _isReady;
         private bool                   _webView2Available = true;
         private bool                   _firstOutputQueuedLogged;
@@ -431,6 +462,15 @@ namespace PS7ScriptDesk.Shell.Controls
         private bool                   _clipboardPasteReadFailureEpisodeActive;
         private long                   _droppedOutputCharacters;
         private long                   _reportedDroppedOutputCharacters;
+        private readonly object _rendererSyncRoot = new();
+        private WebView2? _webView;
+        private TerminalWebView2LifecyclePolicy _webViewLifecycle = new();
+        private CoreWebView2?          _subscribedCoreWebView2;
+        private bool                   _webViewDetachedFromLayout;
+        private int                    _rendererInstanceGeneration;
+        private long                   _nextOutputSubmissionId;
+
+        private TerminalWebView2FallbackState _fallbackState;
 
         // ── Events ────────────────────────────────────────────────────────────────
 
@@ -446,6 +486,9 @@ namespace PS7ScriptDesk.Shell.Controls
         /// <summary>Fires when the terminal is explicitly activated by click/focus/input.</summary>
         public event Action<string>? TerminalActivated;
 
+        /// <summary>Fires when the current WebView2 renderer is permanently retired.</summary>
+        public event Action<string>? TerminalRendererUnavailable;
+
         /// <summary>Fires when xterm.js captures a keyboard gesture that belongs to the host app, such as Ctrl+F or Ctrl+H.</summary>
         public event Action<string>? AppShortcutRequested;
 
@@ -455,23 +498,132 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             InitializeComponent();
             Loaded += OnLoaded;
-            WebView.PreviewMouseDown += WebView_PreviewMouseDown;
-            WebView.GotKeyboardFocus += WebView_GotKeyboardFocus;
-            WebView.LostKeyboardFocus += WebView_LostKeyboardFocus;
+            Unloaded += OnUnloaded;
         }
 
         // ── Initialization ────────────────────────────────────────────────────────
 
         private async void OnLoaded(object sender, RoutedEventArgs e)
         {
+            if (!TryCreateRenderer(out var renderer, out var lifecycle))
+            {
+                return;
+            }
+
+            await InitializeRendererAsync(renderer, lifecycle).ConfigureAwait(true);
+        }
+
+        public void ResetRendererForRetry()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(ResetRendererForRetry), DispatcherPriority.Send);
+                return;
+            }
+
+            if (!IsLoaded || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            {
+                return;
+            }
+
+            if (!TryCreateRenderer(out var renderer, out var lifecycle))
+            {
+                return;
+            }
+
+            _ = InitializeRendererAsync(renderer, lifecycle);
+        }
+
+        private bool TryCreateRenderer(
+            out WebView2 renderer,
+            out TerminalWebView2LifecyclePolicy lifecycle)
+        {
+            renderer = null!;
+            lifecycle = null!;
+
+            lock (_rendererSyncRoot)
+            {
+                if (_webView is not null && !_webViewLifecycle.IsRetired)
+                {
+                    return false;
+                }
+
+                renderer = new WebView2
+                {
+                    Focusable = true,
+                    ToolTip = "Interactive PowerShell terminal. Ctrl+Shift+F6 moves focus back to the editor."
+                };
+                System.Windows.Automation.AutomationProperties.SetName(renderer, "Interactive PowerShell terminal");
+                System.Windows.Automation.AutomationProperties.SetHelpText(renderer, "Uses xterm screen-reader support when provided by WebView2. Ctrl+Shift+F6 moves focus back to the editor.");
+                lifecycle = new TerminalWebView2LifecyclePolicy();
+                var replacementRequested = _fallbackState != TerminalWebView2FallbackState.None;
+                lifecycle.TryBeginInitialization();
+                _webView = renderer;
+                _webViewLifecycle = lifecycle;
+                _webViewDetachedFromLayout = false;
+                _webView2Available = true;
+                _fallbackState = TerminalWebView2FallbackState.None;
+                _rendererInstanceGeneration++;
+                _terminalResizePolicy.Reset(_rendererInstanceGeneration);
+                AppLogger.Info("Terminal", $"Created fresh dynamic WebView2 terminal renderer. RendererInstanceGeneration={_rendererInstanceGeneration}.");
+                DeveloperDiagnostics.LogStateTransition(
+                    "Terminal",
+                    "WebView2Renderer",
+                    "Retired",
+                    "Initializing",
+                    "Created a fresh dynamic WebView2 renderer instance.",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererInstanceGeneration"] = _rendererInstanceGeneration,
+                        ["replacementRequested"] = replacementRequested
+                    });
+            }
+
+            try
+            {
+                WebViewHost.Children.Insert(0, renderer);
+                renderer.PreviewMouseDown += WebView_PreviewMouseDown;
+                renderer.GotKeyboardFocus += WebView_GotKeyboardFocus;
+                renderer.LostKeyboardFocus += WebView_LostKeyboardFocus;
+                FallbackBanner.Visibility = Visibility.Collapsed;
+                FallbackDetailsText.Visibility = Visibility.Collapsed;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                RetireWebView2Renderer("RendererAttachFailed", ex, renderer, lifecycle);
+                return false;
+            }
+        }
+
+        private async Task InitializeRendererAsync(
+            WebView2 renderer,
+            TerminalWebView2LifecyclePolicy lifecycle)
+        {
             try
             {
                 AppLogger.Debug("Terminal", "Initializing WebView2 terminal host.");
-                await WebView.EnsureCoreWebView2Async().ConfigureAwait(true);
-                WebView.CoreWebView2.Settings.IsStatusBarEnabled               = false;
-                WebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled    = false;
-                WebView.CoreWebView2.Settings.IsZoomControlEnabled             = false;
-                WebView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
+                await renderer.EnsureCoreWebView2Async().ConfigureAwait(true);
+                if (!IsCurrentRenderer(renderer, lifecycle) ||
+                    !lifecycle.CanAcceptRendererCallback ||
+                    Dispatcher.HasShutdownStarted ||
+                    Dispatcher.HasShutdownFinished)
+                {
+                    RetireWebView2Renderer("InitializationAbandoned", null, renderer, lifecycle);
+                    return;
+                }
+
+                var coreWebView2 = renderer.CoreWebView2;
+                if (coreWebView2 is null)
+                {
+                    RetireWebView2Renderer("InitializationCompletedWithoutCore", null, renderer, lifecycle);
+                    return;
+                }
+
+                coreWebView2.Settings.IsStatusBarEnabled               = false;
+                coreWebView2.Settings.AreDefaultContextMenusEnabled    = false;
+                coreWebView2.Settings.IsZoomControlEnabled             = false;
+                coreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
 
                 // Map virtual hostname → terminal/ so xterm.js files can be loaded via
                 // https://terminal.local/... Production builds have terminal/ next to the
@@ -503,7 +655,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 System.Diagnostics.Debug.WriteLine(
                     $"[TerminalControl] Terminal assets: {terminalDir} (exists={System.IO.Directory.Exists(terminalDir)})");
 
-                WebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                coreWebView2.SetVirtualHostNameToFolderMapping(
                     "terminal.local", terminalDir,
                     CoreWebView2HostResourceAccessKind.Allow);
 
@@ -511,32 +663,68 @@ namespace PS7ScriptDesk.Shell.Controls
                 // A normal PowerShell console should begin with PowerShell output/prompt,
                 // not app-host debug lines.
 
-                WebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+                if (!IsCurrentRenderer(renderer, lifecycle))
+                {
+                    RetireWebView2Renderer("InitializationSuperseded", null, renderer, lifecycle);
+                    return;
+                }
 
-                WebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
+                _subscribedCoreWebView2 = coreWebView2;
+                coreWebView2.WebMessageReceived += OnWebMessageReceived;
 
-                WebView.CoreWebView2.NavigateToString(TerminalHtml);
+                coreWebView2.NavigationCompleted += OnNavigationCompleted;
+
+                coreWebView2.NavigateToString(TerminalHtml);
+                lifecycle.MarkReady();
                 System.Diagnostics.Debug.WriteLine("[TerminalControl] WebView2 initialized — navigating to terminal page");
                 AppLogger.Debug("Terminal", "WebView2 terminal page navigation started.");
             }
             catch (Exception ex)
             {
-                _webView2Available = false;
-                FallbackBanner.Visibility = Visibility.Visible;
-                WebView.Visibility        = Visibility.Collapsed;
+                RetireWebView2Renderer(
+                    IsWebView2RuntimeAvailable()
+                        ? "InitializationFailed"
+                        : "RuntimeUnavailable",
+                    ex,
+                    renderer,
+                    lifecycle);
                 System.Diagnostics.Debug.WriteLine(
                     $"[TerminalControl] WebView2 initialization failed: {ex.Message}");
-                AppLogger.Error("Terminal", "WebView2 terminal initialization failed.", ex);
             }
+        }
+
+        private void OnUnloaded(object sender, RoutedEventArgs e)
+        {
+            RetireWebView2Renderer("TerminalControlUnloaded", null);
         }
 
         private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs navigation)
         {
+            if (sender is not CoreWebView2 coreWebView2 ||
+                !IsCurrentCoreWebView2(coreWebView2) ||
+                !TryGetCurrentRenderer(out var renderer, out var lifecycle) ||
+                !lifecycle.CanAcceptRendererCallback)
+            {
+                return;
+            }
+
             if (navigation.IsSuccess)
             {
-                var title = WebView.CoreWebView2?.DocumentTitle;
-                System.Diagnostics.Debug.WriteLine(
-                    $"[TerminalControl] NavigationCompleted — success | title={title}");
+                if (!TryGetCoreWebView2("NavigationCompleted", out var currentCoreWebView2, renderer, lifecycle))
+                {
+                    return;
+                }
+
+                try
+                {
+                    var title = currentCoreWebView2.DocumentTitle;
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[TerminalControl] NavigationCompleted — success | title={title}");
+                }
+                catch (Exception ex) when (IsWebView2LifecycleException(ex))
+                {
+                    RetireWebView2Renderer("NavigationCompletedDocumentTitle", ex, renderer, lifecycle);
+                }
                 return;
             }
 
@@ -549,13 +737,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
-            var discardedOutput = _outputFlowController.MarkRendererUnavailable();
-            _webView2Available = false;
-            _isReady = false;
-            FallbackBanner.Visibility = Visibility.Visible;
-            WebView.Visibility = Visibility.Collapsed;
-            RecordDroppedTerminalOutput(discardedOutput.DiscardedCharacters);
-            ReportDroppedTerminalOutputIfNeeded();
+            RetireWebView2Renderer("NavigationFailed", null, renderer, lifecycle);
 
             var metadata = new Dictionary<string, object?>
             {
@@ -567,16 +749,316 @@ namespace PS7ScriptDesk.Shell.Controls
                 ["isLoaded"] = IsLoaded,
                 ["dispatcherHasShutdownStarted"] = dispatcherShutdownStarted,
                 ["dispatcherHasShutdownFinished"] = dispatcherShutdownFinished,
-                ["discardedOutputCharacters"] = discardedOutput.DiscardedCharacters,
                 ["terminalContentOmitted"] = true
             };
             AppLogger.Error(
                 "Terminal",
-                $"WebView2 terminal bootstrap navigation failed. WebErrorStatus={navigation.WebErrorStatus}; DiscardedOutputCharacters={discardedOutput.DiscardedCharacters}.");
+                $"WebView2 terminal bootstrap navigation failed. WebErrorStatus={navigation.WebErrorStatus}.");
             DeveloperDiagnostics.LogError(
                 "Terminal",
                 "WebView2 terminal bootstrap navigation failed.",
                 metadata);
+        }
+
+        private bool TryGetCoreWebView2(
+            string source,
+            out CoreWebView2 coreWebView2,
+            WebView2? expectedRenderer = null,
+            TerminalWebView2LifecyclePolicy? expectedLifecycle = null)
+        {
+            coreWebView2 = null!;
+            if (!_webView2Available ||
+                Dispatcher.HasShutdownStarted ||
+                Dispatcher.HasShutdownFinished)
+            {
+                return false;
+            }
+
+            if (!TryGetCurrentRenderer(expectedRenderer, expectedLifecycle, out var renderer, out var lifecycle) ||
+                !lifecycle.CanUseRenderer)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (renderer.CoreWebView2 is not { } currentCoreWebView2)
+                {
+                    return false;
+                }
+
+                coreWebView2 = currentCoreWebView2;
+                return true;
+            }
+            catch (Exception ex) when (IsWebView2LifecycleException(ex))
+            {
+                RetireWebView2Renderer(source, ex, renderer, lifecycle);
+                return false;
+            }
+        }
+
+        private bool IsCurrentRenderer(
+            WebView2 renderer,
+            TerminalWebView2LifecyclePolicy lifecycle)
+        {
+            lock (_rendererSyncRoot)
+            {
+                return ReferenceEquals(_webView, renderer) &&
+                       ReferenceEquals(_webViewLifecycle, lifecycle) &&
+                       !_webViewDetachedFromLayout;
+            }
+        }
+
+        private bool TryGetCurrentRenderer(
+            WebView2? expectedRenderer,
+            TerminalWebView2LifecyclePolicy? expectedLifecycle,
+            out WebView2 renderer,
+            out TerminalWebView2LifecyclePolicy lifecycle)
+        {
+            lock (_rendererSyncRoot)
+            {
+                if (_webView is null ||
+                    _webViewDetachedFromLayout ||
+                    (expectedRenderer is not null && !ReferenceEquals(_webView, expectedRenderer)) ||
+                    (expectedLifecycle is not null && !ReferenceEquals(_webViewLifecycle, expectedLifecycle)))
+                {
+                    renderer = null!;
+                    lifecycle = null!;
+                    return false;
+                }
+
+                renderer = _webView;
+                lifecycle = _webViewLifecycle;
+                return true;
+            }
+        }
+
+        private bool TryGetCurrentRenderer(
+            WebView2 renderer,
+            out TerminalWebView2LifecyclePolicy lifecycle)
+        {
+            return TryGetCurrentRenderer(renderer, null, out _, out lifecycle);
+        }
+
+        private bool TryGetCurrentRenderer(
+            out WebView2 renderer,
+            out TerminalWebView2LifecyclePolicy lifecycle)
+        {
+            return TryGetCurrentRenderer(null, null, out renderer, out lifecycle);
+        }
+
+        private bool IsCurrentCoreWebView2(CoreWebView2 coreWebView2)
+        {
+            lock (_rendererSyncRoot)
+            {
+                return _webView is not null &&
+                       !_webViewDetachedFromLayout &&
+                       _webViewLifecycle.CanAcceptRendererCallback &&
+                       ReferenceEquals(_subscribedCoreWebView2, coreWebView2);
+            }
+        }
+
+        private void RetireWebView2Renderer(
+            string reason,
+            Exception? exception,
+            WebView2? expectedRenderer = null,
+            TerminalWebView2LifecyclePolicy? expectedLifecycle = null)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(
+                    new Action(() => RetireWebView2Renderer(reason, exception, expectedRenderer, expectedLifecycle)),
+                    DispatcherPriority.Send);
+                return;
+            }
+
+            WebView2? retiredRenderer;
+            TerminalWebView2LifecyclePolicy retiredLifecycle;
+            CoreWebView2? subscribedCoreWebView2;
+            lock (_rendererSyncRoot)
+            {
+                if (_webView is null ||
+                    (expectedRenderer is not null && !ReferenceEquals(_webView, expectedRenderer)) ||
+                    (expectedLifecycle is not null && !ReferenceEquals(_webViewLifecycle, expectedLifecycle)))
+                {
+                    return;
+                }
+
+                retiredRenderer = _webView;
+                retiredLifecycle = _webViewLifecycle;
+                subscribedCoreWebView2 = _subscribedCoreWebView2;
+                _webView = null;
+                _subscribedCoreWebView2 = null;
+                _webViewDetachedFromLayout = true;
+                _webView2Available = false;
+                _isReady = false;
+                _fallbackState = reason == "RuntimeUnavailable"
+                    ? TerminalWebView2FallbackState.RuntimeUnavailable
+                    : reason == "InitializationFailed" || reason == "InitializationCompletedWithoutCore"
+                        ? TerminalWebView2FallbackState.InitializationFailed
+                        : TerminalWebView2FallbackState.Faulted;
+                retiredLifecycle.MarkFaulted();
+                retiredLifecycle.TryBeginDisposal();
+            }
+
+            var firstTransition = retiredLifecycle.State == TerminalWebView2LifecycleState.Disposing;
+            var discardedOutput = _outputFlowController.MarkRendererUnavailable();
+            RecordDroppedTerminalOutput(discardedOutput.DiscardedCharacters);
+            ReportDroppedTerminalOutputIfNeeded();
+
+            if (subscribedCoreWebView2 is not null)
+            {
+                try
+                {
+                    subscribedCoreWebView2.WebMessageReceived -= OnWebMessageReceived;
+                    subscribedCoreWebView2.NavigationCompleted -= OnNavigationCompleted;
+                }
+                catch (Exception ex) when (IsWebView2LifecycleException(ex))
+                {
+                    AppLogger.Warning("Terminal", $"WebView2 terminal event unsubscription hit a disposed controller. Reason={reason}; ExceptionType={ex.GetType().Name}.");
+                }
+            }
+
+            try
+            {
+                System.Windows.Input.Keyboard.ClearFocus();
+                Focus();
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("Terminal", $"Moving focus away from the retired WebView2 host failed. Reason={reason}; ExceptionType={ex.GetType().Name}.");
+            }
+
+            retiredRenderer.PreviewMouseDown -= WebView_PreviewMouseDown;
+            retiredRenderer.GotKeyboardFocus -= WebView_GotKeyboardFocus;
+            retiredRenderer.LostKeyboardFocus -= WebView_LostKeyboardFocus;
+            try
+            {
+                if (WebViewHost.Children.Contains(retiredRenderer))
+                {
+                    WebViewHost.Children.Remove(retiredRenderer);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("Terminal", $"Removing the retired WebView2 host from the visual tree failed. Reason={reason}; ExceptionType={ex.GetType().Name}.");
+            }
+
+            ShowFallback(_fallbackState);
+
+            void DisposeRetiredRenderer()
+            {
+                retiredLifecycle.MarkDisposed();
+                try
+                {
+                    retiredRenderer.Dispose();
+                }
+                catch (Exception ex) when (IsWebView2LifecycleException(ex))
+                {
+                    AppLogger.Warning("Terminal", $"Disposing the retired WebView2 host hit a stale controller. Reason={reason}; ExceptionType={ex.GetType().Name}.");
+                }
+            }
+
+            if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            {
+                DisposeRetiredRenderer();
+            }
+            else
+            {
+                Dispatcher.BeginInvoke(new Action(DisposeRetiredRenderer), DispatcherPriority.ContextIdle);
+            }
+
+            if (!firstTransition)
+            {
+                return;
+            }
+
+            try
+            {
+                TerminalRendererUnavailable?.Invoke(reason);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("Terminal", $"Terminal renderer-unavailable notification failed. Reason={reason}; ExceptionType={ex.GetType().Name}.");
+            }
+
+            var metadata = new Dictionary<string, object?>
+            {
+                ["reason"] = reason,
+                ["exceptionType"] = exception?.GetType().FullName,
+                ["hResult"] = exception?.HResult,
+                ["discardedOutputCharacters"] = discardedOutput.DiscardedCharacters,
+                ["webViewDetachedFromLayout"] = true,
+                ["rendererInstanceGeneration"] = _rendererInstanceGeneration,
+                ["terminalContentOmitted"] = true
+            };
+            if (exception is not null)
+            {
+                AppLogger.Error("Terminal", $"WebView2 terminal renderer disabled. Reason={reason}; DiscardedOutputCharacters={discardedOutput.DiscardedCharacters}.", exception);
+                DeveloperDiagnostics.LogException("Terminal", exception, "WebView2 terminal renderer disabled after lifecycle failure.", metadata);
+            }
+            else
+            {
+                AppLogger.Info("Terminal", $"WebView2 terminal renderer disabled. Reason={reason}; DiscardedOutputCharacters={discardedOutput.DiscardedCharacters}.");
+                DeveloperDiagnostics.LogInfo("Terminal", "WebView2 terminal renderer disabled.", metadata);
+            }
+        }
+
+        private void ShowFallback(TerminalWebView2FallbackState state)
+        {
+            FallbackMessageText.Text = TerminalWebView2FallbackPolicy.GetMessage(state);
+            FallbackDetailsText.Visibility = TerminalWebView2FallbackPolicy.ShowsRuntimeInstallDetails(state)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            FallbackBanner.Visibility = Visibility.Visible;
+        }
+
+        private static bool IsWebView2RuntimeAvailable()
+        {
+            try
+            {
+                return !string.IsNullOrWhiteSpace(
+                    CoreWebView2Environment.GetAvailableBrowserVersionString(null));
+            }
+            catch (WebView2RuntimeNotFoundException)
+            {
+                return false;
+            }
+            catch
+            {
+                // An unrelated probe failure is not proof that the runtime is
+                // missing; keep the fallback message honest and report an init
+                // failure instead.
+                return true;
+            }
+        }
+
+        private static bool IsWebView2LifecycleException(Exception exception)
+        {
+            return exception is InvalidComObjectException ||
+                   exception is COMException ||
+                   exception is ObjectDisposedException ||
+                   exception is InvalidOperationException;
+        }
+
+        private bool TryGetWebViewKeyboardFocusWithin()
+        {
+            if (!_webView2Available ||
+                !TryGetCurrentRenderer(out var renderer, out var lifecycle) ||
+                lifecycle.IsRetired)
+            {
+                return false;
+            }
+
+            try
+            {
+                return renderer.IsKeyboardFocusWithin;
+            }
+            catch (Exception ex) when (IsWebView2LifecycleException(ex))
+            {
+                RetireWebView2Renderer("ReadWebViewKeyboardFocus", ex, renderer, lifecycle);
+                return false;
+            }
         }
 
         // ── Public API ────────────────────────────────────────────────────────────
@@ -590,6 +1072,7 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             _firstInputObservedForDiagnostics = false;
             _firstOutputAfterInputLogged = false;
+            _terminalProtocolOutputFilter.Reset();
             var result = _outputFlowController.ActivateGeneration(generation);
             ReportDiscardedTerminalOutput(result, "session-start");
         }
@@ -597,11 +1080,63 @@ namespace PS7ScriptDesk.Shell.Controls
         /// <summary>Invalidates pending output from a terminal session that is stopping.</summary>
         public void InvalidateTerminalOutputGeneration(int generation)
         {
+            _terminalProtocolOutputFilter.Reset();
             var result = _outputFlowController.InvalidateGeneration(generation);
             ReportDiscardedTerminalOutput(result, "session-stop");
         }
 
         public void WriteRaw(int generation, string data)
+        {
+            if (string.IsNullOrEmpty(data))
+            {
+                return;
+            }
+
+            var filteredOutput = _terminalProtocolOutputFilter.Process(data);
+            if (filteredOutput.FilteredRecordCount > 0)
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Terminal",
+                    "Removed ScriptDesk protocol records before terminal renderer submission.",
+                    new Dictionary<string, object?>
+                    {
+                        ["filteredCharacters"] = filteredOutput.FilteredCharacters,
+                        ["filteredRecordCount"] = filteredOutput.FilteredRecordCount,
+                        ["sessionGeneration"] = generation,
+                        ["contentOmitted"] = true
+                    });
+            }
+
+            data = filteredOutput.VisibleText;
+            WriteVisibleOutput(generation, data, "ConPTY");
+        }
+
+        public void WriteStructuredOutput(int generation, string data)
+        {
+            if (string.IsNullOrEmpty(data))
+            {
+                return;
+            }
+
+            if (TerminalOutputMultiplexer.ContainsPrivateProtocol(data))
+            {
+                AppLogger.Error("Terminal", $"Structured editor output contained private ScriptDesk terminal protocol. SessionGeneration={generation}, Length={data.Length}, ContentOmitted=True.");
+                DeveloperDiagnostics.LogWarning(
+                    "Terminal",
+                    "Rejected structured editor output containing private terminal protocol.",
+                    new Dictionary<string, object?>
+                    {
+                        ["sessionGeneration"] = generation,
+                        ["length"] = data.Length,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            WriteVisibleOutput(generation, data, "StructuredEditor");
+        }
+
+        private void WriteVisibleOutput(int generation, string data, string source)
         {
             if (string.IsNullOrEmpty(data))
             {
@@ -617,7 +1152,8 @@ namespace PS7ScriptDesk.Shell.Controls
                     {
                         ["isReady"] = _isReady,
                         ["rendererAvailable"] = _webView2Available,
-                        ["sessionGeneration"] = generation
+                        ["sessionGeneration"] = generation,
+                        ["source"] = source
                     });
             }
 
@@ -630,13 +1166,14 @@ namespace PS7ScriptDesk.Shell.Controls
             if (!_isReady && !_firstOutputQueuedLogged)
             {
                 _firstOutputQueuedLogged = true;
-                AppLogger.Info("Terminal", $"Queued terminal output before xterm.js was ready. Length={data.Length}.");
+                AppLogger.Info("Terminal", $"Queued terminal output before xterm.js was ready. Length={data.Length}, Source={source}.");
                 DeveloperDiagnostics.LogInfo(
                     "Terminal",
                     "First terminal output observed before xterm.js was ready.",
                     new Dictionary<string, object?>
                     {
                         ["length"] = data.Length,
+                        ["source"] = source,
                         ["vtControlSummary"] = SummarizeVtControls(data)
                     });
             }
@@ -752,14 +1289,28 @@ namespace PS7ScriptDesk.Shell.Controls
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!_webView2Available || !_isReady || WebView.CoreWebView2 is null)
+            if (!_webView2Available ||
+                !_isReady ||
+                !TryGetCurrentRenderer(out var renderer, out var lifecycle) ||
+                !TryGetCoreWebView2("RestoreTerminalFocus", out var coreWebView2, renderer, lifecycle))
             {
-                AppLogger.Info("Terminal", $"Skipped verified terminal focus because the WebView2 renderer is not ready. Generation={generation}, RendererReady={_isReady}, CoreReady={WebView.CoreWebView2 is not null}.");
+                AppLogger.Info("Terminal", $"Skipped verified terminal focus because the WebView2 renderer is not ready. Generation={generation}, RendererReady={_isReady}.");
                 return new TerminalFocusRestoreResult(false, false, false, false, null, "renderer-not-ready");
             }
 
-            var wpfHostFocused = WebView.Focus();
-            var webViewFocused = WebView.IsKeyboardFocused || WebView.IsKeyboardFocusWithin;
+            bool wpfHostFocused;
+            bool webViewFocused;
+            try
+            {
+                wpfHostFocused = renderer.Focus();
+                webViewFocused = renderer.IsKeyboardFocused || renderer.IsKeyboardFocusWithin;
+            }
+            catch (Exception ex) when (IsWebView2LifecycleException(ex))
+            {
+                RetireWebView2Renderer("RestoreTerminalFocusWpfFocus", ex, renderer, lifecycle);
+                return new TerminalFocusRestoreResult(false, false, false, false, null, "renderer-lifecycle-fault");
+            }
+
             AppLogger.Debug(
                 "Terminal",
                 $"Verified terminal focus requested. Generation={generation}, WpfHostFocusResult={wpfHostFocused}, WebViewFocused={webViewFocused}.");
@@ -789,7 +1340,7 @@ namespace PS7ScriptDesk.Shell.Controls
             try
             {
                 const string focusScript = "window.__ps7ScriptDeskFocusTerminal ? window.__ps7ScriptDeskFocusTerminal() : ({ terminalAvailable: false, inputActive: false, activeElement: '', failureReason: 'focus-bridge-unavailable' });";
-                var scriptResult = await WebView.CoreWebView2.ExecuteScriptAsync(focusScript).ConfigureAwait(true);
+                var scriptResult = await coreWebView2.ExecuteScriptAsync(focusScript).ConfigureAwait(true);
                 cancellationToken.ThrowIfCancellationRequested();
                 using var resultDocument = JsonDocument.Parse(scriptResult);
                 var root = resultDocument.RootElement;
@@ -828,6 +1379,17 @@ namespace PS7ScriptDesk.Shell.Controls
                     inputActive,
                     activeElement,
                     failureReason);
+            }
+            catch (Exception ex) when (IsWebView2LifecycleException(ex))
+            {
+                RetireWebView2Renderer("RestoreTerminalFocusBrowserScript", ex, renderer, lifecycle);
+                return new TerminalFocusRestoreResult(
+                    wpfHostFocused,
+                    webViewFocused,
+                    false,
+                    false,
+                    null,
+                    "renderer-lifecycle-fault");
             }
             catch (Exception ex)
             {
@@ -868,7 +1430,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
-            if (!_webView2Available || WebView.CoreWebView2 is null)
+            if (!TryGetCoreWebView2("FlushPendingOutput", out var coreWebView2))
             {
                 RecordDroppedTerminalOutput(
                     _outputFlowController.DiscardInFlight(outputBatch.Generation, outputBatch.Sequence));
@@ -878,8 +1440,33 @@ namespace PS7ScriptDesk.Shell.Controls
 
             try
             {
-                WebView.CoreWebView2.PostWebMessageAsString(
+                var submissionId = System.Threading.Interlocked.Increment(ref _nextOutputSubmissionId);
+                coreWebView2.PostWebMessageAsString(
                     TerminalWebMessageSerializer.SerializeOutput(outputBatch.Generation, outputBatch.Sequence, outputBatch.Data));
+                DeveloperDiagnostics.LogDebug(
+                    "Terminal",
+                    "Submitted terminal output batch to xterm.js.",
+                    new Dictionary<string, object?>
+                    {
+                        ["submissionId"] = submissionId,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["sessionGeneration"] = outputBatch.Generation,
+                        ["length"] = outputBatch.Data.Length,
+                        ["source"] = "ConPTY",
+                        ["replayOrRecovery"] = false,
+                        ["containsCR"] = outputBatch.Data.Contains('\r'),
+                        ["containsLF"] = outputBatch.Data.Contains('\n'),
+                        ["resizeGeneration"] = _terminalResizePolicy.ResizeGeneration,
+                        ["resizeCausedSubmission"] = false,
+                        ["contentOmitted"] = true
+                    });
+            }
+            catch (Exception ex) when (IsWebView2LifecycleException(ex))
+            {
+                RetireWebView2Renderer("FlushPendingOutput", ex);
+                RecordDroppedTerminalOutput(
+                    _outputFlowController.DiscardInFlight(outputBatch.Generation, outputBatch.Sequence));
+                ReportDroppedTerminalOutputIfNeeded();
             }
             catch (Exception ex)
             {
@@ -963,7 +1550,11 @@ namespace PS7ScriptDesk.Shell.Controls
 
             void Send()
             {
-                if (WebView.CoreWebView2 is null) return;
+                if (!TryGetCoreWebView2($"PostToWebView:{type}", out var coreWebView2))
+                {
+                    return;
+                }
+
                 try
                 {
                     if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseTerminalEnabled())
@@ -977,7 +1568,11 @@ namespace PS7ScriptDesk.Shell.Controls
                             });
                     }
                     var msg = TerminalWebMessageSerializer.Serialize(type, data);
-                    WebView.CoreWebView2.PostWebMessageAsString(msg);
+                    coreWebView2.PostWebMessageAsString(msg);
+                }
+                catch (Exception ex) when (IsWebView2LifecycleException(ex))
+                {
+                    RetireWebView2Renderer($"PostToWebView:{type}", ex);
                 }
                 catch (Exception ex)
                 {
@@ -995,6 +1590,25 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
+            if (sender is not CoreWebView2 coreWebView2)
+            {
+                return;
+            }
+
+            if (!IsCurrentCoreWebView2(coreWebView2))
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Terminal",
+                    "Ignored stale WebView2 terminal callback.",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["staleCallbackIgnored"] = true,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
             try
             {
                 var json = e.TryGetWebMessageAsString();
@@ -1155,7 +1769,7 @@ namespace PS7ScriptDesk.Shell.Controls
                             var source = root.TryGetProperty("source", out var activatedSourceProp)
                                 ? activatedSourceProp.GetString()
                                 : "unknown";
-                            AppLogger.Debug("Terminal", $"xterm activation message received. Source={source}, WebViewFocused={WebView.IsKeyboardFocusWithin}.");
+                            AppLogger.Debug("Terminal", $"xterm activation message received. Source={source}, WebViewFocused={TryGetWebViewKeyboardFocusWithin()}.");
                             DeveloperDiagnostics.LogUserAction("Terminal", "TerminalActivated", "xterm activation message received.", new Dictionary<string, object?> { ["source"] = source });
                             RaiseTerminalActivated(source ?? "unknown");
                         }
@@ -1173,7 +1787,7 @@ namespace PS7ScriptDesk.Shell.Controls
                                 documentHasFocusProp.ValueKind == JsonValueKind.True;
                             AppLogger.Debug(
                                 "Terminal",
-                                $"xterm focus reported. Source={source}, DocumentHasFocus={documentHasFocus}, ActiveElement={activeElement}, WebViewFocused={WebView.IsKeyboardFocusWithin}.");
+                                $"xterm focus reported. Source={source}, DocumentHasFocus={documentHasFocus}, ActiveElement={activeElement}, WebViewFocused={TryGetWebViewKeyboardFocusWithin()}.");
                             if (DeveloperDiagnostics.IsVerboseTerminalEnabled())
                             {
                                 DeveloperDiagnostics.LogDebug("Terminal", "xterm focus reported.", new Dictionary<string, object?> { ["source"] = source, ["documentHasFocus"] = documentHasFocus, ["activeElement"] = activeElement });
@@ -1187,7 +1801,7 @@ namespace PS7ScriptDesk.Shell.Controls
                             var source = root.TryGetProperty("source", out var blurSourceProp)
                                 ? blurSourceProp.GetString()
                                 : "unknown";
-                            AppLogger.Debug("Terminal", $"xterm blur reported. Source={source}, WebViewFocused={WebView.IsKeyboardFocusWithin}.");
+                            AppLogger.Debug("Terminal", $"xterm blur reported. Source={source}, WebViewFocused={TryGetWebViewKeyboardFocusWithin()}.");
                         }
                         break;
 
@@ -1291,9 +1905,43 @@ namespace PS7ScriptDesk.Shell.Controls
                         {
                             var cols = colsProp.GetInt32();
                             var rows = rowsProp.GetInt32();
-                            AppLogger.Debug("Terminal", $"xterm resize reported. Cols={cols}, Rows={rows}.");
-                            DeveloperDiagnostics.LogInfo("Terminal", "xterm resize reported.", new Dictionary<string, object?> { ["cols"] = cols, ["rows"] = rows });
-                            TerminalResized?.Invoke(cols, rows);
+                            var clientWidth = root.TryGetProperty("clientWidth", out var clientWidthProp)
+                                ? clientWidthProp.GetInt32()
+                                : 0;
+                            var clientHeight = root.TryGetProperty("clientHeight", out var clientHeightProp)
+                                ? clientHeightProp.GetInt32()
+                                : 0;
+                            var resizeDecision = _terminalResizePolicy.Evaluate(
+                                cols,
+                                rows,
+                                _rendererInstanceGeneration);
+                            AppLogger.Debug(
+                                "Terminal",
+                                $"xterm resize reported. Cols={cols}, Rows={rows}, Accepted={resizeDecision.Accepted}, Reason={resizeDecision.Reason}.");
+                            DeveloperDiagnostics.LogInfo(
+                                "Terminal",
+                                "xterm terminal geometry evaluated.",
+                                new Dictionary<string, object?>
+                                {
+                                    ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                                    ["sessionGeneration"] = _outputFlowController.ActiveGeneration,
+                                    ["pixelWidth"] = clientWidth,
+                                    ["pixelHeight"] = clientHeight,
+                                    ["resolvedColumns"] = cols,
+                                    ["resolvedRows"] = rows,
+                                    ["conptyColumns"] = resizeDecision.Accepted ? resizeDecision.Columns : 0,
+                                    ["conptyRows"] = resizeDecision.Accepted ? resizeDecision.Rows : 0,
+                                    ["accepted"] = resizeDecision.Accepted,
+                                    ["reason"] = resizeDecision.Reason,
+                                    ["outputSubmissionOccurred"] = false,
+                                    ["filterFlushOccurred"] = false,
+                                    ["contentOmitted"] = true
+                                });
+                            if (resizeDecision.Accepted)
+                            {
+                                TerminalResized?.Invoke(resizeDecision.Columns, resizeDecision.Rows);
+                            }
                         }
                         break;
                 }
@@ -1384,7 +2032,14 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void WebView_PreviewMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
-            AppLogger.Debug("Terminal", $"Terminal host received mouse activation. Button={e.ChangedButton}, WebViewFocused={WebView.IsKeyboardFocusWithin}.");
+            if (sender is not WebView2 renderer ||
+                !TryGetCurrentRenderer(renderer, out var lifecycle) ||
+                lifecycle.IsRetired)
+            {
+                return;
+            }
+
+            AppLogger.Debug("Terminal", $"Terminal host received mouse activation. Button={e.ChangedButton}, WebViewFocused={TryGetWebViewKeyboardFocusWithin()}.");
             DeveloperDiagnostics.LogUserAction("Terminal", "TerminalMouseActivation", "Terminal host received mouse activation.", new Dictionary<string, object?> { ["button"] = e.ChangedButton.ToString() });
             RaiseTerminalActivated($"WebView.{e.ChangedButton}MouseDown");
             ActivateTerminalHost($"WebView.{e.ChangedButton}MouseDown");
@@ -1392,6 +2047,13 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void WebView_GotKeyboardFocus(object sender, System.Windows.Input.KeyboardFocusChangedEventArgs e)
         {
+            if (sender is not WebView2 renderer ||
+                !TryGetCurrentRenderer(renderer, out var lifecycle) ||
+                lifecycle.IsRetired)
+            {
+                return;
+            }
+
             AppLogger.Debug("Terminal", $"WebView2 host received keyboard focus. NewFocus={e.NewFocus?.GetType().Name ?? "(null)"}.");
             DeveloperDiagnostics.LogUserAction("Terminal", "TerminalKeyboardFocus", "WebView2 host received keyboard focus.", new Dictionary<string, object?> { ["newFocus"] = e.NewFocus?.GetType().FullName });
             RaiseTerminalActivated("WebView.GotKeyboardFocus");
@@ -1399,6 +2061,13 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void WebView_LostKeyboardFocus(object sender, System.Windows.Input.KeyboardFocusChangedEventArgs e)
         {
+            if (sender is not WebView2 renderer ||
+                !TryGetCurrentRenderer(renderer, out var lifecycle) ||
+                lifecycle.IsRetired)
+            {
+                return;
+            }
+
             AppLogger.Debug("Terminal", $"WebView2 host lost keyboard focus. NewFocus={e.NewFocus?.GetType().Name ?? "(null)"}.");
         }
 
@@ -1411,15 +2080,31 @@ namespace PS7ScriptDesk.Shell.Controls
 
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (!_webView2Available)
+                if (!_webView2Available ||
+                    !TryGetCurrentRenderer(out var renderer, out var lifecycle) ||
+                    !TryGetCoreWebView2($"ActivateTerminalHost:{source}", out _, renderer, lifecycle))
                 {
                     return;
                 }
 
-                var focusResult = WebView.Focus();
+                bool focusResult;
+                bool isKeyboardFocused;
+                bool isKeyboardFocusWithin;
+                try
+                {
+                    focusResult = renderer.Focus();
+                    isKeyboardFocused = renderer.IsKeyboardFocused;
+                    isKeyboardFocusWithin = renderer.IsKeyboardFocusWithin;
+                }
+                catch (Exception ex) when (IsWebView2LifecycleException(ex))
+                {
+                    RetireWebView2Renderer($"ActivateTerminalHost:{source}", ex, renderer, lifecycle);
+                    return;
+                }
+
                 AppLogger.Debug(
                     "Terminal",
-                    $"Terminal host focus requested. Source={source}, FocusResult={focusResult}, IsKeyboardFocused={WebView.IsKeyboardFocused}, IsKeyboardFocusWithin={WebView.IsKeyboardFocusWithin}, CoreReady={WebView.CoreWebView2 is not null}.");
+                    $"Terminal host focus requested. Source={source}, FocusResult={focusResult}, IsKeyboardFocused={isKeyboardFocused}, IsKeyboardFocusWithin={isKeyboardFocusWithin}, CoreReady=True.");
                 DeveloperDiagnostics.LogUiThreadDispatch("Terminal", "TerminalFocusDispatch", "Terminal host focus requested.", Dispatcher.CheckAccess(), new Dictionary<string, object?> { ["source"] = source, ["focusResult"] = focusResult });
                 PostToWebView("focus", string.Empty);
             }), System.Windows.Threading.DispatcherPriority.Input);

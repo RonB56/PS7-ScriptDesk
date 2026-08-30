@@ -253,6 +253,45 @@ public sealed class LiveConsoleServiceCharacterizationTests
     }
 
     [Fact]
+    public async Task PreStartRecovery_DefersSnapshotDeletionUntilTerminalTeardown()
+    {
+        using var service = new LiveConsoleService();
+        const int dispatchGeneration = 7;
+        const int sessionGeneration = 3;
+        ConfigureScriptDispatch(
+            service,
+            "##PSSTUDIO_EXEC_START_missing",
+            "##PSSTUDIO_EXEC_DONE_missing");
+        SetField(service, "_terminalSessionGeneration", sessionGeneration);
+        SetField(service, "_terminalSessionTeardownInProgress", false);
+        var snapshotPath = Assert.IsType<string>(InvokePrivate(
+            service,
+            "CreateExecutionSnapshot",
+            "stale.ps1",
+            "'queued input should not see a missing file'"));
+        GetField<Queue<string>>(service, "_pendingSnapshotPaths").Enqueue(snapshotPath);
+
+        InvokePrivate(
+            service,
+            "RecoverUnconfirmedDispatch",
+            dispatchGeneration,
+            sessionGeneration,
+            true,
+            "stale.ps1",
+            new Action<ExecutionOutputRecord>(_ => { }));
+
+        Assert.False(GetField<bool>(service, "_isCommandInProgress"));
+        Assert.Empty(GetField<Queue<string>>(service, "_pendingSnapshotPaths"));
+        Assert.Contains(snapshotPath, GetField<Queue<string>>(service, "_deferredSnapshotPaths"));
+        Assert.True(File.Exists(snapshotPath));
+
+        Assert.True(await service.StopConsoleAsync());
+
+        Assert.Empty(GetField<Queue<string>>(service, "_deferredSnapshotPaths"));
+        Assert.False(File.Exists(snapshotPath));
+    }
+
+    [Fact]
     public void ExplicitLocationFrame_UpdatesConfirmedDirectoryAndNeverReachesRenderer()
     {
         using var service = new LiveConsoleService();

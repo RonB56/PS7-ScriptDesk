@@ -336,6 +336,68 @@
       ]
     },
     {
+      "endpointId": "poc-get-systemsnapshot",
+      "isEnabled": true,
+      "powerShellFunctionName": "Get-SystemSnapshot",
+      "displayName": "Get System Snapshot",
+      "description": "Returns deterministic optional query binding proof data.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/systemsnapshot",
+        "operationId": "getSystemSnapshot",
+        "tags": [ "Phase 6" ],
+        "includeInOpenApi": false
+      },
+      "parameterBindings": [
+        {
+          "powerShellParameterName": "ComputerName",
+          "source": "Query",
+          "name": "computerName",
+          "required": "Required",
+          "typeName": "string"
+        },
+        {
+          "powerShellParameterName": "TopProcessCount",
+          "source": "Query",
+          "name": "topProcessCount",
+          "required": "Optional",
+          "typeName": "int"
+        },
+        {
+          "powerShellParameterName": "IncludeEnvironment",
+          "source": "Query",
+          "name": "includeEnvironment",
+          "required": "Optional",
+          "typeName": "bool"
+        }
+      ]
+    },
+    {
+      "endpointId": "poc-get-api-stress-manifest",
+      "isEnabled": true,
+      "powerShellFunctionName": "Get-ApiStressManifest",
+      "displayName": "Get API Stress Manifest",
+      "description": "Returns deterministic switch binding proof data.",
+      "requiresAuthentication": false,
+      "rest": {
+        "method": "Get",
+        "routeTemplate": "/api/stress/manifest",
+        "operationId": "getApiStressManifest",
+        "tags": [ "Phase 6" ],
+        "includeInOpenApi": false
+      },
+      "parameterBindings": [
+        {
+          "powerShellParameterName": "IncludeDescriptions",
+          "source": "Query",
+          "name": "includeDescriptions",
+          "required": "Optional",
+          "typeName": "switch"
+        }
+      ]
+    },
+    {
       "endpointId": "poc-phase6-set-computer",
       "isEnabled": true,
       "powerShellFunctionName": "Set-Phase6Computer",

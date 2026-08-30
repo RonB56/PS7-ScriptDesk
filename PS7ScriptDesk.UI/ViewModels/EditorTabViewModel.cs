@@ -27,13 +27,17 @@ namespace PS7ScriptDesk.UI.ViewModels
         private DateTime? _lastKnownFileWriteTimeUtc;
         private long? _lastKnownFileLength;
         private string? _lastKnownFileContentSha256;
+        private string _recoveryId;
+        private bool _isRecoveredContent;
+        private string _recoveryNoticeText = string.Empty;
 
-        public EditorTabViewModel(string title, string content, string? filePath = null)
+        public EditorTabViewModel(string title, string content, string? filePath = null, string? recoveryId = null)
         {
             _title = title;
             _content = content;
             _filePath = filePath;
             _isDirty = false;
+            _recoveryId = string.IsNullOrWhiteSpace(recoveryId) ? Guid.NewGuid().ToString("N") : recoveryId;
             _lineNumbersText = "1";
             _lineCount = 1;
             _caretLine = 1;
@@ -230,7 +234,47 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public int BreakpointVersion { get; private set; }
 
-        public string DisplayTitle => IsDirty ? $"{Title}*" : Title;
+        public string DisplayTitle
+        {
+            get
+            {
+                var title = IsRecoveredContent ? $"{Title} (Recovered)" : Title;
+                return IsDirty ? $"{title}*" : title;
+            }
+        }
+
+        public string RecoveryId => _recoveryId;
+
+        public bool IsRecoveredContent
+        {
+            get => _isRecoveredContent;
+            private set
+            {
+                if (_isRecoveredContent != value)
+                {
+                    _isRecoveredContent = value;
+                    OnPropertyChanged();
+                    OnPropertyChanged(nameof(DisplayTitle));
+                    OnPropertyChanged(nameof(HasRecoveryNotice));
+                }
+            }
+        }
+
+        public string RecoveryNoticeText
+        {
+            get => _recoveryNoticeText;
+            private set
+            {
+                if (_recoveryNoticeText != value)
+                {
+                    _recoveryNoticeText = value;
+                    OnPropertyChanged();
+                    OnPropertyChanged(nameof(HasRecoveryNotice));
+                }
+            }
+        }
+
+        public bool HasRecoveryNotice => IsRecoveredContent && !string.IsNullOrWhiteSpace(RecoveryNoticeText);
 
         public DateTime? LastKnownFileWriteTimeUtc => _lastKnownFileWriteTimeUtc;
 
@@ -263,8 +307,20 @@ namespace PS7ScriptDesk.UI.ViewModels
             Title = Path.GetFileName(filePath);
         }
 
+        public void SetRecoveryId(string recoveryId)
+        {
+            if (string.IsNullOrWhiteSpace(recoveryId) || string.Equals(_recoveryId, recoveryId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _recoveryId = recoveryId;
+            OnPropertyChanged(nameof(RecoveryId));
+        }
+
         public void MarkSaved()
         {
+            ClearRecoveryNotice();
             IsDirty = false;
         }
 
@@ -276,6 +332,21 @@ namespace PS7ScriptDesk.UI.ViewModels
         public void MarkExternallyStale()
         {
             IsDirty = true;
+        }
+
+        public void MarkRecovered(string noticeText)
+        {
+            RecoveryNoticeText = string.IsNullOrWhiteSpace(noticeText)
+                ? "Recovered content is temporary until you save it."
+                : noticeText;
+            IsRecoveredContent = true;
+            IsDirty = true;
+        }
+
+        public void ClearRecoveryNotice()
+        {
+            RecoveryNoticeText = string.Empty;
+            IsRecoveredContent = false;
         }
 
         public bool HasBreakpoint(int lineNumber)

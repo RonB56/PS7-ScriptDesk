@@ -50,6 +50,7 @@ public sealed class UiScaleStructuralTests
         Assert.Contains("UiScaleServiceHost.SetCurrent(uiScaleService)", appCode, StringComparison.Ordinal);
         Assert.Contains("AppBootstrapper.CreateMainWindow(applicationSettingsService, applicationSettings, startupRuntime, uiScaleService)", appCode, StringComparison.Ordinal);
         Assert.Contains("uiScaleService", bootstrapCode, StringComparison.Ordinal);
+        Assert.Contains("UiScaleServiceHost.SetCurrent(uiScaleService)", bootstrapCode, StringComparison.Ordinal);
         Assert.Contains("settings.UiScalePercent = _uiScaleService.CurrentPercentage", mainCode, StringComparison.Ordinal);
     }
 

@@ -1,6 +1,8 @@
 using System;
+using System.ComponentModel;
 using System.Collections.Generic;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 using PS7ScriptDesk.Application.Diagnostics;
@@ -107,6 +109,7 @@ namespace PS7ScriptDesk.Shell
             private FrameworkElement? _scaledContent;
             private Transform? _originalLayoutTransform;
             private bool _originalTransformCaptured;
+            private bool _contentChangeHandlerAttached;
 
             public WindowScaleState(Window window)
             {
@@ -117,18 +120,17 @@ namespace PS7ScriptDesk.Shell
             {
                 _window.Loaded += Window_Loaded;
                 _window.Closed += Window_Closed;
+                AttachContentChangeHandler();
                 UiScaleServiceHost.CurrentChanged += UiScaleServiceHost_CurrentChanged;
                 SubscribeToCurrentScaleService();
-                if (_window.IsLoaded)
-                {
-                    ApplyCurrentScale();
-                }
+                ApplyCurrentScaleOnUiThread();
             }
 
             public void Detach()
             {
                 _window.Loaded -= Window_Loaded;
                 _window.Closed -= Window_Closed;
+                DetachContentChangeHandler();
                 UiScaleServiceHost.CurrentChanged -= UiScaleServiceHost_CurrentChanged;
                 UnsubscribeFromScaleService();
                 RestoreOriginalTransform();
@@ -138,8 +140,7 @@ namespace PS7ScriptDesk.Shell
 
             private void Window_Closed(object? sender, EventArgs args)
             {
-                UiScaleServiceHost.CurrentChanged -= UiScaleServiceHost_CurrentChanged;
-                UnsubscribeFromScaleService();
+                Detach();
                 States.Remove(_window);
             }
 
@@ -150,6 +151,34 @@ namespace PS7ScriptDesk.Shell
             }
 
             private void ScaleService_ScaleChanged(object? sender, EventArgs args) => ApplyCurrentScaleOnUiThread();
+
+            private void Window_ContentChanged(object? sender, EventArgs args) => ApplyCurrentScaleOnUiThread();
+
+            private void AttachContentChangeHandler()
+            {
+                if (_contentChangeHandlerAttached)
+                {
+                    return;
+                }
+
+                DependencyPropertyDescriptor
+                    .FromProperty(ContentControl.ContentProperty, typeof(Window))
+                    ?.AddValueChanged(_window, Window_ContentChanged);
+                _contentChangeHandlerAttached = true;
+            }
+
+            private void DetachContentChangeHandler()
+            {
+                if (!_contentChangeHandlerAttached)
+                {
+                    return;
+                }
+
+                DependencyPropertyDescriptor
+                    .FromProperty(ContentControl.ContentProperty, typeof(Window))
+                    ?.RemoveValueChanged(_window, Window_ContentChanged);
+                _contentChangeHandlerAttached = false;
+            }
 
             private void SubscribeToCurrentScaleService()
             {

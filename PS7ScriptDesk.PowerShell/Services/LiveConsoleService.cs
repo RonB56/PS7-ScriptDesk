@@ -102,6 +102,7 @@ namespace PS7ScriptDesk.PowerShell.Services
         private string? _pendingCompletionToken;
         private string? _pendingLocationToken;
         private readonly Queue<string> _pendingSnapshotPaths = new();
+        private readonly Queue<string> _deferredSnapshotPaths = new();
         private readonly List<string> _pendingHiddenOutputFragments = new();
         private string _hiddenOutputBuffer = string.Empty;
         private bool _preStartBufferTruncated;
@@ -555,7 +556,10 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
             catch
             {
-                CancelPendingCommandDispatch(deleteSnapshot: true);
+                // A failed write may have delivered a partial command to the
+                // terminal. Keep its snapshots alive until the session is torn
+                // down so queued input can never observe a deleted path.
+                CancelPendingCommandDispatch(deleteSnapshot: false);
                 throw;
             }
         }
@@ -682,7 +686,10 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
             catch
             {
-                CancelPendingCommandDispatch(deleteSnapshot: true);
+                // A failed write may have delivered a partial command to the
+                // terminal. Keep its snapshots alive until the session is torn
+                // down so queued input can never observe a deleted path.
+                CancelPendingCommandDispatch(deleteSnapshot: false);
                 throw;
             }
         }
@@ -1139,6 +1146,11 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _rawOutputInfoLogCount = 0;
                 snapshotPathsToDelete = new List<string>(_pendingSnapshotPaths);
                 _pendingSnapshotPaths.Clear();
+                if (_deferredSnapshotPaths.Count > 0)
+                {
+                    snapshotPathsToDelete.AddRange(_deferredSnapshotPaths);
+                    _deferredSnapshotPaths.Clear();
+                }
                 _pendingStartToken = null;
                 _pendingCompletionToken = null;
                 _pendingLocationToken = null;
@@ -1196,11 +1208,6 @@ namespace PS7ScriptDesk.PowerShell.Services
             // blocked in ReadFile causes ClosePseudoConsole to block until all pending I/O
             // completes — hanging StopConsoleAsync indefinitely and leaving IsExecutionRunning
             // stuck at true, which permanently disables the Play button.
-            foreach (var snapshotPath in snapshotPathsToDelete)
-            {
-                TryDeleteSnapshot(snapshotPath);
-            }
-
             if (processToStop is not null)
             {
                 try
@@ -1313,6 +1320,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                 ReaderDrainTimeout).ConfigureAwait(false);
             var priorNativeTeardownCompleted = await priorNativeTeardownCompletionTask.ConfigureAwait(false);
 
+            DeleteSnapshotPaths(snapshotPathsToDelete, "terminal-teardown-after-process-stop");
+
             if (readersDrained)
             {
                 readerCancellation?.Dispose();
@@ -1347,7 +1356,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                     ["processTerminationSucceeded"] = processTerminationSucceeded,
                     ["inputDrained"] = inputDrained,
                     ["readersDrained"] = readersDrained,
-                    ["priorNativeTeardownCompleted"] = priorNativeTeardownCompleted
+                    ["priorNativeTeardownCompleted"] = priorNativeTeardownCompleted,
+                    ["deletedSnapshotCount"] = snapshotPathsToDelete.Count
                 });
 
             return teardownSucceeded;
@@ -2351,10 +2361,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _currentDispatchStartedUtc = null;
             }
 
-            foreach (var snapshotPath in snapshotPaths)
-            {
-                TryDeleteSnapshot(snapshotPath);
-            }
+            DeferSnapshotDeletion(snapshotPaths, "pre-start-recovery");
 
             var recoveredOutput = FilterRecoveredPreStartOutput(bufferedOutput, hiddenFragments);
             if (!string.IsNullOrEmpty(recoveredOutput) &&
@@ -2369,7 +2376,7 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             AppLogger.Warning(
                 "LiveConsole",
-                $"Recovered a terminal dispatch that did not reach its start token. DispatchGeneration={dispatchGeneration}, SessionGeneration={sessionGeneration}, WasScript={wasScript}, ExpectedScript={expectedScript}, BufferedLength={bufferedOutput.Length}, RecoveredLength={recoveredOutput.Length}, BufferTruncated={bufferWasTruncated}, DeletedSnapshotCount={snapshotPaths.Count}.");
+                $"Recovered a terminal dispatch that did not reach its start token. DispatchGeneration={dispatchGeneration}, SessionGeneration={sessionGeneration}, WasScript={wasScript}, ExpectedScript={expectedScript}, BufferedLength={bufferedOutput.Length}, RecoveredLength={recoveredOutput.Length}, BufferTruncated={bufferWasTruncated}, DeferredSnapshotCount={snapshotPaths.Count}.");
             DeveloperDiagnostics.LogStateTransition(
                 "Terminal",
                 "DispatchPreStartRecovery",
@@ -2385,7 +2392,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                     ["bufferedLength"] = bufferedOutput.Length,
                     ["recoveredLength"] = recoveredOutput.Length,
                     ["bufferTruncated"] = bufferWasTruncated,
-                    ["deletedSnapshotCount"] = snapshotPaths.Count,
+                    ["deferredSnapshotCount"] = snapshotPaths.Count,
                     ["contentOmitted"] = true
                 });
             PublishLifecycleMessage(
@@ -2680,10 +2687,11 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             if (deleteSnapshot)
             {
-                foreach (var snapshotPath in snapshotPaths)
-                {
-                    TryDeleteSnapshot(snapshotPath);
-                }
+                DeleteSnapshotPaths(snapshotPaths, "cancel-pending-dispatch");
+            }
+            else
+            {
+                DeferSnapshotDeletion(snapshotPaths, "cancel-pending-dispatch");
             }
         }
 
@@ -2728,10 +2736,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _currentDispatchStartedUtc = null;
             }
 
-            foreach (var snapshotPath in snapshotPaths)
-            {
-                TryDeleteSnapshot(snapshotPath);
-            }
+            DeleteSnapshotPaths(snapshotPaths, "command-completed");
 
             DeveloperDiagnostics.LogStateTransition(
                 "Execution",
@@ -2779,6 +2784,46 @@ namespace PS7ScriptDesk.PowerShell.Services
                 return;
             }
 
+            DeleteSnapshotPaths(snapshotPaths, "reset-pending-command-state");
+        }
+
+        private void DeferSnapshotDeletion(IReadOnlyCollection<string> snapshotPaths, string reason)
+        {
+            if (snapshotPaths.Count == 0)
+            {
+                return;
+            }
+
+            lock (_syncRoot)
+            {
+                foreach (var snapshotPath in snapshotPaths)
+                {
+                    if (!string.IsNullOrWhiteSpace(snapshotPath))
+                    {
+                        _deferredSnapshotPaths.Enqueue(snapshotPath);
+                    }
+                }
+            }
+
+            AppLogger.Info("LiveConsole", $"Deferred terminal snapshot cleanup until session teardown. Reason={reason}, SnapshotCount={snapshotPaths.Count}.");
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Terminal snapshot cleanup was deferred to avoid racing queued terminal input.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["snapshotCount"] = snapshotPaths.Count
+                });
+        }
+
+        private static void DeleteSnapshotPaths(IReadOnlyCollection<string> snapshotPaths, string reason)
+        {
+            if (snapshotPaths.Count == 0)
+            {
+                return;
+            }
+
+            AppLogger.Info("LiveConsole", $"Deleting terminal snapshots at an owned cleanup boundary. Reason={reason}, SnapshotCount={snapshotPaths.Count}.");
             foreach (var snapshotPath in snapshotPaths)
             {
                 TryDeleteSnapshot(snapshotPath);

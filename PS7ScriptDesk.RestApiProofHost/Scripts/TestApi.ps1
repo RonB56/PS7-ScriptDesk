@@ -217,6 +217,43 @@ function Get-Phase6Computer {
     }
 }
 
+function Get-SystemSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ComputerName,
+
+        [int]$TopProcessCount = 3,
+
+        [bool]$IncludeEnvironment = $true
+    )
+
+    [pscustomobject]@{
+        ComputerName        = $ComputerName
+        TopProcessCount     = $TopProcessCount
+        IncludeEnvironment  = $IncludeEnvironment
+    }
+}
+
+function Get-ApiStressManifest {
+    [CmdletBinding()]
+    param(
+        [switch]$IncludeDescriptions
+    )
+
+    $items = @(
+        [pscustomobject]@{
+            Name = 'baseline'
+            Description = if ($IncludeDescriptions.IsPresent) { 'Baseline stress scenario.' } else { $null }
+        }
+    )
+
+    [pscustomobject]@{
+        IncludeDescriptions = $IncludeDescriptions.IsPresent
+        Items = $items
+    }
+}
+
 function Set-Phase6Computer {
     [CmdletBinding()]
     param(

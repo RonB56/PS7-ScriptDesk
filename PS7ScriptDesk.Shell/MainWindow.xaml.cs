@@ -469,6 +469,7 @@ namespace PS7ScriptDesk.Shell
                 ViewModel.ExeExportProgressChanged -= ViewModel_ExeExportProgressChanged;
                 ViewModel.ExeExportProgressChanged += ViewModel_ExeExportProgressChanged;
                 DeveloperDiagnostics.LogInfo("Startup", "ViewModel bound to synchronization context and PropertyChanged handler attached.");
+                ViewModel.ProcessStartupDocumentRecovery();
                 ContextHelp.ValidateWindowTopics(this);
                 ApplyExplorerVisibilityLayout();
                 RefreshDebugCommandAvailability(false);
@@ -497,7 +498,18 @@ namespace PS7ScriptDesk.Shell
                 // TerminalControl applies its own bounded dispatcher/WebView flow control,
                 // so the reader callback does not queue one dispatcher operation per chunk.
                 ViewModel.SubscribeRawOutput(
-                    (generation, raw) => TerminalConsole.WriteRaw(generation, raw));
+                    (generation, raw) => ViewModel.PublishInteractiveTerminalOutput(generation, raw));
+                ViewModel.TerminalOutputPublished += envelope =>
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        if (envelope.Source == TerminalOutputSource.StructuredEditor)
+                        {
+                            TerminalConsole.WriteStructuredOutput(envelope.RendererGeneration, envelope.Payload);
+                            return;
+                        }
+
+                        TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload);
+                    });
 
                 // Forward xterm.js keystrokes to ConPTY stdin.
                 TerminalConsole.UserInput += async data =>
@@ -530,6 +542,15 @@ namespace PS7ScriptDesk.Shell
 
                 TerminalConsole.TerminalActivated += source => OnTerminalActivated(source);
                 TerminalConsole.AppShortcutRequested += command => HandleTerminalAppShortcutRequested(command);
+                TerminalConsole.TerminalRendererUnavailable += reason =>
+                {
+                    _terminalIsReady = false;
+                    AppLogger.Warning("Terminal", $"Integrated terminal renderer became unavailable. Reason={reason}; ConPTY recovery remains independent until Reset Console creates a fresh renderer.");
+                    DeveloperDiagnostics.LogWarning(
+                        "Terminal",
+                        "Integrated terminal renderer became unavailable; ConPTY session recovery remains independent.",
+                        new Dictionary<string, object?> { ["reason"] = reason });
+                };
 
                 // Resize ConPTY when xterm.js reports a new grid size.
                 TerminalConsole.TerminalResized += (cols, rows) =>
@@ -713,6 +734,7 @@ namespace PS7ScriptDesk.Shell
         {
             // Capture this before WPF transfers focus from the WebView2/xterm host to
             // the button. The ViewModel will consume it only for this replacement session.
+            TerminalConsole.ResetRendererForRetry();
             ViewModel?.PrepareTerminalFocusRestoreForReset();
         }
 

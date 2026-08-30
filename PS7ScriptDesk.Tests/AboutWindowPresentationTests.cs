@@ -45,8 +45,7 @@ public sealed class AboutWindowPresentationTests
     {
         RunOnStaThread(() =>
         {
-            var application = new App();
-            application.InitializeComponent();
+            _ = EnsureShellApplication();
 
             var contextHelpWindow = new ContextHelpWindow(HelpTopicCatalog.Get(HelpTopicCatalog.OverviewKey));
             var contextHelpLabel = Assert.IsType<TextBlock>(contextHelpWindow.FindName("ContextHelpLabel"));
@@ -94,5 +93,17 @@ public sealed class AboutWindowPresentationTests
         {
             ExceptionDispatchInfo.Capture(failure).Throw();
         }
+    }
+
+    private static App EnsureShellApplication()
+    {
+        if (System.Windows.Application.Current is App existingApp)
+        {
+            return existingApp;
+        }
+
+        var app = new App();
+        app.InitializeComponent();
+        return app;
     }
 }

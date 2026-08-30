@@ -1094,7 +1094,7 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             ? HttpMethod.Post
             : HttpMethod.Get;
         var route = string.IsNullOrWhiteSpace(row.RouteTemplate) ? "/" : row.RouteTemplate;
-        var query = new List<string>();
+        var query = LocalApiTestRequestBuilder.CreateQueryPairs(EndpointParameterBindings);
         var bodyValues = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var parameter in EndpointParameterBindings)
@@ -1109,10 +1109,6 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             if (parameter.Source == ApiParameterSource.Route)
             {
                 route = route.Replace("{" + apiName + "}", Uri.EscapeDataString(value), StringComparison.OrdinalIgnoreCase);
-            }
-            else if (parameter.Source == ApiParameterSource.Query)
-            {
-                query.Add($"{Uri.EscapeDataString(apiName)}={Uri.EscapeDataString(value)}");
             }
             else if (parameter.Source == ApiParameterSource.Body)
             {
@@ -1135,10 +1131,7 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     private LocalApiTestPreview CreateSseLocalTestPreview(Uri baseUrl, RestApiEndpointRow row)
     {
         var relative = $"sse/{Uri.EscapeDataString(row.EndpointId)}";
-        var query = EndpointParameterBindings
-            .Where(parameter => parameter.Source == ApiParameterSource.Query)
-            .Select(parameter => $"{Uri.EscapeDataString(ResolveApiParameterName(parameter))}={Uri.EscapeDataString(parameter.TestValue ?? string.Empty)}")
-            .ToList();
+        var query = LocalApiTestRequestBuilder.CreateQueryPairs(EndpointParameterBindings);
         if (query.Count > 0)
         {
             relative += "?" + string.Join("&", query);
@@ -1154,7 +1147,9 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             Scheme = string.Equals(baseUrl.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? "wss" : "ws"
         }.Uri;
         var parameters = EndpointParameterBindings
-            .Where(parameter => parameter.Source is ApiParameterSource.Body or ApiParameterSource.Query)
+            .Where(parameter =>
+                parameter.Source == ApiParameterSource.Body ||
+                parameter.Source == ApiParameterSource.Query && LocalApiTestRequestBuilder.ShouldIncludeParameterValue(parameter))
             .ToDictionary(
                 ResolveApiParameterName,
                 parameter => ConvertTestValue(parameter.TestValue, parameter.TypeName),
@@ -1214,9 +1209,7 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     }
 
     private static string ResolveApiParameterName(RestApiParameterBindingRow parameter)
-        => string.IsNullOrWhiteSpace(parameter.Name)
-            ? parameter.PowerShellParameterName
-            : parameter.Name;
+        => LocalApiTestRequestBuilder.ResolveApiParameterName(parameter);
 
     private sealed record LocalApiTestPreview(
         ApiTransport Transport,

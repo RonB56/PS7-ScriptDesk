@@ -245,6 +245,7 @@ public sealed class ExeExportWorkflowTests : IDisposable
         public int ShowSaveExecutableDialogCallCount { get; private set; }
         public UnsavedChangesDecision ShowUnsavedChangesPrompt(string documentName) => UnsavedChangesDecision.Cancel;
         public ExternalFileConflictDecision ShowExternalFileConflictPrompt(string filePath, string conflictReason) => ExternalFileConflictDecision.Cancel;
+        public DocumentRecoveryAction ShowDocumentRecoveryPrompt(DocumentRecoveryCandidate recoveryCandidate) => DocumentRecoveryAction.KeepForLater;
         public string? ShowSaveFileDialog(string suggestedFileName) => null;
         public string? ShowSaveExecutableDialog(string suggestedFileName)
         {

@@ -150,6 +150,47 @@ public sealed class RestApiProofHostTests
     }
 
     [Fact]
+    public void ApiEndpointParameterBinder_BindsSwitchesWithPresenceSemanticsWithoutRegressingBool()
+    {
+        var endpoint = new ApiEndpointConfiguration
+        {
+            EndpointId = "switch-binding-test",
+            PowerShellFunctionName = "Get-ApiStressManifest",
+            ParameterBindings =
+            [
+                CreateQueryBinding("IncludeDescriptions", "includeDescriptions", "switch", ApiRequiredBehavior.Optional),
+                CreateQueryBinding("IncludeEnvironment", "includeEnvironment", "bool", ApiRequiredBehavior.Optional)
+            ]
+        };
+
+        var omitted = ApiEndpointParameterBinder.Shared.Bind(
+            endpoint,
+            _ => ApiParameterBindingValue.Missing);
+        var enabled = ApiEndpointParameterBinder.Shared.Bind(
+            endpoint,
+            binding => binding.Name == "includeDescriptions"
+                ? ApiParameterBindingValue.Present("true")
+                : ApiParameterBindingValue.Present("false"));
+        var disabled = ApiEndpointParameterBinder.Shared.Bind(
+            endpoint,
+            binding => binding.Name == "includeDescriptions"
+                ? ApiParameterBindingValue.Present("false")
+                : ApiParameterBindingValue.Present("false"));
+
+        Assert.True(omitted.IsValid, omitted.ErrorMessage);
+        Assert.Empty(omitted.Parameters);
+
+        Assert.True(enabled.IsValid, enabled.ErrorMessage);
+        var switchParameter = Assert.IsType<SwitchParameter>(enabled.Parameters["IncludeDescriptions"]);
+        Assert.True(switchParameter.IsPresent);
+        Assert.Equal(false, enabled.Parameters["IncludeEnvironment"]);
+
+        Assert.True(disabled.IsValid, disabled.ErrorMessage);
+        Assert.False(disabled.Parameters.ContainsKey("IncludeDescriptions"));
+        Assert.Equal(false, disabled.Parameters["IncludeEnvironment"]);
+    }
+
+    [Fact]
     public void ApiEndpointParameterBinder_RejectsMissingRequiredAndInvalidConvertedValues()
     {
         using var bodyDocument = JsonDocument.Parse("""{ "count": "not-an-int" }""");
@@ -290,6 +331,84 @@ public sealed class RestApiProofHostTests
 
         Assert.Equal(value, json.RootElement.GetProperty("ComputerName").GetString());
         Assert.Equal($"System information requested for {value}", json.RootElement.GetProperty("Message").GetString());
+    }
+
+    [Fact]
+    public async Task GetSystemSnapshot_OmittedOptionalQueryValues_UsesPowerShellDefaults()
+    {
+        await using var host = await StartHostAsync();
+        using var client = host.CreateClient();
+
+        using var response = await client.GetAsync("/api/systemsnapshot?computerName=RonMainDesktop");
+        using var json = await ReadSuccessJsonAsync(response);
+
+        Assert.Equal("RonMainDesktop", json.RootElement.GetProperty("ComputerName").GetString());
+        Assert.Equal(3, json.RootElement.GetProperty("TopProcessCount").GetInt32());
+        Assert.True(json.RootElement.GetProperty("IncludeEnvironment").GetBoolean());
+    }
+
+    [Fact]
+    public async Task GetSystemSnapshot_PopulatedOptionalBoolAndInteger_BindsExplicitValues()
+    {
+        await using var host = await StartHostAsync();
+        using var client = host.CreateClient();
+
+        using var response = await client.GetAsync("/api/systemsnapshot?computerName=RonMainDesktop&topProcessCount=5&includeEnvironment=false");
+        using var json = await ReadSuccessJsonAsync(response);
+
+        Assert.Equal("RonMainDesktop", json.RootElement.GetProperty("ComputerName").GetString());
+        Assert.Equal(5, json.RootElement.GetProperty("TopProcessCount").GetInt32());
+        Assert.False(json.RootElement.GetProperty("IncludeEnvironment").GetBoolean());
+    }
+
+    [Fact]
+    public async Task GetSystemSnapshot_RequiredBlankStillReturnsBadRequest()
+    {
+        await using var host = await StartHostAsync();
+        using var client = host.CreateClient();
+
+        using var response = await client.GetAsync("/api/systemsnapshot?computerName=");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetApiStressManifest_OmittedSwitch_InvokesWithSwitchDisabled()
+    {
+        await using var host = await StartHostAsync();
+        using var client = host.CreateClient();
+
+        using var response = await client.GetAsync("/api/stress/manifest");
+        using var json = await ReadSuccessJsonAsync(response);
+
+        Assert.False(json.RootElement.GetProperty("IncludeDescriptions").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("Items")[0].GetProperty("Description").ValueKind);
+    }
+
+    [Fact]
+    public async Task GetApiStressManifest_TrueSwitch_InvokesWithSwitchEnabled()
+    {
+        await using var host = await StartHostAsync();
+        using var client = host.CreateClient();
+
+        using var response = await client.GetAsync("/api/stress/manifest?includeDescriptions=true");
+        using var json = await ReadSuccessJsonAsync(response);
+
+        Assert.True(json.RootElement.GetProperty("IncludeDescriptions").GetBoolean());
+        Assert.Equal("Baseline stress scenario.", json.RootElement.GetProperty("Items")[0].GetProperty("Description").GetString());
+    }
+
+    [Fact]
+    public async Task GetApiStressManifest_FalseSwitch_DoesNotCreateInvalidBinding()
+    {
+        await using var host = await StartHostAsync();
+        using var client = host.CreateClient();
+
+        using var response = await client.GetAsync("/api/stress/manifest?includeDescriptions=false");
+        using var json = await ReadSuccessJsonAsync(response);
+
+        Assert.False(json.RootElement.GetProperty("IncludeDescriptions").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("Items")[0].GetProperty("Description").ValueKind);
     }
 
     [Fact]
@@ -1211,6 +1330,17 @@ public sealed class RestApiProofHostTests
             Required = required,
             TypeName = typeName
         };
+
+    private static ApiParameterBindingConfiguration CreateQueryBinding(
+        string powerShellParameterName,
+        string externalName,
+        string typeName,
+        ApiRequiredBehavior required)
+    {
+        var binding = CreateBinding(powerShellParameterName, externalName, typeName, required);
+        binding.Source = ApiParameterSource.Query;
+        return binding;
+    }
 
     private static NormalizedApiResult NormalizeResult(IReadOnlyList<PSObject> output, ApiRuntimeOptions? runtimeOptions = null)
         => PowerShellResultNormalizer.Shared.Normalize(

@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
+using PS7ScriptDesk.Application.Services;
+using PS7ScriptDesk.Domain.Models;
 
 namespace PS7ScriptDesk.Shell.Controls
 {
@@ -42,6 +44,17 @@ namespace PS7ScriptDesk.Shell.Controls
 
             _maximumPendingCharacters = maximumPendingCharacters;
             _maximumBatchCharacters = maximumBatchCharacters;
+        }
+
+        public int? ActiveGeneration
+        {
+            get
+            {
+                lock (_syncRoot)
+                {
+                    return _activeGeneration;
+                }
+            }
         }
 
         public TerminalOutputGenerationInvalidationResult ActivateGeneration(int generation)
@@ -248,6 +261,124 @@ namespace PS7ScriptDesk.Shell.Controls
     internal readonly record struct TerminalOutputRendererUnavailableResult(int DiscardedCharacters);
 
     internal readonly record struct TerminalOutputBatch(int Generation, long Sequence, string Data);
+
+    internal sealed class TerminalRendererBridge
+    {
+        private readonly TerminalOutputFlowController _flowController;
+        private readonly object _syncRoot = new();
+        private int _rendererGeneration;
+        private TerminalRendererLifecycle _lifecycle = TerminalRendererLifecycle.Unavailable;
+
+        public TerminalRendererBridge(TerminalOutputFlowController? flowController = null)
+        {
+            _flowController = flowController ?? new TerminalOutputFlowController();
+        }
+
+        public int RendererGeneration
+        {
+            get
+            {
+                lock (_syncRoot)
+                {
+                    return _rendererGeneration;
+                }
+            }
+        }
+
+        public TerminalRendererLifecycle Lifecycle
+        {
+            get
+            {
+                lock (_syncRoot)
+                {
+                    return _lifecycle;
+                }
+            }
+        }
+
+        public TerminalOutputGenerationInvalidationResult StartRenderer(int rendererGeneration)
+        {
+            lock (_syncRoot)
+            {
+                if (rendererGeneration < _rendererGeneration)
+                {
+                    return default;
+                }
+
+                _rendererGeneration = rendererGeneration;
+                _lifecycle = TerminalRendererLifecycle.Starting;
+                return _flowController.ActivateGeneration(rendererGeneration);
+            }
+        }
+
+        public bool MarkRendererReady(int rendererGeneration)
+        {
+            lock (_syncRoot)
+            {
+                if (rendererGeneration != _rendererGeneration ||
+                    _lifecycle is TerminalRendererLifecycle.Failed or TerminalRendererLifecycle.Retired)
+                {
+                    return false;
+                }
+
+                _lifecycle = TerminalRendererLifecycle.Ready;
+                return _flowController.SetRendererReady();
+            }
+        }
+
+        public TerminalOutputRendererUnavailableResult MarkRendererUnavailable(int rendererGeneration)
+        {
+            lock (_syncRoot)
+            {
+                if (rendererGeneration != _rendererGeneration)
+                {
+                    return default;
+                }
+
+                _lifecycle = TerminalRendererLifecycle.Failed;
+                return _flowController.MarkRendererUnavailable();
+            }
+        }
+
+        public TerminalOutputEnqueueResult Submit(TerminalOutputEnvelope envelope)
+        {
+            if (envelope.Source == TerminalOutputSource.StructuredEditor &&
+                TerminalOutputMultiplexer.ContainsPrivateProtocol(envelope.Payload))
+            {
+                throw new InvalidOperationException("Structured editor output contains private ScriptDesk terminal protocol.");
+            }
+
+            lock (_syncRoot)
+            {
+                if (envelope.RendererGeneration != _rendererGeneration)
+                {
+                    return new TerminalOutputEnqueueResult(
+                        ScheduleFlush: false,
+                        AcceptedCharacters: 0,
+                        DroppedCharacters: 0,
+                        PendingCharacters: 0,
+                        RejectedStaleCharacters: envelope.Payload?.Length ?? 0);
+                }
+
+                return _flowController.Enqueue(envelope.RendererGeneration, envelope.Payload);
+            }
+        }
+
+        public TerminalOutputBatch? TryBeginDelivery() => _flowController.TryBeginDelivery();
+
+        public bool Acknowledge(int rendererGeneration, long sequence)
+        {
+            lock (_syncRoot)
+            {
+                if (rendererGeneration != _rendererGeneration)
+                {
+                    return false;
+                }
+
+                return _flowController.Acknowledge(rendererGeneration, sequence);
+            }
+        }
+    }
 
     internal static class TerminalWebMessageSerializer
     {

@@ -15,8 +15,10 @@ namespace PS7ScriptDesk.Shell.Composition
         public static MainWindow CreateMainWindow(ApplicationSettingsService applicationSettingsService, ApplicationSettings applicationSettings, PowerShellRuntimeInfo? startupRuntimeInfo, IUiScaleService? uiScaleService = null)
         {
             uiScaleService ??= new UiScaleService(applicationSettings.UiScalePercent);
+            UiScaleServiceHost.SetCurrent(uiScaleService);
             var workspaceService = new WorkspaceService();
             var fileDocumentService = new FileDocumentService();
+            var documentRecoveryService = new DocumentRecoveryService();
             var workspaceFolderService = new WorkspaceFolderService();
             var userPromptService = new UserPromptService();
             var liveConsoleService = new LiveConsoleService();
@@ -24,6 +26,16 @@ namespace PS7ScriptDesk.Shell.Composition
             var exeExportWizardService = new ExportWizardService(applicationSettings);
             var restApiPublishWizardService = new RestApiPublishWizardService(new ApiPublishConfigurationStore());
             var runtimeService = new RuntimeService(applicationSettings.SelectedRuntimeExecutablePath);
+            var structuredExecutionFeatureGate = EditorExecutionFeatureGate.FromEnvironment();
+            IEditorExecutionAdapter? editorExecutionAdapter = null;
+            if (structuredExecutionFeatureGate.IsStructuredExecutionEnabled)
+            {
+                var broker = PersistentPowerShellSessionBroker
+                    .CreateAsync("Structured editor PowerShell broker")
+                    .GetAwaiter()
+                    .GetResult();
+                editorExecutionAdapter = new StructuredEditorExecutionAdapter(broker, structuredExecutionFeatureGate);
+            }
             DeveloperDiagnostics.ConfigureFromSettings(applicationSettings, "AppBootstrapper loaded settings");
             DeveloperDiagnostics.LogInfo(
                 "Startup",
@@ -46,7 +58,12 @@ namespace PS7ScriptDesk.Shell.Composition
                 startupRuntimeInfo,
                 exeExportWizardService,
                 restApiPublishWizardService,
-                uiScaleService);
+                uiScaleService,
+                documentRecoveryService,
+                editorExecutionAdapter,
+                structuredExecutionFeatureGate,
+                new InteractiveTerminalCoordinator(),
+                new TerminalOutputMultiplexer());
 
             var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService)
             {

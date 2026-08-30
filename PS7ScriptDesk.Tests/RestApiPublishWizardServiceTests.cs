@@ -38,6 +38,41 @@ public sealed class RestApiPublishWizardServiceTests
     }
 
     [Fact]
+    public void LocalTestRequestBuilder_OmitsOptionalBlankQueryValuesButKeepsRequiredValues()
+    {
+        var pairs = LocalApiTestRequestBuilder.CreateQueryPairs(
+            [
+                QueryRow("ComputerName", "computerName", "string", ApiRequiredBehavior.Required, "RonMainDesktop"),
+                QueryRow("RequiredBlank", "requiredBlank", "string", ApiRequiredBehavior.Required, string.Empty),
+                QueryRow("TopProcessCount", "topProcessCount", "int", ApiRequiredBehavior.Optional, string.Empty),
+                QueryRow("IncludeEnvironment", "includeEnvironment", "bool", ApiRequiredBehavior.Optional, " "),
+                QueryRow("Comment", "comment", "string", ApiRequiredBehavior.Optional, string.Empty),
+                QueryRow("Limit", "limit", "int", ApiRequiredBehavior.Optional, "5"),
+                QueryRow("Enabled", "enabled", "bool", ApiRequiredBehavior.Optional, "false"),
+                QueryRow("Mode", "mode", "ConsoleColor", ApiRequiredBehavior.Optional, "DarkGreen"),
+                new RestApiParameterBindingRow
+                {
+                    PowerShellParameterName = "BodyValue",
+                    Name = "bodyValue",
+                    Source = ApiParameterSource.Body,
+                    Required = ApiRequiredBehavior.Optional,
+                    TypeName = "string",
+                    TestValue = string.Empty
+                }
+            ]);
+
+        Assert.Equal(
+            [
+                "computerName=RonMainDesktop",
+                "requiredBlank=",
+                "limit=5",
+                "enabled=false",
+                "mode=DarkGreen"
+            ],
+            pairs);
+    }
+
+    [Fact]
     public void LoadOrCreateConfiguration_WhenExistingConfigurationHasNoEndpoints_AddsDetectedEndpoints()
     {
         var sourcePath = Path.Combine(Path.GetTempPath(), "RestApiWizardServiceTests.ps1");
@@ -387,6 +422,22 @@ public sealed class RestApiPublishWizardServiceTests
         configuration.Endpoints = RestApiPublishWizardService.CreateDefaultEndpoints(CreateMetadata(), "/api");
         return configuration;
     }
+
+    private static RestApiParameterBindingRow QueryRow(
+        string powerShellName,
+        string apiName,
+        string typeName,
+        ApiRequiredBehavior required,
+        string testValue)
+        => new()
+        {
+            PowerShellParameterName = powerShellName,
+            Name = apiName,
+            Source = ApiParameterSource.Query,
+            Required = required,
+            TypeName = typeName,
+            TestValue = testValue
+        };
 
     private static string FindRepositoryRoot()
     {

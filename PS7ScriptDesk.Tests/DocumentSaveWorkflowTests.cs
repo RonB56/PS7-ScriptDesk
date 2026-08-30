@@ -357,8 +357,11 @@ internal sealed class FakeUserPromptService : IUserPromptService
 {
     public Queue<UnsavedChangesDecision> UnsavedDecisions { get; } = new();
     public Queue<ExternalFileConflictDecision> ExternalDecisions { get; } = new();
+    public Queue<DocumentRecoveryAction> RecoveryDecisions { get; } = new();
     public Queue<string?> SaveFilePaths { get; } = new();
     public int ExternalConflictPromptCount { get; private set; }
+    public int RecoveryPromptCount { get; private set; }
+    public List<DocumentRecoveryCandidate> RecoveryCandidates { get; } = new();
 
     public UnsavedChangesDecision ShowUnsavedChangesPrompt(string documentName) =>
         UnsavedDecisions.Count > 0 ? UnsavedDecisions.Dequeue() : UnsavedChangesDecision.Cancel;
@@ -369,6 +372,12 @@ internal sealed class FakeUserPromptService : IUserPromptService
         return ExternalDecisions.Count > 0 ? ExternalDecisions.Dequeue() : ExternalFileConflictDecision.Cancel;
     }
 
+    public DocumentRecoveryAction ShowDocumentRecoveryPrompt(DocumentRecoveryCandidate recoveryCandidate)
+    {
+        RecoveryPromptCount++;
+        RecoveryCandidates.Add(recoveryCandidate);
+        return RecoveryDecisions.Count > 0 ? RecoveryDecisions.Dequeue() : DocumentRecoveryAction.KeepForLater;
+    }
     public string? ShowSaveFileDialog(string suggestedFileName) => SaveFilePaths.Count > 0 ? SaveFilePaths.Dequeue() : null;
     public string? ShowSaveExecutableDialog(string suggestedFileName) => null;
     public string? ShowOpenFolderDialog() => null;

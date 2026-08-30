@@ -24,7 +24,10 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.DoesNotContain("_writeTextSink", viewModelSource, StringComparison.Ordinal);
         Assert.DoesNotContain("SetDebuggerOutputSink", viewModelSource, StringComparison.Ordinal);
         Assert.Contains("SetTerminalSessionControls", shellSource, StringComparison.Ordinal);
-        Assert.Contains("TerminalConsole.WriteRaw(generation, raw)", shellSource, StringComparison.Ordinal);
+        Assert.Contains("PublishInteractiveTerminalOutput(generation, raw)", shellSource, StringComparison.Ordinal);
+        Assert.Contains("TerminalOutputPublished += envelope", shellSource, StringComparison.Ordinal);
+        Assert.Contains("TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload)", shellSource, StringComparison.Ordinal);
+        Assert.Contains("TerminalConsole.WriteStructuredOutput(envelope.RendererGeneration, envelope.Payload)", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("raw => Dispatcher.BeginInvoke(() => TerminalConsole.WriteRaw(raw))", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("TerminalConsole.WriteDebuggerOutput", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("WriteDebuggerOutput", terminalControlSource, StringComparison.Ordinal);
@@ -166,7 +169,9 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.Contains("_webView2Available = false", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("_isReady = false", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("FallbackBanner.Visibility = Visibility.Visible", terminalControlSource, StringComparison.Ordinal);
-        Assert.Contains("WebView.Visibility = Visibility.Collapsed", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("RetireWebView2Renderer", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("WebViewHost.Children.Remove(retiredRenderer)", terminalControlSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("WebView.Visibility", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("navigationStage\"] = \"TerminalHtmlBootstrap\"", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("navigationOrigin\"] = \"NavigateToString\"", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("Dispatcher.HasShutdownStarted", terminalControlSource, StringComparison.Ordinal);
@@ -178,6 +183,34 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.Contains("_rendererUnavailable", flowControllerSource, StringComparison.Ordinal);
         Assert.Contains("MarkRendererUnavailable", flowControllerSource, StringComparison.Ordinal);
         Assert.Contains("if (_rendererUnavailable)", flowControllerSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WebView2Renderer_IsDynamicallyOwnedAndRetiredBeforeDisposal()
+    {
+        var terminalControlSource = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalControl.xaml.cs");
+        var terminalControlXaml = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalControl.xaml");
+        var shellSource = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "MainWindow.xaml.cs");
+
+        Assert.DoesNotContain("x:Name=\"WebView\"", terminalControlXaml, StringComparison.Ordinal);
+        Assert.Contains("new WebView2", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("_webView = null", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("retiredLifecycle.TryBeginDisposal()", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("Keyboard.ClearFocus()", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("DispatcherPriority.ContextIdle", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("TryGetCurrentRenderer", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("lifecycle.CanUseRenderer", terminalControlSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("WebView.CoreWebView2", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("ResetRendererForRetry", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("TerminalConsole.ResetRendererForRetry()", shellSource, StringComparison.Ordinal);
     }
 
     private static string ReadRepositoryFile(params string[] relativeSegments)

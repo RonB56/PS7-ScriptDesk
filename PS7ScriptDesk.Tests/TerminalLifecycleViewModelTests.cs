@@ -273,6 +273,32 @@ public sealed class TerminalLifecycleViewModelTests
         Assert.True(console.IsSessionRunning);
     }
 
+    [Fact]
+    public async Task RepeatedSessionTermination_PausesAutomaticRestartUntilManualReset()
+    {
+        var console = new RecordingLiveConsoleService();
+        var runtime = CreateRuntime();
+        var viewModel = await CreateViewModelAsync(console, runtime);
+
+        for (var i = 0; i < 5; i++)
+        {
+            console.IsSessionRunning = false;
+            console.IsCommandInProgress = false;
+            console.RaiseSessionTerminated();
+            await Task.Delay(350);
+        }
+
+        await WaitUntilAsync(() => viewModel.StatusText.Contains("Automatic recovery paused", StringComparison.Ordinal));
+
+        Assert.Equal(3, console.Operations.Count(operation => operation == "start"));
+        Assert.Contains("repeatedly", viewModel.ApplicationActivityText, StringComparison.OrdinalIgnoreCase);
+
+        viewModel.RestartConsoleCommand.Execute(null);
+        await WaitUntilAsync(() => console.Operations.Count(operation => operation == "start") == 4);
+
+        Assert.Contains("restarted", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static Task<MainWindowViewModel> CreateViewModelAsync(
         RecordingLiveConsoleService console,
         PowerShellRuntimeInfo? runtime = null)

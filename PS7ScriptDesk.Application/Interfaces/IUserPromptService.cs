@@ -1,9 +1,12 @@
-﻿namespace PS7ScriptDesk.Application.Interfaces
+using PS7ScriptDesk.Domain.Models;
+
+namespace PS7ScriptDesk.Application.Interfaces
 {
     public interface IUserPromptService
     {
         UnsavedChangesDecision ShowUnsavedChangesPrompt(string documentName);
         ExternalFileConflictDecision ShowExternalFileConflictPrompt(string filePath, string conflictReason);
+        DocumentRecoveryAction ShowDocumentRecoveryPrompt(DocumentRecoveryCandidate recoveryCandidate);
         string? ShowSaveFileDialog(string suggestedFileName);
         string? ShowSaveExecutableDialog(string suggestedFileName);
         string? ShowOpenFolderDialog();
