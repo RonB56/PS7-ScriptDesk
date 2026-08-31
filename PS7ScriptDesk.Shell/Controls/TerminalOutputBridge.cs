@@ -57,6 +57,17 @@ namespace PS7ScriptDesk.Shell.Controls
             }
         }
 
+        public bool HasOutstandingOutput
+        {
+            get
+            {
+                lock (_syncRoot)
+                {
+                    return _pendingCharacters > 0 || _inFlightBatch is not null;
+                }
+            }
+        }
+
         public TerminalOutputGenerationInvalidationResult ActivateGeneration(int generation)
         {
             lock (_syncRoot)
@@ -262,6 +273,267 @@ namespace PS7ScriptDesk.Shell.Controls
 
     internal readonly record struct TerminalOutputBatch(int Generation, long Sequence, string Data);
 
+    /// <summary>
+    /// Holds renderer-visible terminal bytes while ConPTY has been resized and xterm.js
+    /// has not yet acknowledged the matching grid commit. The coordinator never waits on
+    /// WebView2 and releases accepted chunks in their original order exactly once.
+    /// </summary>
+    internal sealed class TerminalResizeOutputBarrier
+    {
+        public const int DefaultMaximumBufferedCharacters = 256 * 1024;
+        public const int DefaultMaximumBufferedChunks = 256;
+        public static readonly TimeSpan DefaultMaximumDuration = TimeSpan.FromSeconds(2);
+
+        private readonly object _syncRoot = new();
+        private readonly int _maximumBufferedCharacters;
+        private readonly int _maximumBufferedChunks;
+        private readonly TimeSpan _maximumDuration;
+        private ResizeTransaction? _active;
+
+        public TerminalResizeOutputBarrier(
+            int maximumBufferedCharacters = DefaultMaximumBufferedCharacters,
+            int maximumBufferedChunks = DefaultMaximumBufferedChunks,
+            TimeSpan? maximumDuration = null)
+        {
+            if (maximumBufferedCharacters <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maximumBufferedCharacters));
+            }
+
+            if (maximumBufferedChunks <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maximumBufferedChunks));
+            }
+
+            var duration = maximumDuration ?? DefaultMaximumDuration;
+            if (duration <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maximumDuration));
+            }
+
+            _maximumBufferedCharacters = maximumBufferedCharacters;
+            _maximumBufferedChunks = maximumBufferedChunks;
+            _maximumDuration = duration;
+        }
+
+        public bool IsActive
+        {
+            get
+            {
+                lock (_syncRoot)
+                {
+                    return _active is not null;
+                }
+            }
+        }
+
+        public TerminalResizeBarrierBeginResult Begin(
+            int rendererGeneration,
+            int terminalSessionGeneration,
+            long resizeGeneration,
+            int columns,
+            int rows,
+            DateTimeOffset? startedAt = null)
+        {
+            lock (_syncRoot)
+            {
+                if (_active is not null)
+                {
+                    return new TerminalResizeBarrierBeginResult(false, "resize-active");
+                }
+
+                _active = new ResizeTransaction(
+                    rendererGeneration,
+                    terminalSessionGeneration,
+                    resizeGeneration,
+                    columns,
+                    rows,
+                    startedAt ?? DateTimeOffset.UtcNow);
+                return new TerminalResizeBarrierBeginResult(true, "started");
+            }
+        }
+
+        public TerminalResizeBarrierCaptureResult Capture(
+            int rendererGeneration,
+            int terminalSessionGeneration,
+            string source,
+            string data,
+            DateTimeOffset? observedAt = null)
+        {
+            if (string.IsNullOrEmpty(data))
+            {
+                return new TerminalResizeBarrierCaptureResult(TerminalResizeBarrierCaptureStatus.Empty, 0, 0);
+            }
+
+            lock (_syncRoot)
+            {
+                if (_active is null)
+                {
+                    return new TerminalResizeBarrierCaptureResult(TerminalResizeBarrierCaptureStatus.NotActive, 0, 0);
+                }
+
+                if (_active.RendererGeneration != rendererGeneration ||
+                    _active.TerminalSessionGeneration != terminalSessionGeneration)
+                {
+                    return new TerminalResizeBarrierCaptureResult(TerminalResizeBarrierCaptureStatus.Stale, 0, _active.BufferedCharacters);
+                }
+
+                if ((observedAt ?? DateTimeOffset.UtcNow) - _active.StartedAt > _maximumDuration ||
+                    _active.BufferedChunks >= _maximumBufferedChunks ||
+                    data.Length > _maximumBufferedCharacters - _active.BufferedCharacters)
+                {
+                    return new TerminalResizeBarrierCaptureResult(
+                        TerminalResizeBarrierCaptureStatus.BoundedLimitExceeded,
+                        0,
+                        _active.BufferedCharacters);
+                }
+
+                _active.Chunks.Add(new TerminalResizeBufferedOutput(terminalSessionGeneration, source, data));
+                _active.BufferedCharacters += data.Length;
+                return new TerminalResizeBarrierCaptureResult(
+                    TerminalResizeBarrierCaptureStatus.Buffered,
+                    data.Length,
+                    _active.BufferedCharacters);
+            }
+        }
+
+        public TerminalResizeBarrierAcknowledgementResult Acknowledge(
+            int rendererGeneration,
+            int terminalSessionGeneration,
+            long resizeGeneration,
+            int actualColumns,
+            int actualRows)
+        {
+            lock (_syncRoot)
+            {
+                if (_active is null)
+                {
+                    return TerminalResizeBarrierAcknowledgementResult.Rejected("no-active-resize");
+                }
+
+                if (_active.RendererGeneration != rendererGeneration ||
+                    _active.TerminalSessionGeneration != terminalSessionGeneration ||
+                    _active.ResizeGeneration != resizeGeneration ||
+                    _active.Columns != actualColumns ||
+                    _active.Rows != actualRows)
+                {
+                    return TerminalResizeBarrierAcknowledgementResult.Rejected("stale-or-mismatched-ack");
+                }
+
+                var released = _active.Chunks.ToArray();
+                var result = new TerminalResizeBarrierAcknowledgementResult(
+                    Accepted: true,
+                    Reason: "acknowledged",
+                    ReleasedOutput: released,
+                    BufferedCharacters: _active.BufferedCharacters);
+                _active = null;
+                return result;
+            }
+        }
+
+        public TerminalResizeBarrierExpirationResult Expire(DateTimeOffset? now = null)
+        {
+            lock (_syncRoot)
+            {
+                if (_active is null || (now ?? DateTimeOffset.UtcNow) - _active.StartedAt <= _maximumDuration)
+                {
+                    return new TerminalResizeBarrierExpirationResult(false, 0, 0);
+                }
+
+                return new TerminalResizeBarrierExpirationResult(
+                    true,
+                    _active.BufferedCharacters,
+                    _active.BufferedChunks);
+            }
+        }
+
+        public TerminalResizeBarrierCancellationResult Cancel()
+        {
+            lock (_syncRoot)
+            {
+                if (_active is null)
+                {
+                    return new TerminalResizeBarrierCancellationResult(0, 0);
+                }
+
+                var result = new TerminalResizeBarrierCancellationResult(
+                    _active.BufferedCharacters,
+                    _active.BufferedChunks);
+                _active = null;
+                return result;
+            }
+        }
+
+        private sealed class ResizeTransaction
+        {
+            public ResizeTransaction(
+                int rendererGeneration,
+                int terminalSessionGeneration,
+                long resizeGeneration,
+                int columns,
+                int rows,
+                DateTimeOffset startedAt)
+            {
+                RendererGeneration = rendererGeneration;
+                TerminalSessionGeneration = terminalSessionGeneration;
+                ResizeGeneration = resizeGeneration;
+                Columns = columns;
+                Rows = rows;
+                StartedAt = startedAt;
+            }
+
+            public int RendererGeneration { get; }
+            public int TerminalSessionGeneration { get; }
+            public long ResizeGeneration { get; }
+            public int Columns { get; }
+            public int Rows { get; }
+            public DateTimeOffset StartedAt { get; }
+            public List<TerminalResizeBufferedOutput> Chunks { get; } = new();
+            public int BufferedCharacters { get; set; }
+            public int BufferedChunks => Chunks.Count;
+        }
+    }
+
+    internal readonly record struct TerminalResizeBarrierBeginResult(bool Accepted, string Reason);
+
+    internal enum TerminalResizeBarrierCaptureStatus
+    {
+        Empty,
+        NotActive,
+        Stale,
+        Buffered,
+        BoundedLimitExceeded
+    }
+
+    internal readonly record struct TerminalResizeBarrierCaptureResult(
+        TerminalResizeBarrierCaptureStatus Status,
+        int BufferedCharacters,
+        int TotalBufferedCharacters);
+
+    internal readonly record struct TerminalResizeBufferedOutput(
+        int TerminalSessionGeneration,
+        string Source,
+        string Data);
+
+    internal readonly record struct TerminalResizeBarrierAcknowledgementResult(
+        bool Accepted,
+        string Reason,
+        IReadOnlyList<TerminalResizeBufferedOutput> ReleasedOutput,
+        int BufferedCharacters)
+    {
+        public static TerminalResizeBarrierAcknowledgementResult Rejected(string reason) =>
+            new(false, reason, Array.Empty<TerminalResizeBufferedOutput>(), 0);
+    }
+
+    internal readonly record struct TerminalResizeBarrierExpirationResult(
+        bool Expired,
+        int BufferedCharacters,
+        int BufferedChunks);
+
+    internal readonly record struct TerminalResizeBarrierCancellationResult(
+        int BufferedCharacters,
+        int BufferedChunks);
+
     internal sealed class TerminalRendererBridge
     {
         private readonly TerminalOutputFlowController _flowController;
@@ -382,14 +654,52 @@ namespace PS7ScriptDesk.Shell.Controls
 
     internal static class TerminalWebMessageSerializer
     {
-        public static string SerializeOutput(int generation, long sequence, string data)
+        public static string SerializeOutput(
+            int generation,
+            long sequence,
+            string data,
+            int rendererGeneration = 0,
+            long submissionId = 0,
+            bool resizeAdjacent = false,
+            long resizeGeneration = 0,
+            double resizeElapsedMilliseconds = 0,
+            string? hostControlSummary = null)
         {
+            var safeData = data ?? string.Empty;
+            var controlSummary = hostControlSummary ??
+                TerminalOutputControlClassifier.Summarize(safeData).ToDiagnosticString();
             return JsonSerializer.Serialize(new
             {
                 type = "output_b64",
                 generation,
                 sequence,
-                data = Convert.ToBase64String(Encoding.UTF8.GetBytes(data ?? string.Empty))
+                rendererGeneration,
+                submissionId,
+                resizeAdjacent,
+                resizeGeneration,
+                resizeElapsedMilliseconds,
+                outputCharacterLength = safeData.Length,
+                hostControlSummary = controlSummary,
+                contentOmitted = true,
+                data = Convert.ToBase64String(Encoding.UTF8.GetBytes(safeData))
+            });
+        }
+
+        public static string SerializeResizeCommit(
+            int rendererGeneration,
+            int terminalSessionGeneration,
+            long resizeGeneration,
+            int columns,
+            int rows)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                type = "resize_commit",
+                rendererGeneration,
+                terminalSessionGeneration,
+                resizeGeneration,
+                cols = columns,
+                rows
             });
         }
 

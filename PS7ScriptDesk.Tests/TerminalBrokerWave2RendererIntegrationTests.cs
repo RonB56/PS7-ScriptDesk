@@ -60,6 +60,42 @@ public sealed class TerminalBrokerWave2RendererIntegrationTests
         Assert.Equal(9, editor.SourceSequence);
     }
 
+    [Fact]
+    public void Multiplexer_SubscriberFailureDoesNotEscapeOrStopLaterOutput()
+    {
+        var multiplexer = new TerminalOutputMultiplexer();
+        var observed = new List<TerminalOutputEnvelope>();
+        multiplexer.OutputPublished += _ => throw new InvalidOperationException("consumer failed");
+        multiplexer.OutputPublished += observed.Add;
+
+        var first = multiplexer.PublishInteractive(1, EditorOutputStreamKind.VirtualTerminal, "first");
+        var second = multiplexer.PublishInteractive(1, EditorOutputStreamKind.VirtualTerminal, "second");
+
+        Assert.Equal([first, second], observed);
+    }
+
+    [Fact]
+    public async Task Multiplexer_ConcurrentPublishNotificationsFollowGlobalSequence()
+    {
+        var multiplexer = new TerminalOutputMultiplexer();
+        var observed = new List<long>();
+        var syncRoot = new object();
+        multiplexer.OutputPublished += envelope =>
+        {
+            lock (syncRoot)
+            {
+                observed.Add(envelope.Sequence);
+            }
+        };
+
+        await Task.WhenAll(
+            Enumerable.Range(0, 50).Select(index =>
+                Task.Run(() => multiplexer.PublishInteractive(1, EditorOutputStreamKind.VirtualTerminal, index.ToString()))));
+
+        Assert.Equal(observed.OrderBy(item => item), observed);
+        Assert.Equal(50, observed.Count);
+    }
+
     [Theory]
     [InlineData("##PSSTUDIO_EXEC_START_abc")]
     [InlineData("##PSSTUDIO_EXEC_DONE_abc")]
@@ -371,10 +407,68 @@ public sealed class TerminalBrokerWave2RendererIntegrationTests
     {
         var source = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
 
-        Assert.Contains("PublishInteractiveTerminalOutput(generation, raw)", source, StringComparison.Ordinal);
-        Assert.Contains("TerminalOutputPublished += envelope", source, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.SubscribeRawOutput(OnRawTerminalOutputReceived)", source, StringComparison.Ordinal);
+        Assert.Contains("private MainWindowViewModel? ViewModel => Volatile.Read(ref _viewModel)", source, StringComparison.Ordinal);
+        Assert.Contains("viewModel.PublishInteractiveTerminalOutput(generation, rawOutput)", source, StringComparison.Ordinal);
+        Assert.Contains("TerminalOutputPublished += EnqueueTerminalOutputForRenderer", source, StringComparison.Ordinal);
+        Assert.Contains("ConcurrentQueue<TerminalOutputEnvelope>", source, StringComparison.Ordinal);
+        Assert.Contains("DrainTerminalOutputForRenderer", source, StringComparison.Ordinal);
         Assert.Contains("TerminalConsole.WriteStructuredOutput", source, StringComparison.Ordinal);
         Assert.Contains("TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MainWindow_SourceDoesNotTouchTerminalControlFromOutputSubscriber()
+    {
+        var source = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+        var enqueueIndex = source.IndexOf("private void EnqueueTerminalOutputForRenderer", StringComparison.Ordinal);
+        var drainIndex = source.IndexOf("private void DrainTerminalOutputForRenderer", StringComparison.Ordinal);
+
+        Assert.True(enqueueIndex >= 0);
+        Assert.True(drainIndex >= 0);
+        Assert.DoesNotContain("TerminalConsole.Write", source[enqueueIndex..drainIndex], StringComparison.Ordinal);
+        Assert.Contains("TerminalOutputPublished += EnqueueTerminalOutputForRenderer", source, StringComparison.Ordinal);
+        Assert.Contains("_terminalOutputDispatcher.BeginInvoke", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MainWindow_RawOutputSubscriberDoesNotReadWpfDataContextOrTouchRenderer()
+    {
+        var source = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+        var handlerIndex = source.IndexOf("private void OnRawTerminalOutputReceived", StringComparison.Ordinal);
+        var enqueueIndex = source.IndexOf("private void EnqueueTerminalOutputForRenderer", StringComparison.Ordinal);
+
+        Assert.True(handlerIndex >= 0);
+        Assert.True(enqueueIndex > handlerIndex);
+        var handlerBlock = source[handlerIndex..enqueueIndex];
+        Assert.Contains("Volatile.Read(ref _viewModel)", handlerBlock, StringComparison.Ordinal);
+        Assert.Contains("viewModel.PublishInteractiveTerminalOutput(generation, rawOutput)", handlerBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("DataContext", handlerBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("GetValue", handlerBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("Dispatcher.", handlerBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("TerminalConsole.", handlerBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("ViewModel?", handlerBlock, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AppBootstrapper_AttachesViewModelThroughMainWindowOwnershipMethod()
+    {
+        var source = ReadRepositoryFile("PS7ScriptDesk.Shell", "Composition", "AppBootstrapper.cs");
+
+        Assert.Contains("window.AttachViewModel(viewModel)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("DataContext = viewModel", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MainWindowViewModel_SourceDoesNotTreatRendererReadyAsPromptReady()
+    {
+        var source = ReadRepositoryFile("PS7ScriptDesk.UI", "ViewModels", "MainWindowViewModel.cs");
+        var rendererReadyIndex = source.IndexOf("public void NotifyTerminalRendererReady()", StringComparison.Ordinal);
+        var rendererReadyBlock = source[rendererReadyIndex..Math.Min(source.Length, rendererReadyIndex + 900)];
+
+        Assert.Contains("waiting for backend prompt observation", rendererReadyBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("InteractiveTerminalState.InteractiveIdleAtPrompt", rendererReadyBlock, StringComparison.Ordinal);
+        Assert.Contains("OnTerminalPromptReadyObserved", source, StringComparison.Ordinal);
     }
 
     [Fact]

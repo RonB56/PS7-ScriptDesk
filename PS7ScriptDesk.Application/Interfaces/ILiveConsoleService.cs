@@ -42,6 +42,12 @@ namespace PS7ScriptDesk.Application.Interfaces
         event Action<int>? TerminalSessionStopping;
 
         /// <summary>
+        /// Raised when terminal output contains a visible PowerShell prompt heuristic.
+        /// This is a backend observation, not renderer cursor authority.
+        /// </summary>
+        event Action<int, string>? PromptReadyObserved;
+
+        /// <summary>
         /// Fires on the thread-pool with raw (ANSI/VT100-intact) terminal output after
         /// the execution-done sentinel has been stripped, together with its source generation.
         /// Subscribe to forward ConPTY output directly to xterm.js. When at least one handler

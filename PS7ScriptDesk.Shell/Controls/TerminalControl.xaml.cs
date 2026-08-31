@@ -21,7 +21,7 @@ namespace PS7ScriptDesk.Shell.Controls
     /// Data flow:
     ///   ConPTY → LiveConsoleService.RawOutputReceived (generation, output) → WriteRaw() → xterm.js
     ///   xterm.js onData → UserInput event → ILiveConsoleService.WriteRawInputAsync()
-    ///   xterm.js onResize → TerminalResized event → ILiveConsoleService.ResizeConsole()
+    ///   ResizeObserver → proposed exact grid → TerminalResized event → ILiveConsoleService.ResizeConsole() → xterm.js resize commit
     /// </summary>
     public partial class TerminalControl : System.Windows.Controls.UserControl
     {
@@ -177,20 +177,326 @@ namespace PS7ScriptDesk.Shell.Controls
                 term.loadAddon(webLinksAddon);
                 term.open(terminalElement);
 
-                function reportLayout(source) {
-                  post({
-                    type: 'layout',
-                    source: source,
+                var terminalState = function () {
+                  var buffer = term.buffer && term.buffer.active ? term.buffer.active : null;
+                  return {
                     cols: term.cols,
                     rows: term.rows,
+                    cursorX: buffer ? buffer.cursorX : 0,
+                    cursorY: buffer ? buffer.cursorY : 0,
+                    baseY: buffer ? buffer.baseY : 0,
+                    viewportY: buffer ? buffer.viewportY : 0,
+                    absoluteCursorY: buffer ? buffer.baseY + buffer.cursorY : 0,
+                    bufferType: term.buffer && term.buffer.active ? 'active' : 'unknown',
+                    scrollbackLength: buffer && buffer.length ? buffer.length : 0,
                     clientWidth: terminalElement.clientWidth,
                     clientHeight: terminalElement.clientHeight
+                  };
+                };
+
+                var postTerminalState = function (stage, source, extra) {
+                  var state = terminalState();
+                  state.type = 'xterm_resize_trace';
+                  state.stage = stage;
+                  state.source = source || 'unknown';
+                  if (extra) {
+                    Object.keys(extra).forEach(function (key) { state[key] = extra[key]; });
+                  }
+                  post(state);
+                };
+
+                var tryPostTerminalState = function (stage, source, extra) {
+                  try {
+                    if (typeof postTerminalState === 'function') {
+                      postTerminalState(stage, source, extra);
+                    } else {
+                      post({ type: 'xterm_resize_trace_error', source: source || 'unknown', stage: stage, message: 'postTerminalState unavailable' });
+                    }
+                  } catch (traceErr) {
+                    post({ type: 'xterm_resize_trace_error', source: source || 'unknown', stage: stage, message: String(traceErr) });
+                  }
+                };
+
+                var createControlSummary = function () {
+                  return {
+                    carriageReturnCount: 0,
+                    lineFeedCount: 0,
+                    carriageReturnLineFeedPairCount: 0,
+                    escapeCount: 0,
+                    csiCount: 0,
+                    csiCursorUpCount: 0,
+                    csiCursorDownCount: 0,
+                    csiCursorForwardCount: 0,
+                    csiCursorBackwardCount: 0,
+                    csiCursorPositionCount: 0,
+                    csiEraseLineCount: 0,
+                    csiEraseDisplayCount: 0,
+                    csiSaveCursorCount: 0,
+                    csiRestoreCursorCount: 0,
+                    csiInsertLineCount: 0,
+                    csiDeleteLineCount: 0,
+                    csiScrollUpCount: 0,
+                    csiScrollDownCount: 0,
+                    csiSgrCount: 0,
+                    csiOtherCount: 0,
+                    oscCount: 0,
+                    otherEscapeCount: 0,
+                    otherControlCount: 0,
+                    printableCharacterCount: 0
+                  };
+                };
+
+                var appendControlSummaryPart = function (parts, name, value) {
+                  if (value > 0) parts.push(name + '=' + value);
+                };
+
+                var formatControlSummary = function (summary) {
+                  var parts = [];
+                  appendControlSummaryPart(parts, 'CR', summary.carriageReturnCount);
+                  appendControlSummaryPart(parts, 'LF', summary.lineFeedCount);
+                  appendControlSummaryPart(parts, 'CRLF', summary.carriageReturnLineFeedPairCount);
+                  appendControlSummaryPart(parts, 'ESC', summary.escapeCount);
+                  appendControlSummaryPart(parts, 'CSI', summary.csiCount);
+                  appendControlSummaryPart(parts, 'CSI_CursorUp', summary.csiCursorUpCount);
+                  appendControlSummaryPart(parts, 'CSI_CursorDown', summary.csiCursorDownCount);
+                  appendControlSummaryPart(parts, 'CSI_CursorForward', summary.csiCursorForwardCount);
+                  appendControlSummaryPart(parts, 'CSI_CursorBackward', summary.csiCursorBackwardCount);
+                  appendControlSummaryPart(parts, 'CSI_CursorPosition', summary.csiCursorPositionCount);
+                  appendControlSummaryPart(parts, 'CSI_EraseLine', summary.csiEraseLineCount);
+                  appendControlSummaryPart(parts, 'CSI_EraseDisplay', summary.csiEraseDisplayCount);
+                  appendControlSummaryPart(parts, 'CSI_SaveCursor', summary.csiSaveCursorCount);
+                  appendControlSummaryPart(parts, 'CSI_RestoreCursor', summary.csiRestoreCursorCount);
+                  appendControlSummaryPart(parts, 'CSI_InsertLine', summary.csiInsertLineCount);
+                  appendControlSummaryPart(parts, 'CSI_DeleteLine', summary.csiDeleteLineCount);
+                  appendControlSummaryPart(parts, 'CSI_ScrollUp', summary.csiScrollUpCount);
+                  appendControlSummaryPart(parts, 'CSI_ScrollDown', summary.csiScrollDownCount);
+                  appendControlSummaryPart(parts, 'SGR', summary.csiSgrCount);
+                  appendControlSummaryPart(parts, 'CSI_Other', summary.csiOtherCount);
+                  appendControlSummaryPart(parts, 'OSC', summary.oscCount);
+                  appendControlSummaryPart(parts, 'ESC_Other', summary.otherEscapeCount);
+                  appendControlSummaryPart(parts, 'OtherControl', summary.otherControlCount);
+                  appendControlSummaryPart(parts, 'Printable', summary.printableCharacterCount);
+                  return parts.length === 0 ? '(none)' : parts.join(' ');
+                };
+
+                var findCsiEnd = function (data, start) {
+                  for (var index = start; index < data.length; index++) {
+                    var code = data.charCodeAt(index);
+                    if (code >= 0x40 && code <= 0x7e) return index;
+                  }
+
+                  return -1;
+                };
+
+                var findOscEnd = function (data, start) {
+                  for (var index = start; index < data.length; index++) {
+                    if (data.charAt(index) === '\x07') return index;
+                    if (data.charAt(index) === '\x1b' && index + 1 < data.length && data.charAt(index + 1) === '\\') return index + 1;
+                  }
+
+                  return data.length - 1;
+                };
+
+                var classifyTerminalControls = function (data) {
+                  var summary = createControlSummary();
+                  if (!data) {
+                    summary.summaryText = formatControlSummary(summary);
+                    return summary;
+                  }
+
+                  for (var index = 0; index < data.length; index++) {
+                    var character = data.charAt(index);
+                    if (character === '\r') {
+                      summary.carriageReturnCount++;
+                      if (index + 1 < data.length && data.charAt(index + 1) === '\n') summary.carriageReturnLineFeedPairCount++;
+                      continue;
+                    }
+
+                    if (character === '\n') {
+                      summary.lineFeedCount++;
+                      continue;
+                    }
+
+                    if (character !== '\x1b') {
+                      var code = data.charCodeAt(index);
+                      if ((code >= 0 && code < 32) || code === 127) {
+                        summary.otherControlCount++;
+                      } else {
+                        summary.printableCharacterCount++;
+                      }
+                      continue;
+                    }
+
+                    summary.escapeCount++;
+                    if (index + 1 >= data.length) {
+                      summary.otherEscapeCount++;
+                      continue;
+                    }
+
+                    var next = data.charAt(index + 1);
+                    if (next === '[') {
+                      var csiEnd = findCsiEnd(data, index + 2);
+                      if (csiEnd < 0) {
+                        summary.otherEscapeCount++;
+                        continue;
+                      }
+
+                      summary.csiCount++;
+                      switch (data.charAt(csiEnd)) {
+                        case 'A': summary.csiCursorUpCount++; break;
+                        case 'B': summary.csiCursorDownCount++; break;
+                        case 'C': summary.csiCursorForwardCount++; break;
+                        case 'D': summary.csiCursorBackwardCount++; break;
+                        case 'H':
+                        case 'f':
+                        case 'G':
+                        case 'd':
+                          summary.csiCursorPositionCount++;
+                          break;
+                        case 'J': summary.csiEraseDisplayCount++; break;
+                        case 'K': summary.csiEraseLineCount++; break;
+                        case 's': summary.csiSaveCursorCount++; break;
+                        case 'u': summary.csiRestoreCursorCount++; break;
+                        case 'L': summary.csiInsertLineCount++; break;
+                        case 'M': summary.csiDeleteLineCount++; break;
+                        case 'S': summary.csiScrollUpCount++; break;
+                        case 'T': summary.csiScrollDownCount++; break;
+                        case 'm': summary.csiSgrCount++; break;
+                        default: summary.csiOtherCount++; break;
+                      }
+
+                      index = csiEnd;
+                      continue;
+                    }
+
+                    if (next === ']') {
+                      summary.oscCount++;
+                      index = findOscEnd(data, index + 2);
+                      continue;
+                    }
+
+                    switch (next) {
+                      case '7':
+                        summary.csiSaveCursorCount++;
+                        break;
+                      case '8':
+                        summary.csiRestoreCursorCount++;
+                        break;
+                      default:
+                        summary.otherEscapeCount++;
+                        break;
+                    }
+
+                    index++;
+                  }
+
+                  summary.summaryText = formatControlSummary(summary);
+                  return summary;
+                };
+
+                var postOutputCursorTraceError = function (stage, message) {
+                  post({
+                    type: 'xterm_output_cursor_trace_error',
+                    source: 'renderer.outputWrite',
+                    stage: stage,
+                    message: String(message),
+                    contentOmitted: true
                   });
+                };
+
+                var tryPostOutputCursorTraceError = function (stage, message) {
+                  try {
+                    if (typeof postOutputCursorTraceError === 'function') {
+                      postOutputCursorTraceError(stage, message);
+                    } else {
+                      post({
+                        type: 'xterm_output_cursor_trace_error',
+                        source: 'renderer.outputWrite',
+                        stage: stage,
+                        message: String(message),
+                        contentOmitted: true
+                      });
+                    }
+                  } catch (traceErrorReportErr) {
+                  }
+                };
+
+                var postOutputCursorTrace = function (stage, msg, beforeState, classification) {
+                  var state = terminalState();
+                  var summary = classification || createControlSummary();
+                  post({
+                    type: 'xterm_output_cursor_trace',
+                    stage: stage,
+                    source: 'renderer.outputWrite',
+                    rendererGeneration: Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : 0,
+                    terminalSessionGeneration: Number.isSafeInteger(msg.generation) ? msg.generation : 0,
+                    outputSequence: Number.isSafeInteger(msg.sequence) ? msg.sequence : 0,
+                    submissionId: Number.isSafeInteger(msg.submissionId) ? msg.submissionId : 0,
+                    resizeAdjacent: msg.resizeAdjacent === true,
+                    resizeGeneration: Number.isSafeInteger(msg.resizeGeneration) ? msg.resizeGeneration : 0,
+                    resizeElapsedMilliseconds: typeof msg.resizeElapsedMilliseconds === 'number' ? msg.resizeElapsedMilliseconds : -1,
+                    outputCharacterLength: Number.isSafeInteger(msg.outputCharacterLength) ? msg.outputCharacterLength : 0,
+                    hostControlSummary: typeof msg.hostControlSummary === 'string' ? msg.hostControlSummary : '',
+                    classificationSummary: summary.summaryText || formatControlSummary(summary),
+                    carriageReturnCount: summary.carriageReturnCount,
+                    lineFeedCount: summary.lineFeedCount,
+                    carriageReturnLineFeedPairCount: summary.carriageReturnLineFeedPairCount,
+                    escapeCount: summary.escapeCount,
+                    csiCount: summary.csiCount,
+                    csiCursorUpCount: summary.csiCursorUpCount,
+                    csiCursorDownCount: summary.csiCursorDownCount,
+                    csiCursorForwardCount: summary.csiCursorForwardCount,
+                    csiCursorBackwardCount: summary.csiCursorBackwardCount,
+                    csiCursorPositionCount: summary.csiCursorPositionCount,
+                    csiEraseLineCount: summary.csiEraseLineCount,
+                    csiEraseDisplayCount: summary.csiEraseDisplayCount,
+                    csiSaveCursorCount: summary.csiSaveCursorCount,
+                    csiRestoreCursorCount: summary.csiRestoreCursorCount,
+                    csiInsertLineCount: summary.csiInsertLineCount,
+                    csiDeleteLineCount: summary.csiDeleteLineCount,
+                    csiScrollUpCount: summary.csiScrollUpCount,
+                    csiScrollDownCount: summary.csiScrollDownCount,
+                    csiSgrCount: summary.csiSgrCount,
+                    csiOtherCount: summary.csiOtherCount,
+                    oscCount: summary.oscCount,
+                    otherEscapeCount: summary.otherEscapeCount,
+                    otherControlCount: summary.otherControlCount,
+                    printableCharacterCount: summary.printableCharacterCount,
+                    cols: state.cols,
+                    rows: state.rows,
+                    cursorX: state.cursorX,
+                    cursorY: state.cursorY,
+                    baseY: state.baseY,
+                    viewportY: state.viewportY,
+                    absoluteCursorY: state.absoluteCursorY,
+                    scrollbackLength: state.scrollbackLength,
+                    beforeCursorX: beforeState ? beforeState.cursorX : null,
+                    beforeCursorY: beforeState ? beforeState.cursorY : null,
+                    beforeBaseY: beforeState ? beforeState.baseY : null,
+                    beforeViewportY: beforeState ? beforeState.viewportY : null,
+                    beforeAbsoluteCursorY: beforeState ? beforeState.absoluteCursorY : null,
+                    deltaCursorX: beforeState ? state.cursorX - beforeState.cursorX : null,
+                    deltaCursorY: beforeState ? state.cursorY - beforeState.cursorY : null,
+                    deltaBaseY: beforeState ? state.baseY - beforeState.baseY : null,
+                    deltaViewportY: beforeState ? state.viewportY - beforeState.viewportY : null,
+                    deltaAbsoluteCursorY: beforeState ? state.absoluteCursorY - beforeState.absoluteCursorY : null,
+                    contentOmitted: true
+                  });
+                  return state;
+                };
+
+                function reportLayout(source) {
+                  var state = terminalState();
+                  state.type = 'layout';
+                  state.source = source;
+                  post(state);
                 }
 
                 function fitTerminal(source) {
                   try {
+                    postTerminalState('Xterm.BeforeFit', source, { fitCommitted: true });
                     fitAddon.fit();
+                    postTerminalState('Xterm.AfterFit', source, { fitCommitted: true });
                   } catch (fitErr) {
                     post({ type: 'xterm_fit_error', source: source, message: String(fitErr) });
                   }
@@ -271,19 +577,18 @@ namespace PS7ScriptDesk.Shell.Controls
                 });
 
                 term.onData(function (data) { post({ type: 'input', data: data }); });
-                var lastReportedCols = 0;
-                var lastReportedRows = 0;
+                var lastRequestedCols = 0;
+                var lastRequestedRows = 0;
+                var pendingResizeCommit = null;
                 term.onResize(function (e) {
                   if (!e || e.cols <= 0 || e.rows <= 0) return;
-                  if (e.cols === lastReportedCols && e.rows === lastReportedRows) return;
-                  lastReportedCols = e.cols;
-                  lastReportedRows = e.rows;
-                  post({
-                    type: 'resize',
-                    cols: e.cols,
-                    rows: e.rows,
-                    clientWidth: terminalElement.clientWidth,
-                    clientHeight: terminalElement.clientHeight
+                  var commit = pendingResizeCommit;
+                  postTerminalState('Xterm.OnResize', commit ? 'host.resizeCommit' : 'xterm.internal', {
+                    reportedCols: e.cols,
+                    reportedRows: e.rows,
+                    rendererGeneration: commit ? commit.rendererGeneration : null,
+                    resizeGeneration: commit ? commit.resizeGeneration : null,
+                    hostResizeCommit: !!commit
                   });
                 });
 
@@ -338,7 +643,27 @@ namespace PS7ScriptDesk.Shell.Controls
                     if (!resizeRequested) return;
                     resizeRequested = false;
                     if (terminalElement.clientWidth <= 0 || terminalElement.clientHeight <= 0) return;
-                    fitTerminal('resizeObserver');
+                    postTerminalState('ResizeObserver.Observed', 'resizeObserver');
+                    postTerminalState('Xterm.BeforeFit', 'resizeObserver', { fitCommitted: false });
+                    var proposed = fitAddon.proposeDimensions ? fitAddon.proposeDimensions() : null;
+                    if (!proposed || proposed.cols <= 0 || proposed.rows <= 0) {
+                      post({ type: 'xterm_fit_error', source: 'resizeObserver.proposeDimensions', message: 'fit-addon did not return usable dimensions' });
+                      return;
+                    }
+                    postTerminalState('Xterm.AfterFit', 'resizeObserver', {
+                      fitCommitted: false,
+                      proposedCols: proposed.cols,
+                      proposedRows: proposed.rows
+                    });
+                    if (proposed.cols === lastRequestedCols && proposed.rows === lastRequestedRows) return;
+                    lastRequestedCols = proposed.cols;
+                    lastRequestedRows = proposed.rows;
+                    var state = terminalState();
+                    state.type = 'resize_request';
+                    state.source = 'resizeObserver';
+                    state.proposedCols = proposed.cols;
+                    state.proposedRows = proposed.rows;
+                    post(state);
                   });
                 };
                 var ro = new ResizeObserver(function () {
@@ -417,12 +742,80 @@ namespace PS7ScriptDesk.Shell.Controls
                   if      (msg.type === 'output_b64' && typeof msg.data === 'string') {
                     const generation = Number.isSafeInteger(msg.generation) ? msg.generation : null;
                     const sequence = Number.isSafeInteger(msg.sequence) ? msg.sequence : null;
-                    termApi.write(decodeBase64Utf8(msg.data), () => {
-                      if (generation !== null && sequence !== null) post({ type: 'output_ack', generation: generation, sequence: sequence });
+                    const decodedOutput = decodeBase64Utf8(msg.data);
+                    const traceOutputCursor = msg.resizeAdjacent === true;
+                    var outputControlSummary = null;
+                    var beforeOutputWriteState = null;
+                    if (traceOutputCursor) {
+                      try {
+                        outputControlSummary = classifyTerminalControls(decodedOutput);
+                        beforeOutputWriteState = postOutputCursorTrace('Xterm.OutputBeforeWrite', msg, null, outputControlSummary);
+                      } catch (traceBeforeErr) {
+                        tryPostOutputCursorTraceError('Xterm.OutputBeforeWrite', traceBeforeErr);
+                      }
+                    }
+
+                    termApi.write(decodedOutput, () => {
+                      try {
+                        if (traceOutputCursor) {
+                          try {
+                            if (!outputControlSummary) outputControlSummary = classifyTerminalControls(decodedOutput);
+                            postOutputCursorTrace('Xterm.OutputAfterWrite', msg, beforeOutputWriteState, outputControlSummary);
+                          } catch (traceAfterErr) {
+                            tryPostOutputCursorTraceError('Xterm.OutputAfterWrite', traceAfterErr);
+                          }
+                        }
+                      } finally {
+                        if (generation !== null && sequence !== null) post({ type: 'output_ack', generation: generation, sequence: sequence });
+                      }
                     });
                   }
                   else if (msg.type === 'output') { termApi.write(msg.data || ''); }
                   else if (msg.type === 'clear')  { termApi.clear(); }
+                  else if (msg.type === 'resize_commit') {
+                    var commitCols = Number.isSafeInteger(msg.cols) ? msg.cols : 0;
+                    var commitRows = Number.isSafeInteger(msg.rows) ? msg.rows : 0;
+                    if (commitCols > 0 && commitRows > 0) {
+                      var commit = {
+                        rendererGeneration: Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : null,
+                        terminalSessionGeneration: Number.isSafeInteger(msg.terminalSessionGeneration) ? msg.terminalSessionGeneration : null,
+                        resizeGeneration: Number.isSafeInteger(msg.resizeGeneration) ? msg.resizeGeneration : null
+                      };
+                      tryPostTerminalState('Xterm.BeforeHostResizeCommit', 'host.resizeCommit', {
+                        rendererGeneration: commit.rendererGeneration,
+                        resizeGeneration: commit.resizeGeneration,
+                        committedCols: commitCols,
+                        committedRows: commitRows
+                      });
+                      pendingResizeCommit = commit;
+                      try {
+                        term.resize(commitCols, commitRows);
+                        var acknowledgedState = terminalState();
+                        post({
+                          type: 'resize_commit_ack',
+                          rendererGeneration: commit.rendererGeneration,
+                          terminalSessionGeneration: commit.terminalSessionGeneration,
+                          resizeGeneration: commit.resizeGeneration,
+                          actualCols: acknowledgedState.cols,
+                          actualRows: acknowledgedState.rows,
+                          cursorX: acknowledgedState.cursorX,
+                          cursorY: acknowledgedState.cursorY,
+                          baseY: acknowledgedState.baseY,
+                          viewportY: acknowledgedState.viewportY
+                        });
+                      } finally {
+                        pendingResizeCommit = null;
+                      }
+                      lastRequestedCols = commitCols;
+                      lastRequestedRows = commitRows;
+                      tryPostTerminalState('Xterm.AfterHostResizeCommit', 'host.resizeCommit', {
+                        rendererGeneration: commit.rendererGeneration,
+                        resizeGeneration: commit.resizeGeneration,
+                        committedCols: commitCols,
+                        committedRows: commitRows
+                      });
+                    }
+                  }
                   else if (msg.type === 'focus')  {
                     termApi.focus();
                     reportFocus('focus', 'host.message.focus');
@@ -447,9 +840,13 @@ namespace PS7ScriptDesk.Shell.Controls
 
         // ── State ────────────────────────────────────────────────────────────────
 
+        private static readonly TimeSpan ResizeAdjacentOutputTraceWindow = TimeSpan.FromSeconds(1);
+
         private readonly TerminalOutputFlowController _outputFlowController = new();
+        private readonly TerminalResizeOutputBarrier _resizeOutputBarrier = new();
         private readonly TerminalProtocolOutputFilter _terminalProtocolOutputFilter = new();
         private readonly TerminalResizePolicy _terminalResizePolicy = new();
+        private readonly DispatcherTimer _resizeOutputBarrierTimer;
         private volatile bool          _isReady;
         private bool                   _webView2Available = true;
         private bool                   _firstOutputQueuedLogged;
@@ -463,14 +860,28 @@ namespace PS7ScriptDesk.Shell.Controls
         private long                   _droppedOutputCharacters;
         private long                   _reportedDroppedOutputCharacters;
         private readonly object _rendererSyncRoot = new();
+        private readonly object _resizeOutputIntegrationSyncRoot = new();
         private WebView2? _webView;
         private TerminalWebView2LifecyclePolicy _webViewLifecycle = new();
         private CoreWebView2?          _subscribedCoreWebView2;
         private bool                   _webViewDetachedFromLayout;
         private int                    _rendererInstanceGeneration;
         private long                   _nextOutputSubmissionId;
+        private DateTimeOffset         _lastResizeCommitAcknowledgedUtc = DateTimeOffset.MinValue;
+        private long                   _lastResizeCommitAcknowledgedGeneration;
+        private int                    _lastResizeCommitAcknowledgedColumns;
+        private int                    _lastResizeCommitAcknowledgedRows;
+        private TerminalResizeDecision? _pendingResizeDecision;
 
         private TerminalWebView2FallbackState _fallbackState;
+
+        private readonly record struct RendererOutputDiagnostics(
+            bool ResizeAdjacent,
+            long ResizeGeneration,
+            double ResizeElapsedMilliseconds,
+            int ResizeColumns,
+            int ResizeRows,
+            string ControlSummary);
 
         // ── Events ────────────────────────────────────────────────────────────────
 
@@ -497,6 +908,11 @@ namespace PS7ScriptDesk.Shell.Controls
         public TerminalControl()
         {
             InitializeComponent();
+            _resizeOutputBarrierTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromMilliseconds(100)
+            };
+            _resizeOutputBarrierTimer.Tick += OnResizeOutputBarrierTimerTick;
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
         }
@@ -872,6 +1288,8 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
+            CancelResizeTransaction(reason);
+
             WebView2? retiredRenderer;
             TerminalWebView2LifecyclePolicy retiredLifecycle;
             CoreWebView2? subscribedCoreWebView2;
@@ -1070,6 +1488,7 @@ namespace PS7ScriptDesk.Shell.Controls
         /// </summary>
         public void BeginTerminalOutputGeneration(int generation)
         {
+            CancelResizeTransaction("session-start");
             _firstInputObservedForDiagnostics = false;
             _firstOutputAfterInputLogged = false;
             _terminalProtocolOutputFilter.Reset();
@@ -1080,6 +1499,7 @@ namespace PS7ScriptDesk.Shell.Controls
         /// <summary>Invalidates pending output from a terminal session that is stopping.</summary>
         public void InvalidateTerminalOutputGeneration(int generation)
         {
+            CancelResizeTransaction("session-stop");
             _terminalProtocolOutputFilter.Reset();
             var result = _outputFlowController.InvalidateGeneration(generation);
             ReportDiscardedTerminalOutput(result, "session-stop");
@@ -1092,23 +1512,69 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
+            TerminalCriticalTrace.LogStage(
+                "TerminalControl.WriteRaw.Begin",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["outputCharacterLength"] = data.Length,
+                    ["rawControlSummary"] = TerminalOutputControlClassifier.Summarize(data).ToDiagnosticString(),
+                    ["contentOmitted"] = true
+                });
             var filteredOutput = _terminalProtocolOutputFilter.Process(data);
             if (filteredOutput.FilteredRecordCount > 0)
             {
+                var visibleControlSummary = TerminalOutputControlClassifier
+                    .Summarize(filteredOutput.VisibleText)
+                    .ToDiagnosticString();
                 DeveloperDiagnostics.LogDebug(
                     "Terminal",
                     "Removed ScriptDesk protocol records before terminal renderer submission.",
                     new Dictionary<string, object?>
                     {
+                        ["rawOutputCharacterLength"] = data.Length,
+                        ["visibleOutputCharacterLength"] = filteredOutput.VisibleText.Length,
                         ["filteredCharacters"] = filteredOutput.FilteredCharacters,
                         ["filteredRecordCount"] = filteredOutput.FilteredRecordCount,
                         ["sessionGeneration"] = generation,
+                        ["rawControlSummary"] = TerminalOutputControlClassifier.Summarize(data).ToDiagnosticString(),
+                        ["visibleControlSummary"] = visibleControlSummary,
+                        ["removedProtocolControlSummary"] = filteredOutput.RemovedProtocolControlSummary.ToDiagnosticString(),
+                        ["preservedProtocolControlSummary"] = filteredOutput.PreservedProtocolControlSummary.ToDiagnosticString(),
+                        ["contentOmitted"] = true
+                    });
+                TerminalCriticalTrace.LogStage(
+                    "TerminalControl.ProtocolFilter.Characterized",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = generation,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["rawOutputCharacterLength"] = data.Length,
+                        ["visibleOutputCharacterLength"] = filteredOutput.VisibleText.Length,
+                        ["filteredCharacters"] = filteredOutput.FilteredCharacters,
+                        ["filteredRecordCount"] = filteredOutput.FilteredRecordCount,
+                        ["rawControlSummary"] = TerminalOutputControlClassifier.Summarize(data).ToDiagnosticString(),
+                        ["visibleControlSummary"] = visibleControlSummary,
+                        ["removedProtocolControlSummary"] = filteredOutput.RemovedProtocolControlSummary.ToDiagnosticString(),
+                        ["preservedProtocolControlSummary"] = filteredOutput.PreservedProtocolControlSummary.ToDiagnosticString(),
                         ["contentOmitted"] = true
                     });
             }
 
             data = filteredOutput.VisibleText;
             WriteVisibleOutput(generation, data, "ConPTY");
+            TerminalCriticalTrace.LogStage(
+                "TerminalControl.WriteRaw.End",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["outputCharacterLength"] = data.Length,
+                    ["filteredRecordCount"] = filteredOutput.FilteredRecordCount,
+                    ["visibleControlSummary"] = TerminalOutputControlClassifier.Summarize(data).ToDiagnosticString(),
+                    ["contentOmitted"] = true
+                });
         }
 
         public void WriteStructuredOutput(int generation, string data)
@@ -1118,6 +1584,15 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
+            TerminalCriticalTrace.LogStage(
+                "TerminalControl.WriteStructuredOutput.Begin",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["outputCharacterLength"] = data.Length,
+                    ["contentOmitted"] = true
+                });
             if (TerminalOutputMultiplexer.ContainsPrivateProtocol(data))
             {
                 AppLogger.Error("Terminal", $"Structured editor output contained private ScriptDesk terminal protocol. SessionGeneration={generation}, Length={data.Length}, ContentOmitted=True.");
@@ -1134,15 +1609,47 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             WriteVisibleOutput(generation, data, "StructuredEditor");
+            TerminalCriticalTrace.LogStage(
+                "TerminalControl.WriteStructuredOutput.End",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["outputCharacterLength"] = data.Length,
+                    ["contentOmitted"] = true
+                });
         }
 
         private void WriteVisibleOutput(int generation, string data, string source)
+        {
+            // Keep the capture-to-render enqueue boundary atomic with resize-ack release.
+            // This prevents a reader callback from overtaking bytes released for the
+            // completed grid.
+            lock (_resizeOutputIntegrationSyncRoot)
+            {
+                WriteVisibleOutputCore(generation, data, source);
+            }
+        }
+
+        private void WriteVisibleOutputCore(int generation, string data, string source)
         {
             if (string.IsNullOrEmpty(data))
             {
                 return;
             }
 
+            TerminalCriticalTrace.LogStage(
+                "TerminalControl.WriteVisibleOutput.Begin",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["source"] = source,
+                    ["outputCharacterLength"] = data.Length,
+                    ["rendererReady"] = _isReady,
+                    ["rendererAvailable"] = _webView2Available,
+                    ["contentOmitted"] = true
+                });
             if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseTerminalEnabled())
             {
                 DeveloperDiagnostics.LogDebug(
@@ -1160,6 +1667,59 @@ namespace PS7ScriptDesk.Shell.Controls
             if (!_webView2Available)
             {
                 RecordDroppedTerminalOutput(data.Length);
+                TerminalCriticalTrace.LogStage(
+                    "TerminalControl.WriteVisibleOutput.RendererUnavailableDrop",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = generation,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["source"] = source,
+                        ["outputCharacterLength"] = data.Length,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            var barrierCapture = _resizeOutputBarrier.Capture(
+                _rendererInstanceGeneration,
+                generation,
+                source,
+                data);
+            if (barrierCapture.Status == TerminalResizeBarrierCaptureStatus.Buffered)
+            {
+                TerminalCriticalTrace.LogStage(
+                    "ResizeTransaction.OutputBuffered",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = generation,
+                        ["source"] = source,
+                        ["outputCharacterLength"] = data.Length,
+                        ["bufferedCharacters"] = barrierCapture.TotalBufferedCharacters,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            if (barrierCapture.Status == TerminalResizeBarrierCaptureStatus.BoundedLimitExceeded)
+            {
+                AppLogger.Error(
+                    "Terminal",
+                    $"Resize output barrier exceeded its bounded policy. SessionGeneration={generation}, Length={data.Length}, BufferedCharacters={barrierCapture.TotalBufferedCharacters}, Source={source}, ContentOmitted=True.");
+                DeveloperDiagnostics.LogError(
+                    "Terminal",
+                    "Resize output barrier exceeded its bounded policy; retiring the renderer to avoid releasing bytes under an unknown grid.",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = generation,
+                        ["source"] = source,
+                        ["outputCharacterLength"] = data.Length,
+                        ["bufferedCharacters"] = barrierCapture.TotalBufferedCharacters,
+                        ["contentOmitted"] = true
+                    });
+                CancelResizeTransaction("buffer-limit-exceeded");
+                RetireWebView2Renderer("ResizeOutputBarrierLimitExceeded", null);
                 return;
             }
 
@@ -1179,6 +1739,21 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             var enqueueResult = _outputFlowController.Enqueue(generation, data);
+            TerminalCriticalTrace.LogStage(
+                "TerminalOutputFlowController.Enqueue.Result",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["source"] = source,
+                    ["outputCharacterLength"] = data.Length,
+                    ["scheduleFlush"] = enqueueResult.ScheduleFlush,
+                    ["acceptedCharacters"] = enqueueResult.AcceptedCharacters,
+                    ["droppedCharacters"] = enqueueResult.DroppedCharacters,
+                    ["pendingCharacters"] = enqueueResult.PendingCharacters,
+                    ["rejectedStaleCharacters"] = enqueueResult.RejectedStaleCharacters,
+                    ["contentOmitted"] = true
+                });
             if (enqueueResult.RejectedStaleCharacters > 0)
             {
                 DeveloperDiagnostics.LogDebug("Terminal", "Stale terminal output was rejected before WebView dispatch.", new Dictionary<string, object?>
@@ -1224,6 +1799,17 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             RequestOutputFlush(enqueueResult.ScheduleFlush);
+            TerminalCriticalTrace.LogStage(
+                "TerminalControl.WriteVisibleOutput.End",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["source"] = source,
+                    ["outputCharacterLength"] = data.Length,
+                    ["scheduleFlush"] = enqueueResult.ScheduleFlush,
+                    ["contentOmitted"] = true
+                });
         }
 
         /// <summary>Clears the xterm.js terminal display and returns keyboard focus to it.</summary>
@@ -1416,33 +2002,137 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
+            TerminalCriticalTrace.LogStage(
+                "TerminalControl.RequestOutputFlush.Scheduled",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration
+                });
             Dispatcher.BeginInvoke(
                 new Action(FlushPendingOutputToWebView),
                 System.Windows.Threading.DispatcherPriority.Background);
         }
 
+        private RendererOutputDiagnostics CreateRendererOutputDiagnostics(TerminalOutputBatch outputBatch)
+        {
+            var resizeGeneration = _lastResizeCommitAcknowledgedGeneration;
+            var elapsed = resizeGeneration > 0
+                ? DateTimeOffset.UtcNow - _lastResizeCommitAcknowledgedUtc
+                : TimeSpan.MaxValue;
+            var resizeAdjacent = resizeGeneration > 0 &&
+                elapsed >= TimeSpan.Zero &&
+                elapsed <= ResizeAdjacentOutputTraceWindow;
+            var elapsedMilliseconds = resizeAdjacent ? elapsed.TotalMilliseconds : -1;
+            var controlSummary = TerminalOutputControlClassifier
+                .Summarize(outputBatch.Data)
+                .ToDiagnosticString();
+
+            return new RendererOutputDiagnostics(
+                resizeAdjacent,
+                resizeGeneration,
+                elapsedMilliseconds,
+                _lastResizeCommitAcknowledgedColumns,
+                _lastResizeCommitAcknowledgedRows,
+                controlSummary);
+        }
+
         private void FlushPendingOutputToWebView()
         {
+            TerminalCriticalTrace.LogStage(
+                "TerminalControl.FlushPendingOutputToWebView.Begin",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration
+                });
             ReportDroppedTerminalOutputIfNeeded();
-            var batch = _outputFlowController.TryBeginDelivery();
-            if (batch is not { } outputBatch)
+            if (_resizeOutputBarrier.IsActive)
             {
+                TerminalCriticalTrace.LogStage(
+                    "ResizeTransaction.RendererDeliveryBlocked",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration,
+                        ["contentOmitted"] = true
+                    });
                 return;
             }
 
+            var batch = _outputFlowController.TryBeginDelivery();
+            if (batch is not { } outputBatch)
+            {
+                TerminalCriticalTrace.LogStage(
+                    "TerminalOutputFlowController.TryBeginDelivery.Empty",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration
+                    });
+                return;
+            }
+
+            TerminalCriticalTrace.LogStage(
+                "TerminalOutputFlowController.TryBeginDelivery.Batch",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["terminalSessionGeneration"] = outputBatch.Generation,
+                    ["outputSequence"] = outputBatch.Sequence,
+                    ["outputCharacterLength"] = outputBatch.Data.Length,
+                    ["contentOmitted"] = true
+                });
             if (!TryGetCoreWebView2("FlushPendingOutput", out var coreWebView2))
             {
                 RecordDroppedTerminalOutput(
                     _outputFlowController.DiscardInFlight(outputBatch.Generation, outputBatch.Sequence));
                 ReportDroppedTerminalOutputIfNeeded();
+                TerminalCriticalTrace.LogStage(
+                    "TerminalControl.FlushPendingOutputToWebView.NoCoreWebView2",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = outputBatch.Generation,
+                        ["outputSequence"] = outputBatch.Sequence,
+                        ["outputCharacterLength"] = outputBatch.Data.Length,
+                        ["contentOmitted"] = true
+                    });
                 return;
             }
 
             try
             {
                 var submissionId = System.Threading.Interlocked.Increment(ref _nextOutputSubmissionId);
+                var outputDiagnostics = CreateRendererOutputDiagnostics(outputBatch);
                 coreWebView2.PostWebMessageAsString(
-                    TerminalWebMessageSerializer.SerializeOutput(outputBatch.Generation, outputBatch.Sequence, outputBatch.Data));
+                    TerminalWebMessageSerializer.SerializeOutput(
+                        outputBatch.Generation,
+                        outputBatch.Sequence,
+                        outputBatch.Data,
+                        _rendererInstanceGeneration,
+                        submissionId,
+                        outputDiagnostics.ResizeAdjacent,
+                        outputDiagnostics.ResizeGeneration,
+                        outputDiagnostics.ResizeElapsedMilliseconds,
+                        outputDiagnostics.ControlSummary));
+                TerminalCriticalTrace.LogStage(
+                    "TerminalControl.WebView2.PostOutput",
+                    new Dictionary<string, object?>
+                    {
+                        ["submissionId"] = submissionId,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = outputBatch.Generation,
+                        ["outputSequence"] = outputBatch.Sequence,
+                        ["outputCharacterLength"] = outputBatch.Data.Length,
+                        ["resizeAdjacent"] = outputDiagnostics.ResizeAdjacent,
+                        ["resizeGeneration"] = outputDiagnostics.ResizeGeneration,
+                        ["resizeElapsedMilliseconds"] = outputDiagnostics.ResizeElapsedMilliseconds,
+                        ["resizeColumns"] = outputDiagnostics.ResizeColumns,
+                        ["resizeRows"] = outputDiagnostics.ResizeRows,
+                        ["visibleControlSummary"] = outputDiagnostics.ControlSummary,
+                        ["contentOmitted"] = true
+                    });
                 DeveloperDiagnostics.LogDebug(
                     "Terminal",
                     "Submitted terminal output batch to xterm.js.",
@@ -1457,12 +2147,29 @@ namespace PS7ScriptDesk.Shell.Controls
                         ["containsCR"] = outputBatch.Data.Contains('\r'),
                         ["containsLF"] = outputBatch.Data.Contains('\n'),
                         ["resizeGeneration"] = _terminalResizePolicy.ResizeGeneration,
+                        ["resizeAdjacent"] = outputDiagnostics.ResizeAdjacent,
+                        ["resizeAdjacentGeneration"] = outputDiagnostics.ResizeGeneration,
+                        ["resizeElapsedMilliseconds"] = outputDiagnostics.ResizeElapsedMilliseconds,
+                        ["resizeColumns"] = outputDiagnostics.ResizeColumns,
+                        ["resizeRows"] = outputDiagnostics.ResizeRows,
+                        ["visibleControlSummary"] = outputDiagnostics.ControlSummary,
                         ["resizeCausedSubmission"] = false,
                         ["contentOmitted"] = true
                     });
             }
             catch (Exception ex) when (IsWebView2LifecycleException(ex))
             {
+                TerminalCriticalTrace.LogException(
+                    "TerminalControl.WebView2.PostOutputLifecycleException",
+                    ex,
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = outputBatch.Generation,
+                        ["outputSequence"] = outputBatch.Sequence,
+                        ["outputCharacterLength"] = outputBatch.Data.Length,
+                        ["contentOmitted"] = true
+                    });
                 RetireWebView2Renderer("FlushPendingOutput", ex);
                 RecordDroppedTerminalOutput(
                     _outputFlowController.DiscardInFlight(outputBatch.Generation, outputBatch.Sequence));
@@ -1473,6 +2180,17 @@ namespace PS7ScriptDesk.Shell.Controls
                 RecordDroppedTerminalOutput(
                     _outputFlowController.DiscardInFlight(outputBatch.Generation, outputBatch.Sequence));
                 ReportDroppedTerminalOutputIfNeeded();
+                TerminalCriticalTrace.LogException(
+                    "TerminalControl.WebView2.PostOutputException",
+                    ex,
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = outputBatch.Generation,
+                        ["outputSequence"] = outputBatch.Sequence,
+                        ["outputCharacterLength"] = outputBatch.Data.Length,
+                        ["contentOmitted"] = true
+                    });
                 System.Diagnostics.Debug.WriteLine(
                     $"[TerminalControl] PostWebMessageAsString failed: {ex.Message}");
                 DeveloperDiagnostics.LogException(
@@ -1588,6 +2306,553 @@ namespace PS7ScriptDesk.Shell.Controls
                 Dispatcher.BeginInvoke(Send);
         }
 
+        private void PostResizeCommitToWebView(
+            TerminalResizeDecision resizeDecision,
+            int terminalSessionGeneration)
+        {
+            if (!_webView2Available)
+            {
+                return;
+            }
+
+            void Send()
+            {
+                if (!TryGetCoreWebView2("PostResizeCommitToWebView", out var coreWebView2))
+                {
+                    return;
+                }
+
+                try
+                {
+                    coreWebView2.PostWebMessageAsString(
+                        TerminalWebMessageSerializer.SerializeResizeCommit(
+                            _rendererInstanceGeneration,
+                            terminalSessionGeneration,
+                            resizeDecision.ResizeGeneration,
+                            resizeDecision.Columns,
+                            resizeDecision.Rows));
+                    TerminalCriticalTrace.LogStage(
+                        "ResizeCommit.Posted",
+                        new Dictionary<string, object?>
+                        {
+                            ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                            ["rendererGeneration"] = _rendererInstanceGeneration,
+                            ["terminalSessionGeneration"] = terminalSessionGeneration,
+                            ["committedColumns"] = resizeDecision.Columns,
+                            ["committedRows"] = resizeDecision.Rows,
+                            ["outputSubmissionOccurred"] = false,
+                            ["contentOmitted"] = true
+                        });
+                }
+                catch (Exception ex) when (IsWebView2LifecycleException(ex))
+                {
+                    RetireWebView2Renderer("PostResizeCommitToWebView", ex);
+                }
+                catch (Exception ex)
+                {
+                    TerminalCriticalTrace.LogException(
+                        "ResizeCommit.PostException",
+                        ex,
+                        new Dictionary<string, object?>
+                        {
+                            ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                            ["rendererGeneration"] = _rendererInstanceGeneration,
+                            ["terminalSessionGeneration"] = terminalSessionGeneration,
+                            ["committedColumns"] = resizeDecision.Columns,
+                            ["committedRows"] = resizeDecision.Rows,
+                            ["contentOmitted"] = true
+                        });
+                    DeveloperDiagnostics.LogException(
+                        "Terminal",
+                        ex,
+                        "Posting terminal resize commit to WebView2 failed.",
+                        new Dictionary<string, object?>
+                        {
+                            ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                            ["rendererGeneration"] = _rendererInstanceGeneration,
+                            ["contentOmitted"] = true
+                        });
+                }
+            }
+
+            if (Dispatcher.CheckAccess())
+                Send();
+            else
+                Dispatcher.BeginInvoke(Send);
+        }
+
+        private void LogXtermResizeTrace(JsonElement root)
+        {
+            var stage = GetStringProperty(root, "stage", "Xterm.ResizeTrace");
+            var source = GetStringProperty(root, "source", "unknown");
+            TerminalCriticalTrace.LogStage(
+                stage,
+                CreateResizeTraceMetadata(root, source));
+        }
+
+        private void HandleResizeRequest(JsonElement root)
+        {
+            var cols = GetIntProperty(root, "proposedCols", GetIntProperty(root, "cols", 0));
+            var rows = GetIntProperty(root, "proposedRows", GetIntProperty(root, "rows", 0));
+            var source = GetStringProperty(root, "source", "unknown");
+            var resizeDecision = _terminalResizePolicy.Evaluate(
+                cols,
+                rows,
+                _rendererInstanceGeneration);
+
+            var metadata = CreateResizeTraceMetadata(root, source);
+            metadata["resizeGeneration"] = resizeDecision.ResizeGeneration;
+            metadata["rendererGeneration"] = _rendererInstanceGeneration;
+            metadata["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration;
+            metadata["requestedColumns"] = cols;
+            metadata["requestedRows"] = rows;
+            metadata["accepted"] = resizeDecision.Accepted;
+            metadata["reason"] = resizeDecision.Reason;
+            metadata["conptyColumns"] = resizeDecision.Accepted ? resizeDecision.Columns : 0;
+            metadata["conptyRows"] = resizeDecision.Accepted ? resizeDecision.Rows : 0;
+            metadata["outputSubmissionOccurred"] = false;
+            metadata["filterFlushOccurred"] = false;
+
+            TerminalCriticalTrace.LogStage("ResizeMessage.Received", metadata);
+            TerminalCriticalTrace.LogStage(
+                resizeDecision.Accepted ? "ResizePolicy.Accepted" : "ResizePolicy.Rejected",
+                metadata);
+
+            AppLogger.Debug(
+                "Terminal",
+                $"xterm resize requested. Cols={cols}, Rows={rows}, Accepted={resizeDecision.Accepted}, Reason={resizeDecision.Reason}.");
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "xterm terminal geometry evaluated.",
+                metadata);
+
+            if (!resizeDecision.Accepted)
+            {
+                return;
+            }
+
+            if (_outputFlowController.ActiveGeneration is not { } terminalSessionGeneration)
+            {
+                TerminalCriticalTrace.LogStage(
+                    "ResizeTransaction.RejectedNoSession",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                        ["requestedColumns"] = resizeDecision.Columns,
+                        ["requestedRows"] = resizeDecision.Rows,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            if (_resizeOutputBarrier.IsActive)
+            {
+                _pendingResizeDecision = resizeDecision;
+                TerminalCriticalTrace.LogStage(
+                    "ResizeTransaction.Coalesced",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = terminalSessionGeneration,
+                        ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                        ["committedColumns"] = resizeDecision.Columns,
+                        ["committedRows"] = resizeDecision.Rows,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            if (_outputFlowController.HasOutstandingOutput)
+            {
+                _pendingResizeDecision = resizeDecision;
+                TerminalCriticalTrace.LogStage(
+                    "ResizeTransaction.DeferredUntilRendererIdle",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = terminalSessionGeneration,
+                        ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                        ["committedColumns"] = resizeDecision.Columns,
+                        ["committedRows"] = resizeDecision.Rows,
+                        ["contentOmitted"] = true
+                    });
+                RequestOutputFlush(scheduleFlush: true);
+                return;
+            }
+
+            StartResizeTransaction(resizeDecision, terminalSessionGeneration);
+        }
+
+        private void StartResizeTransaction(
+            TerminalResizeDecision resizeDecision,
+            int terminalSessionGeneration)
+        {
+            var beginResult = _resizeOutputBarrier.Begin(
+                _rendererInstanceGeneration,
+                terminalSessionGeneration,
+                resizeDecision.ResizeGeneration,
+                resizeDecision.Columns,
+                resizeDecision.Rows);
+            if (!beginResult.Accepted)
+            {
+                _pendingResizeDecision = resizeDecision;
+                return;
+            }
+
+            _resizeOutputBarrierTimer.Start();
+            TerminalCriticalTrace.LogStage(
+                "ResizeTransaction.Started",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["terminalSessionGeneration"] = terminalSessionGeneration,
+                    ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                    ["committedColumns"] = resizeDecision.Columns,
+                    ["committedRows"] = resizeDecision.Rows,
+                    ["contentOmitted"] = true
+                });
+
+            try
+            {
+                TerminalResized?.Invoke(resizeDecision.Columns, resizeDecision.Rows);
+            TerminalCriticalTrace.LogStage(
+                "ResizePseudoConsole.CompletedBeforeXtermCommit",
+                new Dictionary<string, object?>
+                {
+                    ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["terminalSessionGeneration"] = terminalSessionGeneration,
+                    ["committedColumns"] = resizeDecision.Columns,
+                    ["committedRows"] = resizeDecision.Rows,
+                    ["contentOmitted"] = true
+                });
+                PostResizeCommitToWebView(resizeDecision, terminalSessionGeneration);
+            }
+            catch
+            {
+                CancelResizeTransaction("resize-handler-failed");
+                throw;
+            }
+        }
+
+        private void HandleResizeCommitAcknowledgement(JsonElement root)
+        {
+            if (!TryReadResizeCommitAcknowledgement(root, out var rendererGeneration, out var sessionGeneration, out var resizeGeneration, out var columns, out var rows))
+            {
+                TerminalCriticalTrace.LogStage(
+                    "ResizeCommit.AckRejected",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = "invalid-ack-payload",
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            TerminalResizeBarrierAcknowledgementResult acknowledgement;
+            lock (_resizeOutputIntegrationSyncRoot)
+            {
+                acknowledgement = _resizeOutputBarrier.Acknowledge(
+                    rendererGeneration,
+                    sessionGeneration,
+                    resizeGeneration,
+                    columns,
+                    rows);
+                if (acknowledgement.Accepted)
+                {
+                    foreach (var bufferedOutput in acknowledgement.ReleasedOutput)
+                    {
+                        var enqueueResult = _outputFlowController.Enqueue(
+                            bufferedOutput.TerminalSessionGeneration,
+                            bufferedOutput.Data);
+                        if (enqueueResult.DroppedCharacters > 0)
+                        {
+                            RecordDroppedTerminalOutput(enqueueResult.DroppedCharacters);
+                        }
+                    }
+                }
+            }
+
+            TerminalCriticalTrace.LogStage(
+                acknowledgement.Accepted ? "ResizeCommit.AckAccepted" : "ResizeCommit.AckRejected",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = rendererGeneration,
+                    ["terminalSessionGeneration"] = sessionGeneration,
+                    ["resizeGeneration"] = resizeGeneration,
+                    ["actualColumns"] = columns,
+                    ["actualRows"] = rows,
+                    ["releasedCharacters"] = acknowledgement.BufferedCharacters,
+                    ["reason"] = acknowledgement.Reason,
+                    ["contentOmitted"] = true
+                });
+
+            if (!acknowledgement.Accepted)
+            {
+                return;
+            }
+
+            _lastResizeCommitAcknowledgedUtc = DateTimeOffset.UtcNow;
+            _lastResizeCommitAcknowledgedGeneration = resizeGeneration;
+            _lastResizeCommitAcknowledgedColumns = columns;
+            _lastResizeCommitAcknowledgedRows = rows;
+            _resizeOutputBarrierTimer.Stop();
+            // The release is deliberately posted after the host commit message. A queued
+            // resize waits until those released bytes have also drained and been acked.
+            RequestOutputFlush(scheduleFlush: true);
+            TryStartPendingResizeIfRendererIdle();
+        }
+
+        private void TryStartPendingResizeIfRendererIdle()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(
+                    new Action(TryStartPendingResizeIfRendererIdle),
+                    DispatcherPriority.Background);
+                return;
+            }
+
+            if (_resizeOutputBarrier.IsActive ||
+                _pendingResizeDecision is not { } pendingDecision ||
+                _outputFlowController.HasOutstandingOutput)
+            {
+                return;
+            }
+
+            _pendingResizeDecision = null;
+            if (_outputFlowController.ActiveGeneration is not { } sessionGeneration)
+            {
+                return;
+            }
+
+            StartResizeTransaction(pendingDecision, sessionGeneration);
+        }
+
+        private void OnResizeOutputBarrierTimerTick(object? sender, EventArgs e)
+        {
+            var expiration = _resizeOutputBarrier.Expire();
+            if (!expiration.Expired)
+            {
+                return;
+            }
+
+            _resizeOutputBarrierTimer.Stop();
+            var cancelled = _resizeOutputBarrier.Cancel();
+            _pendingResizeDecision = null;
+            AppLogger.Error(
+                "Terminal",
+                $"Resize output barrier timed out before xterm.js acknowledged the exact grid. BufferedCharacters={cancelled.BufferedCharacters}, BufferedChunks={cancelled.BufferedChunks}, ContentOmitted=True.");
+            DeveloperDiagnostics.LogError(
+                "Terminal",
+                "Resize output barrier timed out; retiring the renderer instead of releasing bytes under an unknown grid.",
+                new Dictionary<string, object?>
+                {
+                    ["bufferedCharacters"] = cancelled.BufferedCharacters,
+                    ["bufferedChunks"] = cancelled.BufferedChunks,
+                    ["contentOmitted"] = true
+                });
+            RetireWebView2Renderer("ResizeOutputBarrierTimeout", null);
+        }
+
+        private void CancelResizeTransaction(string reason)
+        {
+            TerminalResizeBarrierCancellationResult cancelled;
+            lock (_resizeOutputIntegrationSyncRoot)
+            {
+                cancelled = _resizeOutputBarrier.Cancel();
+            }
+
+            _pendingResizeDecision = null;
+            if (Dispatcher.CheckAccess())
+            {
+                _resizeOutputBarrierTimer.Stop();
+            }
+            else if (!Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished)
+            {
+                Dispatcher.BeginInvoke(
+                    new Action(() => _resizeOutputBarrierTimer.Stop()),
+                    DispatcherPriority.Send);
+            }
+
+            if (cancelled.BufferedCharacters > 0)
+            {
+                TerminalCriticalTrace.LogStage(
+                    "ResizeTransaction.Cancelled",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["bufferedCharacters"] = cancelled.BufferedCharacters,
+                        ["bufferedChunks"] = cancelled.BufferedChunks,
+                        ["contentOmitted"] = true
+                    });
+            }
+        }
+
+        private static bool TryReadResizeCommitAcknowledgement(
+            JsonElement root,
+            out int rendererGeneration,
+            out int sessionGeneration,
+            out long resizeGeneration,
+            out int columns,
+            out int rows)
+        {
+            rendererGeneration = GetIntProperty(root, "rendererGeneration", 0);
+            sessionGeneration = GetIntProperty(root, "terminalSessionGeneration", 0);
+            resizeGeneration = GetLongProperty(root, "resizeGeneration", 0);
+            columns = GetIntProperty(root, "actualCols", 0);
+            rows = GetIntProperty(root, "actualRows", 0);
+            return rendererGeneration > 0 && sessionGeneration > 0 && resizeGeneration > 0 && columns > 0 && rows > 0;
+        }
+
+        private static Dictionary<string, object?> CreateResizeTraceMetadata(JsonElement root, string? source)
+        {
+            return new Dictionary<string, object?>
+            {
+                ["source"] = source ?? "unknown",
+                ["cols"] = GetIntProperty(root, "cols", 0),
+                ["rows"] = GetIntProperty(root, "rows", 0),
+                ["cursorX"] = GetIntProperty(root, "cursorX", 0),
+                ["cursorY"] = GetIntProperty(root, "cursorY", 0),
+                ["baseY"] = GetIntProperty(root, "baseY", 0),
+                ["viewportY"] = GetIntProperty(root, "viewportY", 0),
+                ["absoluteCursorY"] = GetIntProperty(root, "absoluteCursorY", 0),
+                ["scrollbackLength"] = GetIntProperty(root, "scrollbackLength", 0),
+                ["clientWidth"] = GetIntProperty(root, "clientWidth", 0),
+                ["clientHeight"] = GetIntProperty(root, "clientHeight", 0),
+                ["proposedColumns"] = GetIntProperty(root, "proposedCols", 0),
+                ["proposedRows"] = GetIntProperty(root, "proposedRows", 0),
+                ["reportedColumns"] = GetIntProperty(root, "reportedCols", 0),
+                ["reportedRows"] = GetIntProperty(root, "reportedRows", 0),
+                ["committedColumns"] = GetIntProperty(root, "committedCols", 0),
+                ["committedRows"] = GetIntProperty(root, "committedRows", 0),
+                ["messageRendererGeneration"] = GetIntProperty(root, "rendererGeneration", 0),
+                ["messageResizeGeneration"] = GetLongProperty(root, "resizeGeneration", 0),
+                ["fitCommitted"] = GetBooleanProperty(root, "fitCommitted"),
+                ["hostResizeCommit"] = GetBooleanProperty(root, "hostResizeCommit"),
+                ["contentOmitted"] = true
+            };
+        }
+
+        private void LogXtermOutputCursorTrace(JsonElement root)
+        {
+            var metadata = new Dictionary<string, object?>
+            {
+                ["stage"] = GetStringProperty(root, "stage", "unknown"),
+                ["source"] = GetStringProperty(root, "source", "unknown"),
+                ["rendererGeneration"] = GetIntProperty(root, "rendererGeneration", 0),
+                ["terminalSessionGeneration"] = GetIntProperty(root, "terminalSessionGeneration", 0),
+                ["outputSequence"] = GetLongProperty(root, "outputSequence", 0),
+                ["submissionId"] = GetLongProperty(root, "submissionId", 0),
+                ["resizeAdjacent"] = GetBooleanProperty(root, "resizeAdjacent"),
+                ["resizeGeneration"] = GetLongProperty(root, "resizeGeneration", 0),
+                ["resizeElapsedMilliseconds"] = GetDoubleProperty(root, "resizeElapsedMilliseconds", -1),
+                ["outputCharacterLength"] = GetIntProperty(root, "outputCharacterLength", 0),
+                ["hostControlSummary"] = GetStringProperty(root, "hostControlSummary", string.Empty),
+                ["classificationSummary"] = GetStringProperty(root, "classificationSummary", string.Empty),
+                ["carriageReturnCount"] = GetIntProperty(root, "carriageReturnCount", 0),
+                ["lineFeedCount"] = GetIntProperty(root, "lineFeedCount", 0),
+                ["carriageReturnLineFeedPairCount"] = GetIntProperty(root, "carriageReturnLineFeedPairCount", 0),
+                ["escapeCount"] = GetIntProperty(root, "escapeCount", 0),
+                ["csiCount"] = GetIntProperty(root, "csiCount", 0),
+                ["csiCursorUpCount"] = GetIntProperty(root, "csiCursorUpCount", 0),
+                ["csiCursorDownCount"] = GetIntProperty(root, "csiCursorDownCount", 0),
+                ["csiCursorForwardCount"] = GetIntProperty(root, "csiCursorForwardCount", 0),
+                ["csiCursorBackwardCount"] = GetIntProperty(root, "csiCursorBackwardCount", 0),
+                ["csiCursorPositionCount"] = GetIntProperty(root, "csiCursorPositionCount", 0),
+                ["csiEraseLineCount"] = GetIntProperty(root, "csiEraseLineCount", 0),
+                ["csiEraseDisplayCount"] = GetIntProperty(root, "csiEraseDisplayCount", 0),
+                ["csiSaveCursorCount"] = GetIntProperty(root, "csiSaveCursorCount", 0),
+                ["csiRestoreCursorCount"] = GetIntProperty(root, "csiRestoreCursorCount", 0),
+                ["csiInsertLineCount"] = GetIntProperty(root, "csiInsertLineCount", 0),
+                ["csiDeleteLineCount"] = GetIntProperty(root, "csiDeleteLineCount", 0),
+                ["csiScrollUpCount"] = GetIntProperty(root, "csiScrollUpCount", 0),
+                ["csiScrollDownCount"] = GetIntProperty(root, "csiScrollDownCount", 0),
+                ["csiSgrCount"] = GetIntProperty(root, "csiSgrCount", 0),
+                ["csiOtherCount"] = GetIntProperty(root, "csiOtherCount", 0),
+                ["oscCount"] = GetIntProperty(root, "oscCount", 0),
+                ["otherEscapeCount"] = GetIntProperty(root, "otherEscapeCount", 0),
+                ["otherControlCount"] = GetIntProperty(root, "otherControlCount", 0),
+                ["printableCharacterCount"] = GetIntProperty(root, "printableCharacterCount", 0),
+                ["cols"] = GetIntProperty(root, "cols", 0),
+                ["rows"] = GetIntProperty(root, "rows", 0),
+                ["cursorX"] = GetIntProperty(root, "cursorX", 0),
+                ["cursorY"] = GetIntProperty(root, "cursorY", 0),
+                ["baseY"] = GetIntProperty(root, "baseY", 0),
+                ["viewportY"] = GetIntProperty(root, "viewportY", 0),
+                ["absoluteCursorY"] = GetIntProperty(root, "absoluteCursorY", 0),
+                ["scrollbackLength"] = GetIntProperty(root, "scrollbackLength", 0),
+                ["beforeCursorX"] = GetIntProperty(root, "beforeCursorX", 0),
+                ["beforeCursorY"] = GetIntProperty(root, "beforeCursorY", 0),
+                ["beforeBaseY"] = GetIntProperty(root, "beforeBaseY", 0),
+                ["beforeViewportY"] = GetIntProperty(root, "beforeViewportY", 0),
+                ["beforeAbsoluteCursorY"] = GetIntProperty(root, "beforeAbsoluteCursorY", 0),
+                ["deltaCursorX"] = GetIntProperty(root, "deltaCursorX", 0),
+                ["deltaCursorY"] = GetIntProperty(root, "deltaCursorY", 0),
+                ["deltaBaseY"] = GetIntProperty(root, "deltaBaseY", 0),
+                ["deltaViewportY"] = GetIntProperty(root, "deltaViewportY", 0),
+                ["deltaAbsoluteCursorY"] = GetIntProperty(root, "deltaAbsoluteCursorY", 0),
+                ["contentOmitted"] = true
+            };
+
+            TerminalCriticalTrace.LogStage("Xterm.OutputCursorTrace", metadata);
+            DeveloperDiagnostics.LogDebug(
+                "Terminal",
+                "Captured xterm cursor state around resize-adjacent renderer output write.",
+                metadata);
+        }
+
+        private static string GetStringProperty(JsonElement root, string name, string fallback)
+        {
+            return root.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
+                ? property.GetString() ?? fallback
+                : fallback;
+        }
+
+        private static int GetIntProperty(JsonElement root, string name, int fallback)
+        {
+            return root.TryGetProperty(name, out var property) &&
+                   property.ValueKind == JsonValueKind.Number &&
+                   property.TryGetInt32(out var value)
+                ? value
+                : fallback;
+        }
+
+        private static long GetLongProperty(JsonElement root, string name, long fallback)
+        {
+            return root.TryGetProperty(name, out var property) &&
+                   property.ValueKind == JsonValueKind.Number &&
+                   property.TryGetInt64(out var value)
+                ? value
+                : fallback;
+        }
+
+        private static double GetDoubleProperty(JsonElement root, string name, double fallback)
+        {
+            return root.TryGetProperty(name, out var property) &&
+                   property.ValueKind == JsonValueKind.Number &&
+                   property.TryGetDouble(out var value)
+                ? value
+                : fallback;
+        }
+
+        private static bool? GetBooleanProperty(JsonElement root, string name)
+        {
+            if (!root.TryGetProperty(name, out var property))
+            {
+                return null;
+            }
+
+            return property.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                _ => null
+            };
+        }
+
         private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             if (sender is not CoreWebView2 coreWebView2)
@@ -1654,8 +2919,23 @@ namespace PS7ScriptDesk.Shell.Controls
                             root.TryGetProperty("sequence", out var sequenceProp) &&
                             sequenceProp.TryGetInt64(out var sequence))
                         {
-                            RequestOutputFlush(_outputFlowController.Acknowledge(generation, sequence));
+                            var scheduleFlush = _outputFlowController.Acknowledge(generation, sequence);
+                            TerminalCriticalTrace.LogStage(
+                                "TerminalControl.RendererAcknowledgement",
+                                new Dictionary<string, object?>
+                                {
+                                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                                    ["terminalSessionGeneration"] = generation,
+                                    ["outputSequence"] = sequence,
+                                    ["scheduleFlush"] = scheduleFlush
+                            });
+                            RequestOutputFlush(scheduleFlush);
+                            TryStartPendingResizeIfRendererIdle();
                         }
+                        break;
+
+                    case "resize_commit_ack":
+                        HandleResizeCommitAcknowledgement(root);
                         break;
 
                     case "terminal_compatibility":
@@ -1740,6 +3020,48 @@ namespace PS7ScriptDesk.Shell.Controls
                             var writeReason = root.TryGetProperty("message", out var writeMsgProp) ? writeMsgProp.GetString() : "unknown";
                             AppLogger.Error("Terminal", $"xterm.js message/write failed inside WebView2. Type={type}, Reason={writeReason}");
                             DeveloperDiagnostics.LogError("Terminal", "xterm.js message/write failed inside WebView2.", new Dictionary<string, object?> { ["type"] = type, ["reason"] = writeReason });
+                        }
+                        break;
+
+                    case "xterm_resize_trace_error":
+                        {
+                            var traceReason = root.TryGetProperty("message", out var traceMsgProp) ? traceMsgProp.GetString() : "unknown";
+                            var traceSource = root.TryGetProperty("source", out var traceSourceProp) ? traceSourceProp.GetString() : "unknown";
+                            var traceStage = root.TryGetProperty("stage", out var traceStageProp) ? traceStageProp.GetString() : "unknown";
+                            AppLogger.Warning("Terminal", $"xterm.js resize trace failed but resize commit handling continued. Source={traceSource}, Stage={traceStage}, Reason={traceReason}");
+                            DeveloperDiagnostics.LogWarning(
+                                "Terminal",
+                                "xterm.js resize trace failed but resize commit handling continued.",
+                                new Dictionary<string, object?>
+                                {
+                                    ["source"] = traceSource,
+                                    ["stage"] = traceStage,
+                                    ["reason"] = traceReason,
+                                    ["contentOmitted"] = true
+                                });
+                        }
+                        break;
+
+                    case "xterm_output_cursor_trace":
+                        LogXtermOutputCursorTrace(root);
+                        break;
+
+                    case "xterm_output_cursor_trace_error":
+                        {
+                            var traceReason = root.TryGetProperty("message", out var traceMsgProp) ? traceMsgProp.GetString() : "unknown";
+                            var traceSource = root.TryGetProperty("source", out var traceSourceProp) ? traceSourceProp.GetString() : "unknown";
+                            var traceStage = root.TryGetProperty("stage", out var traceStageProp) ? traceStageProp.GetString() : "unknown";
+                            AppLogger.Warning("Terminal", $"xterm.js output cursor trace failed but terminal output handling continued. Source={traceSource}, Stage={traceStage}, Reason={traceReason}");
+                            DeveloperDiagnostics.LogWarning(
+                                "Terminal",
+                                "xterm.js output cursor trace failed but terminal output handling continued.",
+                                new Dictionary<string, object?>
+                                {
+                                    ["source"] = traceSource,
+                                    ["stage"] = traceStage,
+                                    ["reason"] = traceReason,
+                                    ["contentOmitted"] = true
+                                });
                         }
                         break;
 
@@ -1899,50 +3221,13 @@ namespace PS7ScriptDesk.Shell.Controls
                         }
                         break;
 
+                    case "xterm_resize_trace":
+                        LogXtermResizeTrace(root);
+                        break;
+
                     case "resize":
-                        if (root.TryGetProperty("cols", out var colsProp) &&
-                            root.TryGetProperty("rows", out var rowsProp))
-                        {
-                            var cols = colsProp.GetInt32();
-                            var rows = rowsProp.GetInt32();
-                            var clientWidth = root.TryGetProperty("clientWidth", out var clientWidthProp)
-                                ? clientWidthProp.GetInt32()
-                                : 0;
-                            var clientHeight = root.TryGetProperty("clientHeight", out var clientHeightProp)
-                                ? clientHeightProp.GetInt32()
-                                : 0;
-                            var resizeDecision = _terminalResizePolicy.Evaluate(
-                                cols,
-                                rows,
-                                _rendererInstanceGeneration);
-                            AppLogger.Debug(
-                                "Terminal",
-                                $"xterm resize reported. Cols={cols}, Rows={rows}, Accepted={resizeDecision.Accepted}, Reason={resizeDecision.Reason}.");
-                            DeveloperDiagnostics.LogInfo(
-                                "Terminal",
-                                "xterm terminal geometry evaluated.",
-                                new Dictionary<string, object?>
-                                {
-                                    ["resizeGeneration"] = resizeDecision.ResizeGeneration,
-                                    ["rendererGeneration"] = _rendererInstanceGeneration,
-                                    ["sessionGeneration"] = _outputFlowController.ActiveGeneration,
-                                    ["pixelWidth"] = clientWidth,
-                                    ["pixelHeight"] = clientHeight,
-                                    ["resolvedColumns"] = cols,
-                                    ["resolvedRows"] = rows,
-                                    ["conptyColumns"] = resizeDecision.Accepted ? resizeDecision.Columns : 0,
-                                    ["conptyRows"] = resizeDecision.Accepted ? resizeDecision.Rows : 0,
-                                    ["accepted"] = resizeDecision.Accepted,
-                                    ["reason"] = resizeDecision.Reason,
-                                    ["outputSubmissionOccurred"] = false,
-                                    ["filterFlushOccurred"] = false,
-                                    ["contentOmitted"] = true
-                                });
-                            if (resizeDecision.Accepted)
-                            {
-                                TerminalResized?.Invoke(resizeDecision.Columns, resizeDecision.Rows);
-                            }
-                        }
+                    case "resize_request":
+                        HandleResizeRequest(root);
                         break;
                 }
             }

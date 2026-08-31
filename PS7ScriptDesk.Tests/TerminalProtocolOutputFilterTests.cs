@@ -22,7 +22,7 @@ public sealed class TerminalProtocolOutputFilterTests
             done + "\r\n",
             prompt);
 
-        Assert.Equal("Sunday, August 30, 2026 10:25:58 AM\r\n" + prompt, visible);
+        Assert.Equal("\r\n\r\nSunday, August 30, 2026 10:25:58 AM\r\n\r\n\r\n" + prompt, visible);
         Assert.DoesNotContain("PSSTUDIO", visible, StringComparison.Ordinal);
         Assert.DoesNotContain("TerminalSnapshots", visible, StringComparison.Ordinal);
     }
@@ -45,8 +45,8 @@ public sealed class TerminalProtocolOutputFilterTests
 
         var visible = Filter("output\r\n" + done + "\r\nPS C:\\> ");
 
-        Assert.Equal("output\r\nPS C:\\> ", visible);
-        Assert.Equal(1, visible.Count(character => character == '\n'));
+        Assert.Equal("output\r\n\r\nPS C:\\> ", visible);
+        Assert.Equal(2, visible.Count(character => character == '\n'));
     }
 
     [Fact]
@@ -59,7 +59,7 @@ public sealed class TerminalProtocolOutputFilterTests
         var second = filter.Process(done[17..] + "\r\nPS C:\\> ").VisibleText;
 
         Assert.Equal("output\r\n", first);
-        Assert.Equal("PS C:\\> ", second);
+        Assert.Equal("\r\nPS C:\\> ", second);
     }
 
     [Fact]
@@ -82,8 +82,20 @@ public sealed class TerminalProtocolOutputFilterTests
         var visible = Filter(
             $"{command}\r\n{start}\r\n{diagnostic}\r\n{location}\r\n{done}\r\nuser output\r\n");
 
-        Assert.Equal("user output\r\n", visible);
+        Assert.Equal(string.Concat(Enumerable.Repeat("\r\n", 5)) + "user output\r\n", visible);
         Assert.DoesNotContain("PSSTUDIO", visible, StringComparison.Ordinal);
+        Assert.DoesNotContain("TerminalSnapshots", visible, StringComparison.Ordinal);
+    }
+
+
+    [Fact]
+    public void ShortDispatchSnapshotCommand_IsHiddenButPreservesLineAdvance()
+    {
+        const string command = "& 'C:\\Users\\rbarn\\AppData\\Local\\PS7ScriptDesk\\Temp\\TerminalSnapshots\\psd-0123456789abcdef0123456789abcdef.ps1'";
+
+        var visible = Filter(command + "\r\nuser output\r\n");
+
+        Assert.Equal("\r\nuser output\r\n", visible);
         Assert.DoesNotContain("TerminalSnapshots", visible, StringComparison.Ordinal);
     }
 
@@ -108,7 +120,11 @@ public sealed class TerminalProtocolOutputFilterTests
                 output.Append(filter.Process(frame[split..] + "after\r\n").VisibleText);
                 output.Append(filter.Flush().VisibleText);
 
-                Assert.Equal("before\r\nafter\r\n", output.ToString());
+                var rendered = output.ToString();
+                Assert.StartsWith("before\r\n", rendered, StringComparison.Ordinal);
+                Assert.EndsWith("after\r\n", rendered, StringComparison.Ordinal);
+                Assert.DoesNotContain("PSSTUDIO", rendered, StringComparison.Ordinal);
+                Assert.True(rendered.Length > "before\r\nafter\r\n".Length);
             }
         }
     }
@@ -121,8 +137,29 @@ public sealed class TerminalProtocolOutputFilterTests
 
         var visible = Filter(input);
 
-        Assert.Equal("before\x1b[31mred\x1b[0m\r\n\x1b[32m\x1b[0mafter\x1b[34mblue\x1b[0m", visible);
+        Assert.Equal("before\x1b[31mred\x1b[0m\r\n\x1b[32m\x1b[0m\r\nafter\x1b[34mblue\x1b[0m", visible);
         Assert.DoesNotContain(frame, visible, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PrivateProtocolFiltering_CharacterizesRemovedAndPreservedControls()
+    {
+        const string frame = "##PSSTUDIO_EXEC_DONE_0123456789abcdef0123456789abcdef";
+        var filter = new TerminalProtocolOutputFilter();
+
+        var result = filter.Process($"\u001b[32m{frame}\u001b[0m\r\n");
+
+        Assert.Equal("\u001b[32m\u001b[0m\r\n", result.VisibleText);
+        Assert.Equal(1, result.FilteredRecordCount);
+        Assert.True(result.FilteredCharacters > 0);
+        Assert.Equal(1, result.RemovedProtocolControlSummary.CarriageReturnCount);
+        Assert.Equal(1, result.RemovedProtocolControlSummary.LineFeedCount);
+        Assert.Equal(1, result.RemovedProtocolControlSummary.CarriageReturnLineFeedPairCount);
+        Assert.Equal(2, result.RemovedProtocolControlSummary.CsiSgrCount);
+        Assert.Equal(2, result.PreservedProtocolControlSummary.CsiSgrCount);
+        Assert.Equal(1, result.PreservedProtocolControlSummary.CarriageReturnCount);
+        Assert.Equal(1, result.PreservedProtocolControlSummary.LineFeedCount);
+        Assert.Equal(1, result.PreservedProtocolControlSummary.CarriageReturnLineFeedPairCount);
     }
 
     [Fact]

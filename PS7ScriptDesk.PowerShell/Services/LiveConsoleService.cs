@@ -20,8 +20,10 @@ namespace PS7ScriptDesk.PowerShell.Services
     ///
     /// ── xterm.js terminal architecture ────────────────────────────────────────
     /// ConPTY stdout is published via <see cref="RawOutputReceived"/> with ANSI/
-    /// VT100 sequences intact (only null bytes and the exec-done sentinel are
-    /// stripped). The Shell layer subscribes and forwards the raw data to the
+    /// VT100 sequences intact. ScriptDesk's private execution lifecycle frames use
+    /// cursor-neutral OSC records and are consumed before rendering; ordinary terminal
+    /// state controls and line terminators remain ordered. The Shell layer subscribes
+    /// and forwards the raw data to the
     /// xterm.js <see cref="Controls.TerminalControl"/> via WebView2.
     ///
     /// Lifecycle events (session start/stop, process exit) are still delivered
@@ -66,8 +68,11 @@ namespace PS7ScriptDesk.PowerShell.Services
         private static readonly TimeSpan InputDrainTimeout = TimeSpan.FromSeconds(2);
         private static readonly TimeSpan ProcessExitTimeout = TimeSpan.FromSeconds(2);
         private static readonly TimeSpan ReaderDrainTimeout = TimeSpan.FromSeconds(2);
+        private static readonly TimeSpan ResizeOutputObservationWindow = TimeSpan.FromSeconds(1);
         private const int MaxPreStartBufferCharacters = 64 * 1024;
         private const string DispatchDiagnosticTokenPrefix = "##PSSTUDIO_DISPATCH_DIAG##";
+        private const string DispatchControlOscPrefix = "\x1b]7777;PS7SD;";
+        private const char DispatchControlOscTerminator = '\a';
 
         private readonly object _syncRoot = new();
         private readonly SemaphoreSlim _sessionLifecycleGate = new(1, 1);
@@ -111,6 +116,8 @@ namespace PS7ScriptDesk.PowerShell.Services
         private bool _terminalSessionTeardownInProgress = true;
         private bool _redirectedTerminalTransportActive;
         private readonly ResizeFailureEpisode _resizeFailureEpisode = new();
+        private long _resizeSequence;
+        private ResizeObservation _lastResizeObservation;
         private Task _lastProcessExitTeardownTask = Task.CompletedTask;
         private Task _pendingNativeTeardownTask = Task.CompletedTask;
 
@@ -165,6 +172,8 @@ namespace PS7ScriptDesk.PowerShell.Services
         public event Action<int>? TerminalSessionStarted;
 
         public event Action<int>? TerminalSessionStopping;
+
+        public event Action<int, string>? PromptReadyObserved;
 
         public event Action<int, string>? RawOutputReceived;
 
@@ -280,23 +289,29 @@ namespace PS7ScriptDesk.PowerShell.Services
         public void ResizeHost(int width, int height)
         {
             ResizeRequest resizeRequest;
+            long resizeSequence;
 
             lock (_syncRoot)
             {
                 UpdateTerminalSize(width, height);
+                resizeSequence = ++_resizeSequence;
                 resizeRequest = new ResizeRequest(
                     _pseudoConsoleHandle,
                     _terminalSessionGeneration,
                     _terminalColumns,
                     _terminalRows,
-                    _process);
+                    _process,
+                    resizeSequence);
+                _lastResizeObservation = ResizeObservation.FromRequest(resizeRequest);
             }
 
             if (resizeRequest.PseudoConsole != IntPtr.Zero)
             {
+                LogResizePseudoConsoleStage("ResizePseudoConsole.Begin", "ResizeHost", resizeRequest, null);
                 var hResult = ResizePseudoConsole(
                     resizeRequest.PseudoConsole,
                     new COORD((short)resizeRequest.Columns, (short)resizeRequest.Rows));
+                LogResizePseudoConsoleStage("ResizePseudoConsole.End", "ResizeHost", resizeRequest, hResult);
                 ObserveResizeResult("ResizeHost", resizeRequest, hResult);
             }
         }
@@ -499,15 +514,26 @@ namespace PS7ScriptDesk.PowerShell.Services
                 completionToken,
                 locationToken,
                 executeInCurrentScope: true);
-            string helperSnapshotPath;
+            string helperSnapshotPath = string.Empty;
+            string dispatchSnapshotPath = string.Empty;
             try
             {
                 helperSnapshotPath = CreateDispatchHelperSnapshot();
+                dispatchSnapshotPath = CreateShortDispatchSnapshot(
+                    BuildScriptDispatchCommand(helperSnapshotPath, instructionSnapshotPath, executeInCurrentScope: true));
             }
             catch
             {
                 TryDeleteSnapshot(commandSnapshotPath);
                 TryDeleteSnapshot(instructionSnapshotPath);
+                if (!string.IsNullOrEmpty(helperSnapshotPath))
+                {
+                    TryDeleteSnapshot(helperSnapshotPath);
+                }
+                if (!string.IsNullOrEmpty(dispatchSnapshotPath))
+                {
+                    TryDeleteSnapshot(dispatchSnapshotPath);
+                }
                 throw;
             }
 
@@ -520,6 +546,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 TryDeleteSnapshot(commandSnapshotPath);
                 TryDeleteSnapshot(instructionSnapshotPath);
                 TryDeleteSnapshot(helperSnapshotPath);
+                TryDeleteSnapshot(dispatchSnapshotPath);
                 throw new InvalidOperationException(dispatchFailure ?? "Another terminal operation is already running.");
             }
 
@@ -528,11 +555,9 @@ namespace PS7ScriptDesk.PowerShell.Services
             AddPendingSnapshotPath(commandSnapshotPath);
             AddPendingSnapshotPath(instructionSnapshotPath);
             AddPendingSnapshotPath(helperSnapshotPath);
+            AddPendingSnapshotPath(dispatchSnapshotPath);
             SetPendingExecutionTokens(startToken, completionToken, locationToken);
-            var dispatchCommand = BuildScriptDispatchCommand(
-                helperSnapshotPath,
-                instructionSnapshotPath,
-                executeInCurrentScope: true);
+            var dispatchCommand = BuildShortDispatchCommand(dispatchSnapshotPath, executeInCurrentScope: true);
             RegisterHiddenOutputFragment(dispatchCommand);
             AppLogger.Info(
                 "LiveConsole",
@@ -588,14 +613,25 @@ namespace PS7ScriptDesk.PowerShell.Services
                 completionToken,
                 locationToken,
                 executeInCurrentScope);
-            string helperSnapshotPath;
+            string helperSnapshotPath = string.Empty;
+            string dispatchSnapshotPath = string.Empty;
             try
             {
                 helperSnapshotPath = CreateDispatchHelperSnapshot();
+                dispatchSnapshotPath = CreateShortDispatchSnapshot(
+                    BuildScriptDispatchCommand(helperSnapshotPath, instructionSnapshotPath, executeInCurrentScope));
             }
             catch
             {
                 TryDeleteSnapshot(instructionSnapshotPath);
+                if (!string.IsNullOrEmpty(helperSnapshotPath))
+                {
+                    TryDeleteSnapshot(helperSnapshotPath);
+                }
+                if (!string.IsNullOrEmpty(dispatchSnapshotPath))
+                {
+                    TryDeleteSnapshot(dispatchSnapshotPath);
+                }
                 if (executionTarget.DeleteAfterRun)
                 {
                     TryDeleteSnapshot(scriptSnapshotPath);
@@ -617,6 +653,7 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                 TryDeleteSnapshot(instructionSnapshotPath);
                 TryDeleteSnapshot(helperSnapshotPath);
+                TryDeleteSnapshot(dispatchSnapshotPath);
                 throw new InvalidOperationException(dispatchFailure ?? "Another terminal operation is already running.");
             }
 
@@ -624,11 +661,9 @@ namespace PS7ScriptDesk.PowerShell.Services
             var ownedProcessIdAtDispatch = GetCurrentProcessIdNoThrow();
             AddPendingSnapshotPath(instructionSnapshotPath);
             AddPendingSnapshotPath(helperSnapshotPath);
+            AddPendingSnapshotPath(dispatchSnapshotPath);
             SetPendingExecutionTokens(startToken, completionToken, locationToken);
-            var dispatchCommand = BuildScriptDispatchCommand(
-                helperSnapshotPath,
-                instructionSnapshotPath,
-                executeInCurrentScope);
+            var dispatchCommand = BuildShortDispatchCommand(dispatchSnapshotPath, executeInCurrentScope);
             var scriptCommand = dispatchCommand + TerminalEnterSequence;
             RegisterHiddenOutputFragment(dispatchCommand);
             var scriptSnapshotExists = File.Exists(scriptSnapshotPath);
@@ -713,6 +748,13 @@ namespace PS7ScriptDesk.PowerShell.Services
             // into PSReadLine or exposed in the command echo.
             var invocationOperator = executeInCurrentScope ? "." : "&";
             return $"{invocationOperator} {quotedHelperPath} {quotedInstructionPath}";
+        }
+
+        private static string BuildShortDispatchCommand(string dispatchSnapshotPath, bool executeInCurrentScope)
+        {
+            var quotedDispatchPath = QuotePowerShellSingleQuotedString(dispatchSnapshotPath);
+            var invocationOperator = executeInCurrentScope ? "." : "&";
+            return $"{invocationOperator} {quotedDispatchPath}";
         }
 
         private static string BuildInteractivePowerShellArguments(string startupCommand)
@@ -1811,6 +1853,12 @@ namespace PS7ScriptDesk.PowerShell.Services
         {
             try
             {
+                TerminalCriticalTrace.LogStage(
+                    "ConPTY.ReadLoop.Begin",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = sessionGeneration
+                    });
                 using var stream = new FileStream(
                     new SafeFileHandle(outputReaderHandle, ownsHandle: false),
                     FileAccess.Read,
@@ -1833,6 +1881,12 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                     if (!IsCurrentSessionGeneration(sessionGeneration))
                     {
+                        TerminalCriticalTrace.LogStage(
+                            "ConPTY.ReadLoop.StaleGenerationExit",
+                            new Dictionary<string, object?>
+                            {
+                                ["terminalSessionGeneration"] = sessionGeneration
+                            });
                         break;
                     }
 
@@ -1844,12 +1898,30 @@ namespace PS7ScriptDesk.PowerShell.Services
                             $"[LiveConsoleService] First ConPTY chunk — {charsRead} chars, hasAnsi={hasAnsi}, contentOmitted=true");
                     }
 
+                    TerminalCriticalTrace.LogStage(
+                        "ConPTY.ChunkReceived",
+                        new Dictionary<string, object?>
+                        {
+                            ["terminalSessionGeneration"] = sessionGeneration,
+                            ["outputCharacterLength"] = charsRead,
+                            ["streamKind"] = ExecutionOutputStreamKind.StandardOutput.ToString(),
+                            ["contentOmitted"] = true
+                        });
+                    LogConptyOutputDuringResizeIfRecent(sessionGeneration, charsRead);
                     PublishTerminalChunkForSession(
                         new string(buffer, 0, charsRead),
                         ExecutionOutputStreamKind.StandardOutput,
                         onOutput,
                         sessionGeneration);
                 }
+
+                TerminalCriticalTrace.LogStage(
+                    "ConPTY.ReadLoop.End",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = sessionGeneration,
+                        ["cancellationRequested"] = cancellationToken.IsCancellationRequested
+                    });
             }
             catch (OperationCanceledException)
             {
@@ -1863,6 +1935,17 @@ namespace PS7ScriptDesk.PowerShell.Services
             {
                 if (IsCurrentSessionGeneration(sessionGeneration))
                 {
+                    TerminalCriticalTrace.LogException(
+                        "ConPTY.Reader.FatalException",
+                        ex,
+                        new Dictionary<string, object?>
+                        {
+                            ["terminalSessionGeneration"] = sessionGeneration,
+                            ["failureBoundary"] = "ReadPseudoConsoleOutputLoopAsync.outerCatch",
+                            ["uiDispatcherTransition"] = "unknown-before-during-or-after",
+                            ["statusMessageUsesExceptionMessageOnly"] = true,
+                            ["contentOmitted"] = true
+                        });
                     AppLogger.Error("LiveConsole", "ConPTY terminal reader stopped unexpectedly.", ex);
                     onOutput(new ExecutionOutputRecord(
                         ExecutionOutputStreamKind.Lifecycle,
@@ -1881,6 +1964,13 @@ namespace PS7ScriptDesk.PowerShell.Services
         {
             try
             {
+                TerminalCriticalTrace.LogStage(
+                    "RedirectedTerminal.ReadLoop.Begin",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = sessionGeneration,
+                        ["streamKind"] = streamKind.ToString()
+                    });
                 char[] buffer = new char[2048];
                 while (!cancellationToken.IsCancellationRequested)
                 {
@@ -1896,15 +1986,40 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                     if (!IsCurrentSessionGeneration(sessionGeneration))
                     {
+                        TerminalCriticalTrace.LogStage(
+                            "RedirectedTerminal.ReadLoop.StaleGenerationExit",
+                            new Dictionary<string, object?>
+                            {
+                                ["terminalSessionGeneration"] = sessionGeneration,
+                                ["streamKind"] = streamKind.ToString()
+                            });
                         break;
                     }
 
+                    TerminalCriticalTrace.LogStage(
+                        "RedirectedTerminal.ChunkReceived",
+                        new Dictionary<string, object?>
+                        {
+                            ["terminalSessionGeneration"] = sessionGeneration,
+                            ["outputCharacterLength"] = charsRead,
+                            ["streamKind"] = streamKind.ToString(),
+                            ["contentOmitted"] = true
+                        });
                     PublishTerminalChunkForSession(
                         new string(buffer, 0, charsRead),
                         streamKind,
                         onOutput,
                         sessionGeneration);
                 }
+
+                TerminalCriticalTrace.LogStage(
+                    "RedirectedTerminal.ReadLoop.End",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = sessionGeneration,
+                        ["streamKind"] = streamKind.ToString(),
+                        ["cancellationRequested"] = cancellationToken.IsCancellationRequested
+                    });
             }
             catch (OperationCanceledException)
             {
@@ -1918,6 +2033,18 @@ namespace PS7ScriptDesk.PowerShell.Services
             {
                 if (IsCurrentSessionGeneration(sessionGeneration))
                 {
+                    TerminalCriticalTrace.LogException(
+                        "RedirectedTerminal.Reader.FatalException",
+                        ex,
+                        new Dictionary<string, object?>
+                        {
+                            ["terminalSessionGeneration"] = sessionGeneration,
+                            ["streamKind"] = streamKind.ToString(),
+                            ["failureBoundary"] = "ReadStreamLoopAsync.outerCatch",
+                            ["uiDispatcherTransition"] = "unknown-before-during-or-after",
+                            ["statusMessageUsesExceptionMessageOnly"] = true,
+                            ["contentOmitted"] = true
+                        });
                     AppLogger.Error("LiveConsole", "Redirected terminal reader stopped unexpectedly.", ex);
                     onOutput(new ExecutionOutputRecord(
                         ExecutionOutputStreamKind.Lifecycle,
@@ -1955,12 +2082,29 @@ namespace PS7ScriptDesk.PowerShell.Services
                 return;
             }
 
+            TerminalCriticalTrace.LogStage(
+                "LiveConsole.PublishTerminalChunkForSession.Begin",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = observedSessionGeneration,
+                    ["streamKind"] = streamKind.ToString(),
+                    ["inputCharacterLength"] = rawChunk.Length,
+                    ["contentOmitted"] = true
+                });
             if (observedSessionGeneration.HasValue &&
                 !IsCurrentSessionGeneration(observedSessionGeneration.Value))
             {
                 AppLogger.Debug(
                     "LiveConsole",
                     $"Ignored stale terminal output. ObservedSessionGeneration={observedSessionGeneration.Value}.");
+                TerminalCriticalTrace.LogStage(
+                    "LiveConsole.PublishTerminalChunkForSession.StaleGenerationDrop",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = observedSessionGeneration.Value,
+                        ["streamKind"] = streamKind.ToString(),
+                        ["contentOmitted"] = true
+                    });
                 return;
             }
 
@@ -1971,6 +2115,17 @@ namespace PS7ScriptDesk.PowerShell.Services
             // can render colors, cursor movement, progress bars, etc.
             var raw = rawChunk.Replace("\0", string.Empty, StringComparison.Ordinal);
             raw = FilterInternalTerminalOutput(raw, out var hasSentinel, observedSessionGeneration);
+            TerminalCriticalTrace.LogStage(
+                "LiveConsole.PublishTerminalChunkForSession.Filtered",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = observedSessionGeneration,
+                    ["streamKind"] = streamKind.ToString(),
+                    ["outputCharacterLength"] = raw.Length,
+                    ["containsSentinel"] = hasSentinel,
+                    ["dispatchGeneration"] = dispatchGeneration,
+                    ["contentOmitted"] = true
+                });
 
             // ── Cleaned path (for internal tracking) ─────────────────────────────
             // Strip OSC/ANSI sequences and normalise line endings so that the
@@ -2033,6 +2188,9 @@ namespace PS7ScriptDesk.PowerShell.Services
             if (!string.IsNullOrEmpty(raw))
             {
                 var meaningfulUserOutput = ContainsMeaningfulUserOutput(raw, cleaned);
+                Action<int, string>? rawHandler;
+                var generationForRawOutput = observedSessionGeneration ?? _terminalSessionGeneration;
+                var shouldUseFallbackOutput = false;
                 lock (_syncRoot)
                 {
                     if (observedSessionGeneration.HasValue &&
@@ -2045,15 +2203,65 @@ namespace PS7ScriptDesk.PowerShell.Services
                     }
 
                     MarkCurrentCommandVisibleOutputSeen(meaningfulUserOutput);
-                    var rawHandler = RawOutputReceived;
-                    if (rawHandler is not null)
-                    {
-                        rawHandler(observedSessionGeneration ?? _terminalSessionGeneration, raw);
-                    }
-                    else if (!string.IsNullOrEmpty(cleaned))
-                    {
-                        onOutput(new ExecutionOutputRecord(streamKind, cleaned, DateTime.Now));
-                    }
+                    generationForRawOutput = observedSessionGeneration ?? _terminalSessionGeneration;
+                    rawHandler = RawOutputReceived;
+                    shouldUseFallbackOutput = rawHandler is null && !string.IsNullOrEmpty(cleaned);
+                }
+
+                if (rawHandler is not null)
+                {
+                    TerminalCriticalTrace.LogStage(
+                        "LiveConsole.NotifyRawOutputHandlers.Dispatch",
+                        new Dictionary<string, object?>
+                        {
+                            ["terminalSessionGeneration"] = generationForRawOutput,
+                            ["subscriberCount"] = rawHandler.GetInvocationList().Length,
+                            ["outputCharacterLength"] = raw.Length,
+                            ["streamKind"] = streamKind.ToString(),
+                            ["contentOmitted"] = true
+                        });
+                    NotifyRawOutputHandlers(rawHandler, generationForRawOutput, raw);
+                }
+                else if (shouldUseFallbackOutput)
+                {
+                    onOutput(new ExecutionOutputRecord(streamKind, cleaned, DateTime.Now));
+                }
+            }
+        }
+
+        private static void NotifyRawOutputHandlers(Action<int, string> rawHandler, int sessionGeneration, string raw)
+        {
+            foreach (Action<int, string> handler in rawHandler.GetInvocationList())
+            {
+                var metadata = TerminalCriticalTrace.CreateDelegateMetadata(handler);
+                metadata["terminalSessionGeneration"] = sessionGeneration;
+                metadata["outputCharacterLength"] = raw.Length;
+                metadata["pipelineStage"] = "RawOutputReceived";
+                metadata["uiDispatcherTransition"] = "before-dispatcher-marshal";
+                metadata["contentOmitted"] = true;
+                try
+                {
+                    TerminalCriticalTrace.LogStage("LiveConsole.RawOutputReceivedSubscriber.Begin", metadata);
+                    handler(sessionGeneration, raw);
+                    TerminalCriticalTrace.LogStage("LiveConsole.RawOutputReceivedSubscriber.End", metadata);
+                }
+                catch (Exception ex)
+                {
+                    TerminalCriticalTrace.LogException(
+                        "LiveConsole.RawOutputReceivedSubscriber.Exception",
+                        ex,
+                        metadata);
+                    AppLogger.Error("LiveConsole", $"Raw terminal output subscriber failed. SessionGeneration={sessionGeneration}, Length={raw.Length}, ContentOmitted=True.", ex);
+                    DeveloperDiagnostics.LogException(
+                        "Terminal",
+                        ex,
+                        "Raw terminal output subscriber failed; the terminal reader will continue.",
+                        new Dictionary<string, object?>
+                        {
+                            ["sessionGeneration"] = sessionGeneration,
+                            ["length"] = raw.Length,
+                            ["contentOmitted"] = true
+                        });
                 }
             }
         }
@@ -2889,6 +3097,7 @@ namespace PS7ScriptDesk.PowerShell.Services
             lock (_syncRoot)
             {
                 hasSentinel = false;
+                var preservedHiddenState = new StringBuilder();
 
                 if (observedSessionGeneration.HasValue &&
                     !TerminalSessionEventPolicy.IsCurrentSession(
@@ -2909,7 +3118,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                         raw.Contains(completionToken, StringComparison.Ordinal))
                     {
                         hasSentinel = true;
-                        return raw.Replace(completionToken, string.Empty, StringComparison.Ordinal);
+                        return raw.Replace(completionToken, new string(' ', completionToken.Length), StringComparison.Ordinal);
                     }
                     return raw;
                 }
@@ -2931,19 +3140,37 @@ namespace PS7ScriptDesk.PowerShell.Services
                 // output that follows the token.
                 if (commandInProgress && !string.IsNullOrEmpty(startToken))
                 {
-                    var startIndex = _hiddenOutputBuffer.IndexOf(startToken, StringComparison.Ordinal);
-                    if (startIndex < 0)
+                    var startFrame = BuildDispatchControlOscFrame("START", startToken);
+                    var startFrameIndex = _hiddenOutputBuffer.IndexOf(startFrame, StringComparison.Ordinal);
+                    var legacyStartIndex = _hiddenOutputBuffer.IndexOf(startToken, StringComparison.Ordinal);
+                    if (startFrameIndex < 0 && legacyStartIndex < 0)
                     {
                         // Keep buffering. This prevents partial leaks such as
                         // "PS Z:\> $__psstudioDone=[" or "try { & 'C:\Users".
                         return string.Empty;
                     }
 
-                    _hiddenOutputBuffer = _hiddenOutputBuffer[(startIndex + startToken.Length)..];
+                    if (startFrameIndex >= 0 &&
+                        (legacyStartIndex < 0 || startFrameIndex <= legacyStartIndex))
+                    {
+                        // The new private OSC control frame is cursor-neutral. Preserve
+                        // only state controls from the hidden command echo, then remove
+                        // the OSC frame entirely before it reaches xterm.
+                        preservedHiddenState.Append(ExtractTerminalStateControls(_hiddenOutputBuffer[..startFrameIndex]));
+                        _hiddenOutputBuffer = _hiddenOutputBuffer[(startFrameIndex + startFrame.Length)..];
+                    }
+                    else
+                    {
+                        // Backward-compatible handling for an older helper that emitted
+                        // the start token as printable terminal text.
+                        var hiddenPrefixThroughStartToken = _hiddenOutputBuffer[..(legacyStartIndex + startToken.Length)];
+                        preservedHiddenState.Append(ExtractTerminalStateControls(hiddenPrefixThroughStartToken));
+                        _hiddenOutputBuffer = _hiddenOutputBuffer[(legacyStartIndex + startToken.Length)..];
+                    }
                     _pendingStartToken = null;
                     _currentDispatchStartConfirmed = true;
                     _preStartBufferTruncated = false;
-                    AppLogger.Info("LiveConsole", "Script dispatch start token observed in terminal output; hidden command echo was filtered before display.");
+                    AppLogger.Info("LiveConsole", "Script dispatch start control observed; hidden command printable payload was removed while terminal-state controls were preserved.");
                     DeveloperDiagnostics.LogStateTransition(
                         "Terminal",
                         "ScriptDispatchStartConfirmed",
@@ -2952,7 +3179,9 @@ namespace PS7ScriptDesk.PowerShell.Services
                         "Script dispatch start token observed in terminal output.",
                         new Dictionary<string, object?>
                         {
-                            ["hiddenBufferLengthAfterToken"] = _hiddenOutputBuffer.Length
+                            ["hiddenBufferLengthAfterToken"] = _hiddenOutputBuffer.Length,
+                            ["terminalStateControlsPreserved"] = true,
+                            ["privateControlProtocol"] = "OSC7777"
                         });
                     // The start token is written only after PowerShell has accepted and begun
                     // executing the hidden dispatch command. Everything before it is
@@ -2963,6 +3192,16 @@ namespace PS7ScriptDesk.PowerShell.Services
                     _pendingHiddenOutputFragments.Clear();
                 }
 
+                ConsumeDispatchControlOscFrames(
+                    ref _hiddenOutputBuffer,
+                    completionToken,
+                    locationToken,
+                    ref hasSentinel);
+
+                // If a private OSC frame is split across ConPTY reads, hold only the
+                // incomplete tail. Ordinary output before the frame can still flow.
+                var privateOscCarry = DetachIncompleteDispatchControlOscTail(ref _hiddenOutputBuffer);
+
                 // Completion detection must win over hidden-command buffering.
                 // If the sentinel is split across the same buffered text as an echoed
                 // internal dispatch command, observe and strip it before deciding what
@@ -2972,10 +3211,11 @@ namespace PS7ScriptDesk.PowerShell.Services
                     _hiddenOutputBuffer.Contains(completionToken, StringComparison.Ordinal))
                 {
                     hasSentinel = true;
-                    _hiddenOutputBuffer = _hiddenOutputBuffer.Replace(completionToken, string.Empty, StringComparison.Ordinal);
+                    _hiddenOutputBuffer = _hiddenOutputBuffer.Replace(completionToken, new string(' ', completionToken.Length), StringComparison.Ordinal);
                 }
 
-                var filtered = new StringBuilder(_hiddenOutputBuffer.Length);
+                var filtered = new StringBuilder(preservedHiddenState.Length + _hiddenOutputBuffer.Length);
+                filtered.Append(preservedHiddenState);
                 var keepRemainder = new StringBuilder();
 
                 while (TryReadTerminalSegment(ref _hiddenOutputBuffer, out var segment))
@@ -2984,25 +3224,29 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                     if (TryConsumeLocationControlFrame(segment, locationToken))
                     {
+                        filtered.Append(ExtractTerminalStateControls(segment));
                         continue;
                     }
 
                     if (TryLogInternalDispatchDiagnostic(sanitizedSegment))
                     {
+                        filtered.Append(ExtractTerminalStateControls(segment));
                         continue;
                     }
 
                     if (IsInternalExecutionEcho(sanitizedSegment))
                     {
-                        AppLogger.Debug("LiveConsole", $"Filtered internal terminal echo before xterm.js. Segment='{sanitizedSegment}'.");
+                        AppLogger.Debug("LiveConsole", "Masked internal terminal echo before xterm.js while preserving terminal state.");
+                        filtered.Append(ExtractTerminalStateControls(segment));
                         continue;
                     }
 
                     var matchedIndex = FindHiddenFragmentIndex(sanitizedSegment);
                     if (matchedIndex >= 0)
                     {
-                        AppLogger.Debug("LiveConsole", $"Filtered registered internal terminal echo before xterm.js. Fragment='{_pendingHiddenOutputFragments[matchedIndex]}'.");
+                        AppLogger.Debug("LiveConsole", "Masked registered internal terminal echo before xterm.js while preserving terminal state.");
                         _pendingHiddenOutputFragments.RemoveAt(matchedIndex);
+                        filtered.Append(ExtractTerminalStateControls(segment));
                         continue;
                     }
 
@@ -3012,7 +3256,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                     // so the user never sees partial app-generated script dispatch text.
                     if (commandInProgress && IsPotentialHiddenFragmentPrefix(sanitizedSegment))
                     {
-                        AppLogger.Debug("LiveConsole", $"Filtered wrapped internal terminal echo before xterm.js. Segment='{sanitizedSegment}'.");
+                        AppLogger.Debug("LiveConsole", "Masked wrapped internal terminal echo before xterm.js while preserving terminal state.");
+                        filtered.Append(ExtractTerminalStateControls(segment));
                         continue;
                     }
 
@@ -3020,7 +3265,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                         segment.Contains(completionToken, StringComparison.Ordinal))
                     {
                         hasSentinel = true;
-                        segment = segment.Replace(completionToken, string.Empty, StringComparison.Ordinal);
+                        segment = segment.Replace(completionToken, new string(' ', completionToken.Length), StringComparison.Ordinal);
                     }
 
                     // If removing the sentinel leaves only an echoed internal command,
@@ -3028,7 +3273,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                     //     PS Z:\> Write-Host ''
                     if (IsInternalExecutionEcho(RemoveControlSequences(segment)))
                     {
-                        AppLogger.Debug("LiveConsole", "Filtered internal terminal echo after sentinel removal.");
+                        AppLogger.Debug("LiveConsole", "Masked internal terminal echo after sentinel observation while preserving terminal state.");
+                        filtered.Append(ExtractTerminalStateControls(segment));
                         continue;
                     }
 
@@ -3055,7 +3301,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                             _hiddenOutputBuffer.Contains(completionToken, StringComparison.Ordinal))
                         {
                             hasSentinel = true;
-                            var remainder = _hiddenOutputBuffer.Replace(completionToken, string.Empty, StringComparison.Ordinal);
+                            var remainder = _hiddenOutputBuffer.Replace(completionToken, new string(' ', completionToken.Length), StringComparison.Ordinal);
                             if (!IsInternalExecutionEcho(RemoveControlSequences(remainder)))
                             {
                                 filtered.Append(remainder);
@@ -3076,9 +3322,138 @@ namespace PS7ScriptDesk.PowerShell.Services
                     }
                 }
 
+                if (!string.IsNullOrEmpty(privateOscCarry))
+                {
+                    keepRemainder.Append(privateOscCarry);
+                }
+
                 _hiddenOutputBuffer = keepRemainder.ToString();
                 return filtered.ToString();
             }
+        }
+
+        private static string BuildDispatchControlOscFrame(string kind, string payload)
+        {
+            return DispatchControlOscPrefix + kind + ";" + payload + DispatchControlOscTerminator;
+        }
+
+        private void ConsumeDispatchControlOscFrames(
+            ref string buffer,
+            string? completionToken,
+            string? locationToken,
+            ref bool hasSentinel)
+        {
+            if (string.IsNullOrEmpty(buffer) ||
+                buffer.IndexOf(DispatchControlOscPrefix, StringComparison.Ordinal) < 0)
+            {
+                return;
+            }
+
+            var searchIndex = 0;
+            while (searchIndex < buffer.Length)
+            {
+                var frameStart = buffer.IndexOf(DispatchControlOscPrefix, searchIndex, StringComparison.Ordinal);
+                if (frameStart < 0)
+                {
+                    break;
+                }
+
+                var frameEnd = buffer.IndexOf(DispatchControlOscTerminator, frameStart + DispatchControlOscPrefix.Length);
+                if (frameEnd < 0)
+                {
+                    break;
+                }
+
+                var payloadStart = frameStart + DispatchControlOscPrefix.Length;
+                var payload = buffer[payloadStart..frameEnd];
+                var consumed = false;
+
+                if (!string.IsNullOrEmpty(completionToken) &&
+                    string.Equals(payload, "DONE;" + completionToken, StringComparison.Ordinal))
+                {
+                    hasSentinel = true;
+                    consumed = true;
+                }
+                else if (!string.IsNullOrEmpty(locationToken) &&
+                         payload.StartsWith("LOCATION;" + locationToken, StringComparison.Ordinal))
+                {
+                    var encodedLocation = payload[("LOCATION;" + locationToken).Length..];
+                    TryApplyEncodedLocation(encodedLocation);
+                    consumed = true;
+                }
+                else if (payload.StartsWith("DIAG;", StringComparison.Ordinal) ||
+                         payload.StartsWith("START;", StringComparison.Ordinal))
+                {
+                    // START is consumed by the pre-start gate. Accepting it here keeps
+                    // recovery/reordered output cursor-neutral if a duplicate appears.
+                    consumed = true;
+                }
+
+                if (!consumed)
+                {
+                    searchIndex = frameEnd + 1;
+                    continue;
+                }
+
+                buffer = buffer.Remove(frameStart, frameEnd - frameStart + 1);
+                searchIndex = frameStart;
+            }
+        }
+
+        private void TryApplyEncodedLocation(string encodedLocation)
+        {
+            try
+            {
+                var decodedBytes = Convert.FromBase64String(encodedLocation);
+                var location = Encoding.UTF8.GetString(decodedBytes).Trim();
+                if (string.IsNullOrWhiteSpace(location))
+                {
+                    return;
+                }
+
+                CurrentWorkingDirectory = location;
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "Confirmed terminal working directory from a cursor-neutral dispatch OSC control frame.",
+                    new Dictionary<string, object?>
+                    {
+                        ["locationLength"] = location.Length,
+                        ["dispatchGeneration"] = _commandDispatchGeneration,
+                        ["contentOmitted"] = true
+                    });
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Debug(
+                    "LiveConsole",
+                    $"Ignored an invalid terminal dispatch OSC location frame. ExceptionType={ex.GetType().Name}.");
+            }
+        }
+
+        private static string DetachIncompleteDispatchControlOscTail(ref string buffer)
+        {
+            if (string.IsNullOrEmpty(buffer))
+            {
+                return string.Empty;
+            }
+
+            var escapeIndex = buffer.LastIndexOf('\x1b');
+            if (escapeIndex < 0)
+            {
+                return string.Empty;
+            }
+
+            var tail = buffer[escapeIndex..];
+            var isPrefixFragment = DispatchControlOscPrefix.StartsWith(tail, StringComparison.Ordinal);
+            var isIncompleteFrame = tail.StartsWith(DispatchControlOscPrefix, StringComparison.Ordinal) &&
+                                    tail.IndexOf(DispatchControlOscTerminator) < 0;
+            if (!isPrefixFragment && !isIncompleteFrame)
+            {
+                return string.Empty;
+            }
+
+            buffer = buffer[..escapeIndex];
+            return tail;
         }
 
         private void AppendBoundedPreStartOutput(string raw, string startToken)
@@ -3089,13 +3464,20 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
 
             var combined = _hiddenOutputBuffer + raw;
-            var startIndex = combined.IndexOf(startToken, StringComparison.Ordinal);
+            var startFrame = BuildDispatchControlOscFrame("START", startToken);
+            var startIndex = combined.IndexOf(startFrame, StringComparison.Ordinal);
+            if (startIndex < 0)
+            {
+                startIndex = combined.IndexOf(startToken, StringComparison.Ordinal);
+            }
             if (startIndex >= 0)
             {
-                // Preserve the complete acknowledged payload for immediate filtering,
-                // even when one unusually large reader chunk contains both the start
-                // frame and more than the pre-start cap of genuine script output.
-                _hiddenOutputBuffer = combined[startIndex..];
+                // Preserve the full pre-start VT stream until the start token is
+                // observed. The filtering stage masks ScriptDesk-owned printable
+                // payload while replaying all cursor-affecting state to xterm.
+                // Dropping the command/prompt prefix here would recreate the cursor
+                // divergence this path is intended to prevent.
+                _hiddenOutputBuffer = combined;
                 return;
             }
 
@@ -3329,6 +3711,80 @@ namespace PS7ScriptDesk.PowerShell.Services
             return "\"" + value.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
         }
 
+        private static string ExtractTerminalStateControls(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            var masked = new StringBuilder(value.Length);
+            for (var index = 0; index < value.Length; index++)
+            {
+                var character = value[index];
+                if (character == '\x1b')
+                {
+                    var escapeEnd = FindTerminalEscapeSequenceEnd(value, index);
+                    masked.Append(value, index, escapeEnd - index + 1);
+                    index = escapeEnd;
+                    continue;
+                }
+
+                if (char.IsControl(character))
+                {
+                    masked.Append(character);
+                    continue;
+                }
+
+                // Printable ScriptDesk-owned payload is intentionally omitted.
+            }
+
+            return masked.ToString();
+        }
+
+        private static int FindTerminalEscapeSequenceEnd(string value, int escapeIndex)
+        {
+            if (escapeIndex + 1 >= value.Length)
+            {
+                return escapeIndex;
+            }
+
+            var next = value[escapeIndex + 1];
+            if (next == '[')
+            {
+                for (var index = escapeIndex + 2; index < value.Length; index++)
+                {
+                    var code = value[index];
+                    if (code >= '@' && code <= '~')
+                    {
+                        return index;
+                    }
+                }
+
+                return value.Length - 1;
+            }
+
+            if (next == ']')
+            {
+                for (var index = escapeIndex + 2; index < value.Length; index++)
+                {
+                    if (value[index] == '\a')
+                    {
+                        return index;
+                    }
+
+                    if (value[index] == '\x1b' && index + 1 < value.Length && value[index + 1] == '\\')
+                    {
+                        return index + 1;
+                    }
+                }
+
+                return value.Length - 1;
+            }
+
+            return Math.Min(escapeIndex + 1, value.Length - 1);
+        }
+
         private static string RemoveControlSequences(string text)
         {
             if (string.IsNullOrEmpty(text))
@@ -3365,6 +3821,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 return;
             }
 
+            int promptSessionGeneration;
             lock (_syncRoot)
             {
                 if (observedSessionGeneration.HasValue &&
@@ -3377,6 +3834,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 }
 
                 _lastPromptHeuristicDirectory = path;
+                promptSessionGeneration = observedSessionGeneration ?? _terminalSessionGeneration;
             }
 
             AppLogger.Debug(
@@ -3391,6 +3849,28 @@ namespace PS7ScriptDesk.PowerShell.Services
                     ["authoritativeStateChanged"] = false,
                     ["contentOmitted"] = true
                 });
+            NotifyPromptReadyObserved(promptSessionGeneration, path);
+        }
+
+        private void NotifyPromptReadyObserved(int sessionGeneration, string path)
+        {
+            var handlers = PromptReadyObserved;
+            if (handlers is null)
+            {
+                return;
+            }
+
+            foreach (Action<int, string> handler in handlers.GetInvocationList())
+            {
+                try
+                {
+                    handler(sessionGeneration, path);
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Warning("LiveConsole", $"Prompt-ready subscriber failed. SessionGeneration={sessionGeneration}, PathLength={path.Length}, ErrorType={ex.GetType().Name}.");
+                }
+            }
         }
 
         private async Task WriteTerminalInputAsync(
@@ -3485,25 +3965,91 @@ namespace PS7ScriptDesk.PowerShell.Services
         public void ResizeConsole(int cols, int rows)
         {
             ResizeRequest resizeRequest;
+            long resizeSequence;
             lock (_syncRoot)
             {
                 _terminalColumns = Math.Max(1, cols);
                 _terminalRows    = Math.Max(1, rows);
+                resizeSequence = ++_resizeSequence;
                 resizeRequest = new ResizeRequest(
                     _pseudoConsoleHandle,
                     _terminalSessionGeneration,
                     _terminalColumns,
                     _terminalRows,
-                    _process);
+                    _process,
+                    resizeSequence);
+                _lastResizeObservation = ResizeObservation.FromRequest(resizeRequest);
             }
 
             if (resizeRequest.PseudoConsole != IntPtr.Zero)
             {
+                LogResizePseudoConsoleStage("ResizePseudoConsole.Begin", "ResizeConsole", resizeRequest, null);
                 var hResult = ResizePseudoConsole(
                     resizeRequest.PseudoConsole,
                     new COORD((short)resizeRequest.Columns, (short)resizeRequest.Rows));
+                LogResizePseudoConsoleStage("ResizePseudoConsole.End", "ResizeConsole", resizeRequest, hResult);
                 ObserveResizeResult("ResizeConsole", resizeRequest, hResult);
             }
+        }
+
+        private static void LogResizePseudoConsoleStage(
+            string stage,
+            string operation,
+            ResizeRequest resizeRequest,
+            int? hResult)
+        {
+            TerminalCriticalTrace.LogStage(
+                stage,
+                new Dictionary<string, object?>
+                {
+                    ["operation"] = operation,
+                    ["resizeGeneration"] = resizeRequest.ResizeSequence,
+                    ["terminalSessionGeneration"] = resizeRequest.SessionGeneration,
+                    ["requestedColumns"] = resizeRequest.Columns,
+                    ["requestedRows"] = resizeRequest.Rows,
+                    ["coordX"] = resizeRequest.Columns,
+                    ["coordY"] = resizeRequest.Rows,
+                    ["pseudoConsoleHandlePresent"] = resizeRequest.PseudoConsole != IntPtr.Zero,
+                    ["processId"] = TryGetProcessId(resizeRequest.Process),
+                    ["hResult"] = hResult,
+                    ["hResultHex"] = hResult.HasValue ? $"0x{hResult.Value:X8}" : null,
+                    ["contentOmitted"] = true
+                });
+        }
+
+        private void LogConptyOutputDuringResizeIfRecent(int sessionGeneration, int characterCount)
+        {
+            ResizeObservation resizeObservation;
+            lock (_syncRoot)
+            {
+                resizeObservation = _lastResizeObservation;
+            }
+
+            if (!resizeObservation.IsActive ||
+                resizeObservation.SessionGeneration != sessionGeneration)
+            {
+                return;
+            }
+
+            var elapsed = DateTimeOffset.UtcNow - resizeObservation.ObservedUtc;
+            if (elapsed < TimeSpan.Zero ||
+                elapsed > ResizeOutputObservationWindow)
+            {
+                return;
+            }
+
+            TerminalCriticalTrace.LogStage(
+                "ConPTY.OutputDuringResize",
+                new Dictionary<string, object?>
+                {
+                    ["resizeGeneration"] = resizeObservation.ResizeSequence,
+                    ["terminalSessionGeneration"] = sessionGeneration,
+                    ["resizeColumns"] = resizeObservation.Columns,
+                    ["resizeRows"] = resizeObservation.Rows,
+                    ["elapsedMillisecondsSinceResize"] = elapsed.TotalMilliseconds,
+                    ["outputCharacterLength"] = characterCount,
+                    ["contentOmitted"] = true
+                });
         }
 
         private void ObserveResizeResult(string operation, ResizeRequest resizeRequest, int hResult)
@@ -3911,6 +4457,9 @@ namespace PS7ScriptDesk.PowerShell.Services
                 "param([Parameter(Mandatory=$true)][string]$InstructionPath)",
                 "$__pssdDone = $null",
                 "$__pssdLocation = $null",
+                "$__pssdEsc = [char]27",
+                "$__pssdBel = [char]7",
+                "$__pssdOscPrefix = [string]$__pssdEsc + ']7777;PS7SD;'",
                 "try {",
                 "  $__pssdLines = [System.IO.File]::ReadAllLines($InstructionPath, [System.Text.Encoding]::UTF8)",
                 "  if ($__pssdLines.Length -lt 5) { throw 'PS7 ScriptDesk dispatch instruction is incomplete.' }",
@@ -3919,23 +4468,21 @@ namespace PS7ScriptDesk.PowerShell.Services
                 "  $__pssdDone = $__pssdLines[2]",
                 "  $__pssdCurrentScope = [System.Boolean]::Parse($__pssdLines[3])",
                 "  $__pssdLocation = $__pssdLines[4]",
-                "  [Console]::Out.WriteLine($__pssdStart)",
-                "  [Console]::Out.WriteLine('##PSSTUDIO_DISPATCH_DIAG## begin pid=' + $PID + ' apartment=' + [System.Threading.Thread]::CurrentThread.GetApartmentState())",
+                "  [Console]::Out.Write($__pssdOscPrefix + 'START;' + $__pssdStart + [string]$__pssdBel)",
                 "  try { if ($__pssdCurrentScope) { . $__pssdPath } else { & $__pssdPath } }",
                 "  catch { [Console]::Error.WriteLine('PS7 ScriptDesk: Script threw a terminating exception: ' + $_.Exception.Message); throw }",
                 "  finally {",
-                "    [Console]::Out.WriteLine('##PSSTUDIO_DISPATCH_DIAG## finally pid=' + $PID)",
                 "    try {",
                 "      $__pssdProviderPath = (Get-Location).ProviderPath",
                 "      $__pssdEncodedLocation = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($__pssdProviderPath))",
-                "      [Console]::Out.WriteLine($__pssdLocation + $__pssdEncodedLocation)",
+                "      [Console]::Out.Write($__pssdOscPrefix + 'LOCATION;' + $__pssdLocation + $__pssdEncodedLocation + [string]$__pssdBel)",
                 "    } catch { }",
-                "    [Console]::Out.WriteLine($__pssdDone)",
+                "    [Console]::Out.Write($__pssdOscPrefix + 'DONE;' + $__pssdDone + [string]$__pssdBel)",
                 "  }",
                 "} catch {",
                 "  if ([string]::IsNullOrEmpty($__pssdDone)) { [Console]::Error.WriteLine('PS7 ScriptDesk dispatch helper failed before execution started: ' + $_.Exception.Message) } else { throw }",
                 "} finally {",
-                "  Remove-Variable -Name __pssdLines,__pssdPath,__pssdStart,__pssdDone,__pssdCurrentScope,__pssdLocation,__pssdProviderPath,__pssdEncodedLocation -ErrorAction SilentlyContinue",
+                "  Remove-Variable -Name __pssdLines,__pssdPath,__pssdStart,__pssdDone,__pssdCurrentScope,__pssdLocation,__pssdProviderPath,__pssdEncodedLocation,__pssdEsc,__pssdBel,__pssdOscPrefix -ErrorAction SilentlyContinue",
                 "}"
             };
 
@@ -4030,13 +4577,15 @@ namespace PS7ScriptDesk.PowerShell.Services
                 int sessionGeneration,
                 int columns,
                 int rows,
-                Process? process)
+                Process? process,
+                long resizeSequence)
             {
                 PseudoConsole = pseudoConsole;
                 SessionGeneration = sessionGeneration;
                 Columns = columns;
                 Rows = rows;
                 Process = process;
+                ResizeSequence = resizeSequence;
             }
 
             public IntPtr PseudoConsole { get; }
@@ -4048,6 +4597,43 @@ namespace PS7ScriptDesk.PowerShell.Services
             public int Rows { get; }
 
             public Process? Process { get; }
+
+            public long ResizeSequence { get; }
+        }
+
+        private readonly struct ResizeObservation
+        {
+            private ResizeObservation(long resizeSequence, int sessionGeneration, int columns, int rows, DateTimeOffset observedUtc)
+            {
+                ResizeSequence = resizeSequence;
+                SessionGeneration = sessionGeneration;
+                Columns = columns;
+                Rows = rows;
+                ObservedUtc = observedUtc;
+                IsActive = true;
+            }
+
+            public bool IsActive { get; }
+
+            public long ResizeSequence { get; }
+
+            public int SessionGeneration { get; }
+
+            public int Columns { get; }
+
+            public int Rows { get; }
+
+            public DateTimeOffset ObservedUtc { get; }
+
+            public static ResizeObservation FromRequest(ResizeRequest resizeRequest)
+            {
+                return new ResizeObservation(
+                    resizeRequest.ResizeSequence,
+                    resizeRequest.SessionGeneration,
+                    resizeRequest.Columns,
+                    resizeRequest.Rows,
+                    DateTimeOffset.UtcNow);
+            }
         }
 
         private sealed class ResizeFailureEpisode

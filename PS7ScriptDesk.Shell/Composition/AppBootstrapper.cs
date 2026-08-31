@@ -65,12 +65,10 @@ namespace PS7ScriptDesk.Shell.Composition
                 new InteractiveTerminalCoordinator(),
                 new TerminalOutputMultiplexer());
 
-            var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService)
-            {
-                DataContext = viewModel
-            };
+            var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService);
+            window.AttachViewModel(viewModel);
 
-            DeveloperDiagnostics.LogInfo("Startup", "MainWindow instance created and DataContext assigned.");
+            DeveloperDiagnostics.LogInfo("Startup", "MainWindow instance created and view model attached.");
             return window;
         }
     }

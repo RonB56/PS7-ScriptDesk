@@ -32,11 +32,22 @@ namespace PS7ScriptDesk.Shell
         protected override void OnStartup(StartupEventArgs e)
         {
             var startupArgs = e.Args ?? Array.Empty<string>();
+            TerminalCriticalTrace.ConfigureUiThreadSnapshotProvider(() =>
+                new TerminalCriticalUiThreadSnapshot(
+                    Dispatcher.CheckAccess(),
+                    Dispatcher.Thread.ManagedThreadId));
 
             try
             {
                 StartupTimingLogger.StartSession("App.OnStartup");
                 LogStartupEnvironment(startupArgs);
+                TerminalCriticalTrace.LogStartupIdentity(
+                    new Dictionary<string, object?>
+                    {
+                        ["startupArgumentCount"] = startupArgs.Length,
+                        ["packagedProcessGuess"] = DetectPackagedProcess(),
+                        ["repairedOutputDispatchImplementationActive"] = true
+                    });
             }
             catch (Exception ex)
             {

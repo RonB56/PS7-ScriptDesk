@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -79,6 +80,7 @@ namespace PS7ScriptDesk.Shell
         private const int AuthoringDiagnosticsLargeLineThreshold = 800;
         private const int AuthoringDiagnosticsVeryLargeCharacterThreshold = 120000;
         private const int AuthoringDiagnosticsVeryLargeLineThreshold = 2000;
+        private const int MaximumQueuedTerminalOutputEnvelopes = 8192;
         private const int EditorFoldingDebounceMilliseconds = 350;
         private const int EditorHoverDelayMilliseconds = 450;
         private const int EditorMetadataWarmupDebounceMilliseconds = 150;
@@ -89,6 +91,11 @@ namespace PS7ScriptDesk.Shell
         private const string ThemeAccentPrimaryResourceKey = "Theme.Accent.Primary";
         private const string ThemeBorderStrongResourceKey = "Theme.Border.Strong";
         private const string ThemeIconAccentResourceKey = "Theme.Icon.Accent";
+        private readonly ConcurrentQueue<TerminalOutputEnvelope> _terminalOutputEnvelopeQueue = new();
+        private readonly Dispatcher _terminalOutputDispatcher;
+        private MainWindowViewModel? _viewModel;
+        private int _terminalOutputDrainScheduled;
+        private int _terminalOutputQueuedEnvelopeCount;
         private const string ThemeIconSuccessResourceKey = "Theme.Icon.Success";
         private const string ThemeStatusErrorBackgroundResourceKey = "Theme.Status.Error.Background";
         private const string ThemeStatusErrorBorderResourceKey = "Theme.Status.Error.Border";
@@ -335,6 +342,7 @@ namespace PS7ScriptDesk.Shell
         public MainWindow(IApplicationSettingsService applicationSettingsService, ApplicationSettings loadedSettings, IUiScaleService? uiScaleService = null)
         {
             DeveloperDiagnostics.LogMethodEntry("UI", "MainWindow constructor entry.");
+            _terminalOutputDispatcher = Dispatcher;
             _applicationSettingsService = applicationSettingsService;
             _loadedSettings = loadedSettings ?? new ApplicationSettings();
             _uiScaleService = uiScaleService ?? UiScaleServiceHost.Current;
@@ -431,7 +439,314 @@ namespace PS7ScriptDesk.Shell
                 });
         }
 
-        private MainWindowViewModel? ViewModel => DataContext as MainWindowViewModel;
+        internal void AttachViewModel(MainWindowViewModel viewModel)
+        {
+            ArgumentNullException.ThrowIfNull(viewModel);
+            Dispatcher.VerifyAccess();
+            Volatile.Write(ref _viewModel, viewModel);
+            DataContext = viewModel;
+            DeveloperDiagnostics.LogInfo(
+                "Startup",
+                "MainWindow attached its view model reference before DataContext exposure.",
+                new Dictionary<string, object?>
+                {
+                    ["viewModelType"] = viewModel.GetType().FullName
+                });
+        }
+
+        private MainWindowViewModel? ViewModel => Volatile.Read(ref _viewModel);
+
+        private void OnRawTerminalOutputReceived(int generation, string raw)
+        {
+            var rawOutput = raw ?? string.Empty;
+            if (rawOutput.Length == 0)
+            {
+                return;
+            }
+
+            TerminalCriticalTrace.LogStage(
+                "MainWindow.RawOutputReceivedSubscriber.Begin",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = generation,
+                    ["outputCharacterLength"] = rawOutput.Length,
+                    ["contentOmitted"] = true
+                });
+            var viewModel = Volatile.Read(ref _viewModel);
+            if (viewModel is null)
+            {
+                TerminalCriticalTrace.LogStage(
+                    "MainWindow.RawOutputReceivedSubscriber.DroppedNoViewModel",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = generation,
+                        ["rendererGeneration"] = generation,
+                        ["outputCharacterLength"] = rawOutput.Length,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            viewModel.PublishInteractiveTerminalOutput(generation, rawOutput);
+            TerminalCriticalTrace.LogStage(
+                "MainWindow.RawOutputReceivedSubscriber.End",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = generation,
+                    ["outputCharacterLength"] = rawOutput.Length,
+                    ["contentOmitted"] = true
+                });
+        }
+
+        private void EnqueueTerminalOutputForRenderer(TerminalOutputEnvelope envelope)
+        {
+            TerminalCriticalTrace.LogStage(
+                "MainWindow.EnqueueTerminalOutputForRenderer.Begin",
+                CreateTerminalEnvelopeMetadata(envelope));
+            var queuedCount = Interlocked.Increment(ref _terminalOutputQueuedEnvelopeCount);
+            if (queuedCount > MaximumQueuedTerminalOutputEnvelopes)
+            {
+                Interlocked.Decrement(ref _terminalOutputQueuedEnvelopeCount);
+                AppLogger.Warning("Terminal", $"Dropping terminal output envelope because the UI renderer queue is full. Sequence={envelope.Sequence}, Source={envelope.Source}, ContentOmitted=True.");
+                DeveloperDiagnostics.LogWarning(
+                    "Terminal",
+                    "Terminal output envelope dropped before UI dispatch because the renderer queue was full.",
+                    new Dictionary<string, object?>
+                    {
+                        ["sequence"] = envelope.Sequence,
+                        ["source"] = envelope.Source.ToString(),
+                        ["maxQueuedEnvelopes"] = MaximumQueuedTerminalOutputEnvelopes,
+                        ["contentOmitted"] = true
+                    });
+                TerminalCriticalTrace.LogStage(
+                    "MainWindow.EnqueueTerminalOutputForRenderer.DroppedQueueFull",
+                    CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
+                    {
+                        ["queuedEnvelopeCount"] = queuedCount,
+                        ["maximumQueuedEnvelopes"] = MaximumQueuedTerminalOutputEnvelopes
+                    }));
+                return;
+            }
+
+            if (_terminalOutputDispatcher.HasShutdownStarted ||
+                _terminalOutputDispatcher.HasShutdownFinished)
+            {
+                Interlocked.Decrement(ref _terminalOutputQueuedEnvelopeCount);
+                AppLogger.Warning("Terminal", $"Dropping terminal output envelope because the UI dispatcher is shutting down. Sequence={envelope.Sequence}, Source={envelope.Source}, ContentOmitted=True.");
+                DeveloperDiagnostics.LogWarning(
+                    "Terminal",
+                    "Terminal output envelope dropped because the UI dispatcher is shutting down.",
+                    new Dictionary<string, object?>
+                    {
+                        ["sequence"] = envelope.Sequence,
+                        ["source"] = envelope.Source.ToString(),
+                        ["contentOmitted"] = true
+                    });
+                TerminalCriticalTrace.LogStage(
+                    "MainWindow.EnqueueTerminalOutputForRenderer.DroppedDispatcherShutdown",
+                    CreateTerminalEnvelopeMetadata(envelope));
+                return;
+            }
+
+            _terminalOutputEnvelopeQueue.Enqueue(envelope);
+            TerminalCriticalTrace.LogStage(
+                "MainWindow.EnqueueTerminalOutputForRenderer.Queued",
+                CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
+                {
+                    ["queuedEnvelopeCount"] = queuedCount,
+                    ["dispatcherShutdownStarted"] = _terminalOutputDispatcher.HasShutdownStarted,
+                    ["dispatcherShutdownFinished"] = _terminalOutputDispatcher.HasShutdownFinished
+                }));
+            if (Interlocked.Exchange(ref _terminalOutputDrainScheduled, 1) == 1)
+            {
+                TerminalCriticalTrace.LogStage(
+                    "MainWindow.DispatcherDrain.AlreadyScheduled",
+                    CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
+                    {
+                        ["queuedEnvelopeCount"] = queuedCount
+                    }));
+                return;
+            }
+
+            try
+            {
+                _terminalOutputDispatcher.BeginInvoke(
+                    new Action(DrainTerminalOutputForRenderer),
+                    DispatcherPriority.Background);
+                TerminalCriticalTrace.LogStage(
+                    "MainWindow.DispatcherBeginInvoke.Scheduled",
+                    CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
+                    {
+                        ["queuedEnvelopeCount"] = queuedCount,
+                        ["dispatcherPriority"] = DispatcherPriority.Background.ToString()
+                    }));
+            }
+            catch (Exception ex)
+            {
+                Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
+                TerminalCriticalTrace.LogException(
+                    "MainWindow.DispatcherBeginInvoke.Exception",
+                    ex,
+                    CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
+                    {
+                        ["queuedEnvelopeCount"] = queuedCount,
+                        ["uiDispatcherTransition"] = "before-dispatcher-drain"
+                    }));
+                AppLogger.Error("Terminal", "Unable to schedule terminal output renderer drain.", ex);
+                DeveloperDiagnostics.LogException(
+                    "Terminal",
+                    ex,
+                    "Unable to schedule terminal output renderer drain.",
+                    new Dictionary<string, object?> { ["contentOmitted"] = true });
+            }
+        }
+
+        private void DrainTerminalOutputForRenderer()
+        {
+            TerminalCriticalTrace.LogStage(
+                "MainWindow.DrainTerminalOutputForRenderer.Begin",
+                new Dictionary<string, object?>
+                {
+                    ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount)
+                });
+            try
+            {
+                while (_terminalOutputEnvelopeQueue.TryDequeue(out var envelope))
+                {
+                    Interlocked.Decrement(ref _terminalOutputQueuedEnvelopeCount);
+                    try
+                    {
+                        TerminalCriticalTrace.LogStage(
+                            "MainWindow.DrainTerminalOutputForRenderer.EnvelopeBegin",
+                            CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
+                            {
+                                ["uiDispatcherTransition"] = "during-dispatcher-drain"
+                            }));
+                        if (envelope.Source == TerminalOutputSource.StructuredEditor)
+                        {
+                            TerminalConsole.WriteStructuredOutput(envelope.RendererGeneration, envelope.Payload);
+                            TerminalCriticalTrace.LogStage(
+                                "MainWindow.DrainTerminalOutputForRenderer.EnvelopeEnd",
+                                CreateTerminalEnvelopeMetadata(envelope));
+                            continue;
+                        }
+
+                        TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload);
+                        TerminalCriticalTrace.LogStage(
+                            "MainWindow.DrainTerminalOutputForRenderer.EnvelopeEnd",
+                            CreateTerminalEnvelopeMetadata(envelope));
+                    }
+                    catch (Exception ex)
+                    {
+                        TerminalCriticalTrace.LogException(
+                            "MainWindow.DrainTerminalOutputForRenderer.EnvelopeException",
+                            ex,
+                            CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
+                            {
+                                ["uiDispatcherTransition"] = "during-dispatcher-drain"
+                            }));
+                        AppLogger.Error("Terminal", $"Terminal output renderer consumer failed. Sequence={envelope.Sequence}, Source={envelope.Source}, ContentOmitted=True.", ex);
+                        DeveloperDiagnostics.LogException(
+                            "Terminal",
+                            ex,
+                            "Terminal output renderer consumer failed during UI dispatcher drain.",
+                            new Dictionary<string, object?>
+                            {
+                                ["sequence"] = envelope.Sequence,
+                                ["source"] = envelope.Source.ToString(),
+                                ["rendererGeneration"] = envelope.RendererGeneration,
+                                ["interactiveTerminalSessionGeneration"] = envelope.InteractiveTerminalSessionGeneration,
+                                ["brokerSessionGeneration"] = envelope.BrokerSessionGeneration,
+                                ["contentOmitted"] = true
+                            });
+                    }
+                }
+            }
+            finally
+            {
+                TerminalCriticalTrace.LogStage(
+                    "MainWindow.DrainTerminalOutputForRenderer.End",
+                    new Dictionary<string, object?>
+                    {
+                        ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
+                        ["queueIsEmpty"] = _terminalOutputEnvelopeQueue.IsEmpty
+                    });
+                Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
+                if (!_terminalOutputEnvelopeQueue.IsEmpty &&
+                    Interlocked.Exchange(ref _terminalOutputDrainScheduled, 1) == 0)
+                {
+                    try
+                    {
+                        if (!_terminalOutputDispatcher.HasShutdownStarted &&
+                            !_terminalOutputDispatcher.HasShutdownFinished)
+                        {
+                            _terminalOutputDispatcher.BeginInvoke(
+                                new Action(DrainTerminalOutputForRenderer),
+                                DispatcherPriority.Background);
+                            TerminalCriticalTrace.LogStage(
+                                "MainWindow.DispatcherBeginInvoke.Rescheduled",
+                                new Dictionary<string, object?>
+                                {
+                                    ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
+                                    ["dispatcherPriority"] = DispatcherPriority.Background.ToString()
+                                });
+                        }
+                        else
+                        {
+                            Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
+                        TerminalCriticalTrace.LogException(
+                            "MainWindow.DispatcherBeginInvoke.RescheduleException",
+                            ex,
+                            new Dictionary<string, object?>
+                            {
+                                ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
+                                ["uiDispatcherTransition"] = "after-dispatcher-drain"
+                            });
+                        AppLogger.Error("Terminal", "Unable to reschedule terminal output renderer drain.", ex);
+                        DeveloperDiagnostics.LogException(
+                            "Terminal",
+                            ex,
+                            "Unable to reschedule terminal output renderer drain.",
+                            new Dictionary<string, object?> { ["contentOmitted"] = true });
+                    }
+                }
+            }
+        }
+
+        private static Dictionary<string, object?> CreateTerminalEnvelopeMetadata(
+            TerminalOutputEnvelope envelope,
+            IReadOnlyDictionary<string, object?>? additionalMetadata = null)
+        {
+            var metadata = new Dictionary<string, object?>
+            {
+                ["source"] = envelope.Source.ToString(),
+                ["sequence"] = envelope.Sequence,
+                ["brokerSessionGeneration"] = envelope.BrokerSessionGeneration,
+                ["terminalSessionGeneration"] = envelope.InteractiveTerminalSessionGeneration,
+                ["rendererGeneration"] = envelope.RendererGeneration,
+                ["sourceSequence"] = envelope.SourceSequence,
+                ["streamKind"] = envelope.StreamKind.ToString(),
+                ["outputCharacterLength"] = envelope.Payload?.Length ?? 0,
+                ["contentOmitted"] = true
+            };
+
+            if (additionalMetadata is not null)
+            {
+                foreach (var item in additionalMetadata)
+                {
+                    metadata[item.Key] = item.Value;
+                }
+            }
+
+            return metadata;
+        }
 
         private async void Window_Loaded(object sender, RoutedEventArgs e)
         {
@@ -497,19 +812,8 @@ namespace PS7ScriptDesk.Shell
                 // Forward raw (ANSI-intact) ConPTY output to xterm.js.
                 // TerminalControl applies its own bounded dispatcher/WebView flow control,
                 // so the reader callback does not queue one dispatcher operation per chunk.
-                ViewModel.SubscribeRawOutput(
-                    (generation, raw) => ViewModel.PublishInteractiveTerminalOutput(generation, raw));
-                ViewModel.TerminalOutputPublished += envelope =>
-                    Dispatcher.BeginInvoke(() =>
-                    {
-                        if (envelope.Source == TerminalOutputSource.StructuredEditor)
-                        {
-                            TerminalConsole.WriteStructuredOutput(envelope.RendererGeneration, envelope.Payload);
-                            return;
-                        }
-
-                        TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload);
-                    });
+                ViewModel.SubscribeRawOutput(OnRawTerminalOutputReceived);
+                ViewModel.TerminalOutputPublished += EnqueueTerminalOutputForRenderer;
 
                 // Forward xterm.js keystrokes to ConPTY stdin.
                 TerminalConsole.UserInput += async data =>

@@ -24,8 +24,11 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.DoesNotContain("_writeTextSink", viewModelSource, StringComparison.Ordinal);
         Assert.DoesNotContain("SetDebuggerOutputSink", viewModelSource, StringComparison.Ordinal);
         Assert.Contains("SetTerminalSessionControls", shellSource, StringComparison.Ordinal);
-        Assert.Contains("PublishInteractiveTerminalOutput(generation, raw)", shellSource, StringComparison.Ordinal);
-        Assert.Contains("TerminalOutputPublished += envelope", shellSource, StringComparison.Ordinal);
+        Assert.Contains("private MainWindowViewModel? ViewModel => Volatile.Read(ref _viewModel)", shellSource, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.SubscribeRawOutput(OnRawTerminalOutputReceived)", shellSource, StringComparison.Ordinal);
+        Assert.Contains("viewModel.PublishInteractiveTerminalOutput(generation, rawOutput)", shellSource, StringComparison.Ordinal);
+        Assert.Contains("TerminalOutputPublished += EnqueueTerminalOutputForRenderer", shellSource, StringComparison.Ordinal);
+        Assert.Contains("DrainTerminalOutputForRenderer", shellSource, StringComparison.Ordinal);
         Assert.Contains("TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload)", shellSource, StringComparison.Ordinal);
         Assert.Contains("TerminalConsole.WriteStructuredOutput(envelope.RendererGeneration, envelope.Payload)", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("raw => Dispatcher.BeginInvoke(() => TerminalConsole.WriteRaw(raw))", shellSource, StringComparison.Ordinal);

@@ -178,7 +178,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _editorExecutionFeatureGate = editorExecutionFeatureGate ?? new EditorExecutionFeatureGate();
             _interactiveTerminalCoordinator = interactiveTerminalCoordinator ?? new InteractiveTerminalCoordinator();
             _terminalOutputMultiplexer = terminalOutputMultiplexer ?? new TerminalOutputMultiplexer();
-            _terminalOutputMultiplexer.OutputPublished += envelope => TerminalOutputPublished?.Invoke(envelope);
+            _terminalOutputMultiplexer.OutputPublished += OnTerminalOutputEnvelopePublished;
             if (_editorExecutionAdapter is not null)
             {
                 _editorExecutionAdapter.EventPublished += OnStructuredEditorExecutionEvent;
@@ -253,6 +253,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _liveConsoleService.SessionTerminated       += OnSessionTerminated;
             _liveConsoleService.TerminalSessionStarted   += OnTerminalSessionStarted;
             _liveConsoleService.TerminalSessionStopping  += OnTerminalSessionStopping;
+            _liveConsoleService.PromptReadyObserved      += OnTerminalPromptReadyObserved;
 
             _startupRecoveryCandidates = _documentRecoveryService.GetRecoverableDocuments();
             RestorePersistedState(initialSettings);
@@ -274,6 +275,26 @@ namespace PS7ScriptDesk.UI.ViewModels
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public event Action<TerminalOutputEnvelope>? TerminalOutputPublished;
+
+        private void OnTerminalOutputEnvelopePublished(TerminalOutputEnvelope envelope)
+        {
+            var metadata = new Dictionary<string, object?>
+            {
+                ["source"] = envelope.Source.ToString(),
+                ["sequence"] = envelope.Sequence,
+                ["brokerSessionGeneration"] = envelope.BrokerSessionGeneration,
+                ["terminalSessionGeneration"] = envelope.InteractiveTerminalSessionGeneration,
+                ["rendererGeneration"] = envelope.RendererGeneration,
+                ["sourceSequence"] = envelope.SourceSequence,
+                ["streamKind"] = envelope.StreamKind.ToString(),
+                ["outputCharacterLength"] = envelope.Payload?.Length ?? 0,
+                ["contentOmitted"] = true
+            };
+
+            TerminalCriticalTrace.LogStage("MainWindowViewModel.TerminalOutputPublished.Begin", metadata);
+            TerminalOutputPublished?.Invoke(envelope);
+            TerminalCriticalTrace.LogStage("MainWindowViewModel.TerminalOutputPublished.End", metadata);
+        }
 
         public string Title { get; }
 
@@ -1245,12 +1266,12 @@ namespace PS7ScriptDesk.UI.ViewModels
             var generation = Volatile.Read(ref _currentTerminalGeneration);
             _interactiveTerminalCoordinator.TryReplaceGeneration(
                 generation,
-                InteractiveTerminalState.InteractiveIdleAtPrompt,
-                "Renderer reported ready; prompt readiness remains conservative until richer PSReadLine signals exist.");
+                InteractiveTerminalState.Starting,
+                "Renderer reported ready; waiting for backend prompt observation.");
             _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
                 generation,
-                InteractiveTerminalState.InteractiveIdleAtPrompt,
-                "Renderer reported ready.");
+                InteractiveTerminalState.Starting,
+                "Renderer reported ready; waiting for backend prompt observation.");
             RequestTerminalFocusAfterReset(Volatile.Read(ref _currentTerminalGeneration), "RendererReady");
         }
 
@@ -1276,10 +1297,28 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
+            TerminalCriticalTrace.LogStage(
+                "MainWindowViewModel.PublishInteractiveTerminalOutput.Begin",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = generation,
+                    ["outputCharacterLength"] = rawOutput.Length,
+                    ["contentOmitted"] = true
+                });
             _terminalOutputMultiplexer.PublishInteractive(
                 generation,
                 EditorOutputStreamKind.VirtualTerminal,
                 rawOutput);
+            TerminalCriticalTrace.LogStage(
+                "MainWindowViewModel.PublishInteractiveTerminalOutput.End",
+                new Dictionary<string, object?>
+                {
+                    ["terminalSessionGeneration"] = generation,
+                    ["rendererGeneration"] = generation,
+                    ["outputCharacterLength"] = rawOutput.Length,
+                    ["contentOmitted"] = true
+                });
         }
 
         /// <summary>
@@ -5551,6 +5590,38 @@ namespace PS7ScriptDesk.UI.ViewModels
                 "Interactive terminal session is stopping.");
         }
 
+        private void OnTerminalPromptReadyObserved(int generation, string path)
+        {
+            var currentGeneration = Volatile.Read(ref _currentTerminalGeneration);
+            if (generation < currentGeneration)
+            {
+                AppLogger.Warning("Terminal", $"Ignored stale prompt-ready observation. Generation={generation}, CurrentGeneration={currentGeneration}, PathLength={path?.Length ?? 0}, ContentOmitted=True.");
+                return;
+            }
+
+            _interactiveTerminalCoordinator.TryReplaceGeneration(
+                generation,
+                InteractiveTerminalState.InteractiveIdleAtPrompt,
+                "Backend prompt heuristic observed.");
+            _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
+                generation,
+                InteractiveTerminalState.InteractiveIdleAtPrompt,
+                "Backend prompt heuristic observed.");
+            DeveloperDiagnostics.LogStateTransition(
+                "Terminal",
+                "InteractivePromptReady",
+                "StartingOrRunning",
+                "InteractiveIdleAtPrompt",
+                "Backend prompt heuristic marked the interactive terminal idle.",
+                new Dictionary<string, object?>
+                {
+                    ["generation"] = generation,
+                    ["pathLength"] = path?.Length ?? 0,
+                    ["rendererReadyOnly"] = false,
+                    ["contentOmitted"] = true
+                });
+        }
+
         private void OnTerminalCommandCompleted()
         {
             // Fired on a thread-pool thread by LiveConsoleService when the sentinel token
@@ -6036,10 +6107,29 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void AppendExecutionOutput(ExecutionOutputRecord record)
         {
+            var text = record.Text ?? string.Empty;
+            TerminalCriticalTrace.LogStage(
+                "MainWindowViewModel.AppendExecutionOutput.Post",
+                new Dictionary<string, object?>
+                {
+                    ["streamKind"] = record.StreamKind.ToString(),
+                    ["messageLength"] = text.Length,
+                    ["isTerminalReaderFailureStatus"] = text.Contains("Terminal reader stopped unexpectedly:", StringComparison.Ordinal),
+                    ["contentOmitted"] = true
+                });
             PostToUi(() =>
             {
+                TerminalCriticalTrace.LogStage(
+                    "MainWindowViewModel.AppendExecutionOutput.UiBegin",
+                    new Dictionary<string, object?>
+                    {
+                        ["streamKind"] = record.StreamKind.ToString(),
+                        ["messageLength"] = text.Length,
+                        ["isTerminalReaderFailureStatus"] = text.Contains("Terminal reader stopped unexpectedly:", StringComparison.Ordinal),
+                        ["contentOmitted"] = true
+                    });
                 if (record.StreamKind == ExecutionOutputStreamKind.Lifecycle &&
-                    string.Equals(record.Text, "__PSSTUDIO_CLEAR_TERMINAL__", StringComparison.Ordinal))
+                    string.Equals(text, "__PSSTUDIO_CLEAR_TERMINAL__", StringComparison.Ordinal))
                 {
                     // Delegate to the terminal control if wired; otherwise clear the
                     // fallback TerminalDisplayText buffer.
@@ -6052,13 +6142,21 @@ namespace PS7ScriptDesk.UI.ViewModels
 
                 if (record.StreamKind == ExecutionOutputStreamKind.Lifecycle)
                 {
-                    AppLogger.Info("Console", record.Text);
+                    AppLogger.Info("Console", text);
 
-                    if (ShouldSurfaceLifecycleMessageToUser(record.Text))
+                    if (ShouldSurfaceLifecycleMessageToUser(text))
                     {
-                        StatusText = record.Text;
+                        TerminalCriticalTrace.LogStage(
+                            "MainWindowViewModel.AppendExecutionOutput.StatusText",
+                            new Dictionary<string, object?>
+                            {
+                                ["messageLength"] = text.Length,
+                                ["isTerminalReaderFailureStatus"] = text.Contains("Terminal reader stopped unexpectedly:", StringComparison.Ordinal),
+                                ["contentOmitted"] = true
+                            });
+                        StatusText = text;
                         AppendApplicationActivityFragmentCore(
-                            $"{ApplicationBranding.PublicName}: {record.Text}{Environment.NewLine}");
+                            $"{ApplicationBranding.PublicName}: {text}{Environment.NewLine}");
                         DeveloperDiagnostics.LogDecision(
                             "Console",
                             "LifecycleMessageRouting",

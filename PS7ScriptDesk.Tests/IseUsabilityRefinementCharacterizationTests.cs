@@ -23,7 +23,8 @@ public sealed class IseUsabilityRefinementCharacterizationTests
         var liveConsoleSource = ReadRepositoryFile("PS7ScriptDesk.PowerShell", "Services", "LiveConsoleService.cs");
 
         Assert.Contains("Strip only null bytes; preserve all ANSI/VT100 sequences", liveConsoleSource, StringComparison.Ordinal);
-        Assert.Contains("rawHandler(observedSessionGeneration ?? _terminalSessionGeneration, raw);", liveConsoleSource, StringComparison.Ordinal);
+        Assert.Contains("NotifyRawOutputHandlers(rawHandler, generationForRawOutput, raw);", liveConsoleSource, StringComparison.Ordinal);
+        Assert.Contains("handler(sessionGeneration, raw);", liveConsoleSource, StringComparison.Ordinal);
         Assert.Contains("FilterInternalTerminalOutput(raw, out var hasSentinel, observedSessionGeneration)", liveConsoleSource, StringComparison.Ordinal);
         Assert.DoesNotContain("raw = raw.Replace(\"\\r\\n\\r\\n\", \"\\r\\n\", StringComparison.Ordinal);", liveConsoleSource, StringComparison.Ordinal);
     }

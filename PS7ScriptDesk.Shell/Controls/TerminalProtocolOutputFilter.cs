@@ -6,7 +6,9 @@ namespace PS7ScriptDesk.Shell.Controls;
 internal readonly record struct TerminalProtocolFilterResult(
     string VisibleText,
     int FilteredCharacters,
-    int FilteredRecordCount);
+    int FilteredRecordCount,
+    TerminalOutputControlSummary RemovedProtocolControlSummary,
+    TerminalOutputControlSummary PreservedProtocolControlSummary);
 
 /// <summary>
 /// Removes ScriptDesk-owned dispatch records before they enter the xterm buffer.
@@ -26,7 +28,7 @@ internal sealed class TerminalProtocolOutputFilter
         RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
     private static readonly Regex GeneratedDispatchCommandRegex = new(
-        @"^(?:PS\s+.+?>\s*)?(?:&|\.)\s+'[^']*[\\/]TerminalSnapshots[\\/]psh-[0-9a-f]{32}\.ps1'\s+'[^']*[\\/]TerminalSnapshots[\\/]psi-[0-9a-f]{32}\.ps1'$",
+        @"^(?:PS\s+.+?>\s*)?(?:(?:&|\.)\s+'[^']*[\\/]TerminalSnapshots[\\/]psh-[0-9a-f]{32}\.ps1'\s+'[^']*[\\/]TerminalSnapshots[\\/]psi-[0-9a-f]{32}\.ps1'|(?:&|\.)\s+'[^']*[\\/]TerminalSnapshots[\\/]psd-[0-9a-f]{32}\.ps1')$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private static readonly Regex ProtocolRecordRegex = new(
@@ -48,7 +50,12 @@ internal sealed class TerminalProtocolOutputFilter
     {
         if (string.IsNullOrEmpty(chunk))
         {
-            return new TerminalProtocolFilterResult(string.Empty, 0, 0);
+            return new TerminalProtocolFilterResult(
+                string.Empty,
+                0,
+                0,
+                TerminalOutputControlSummary.Empty,
+                TerminalOutputControlSummary.Empty);
         }
 
         lock (_syncRoot)
@@ -68,7 +75,12 @@ internal sealed class TerminalProtocolOutputFilter
         {
             if (_carry.Length == 0)
             {
-                return new TerminalProtocolFilterResult(string.Empty, 0, 0);
+                return new TerminalProtocolFilterResult(
+                    string.Empty,
+                    0,
+                    0,
+                    TerminalOutputControlSummary.Empty,
+                    TerminalOutputControlSummary.Empty);
             }
 
             var remainder = _carry.ToString();
@@ -90,6 +102,8 @@ internal sealed class TerminalProtocolOutputFilter
         var visible = new StringBuilder();
         var filteredCharacters = 0;
         var filteredRecordCount = 0;
+        var removedProtocolControlSummary = TerminalOutputControlSummary.Empty;
+        var preservedProtocolControlSummary = TerminalOutputControlSummary.Empty;
 
         while (TryReadLine(out var line))
         {
@@ -97,7 +111,9 @@ internal sealed class TerminalProtocolOutputFilter
                 line,
                 visible,
                 ref filteredCharacters,
-                ref filteredRecordCount);
+                ref filteredRecordCount,
+                ref removedProtocolControlSummary,
+                ref preservedProtocolControlSummary);
         }
 
         // Interactive PowerShell prompts normally have no trailing newline. Do
@@ -119,6 +135,8 @@ internal sealed class TerminalProtocolOutputFilter
             {
                 filteredCharacters += _carry.Length;
                 filteredRecordCount++;
+                removedProtocolControlSummary = removedProtocolControlSummary.Add(
+                    TerminalOutputControlClassifier.Summarize(_carry.ToString()));
                 _carry.Clear();
             }
             else
@@ -132,14 +150,18 @@ internal sealed class TerminalProtocolOutputFilter
         return new TerminalProtocolFilterResult(
             visible.ToString(),
             filteredCharacters,
-            filteredRecordCount);
+            filteredRecordCount,
+            removedProtocolControlSummary,
+            preservedProtocolControlSummary);
     }
 
     private void AppendClassifiedLine(
         string line,
         StringBuilder visible,
         ref int filteredCharacters,
-        ref int filteredRecordCount)
+        ref int filteredRecordCount,
+        ref TerminalOutputControlSummary removedProtocolControlSummary,
+        ref TerminalOutputControlSummary preservedProtocolControlSummary)
     {
         var result = ClassifyLine(line);
         if (result.FilteredRecordCount > 0)
@@ -147,6 +169,8 @@ internal sealed class TerminalProtocolOutputFilter
             visible.Append(result.VisibleText);
             filteredCharacters += result.FilteredCharacters;
             filteredRecordCount += result.FilteredRecordCount;
+            removedProtocolControlSummary = removedProtocolControlSummary.Add(result.RemovedProtocolControlSummary);
+            preservedProtocolControlSummary = preservedProtocolControlSummary.Add(result.PreservedProtocolControlSummary);
             return;
         }
 
@@ -158,16 +182,27 @@ internal sealed class TerminalProtocolOutputFilter
         var normalized = NormalizeForMatch(line);
         if (IsPrivateProtocolRecord(normalized) || IsGeneratedDispatchCommand(normalized))
         {
-            // Preserve control sequences surrounding a private record so an ANSI
-            // state change adjacent to the frame remains valid for later output.
-            var controls = ExtractTerminalControls(line);
+            // A ConPTY stream is stateful. Removing a private line outright also
+            // removes its CR/LF and VT cursor operations, which lets xterm's cursor
+            // diverge from the pseudo console. Remove only ScriptDesk-owned printable
+            // payload while preserving every terminal control and line terminator.
+            // Dispatch commands are deliberately kept shorter than one terminal row,
+            // so hidden printable text cannot introduce an unrepresented wrap.
+            var controls = ExtractTerminalStateControls(line, out var filteredCharacters);
             return new TerminalProtocolFilterResult(
                 controls,
-                Math.Max(0, line.Length - controls.Length),
-                1);
+                filteredCharacters,
+                1,
+                TerminalOutputControlClassifier.Summarize(line),
+                TerminalOutputControlClassifier.Summarize(controls));
         }
 
-        return new TerminalProtocolFilterResult(line, 0, 0);
+        return new TerminalProtocolFilterResult(
+            line,
+            0,
+            0,
+            TerminalOutputControlSummary.Empty,
+            TerminalOutputControlSummary.Empty);
     }
 
     private bool TryReadLine(out string line)
@@ -246,7 +281,8 @@ internal sealed class TerminalProtocolOutputFilter
                 trimmed.StartsWith(".", StringComparison.Ordinal)) &&
                trimmed.Contains("TerminalSnapshots", StringComparison.OrdinalIgnoreCase) &&
                (trimmed.Contains("psh-", StringComparison.OrdinalIgnoreCase) ||
-                trimmed.Contains("psi-", StringComparison.OrdinalIgnoreCase));
+                trimmed.Contains("psi-", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.Contains("psd-", StringComparison.OrdinalIgnoreCase));
     }
 
     private static string NormalizeForMatch(string value)
@@ -254,6 +290,82 @@ internal sealed class TerminalProtocolOutputFilter
         return TerminalControlRegex.Replace(value, string.Empty)
             .Replace("\0", string.Empty, StringComparison.Ordinal)
             .Trim();
+    }
+
+    private static string ExtractTerminalStateControls(string value, out int maskedCharacters)
+    {
+        maskedCharacters = 0;
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        var masked = new StringBuilder(value.Length);
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (character == '\x1b')
+            {
+                var escapeEnd = FindEscapeSequenceEnd(value, index);
+                masked.Append(value, index, escapeEnd - index + 1);
+                index = escapeEnd;
+                continue;
+            }
+
+            if (char.IsControl(character))
+            {
+                masked.Append(character);
+                continue;
+            }
+
+            maskedCharacters++;
+            // Printable ScriptDesk-owned payload is intentionally omitted.
+        }
+
+        return masked.ToString();
+    }
+
+    private static int FindEscapeSequenceEnd(string value, int escapeIndex)
+    {
+        if (escapeIndex + 1 >= value.Length)
+        {
+            return escapeIndex;
+        }
+
+        var next = value[escapeIndex + 1];
+        if (next == '[')
+        {
+            for (var index = escapeIndex + 2; index < value.Length; index++)
+            {
+                var code = value[index];
+                if (code >= '@' && code <= '~')
+                {
+                    return index;
+                }
+            }
+
+            return value.Length - 1;
+        }
+
+        if (next == ']')
+        {
+            for (var index = escapeIndex + 2; index < value.Length; index++)
+            {
+                if (value[index] == '\a')
+                {
+                    return index;
+                }
+
+                if (value[index] == '\x1b' && index + 1 < value.Length && value[index + 1] == '\\')
+                {
+                    return index + 1;
+                }
+            }
+
+            return value.Length - 1;
+        }
+
+        return Math.Min(escapeIndex + 1, value.Length - 1);
     }
 
     private static string ExtractTerminalControls(string value)

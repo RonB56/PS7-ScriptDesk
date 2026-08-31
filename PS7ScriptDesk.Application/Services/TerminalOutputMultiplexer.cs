@@ -9,6 +9,7 @@ public sealed class TerminalOutputMultiplexer
 {
     private readonly object _syncRoot = new();
     private readonly List<TerminalOutputEnvelope> _published = [];
+    private readonly Queue<TerminalOutputEnvelope> _pendingNotifications = new();
     private long _sequence;
     private InteractiveTerminalSnapshot _interactiveSnapshot = new(
         0,
@@ -16,6 +17,7 @@ public sealed class TerminalOutputMultiplexer
         "Terminal state has not been initialized.",
         DateTimeOffset.UtcNow);
     private Guid? _activeEditorRequestId;
+    private bool _isPublishingNotifications;
 
     public event Action<TerminalOutputEnvelope>? OutputPublished;
 
@@ -177,7 +179,22 @@ public sealed class TerminalOutputMultiplexer
         EditorOutputStreamKind streamKind,
         string payload)
     {
+        payload ??= string.Empty;
+        TerminalCriticalTrace.LogStage(
+            "TerminalOutputMultiplexer.Publish.Begin",
+            new Dictionary<string, object?>
+            {
+                ["source"] = source.ToString(),
+                ["brokerSessionGeneration"] = brokerSessionGeneration,
+                ["terminalSessionGeneration"] = interactiveTerminalSessionGeneration,
+                ["rendererGeneration"] = rendererGeneration,
+                ["sourceSequence"] = sourceSequence,
+                ["streamKind"] = streamKind.ToString(),
+                ["outputCharacterLength"] = payload?.Length ?? 0,
+                ["contentOmitted"] = true
+            });
         TerminalOutputEnvelope envelope;
+        var shouldDrainNotifications = false;
         lock (_syncRoot)
         {
             envelope = new TerminalOutputEnvelope(
@@ -189,27 +206,86 @@ public sealed class TerminalOutputMultiplexer
                 rendererGeneration,
                 sourceSequence,
                 streamKind,
-                payload,
+                payload!,
                 DateTimeOffset.UtcNow);
             _published.Add(envelope);
-        }
-
-        var handlers = OutputPublished;
-        if (handlers is not null)
-        {
-            foreach (Action<TerminalOutputEnvelope> handler in handlers.GetInvocationList())
+            _pendingNotifications.Enqueue(envelope);
+            if (!_isPublishingNotifications)
             {
-                try
-                {
-                    handler(envelope);
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.Warning("TerminalOutputMultiplexer", $"Renderer output subscriber failed. Source={source}, Sequence={envelope.Sequence}, ErrorType={ex.GetType().Name}.");
-                }
+                _isPublishingNotifications = true;
+                shouldDrainNotifications = true;
             }
+        }
+        TerminalCriticalTrace.LogStage(
+            "TerminalOutputMultiplexer.Publish.EnvelopeCreated",
+            new Dictionary<string, object?>
+            {
+                ["source"] = envelope.Source.ToString(),
+                ["sequence"] = envelope.Sequence,
+                ["brokerSessionGeneration"] = envelope.BrokerSessionGeneration,
+                ["terminalSessionGeneration"] = envelope.InteractiveTerminalSessionGeneration,
+                ["rendererGeneration"] = envelope.RendererGeneration,
+                ["sourceSequence"] = envelope.SourceSequence,
+                ["streamKind"] = envelope.StreamKind.ToString(),
+                ["outputCharacterLength"] = envelope.Payload?.Length ?? 0,
+                ["contentOmitted"] = true
+            });
+
+        if (shouldDrainNotifications)
+        {
+            DrainNotifications();
         }
 
         return envelope;
+    }
+
+    private void DrainNotifications()
+    {
+        while (true)
+        {
+            TerminalOutputEnvelope envelope;
+            lock (_syncRoot)
+            {
+                if (!_pendingNotifications.TryDequeue(out envelope!))
+                {
+                    _isPublishingNotifications = false;
+                    return;
+                }
+            }
+
+            var handlers = OutputPublished;
+            if (handlers is null)
+            {
+                continue;
+            }
+
+            foreach (Action<TerminalOutputEnvelope> handler in handlers.GetInvocationList())
+            {
+                var metadata = TerminalCriticalTrace.CreateDelegateMetadata(handler);
+                metadata["source"] = envelope.Source.ToString();
+                metadata["sequence"] = envelope.Sequence;
+                metadata["brokerSessionGeneration"] = envelope.BrokerSessionGeneration;
+                metadata["terminalSessionGeneration"] = envelope.InteractiveTerminalSessionGeneration;
+                metadata["rendererGeneration"] = envelope.RendererGeneration;
+                metadata["sourceSequence"] = envelope.SourceSequence;
+                metadata["streamKind"] = envelope.StreamKind.ToString();
+                metadata["outputCharacterLength"] = envelope.Payload?.Length ?? 0;
+                metadata["contentOmitted"] = true;
+                try
+                {
+                    TerminalCriticalTrace.LogStage("TerminalOutputMultiplexer.OutputPublishedSubscriber.Begin", metadata);
+                    handler(envelope);
+                    TerminalCriticalTrace.LogStage("TerminalOutputMultiplexer.OutputPublishedSubscriber.End", metadata);
+                }
+                catch (Exception ex)
+                {
+                    TerminalCriticalTrace.LogException(
+                        "TerminalOutputMultiplexer.OutputPublishedSubscriber.Exception",
+                        ex,
+                        metadata);
+                    AppLogger.Warning("TerminalOutputMultiplexer", $"Renderer output subscriber failed. Source={envelope.Source}, Sequence={envelope.Sequence}, ErrorType={ex.GetType().Name}.");
+                }
+            }
+        }
     }
 }

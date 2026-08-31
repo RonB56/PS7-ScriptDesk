@@ -372,6 +372,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public event Action? SessionTerminated;
     public event Action<int>? TerminalSessionStarted;
     public event Action<int>? TerminalSessionStopping;
+    public event Action<int, string>? PromptReadyObserved;
     public event Action<int, string>? RawOutputReceived;
 
     public void AttachHost(IntPtr hostHandle, int width, int height) { }
@@ -462,4 +463,6 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public void RaiseCommandCompleted() => CommandExecutionCompleted?.Invoke();
     public void RaiseSessionTerminated() => SessionTerminated?.Invoke();
     public void RaiseRawOutput(string text) => RawOutputReceived?.Invoke(1, text);
+
+    public void RaisePromptReady(int generation, string path) => PromptReadyObserved?.Invoke(generation, path);
 }

@@ -37,6 +37,37 @@ public sealed class LiveConsoleServiceCharacterizationTests
     }
 
     [Fact]
+    public void RawOutputSubscriberFailure_IsContainedAndDoesNotStopLaterSubscribers()
+    {
+        using var service = new LiveConsoleService();
+        var rawOutput = new List<string>();
+        service.RawOutputReceived += (_, _) => throw new InvalidOperationException("renderer callback failed");
+        service.RawOutputReceived += (_, output) => rawOutput.Add(output);
+
+        Publish(service, "PS C:\\> ", _ => { });
+        Publish(service, "after failure", _ => { });
+
+        Assert.Equal("PS C:\\> after failure", string.Concat(rawOutput));
+    }
+
+    [Fact]
+    public void PromptObservation_RaisesSeparateBackendSignalWithoutCompletingCommand()
+    {
+        using var service = new LiveConsoleService();
+        var prompts = new List<(int Generation, string Path)>();
+        SetField(service, "_terminalSessionGeneration", 5);
+        SetField(service, "_isCommandInProgress", true);
+        service.PromptReadyObserved += (generation, path) => prompts.Add((generation, path));
+
+        InvokePrivate(service, "UpdateCurrentDirectoryFromPrompt", "noise\r\nPS C:\\PromptReady>");
+
+        var prompt = Assert.Single(prompts);
+        Assert.Equal(5, prompt.Generation);
+        Assert.Equal(@"C:\PromptReady", prompt.Path);
+        Assert.True(GetField<bool>(service, "_isCommandInProgress"));
+    }
+
+    [Fact]
     public void FragmentedDispatchTokens_AreHidden_WhileScriptOutputRemainsOrderedAndVisible()
     {
         using var service = new LiveConsoleService();
@@ -178,6 +209,117 @@ public sealed class LiveConsoleServiceCharacterizationTests
         Assert.DoesNotContain("__psstudioSnapshotRoot", startup, StringComparison.Ordinal);
     }
 
+
+
+    [Fact]
+    public void CursorNeutralOscDispatchFrames_DoNotCreateHiddenProtocolRows()
+    {
+        using var service = new LiveConsoleService();
+        const string startToken = "##PSSTUDIO_EXEC_START_osc";
+        const string completionToken = "##PSSTUDIO_EXEC_DONE_osc";
+        const string locationToken = "##PSSTUDIO_LOCATION_osc_";
+        ConfigureScriptDispatch(service, startToken, completionToken, locationToken);
+        var visible = new List<string>();
+        var completions = 0;
+        service.RawOutputReceived += (_, output) => visible.Add(output);
+        service.CommandExecutionCompleted += () => completions++;
+        var encodedLocation = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(@"D:\OscConfirmed"));
+
+        var startFrame = $"\x1b]7777;PS7SD;START;{startToken}\a";
+        var locationFrame = $"\x1b]7777;PS7SD;LOCATION;{locationToken}{encodedLocation}\a";
+        var doneFrame = $"\x1b]7777;PS7SD;DONE;{completionToken}\a";
+
+        Publish(service, $"hidden short dispatch\r\n{startFrame}script output\r\n{locationFrame}{doneFrame}PS D:\\OscConfirmed> ", _ => { });
+
+        var rendered = string.Concat(visible);
+        Assert.Equal("\r\nscript output\r\nPS D:\\OscConfirmed> ", rendered);
+        Assert.DoesNotContain("PS7SD", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("PSSTUDIO", rendered, StringComparison.Ordinal);
+        Assert.Equal(1, completions);
+        Assert.Equal(@"D:\OscConfirmed", service.CurrentWorkingDirectory);
+    }
+
+    [Fact]
+    public void FragmentedCursorNeutralOscCompletion_IsHeldUntilTerminator()
+    {
+        using var service = new LiveConsoleService();
+        const string startToken = "##PSSTUDIO_EXEC_START_oscfragment";
+        const string completionToken = "##PSSTUDIO_EXEC_DONE_oscfragment";
+        ConfigureScriptDispatch(service, startToken, completionToken);
+        var visible = new List<string>();
+        var completions = 0;
+        service.RawOutputReceived += (_, output) => visible.Add(output);
+        service.CommandExecutionCompleted += () => completions++;
+
+        var startFrame = $"\x1b]7777;PS7SD;START;{startToken}\a";
+        var doneFrame = $"\x1b]7777;PS7SD;DONE;{completionToken}\a";
+        var split = doneFrame.Length - 3;
+
+        Publish(service, $"hidden\r\n{startFrame}output\r\n{doneFrame[..split]}", _ => { });
+        Assert.Equal(0, completions);
+        Publish(service, doneFrame[split..] + "PS C:\\> ", _ => { });
+
+        var rendered = string.Concat(visible);
+        Assert.Equal("\r\noutput\r\nPS C:\\> ", rendered);
+        Assert.Equal(1, completions);
+    }
+
+    [Fact]
+    public void DispatchHelper_UsesCursorNeutralOscFramesInsteadOfPrivateWriteLines()
+    {
+        using var service = new LiveConsoleService();
+        var helperPath = Assert.IsType<string>(InvokePrivate(service, "CreateDispatchHelperSnapshot"));
+        try
+        {
+            var helper = File.ReadAllText(helperPath);
+            Assert.Contains("]7777;PS7SD;", helper, StringComparison.Ordinal);
+            Assert.Contains("[Console]::Out.Write($__pssdOscPrefix + 'START;'", helper, StringComparison.Ordinal);
+            Assert.Contains("[Console]::Out.Write($__pssdOscPrefix + 'LOCATION;'", helper, StringComparison.Ordinal);
+            Assert.Contains("[Console]::Out.Write($__pssdOscPrefix + 'DONE;'", helper, StringComparison.Ordinal);
+            Assert.DoesNotContain("WriteLine($__pssdStart)", helper, StringComparison.Ordinal);
+            Assert.DoesNotContain("##PSSTUDIO_DISPATCH_DIAG## begin", helper, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(helperPath);
+        }
+    }
+
+    [Fact]
+    public void ShortDispatchCommand_UsesSingleSnapshotPathToAvoidPsReadLineWrapping()
+    {
+        using var service = new LiveConsoleService();
+        var command = Assert.IsType<string>(InvokePrivate(
+            service,
+            "BuildShortDispatchCommand",
+            @"C:\Users\rbarn\AppData\Local\PS7ScriptDesk\Temp\TerminalSnapshots\psd-0123456789abcdef0123456789abcdef.ps1",
+            false));
+
+        Assert.StartsWith("& '", command, StringComparison.Ordinal);
+        Assert.Contains("psd-0123456789abcdef0123456789abcdef.ps1", command, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("psh-", command, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("psi-", command, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void HiddenProtocolFiltering_PreservesCursorAffectingLineTerminators()
+    {
+        using var service = new LiveConsoleService();
+        const string startToken = "##PSSTUDIO_EXEC_START_state";
+        const string completionToken = "##PSSTUDIO_EXEC_DONE_state";
+        ConfigureScriptDispatch(service, startToken, completionToken);
+        var visible = new List<string>();
+        service.RawOutputReceived += (_, output) => visible.Add(output);
+
+        Publish(service, $"hidden dispatch echo\r\n{startToken}\r\nreal output\r\n{completionToken}\r\nPS C:\\> ", _ => { });
+
+        var rendered = string.Concat(visible);
+        Assert.DoesNotContain("hidden dispatch echo", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("PSSTUDIO", rendered, StringComparison.Ordinal);
+        Assert.Contains("real output", rendered, StringComparison.Ordinal);
+        Assert.True(rendered.Count(character => character == '\n') >= 4);
+    }
+
     [Fact]
     public void PreStartOutputBuffer_IsCappedUntilStartAcknowledgementArrives()
     {
@@ -210,7 +352,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         Publish(service, $"hidden echo\r\n{startToken}\r\n{scriptOutput}", _ => { });
 
         Assert.Null(GetFieldValue(service, "_pendingStartToken"));
-        Assert.Equal(scriptOutput.Length + 2, string.Concat(visible).Length);
+        Assert.Equal(scriptOutput.Length + 4, string.Concat(visible).Length);
         Assert.Contains(scriptOutput, string.Concat(visible), StringComparison.Ordinal);
     }
 
