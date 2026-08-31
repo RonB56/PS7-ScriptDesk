@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Collections.Generic;
@@ -225,7 +225,6 @@ namespace PS7ScriptDesk.Shell
         private WpfPoint _pendingHoverPoint;
         private FindReplaceWindow? _findReplaceWindow;
         private AboutWindow? _aboutWindow;
-        private bool _manualStoreUpdateCheckInProgress;
         private readonly AdministratorModeBannerState _administratorModeBannerState;
         private bool _allowWindowClose;
         private bool _terminalShutdownInProgress;
@@ -2028,115 +2027,72 @@ namespace PS7ScriptDesk.Shell
             ContextHelp.OpenOverview(this);
         }
 
-        private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
-        {
-            await CheckForUpdatesFromHelpAsync().ConfigureAwait(true);
-        }
-
-        private async Task CheckForUpdatesFromHelpAsync()
+        private void CheckForUpdates_Click(object sender, RoutedEventArgs e)
         {
             DeveloperDiagnostics.LogUserAction(
                 "StoreUpdate",
-                "ManualCheckRequested",
-                "User requested a manual Store update check from Help > Check for Updates.");
+                "StartupStatusRequested",
+                "User requested the Microsoft Store update status captured during application startup.");
 
-            if (_manualStoreUpdateCheckInProgress)
+            var snapshot = StoreUpdateStartupState.Read();
+            if (snapshot.CheckInProgress)
             {
                 if (ViewModel is not null)
                 {
-                    ViewModel.StatusText = "Update check already in progress.";
+                    ViewModel.StatusText = "Startup update check is still in progress.";
                 }
 
-                AppLogger.Info("StoreUpdate", "Manual Store update check ignored because another manual check is already running.");
-                DeveloperDiagnostics.LogDecision(
-                    "StoreUpdate",
-                    "ManualCheckRequested",
-                    "Manual Store update check was rejected because another check is already running.",
-                    "RejectedReentrantCheck",
-                    new Dictionary<string, object?> { ["inProgress"] = true });
+                System.Windows.MessageBox.Show(
+                    this,
+                    "PS7 ScriptDesk is still completing the one-time Microsoft Store update check that started with the application.\n\n" +
+                    "Open Store Update Status again in a moment.",
+                    "PS7 ScriptDesk - Store Update Status",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
                 return;
             }
 
-            _manualStoreUpdateCheckInProgress = true;
+            if (snapshot.Service is null || snapshot.Result is null)
+            {
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = "No startup update status is available.";
+                }
+
+                System.Windows.MessageBox.Show(
+                    this,
+                    "No Microsoft Store update status was captured for this application session.\n\n" +
+                    "ScriptDesk checks Microsoft Store once after startup and does not poll again during the session.",
+                    "PS7 ScriptDesk - Store Update Status",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var checkResult = snapshot.Result;
+            var resultKind = ClassifyStoreUpdateResult(checkResult);
+            DeveloperDiagnostics.LogDecision(
+                "StoreUpdate",
+                "StartupStatusDisplay",
+                $"Displayed cached startup Store update status '{resultKind}'.",
+                resultKind,
+                BuildStoreUpdateDiagnosticsProperties(checkResult, "StartupCache"));
+
+            ShowManualStoreUpdateWindow(snapshot.Service, checkResult);
+
             if (ViewModel is not null)
             {
-                ViewModel.StatusText = "Checking for updates...";
-            }
-
-            var operationId = $"ManualStoreUpdateCheck-{Guid.NewGuid():N}";
-            var stopwatch = Stopwatch.StartNew();
-            StoreUpdateCheckResult? checkResult = null;
-
-            DeveloperDiagnostics.LogOperationStart(
-                "StoreUpdate",
-                "ManualCheckForUpdates",
-                "Manual Store update check started.",
-                operationId,
-                new Dictionary<string, object?>
+                ViewModel.StatusText = resultKind switch
                 {
-                    ["invocation"] = "HelpMenu",
-                    ["cancellationSupported"] = false
-                });
-
-            var storeUpdateService = new StoreUpdateService();
-            try
-            {
-                AppLogger.Info("StoreUpdate", "Manual Store/MSIX update check requested from Help > Check for Updates.");
-                checkResult = await storeUpdateService.CheckForUpdatesAsync(CancellationToken.None).ConfigureAwait(true);
-
-                var resultKind = ClassifyStoreUpdateResult(checkResult);
-                var resultProperties = BuildStoreUpdateDiagnosticsProperties(checkResult, "HelpMenu");
-                DeveloperDiagnostics.LogDecision(
-                    "StoreUpdate",
-                    "ManualCheckResult",
-                    $"Manual Store update check completed with result '{resultKind}'.",
-                    resultKind,
-                    resultProperties);
-
-                ShowManualStoreUpdateWindow(storeUpdateService, checkResult);
-            }
-            catch (OperationCanceledException ex)
-            {
-                AppLogger.Info("StoreUpdate", "Manual Store update check was canceled.");
-                DeveloperDiagnostics.LogException(
-                    "StoreUpdate",
-                    ex,
-                    "Manual Store update check was canceled.",
-                    new Dictionary<string, object?>
-                    {
-                        ["invocation"] = "HelpMenu",
-                        ["elapsedMilliseconds"] = stopwatch.ElapsedMilliseconds
-                    });
-                if (ViewModel is not null)
-                {
-                    ViewModel.StatusText = "Update check canceled.";
-                }
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("StoreUpdate", "Manual Store update check failed.", ex);
-                DeveloperDiagnostics.LogOperationFailure(
-                    "StoreUpdate",
-                    "ManualCheckForUpdates",
-                    "Manual Store update check failed.",
-                    ex,
-                    stopwatch.ElapsedMilliseconds,
-                    BuildStoreUpdateDiagnosticsProperties(checkResult, "HelpMenu"));
-                if (ViewModel is not null)
-                {
-                    ViewModel.StatusText = "Unable to check for updates.";
-                }
-            }
-            finally
-            {
-                stopwatch.Stop();
-                DeveloperDiagnostics.LogOperationStop(
-                    "StoreUpdate",
-                    "ManualCheckForUpdates",
-                    "Manual Store update check finished.",
-                    stopwatch.ElapsedMilliseconds,
-                    BuildStoreUpdateDiagnosticsProperties(checkResult, "HelpMenu"));
-                _manualStoreUpdateCheckInProgress = false;
+                    "MandatoryUpdate" => "Mandatory update detected at startup.",
+                    "UpdateAvailable" => "Update available.",
+                    "NoUpdateAvailable" => "No updates were available at startup.",
+                    "ManualInstructions" => "Startup Store status requires manual Store instructions.",
+                    "LocalBuildUnavailable" => "Store updates are not available for this local build.",
+                    "CheckUnavailable" => "Startup Store update check was unavailable.",
+                    "Failure" => "Startup Store update check failed.",
+                    _ => "Store update status displayed."
+                };
             }
         }
 

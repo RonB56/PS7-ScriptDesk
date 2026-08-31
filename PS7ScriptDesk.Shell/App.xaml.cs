@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -518,20 +518,33 @@ namespace PS7ScriptDesk.Shell
 
         private static async Task CheckForStoreUpdatesAfterStartupAsync(Window shellWindow)
         {
+            if (shellWindow is null)
+            {
+                return;
+            }
+
+            var storeUpdateService = new StoreUpdateService();
+            StoreUpdateStartupState.Begin(storeUpdateService);
+
             try
             {
-                if (shellWindow is null)
-                {
-                    return;
-                }
-
-                var storeUpdateService = new StoreUpdateService();
                 AppLogger.Info("StoreUpdate", "Startup Store/MSIX update check requested.");
                 var storeUpdateCheckResult = await storeUpdateService.CheckForUpdatesAsync(CancellationToken.None).ConfigureAwait(true);
+                StoreUpdateStartupState.Complete(storeUpdateService, storeUpdateCheckResult);
                 ShowNonBlockingStoreUpdateNotificationIfNeeded(shellWindow, storeUpdateService, storeUpdateCheckResult);
             }
             catch (Exception ex)
             {
+                var failedResult = new StoreUpdateCheckResult
+                {
+                    AvailabilityState = StoreUpdateAvailabilityState.UpdateCheckUnavailable,
+                    StoreUpdateCheckAvailable = false,
+                    StatusMessage = "Microsoft Store update status could not be queried at startup.",
+                    ExceptionSummary = $"{ex.GetType().Name}: {ex.Message}",
+                    ManualInstructions = "Microsoft Store -> Library -> Get updates."
+                };
+                StoreUpdateStartupState.Fail(storeUpdateService, failedResult);
+
                 AppLogger.Error("StoreUpdate", "Startup Store/MSIX update check failed.", ex);
                 DeveloperDiagnostics.LogException("StoreUpdate", ex, "Startup Store/MSIX update check failed.");
             }

@@ -1,4 +1,4 @@
-﻿<Window x:Class="PS7ScriptDesk.Shell.MainWindow"
+<Window x:Class="PS7ScriptDesk.Shell.MainWindow"
         x:Name="RootWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -364,7 +364,7 @@
                           help:ContextHelp.Key="Help.Context" />
                 <MenuItem Header="PS7 ScriptDesk _Help" Click="HelpOverview_Click" help:ContextHelp.Key="App.Overview" />
                 <Separator />
-                <MenuItem Header="Check for _Updates" Click="CheckForUpdates_Click" help:ContextHelp.Key="App.StoreUpdate" />
+                <MenuItem Header="Store Update _Status" Click="CheckForUpdates_Click" help:ContextHelp.Key="App.StoreUpdate" />
                 <Separator />
                 <MenuItem Header="_About" Click="About_Click" help:ContextHelp.Key="Help.About" />
             </MenuItem>

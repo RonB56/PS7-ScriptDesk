@@ -62,7 +62,9 @@ namespace PS7ScriptDesk.Shell
             {
                 foreach (var update in _checkResult.Updates)
                 {
-                    items.Add($"{update.PackageFamilyName} | Mandatory: {update.IsMandatory}");
+                    items.Add(string.IsNullOrWhiteSpace(update.Version)
+                        ? $"{update.PackageFamilyName} | Mandatory: {update.IsMandatory}"
+                        : $"{update.PackageFamilyName} | Version: {update.Version} | Mandatory: {update.IsMandatory}");
                 }
             }
             else

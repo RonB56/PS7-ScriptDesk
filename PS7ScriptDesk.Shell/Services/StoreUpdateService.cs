@@ -12,20 +12,19 @@ using System.Threading;
 using System.Threading.Tasks;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Utilities;
+using Windows.ApplicationModel;
+using Windows.Services.Store;
 
 namespace PS7ScriptDesk.Shell.Services
 {
     public sealed class StoreUpdateService
     {
-        private const string PackageTypeName = "Windows.ApplicationModel.Package, Windows, ContentType=WindowsRuntime";
-        private const string StoreContextTypeName = "Windows.Services.Store.StoreContext, Windows, ContentType=WindowsRuntime";
         private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(30);
-        private static readonly TimeSpan InstallTimeout = TimeSpan.FromMinutes(15);
         private readonly IStorePackageEnvironmentProvider _packageEnvironmentProvider;
         private readonly IStoreUpdateQuery _storeUpdateQuery;
 
         public StoreUpdateService()
-            : this(new WindowsStorePackageEnvironmentProvider(), new ReflectionStoreUpdateQuery())
+            : this(new WindowsStorePackageEnvironmentProvider(), new DirectStoreUpdateQuery())
         {
         }
 
@@ -244,39 +243,62 @@ namespace PS7ScriptDesk.Shell.Services
 
             try
             {
-                if (checkResult.RawStoreContext is null || checkResult.RawUpdatesCollection is null)
+                if (checkResult.RawStoreContext is not StoreContext storeContext ||
+                    checkResult.RawUpdatesCollection is not IReadOnlyList<StorePackageUpdate> rawUpdates)
                 {
-                    result.ExceptionSummary = "Store update install could not start because no raw Store update context was available.";
+                    result.ExceptionSummary = "Store update install could not start because no direct Store update context was available.";
                     LogCheckStep(result.ExceptionSummary);
                     return result;
                 }
 
-                var storeContextType = checkResult.RawStoreContext.GetType();
-                var installMethod = storeContextType.GetMethod("RequestDownloadAndInstallStorePackageUpdatesAsync", BindingFlags.Public | BindingFlags.Instance);
-                if (installMethod is null)
-                {
-                    result.ExceptionSummary = "RequestDownloadAndInstallStorePackageUpdatesAsync was unavailable at runtime.";
-                    LogCheckStep(result.ExceptionSummary);
-                    return result;
-                }
+                cancellationToken.ThrowIfCancellationRequested();
 
                 result.RequestStarted = true;
                 LogCheckStep(
-                    "Calling RequestDownloadAndInstallStorePackageUpdatesAsync.",
+                    "Calling direct RequestDownloadAndInstallStorePackageUpdatesAsync.",
                     new Dictionary<string, object?>
                     {
                         ["updateCount"] = checkResult.UpdateCount,
                         ["packageFamilyNames"] = string.Join(", ", checkResult.Updates.Select(update => update.PackageFamilyName))
                     });
 
-                var operation = installMethod.Invoke(checkResult.RawStoreContext, new[] { checkResult.RawUpdatesCollection });
-                TryRegisterProgressCallback(operation, progress);
-                var installResultObject = await AwaitWinRtOperationAsync(operation, InstallTimeout, "RequestDownloadAndInstallStorePackageUpdatesAsync", cancellationToken).ConfigureAwait(false);
-                result.OverallState = ReadStringProperty(installResultObject, "OverallState");
-                result.PackageStatuses = ExtractInstallStatuses(installResultObject);
+                // Microsoft requires this API to be initiated from the UI thread.
+                // StoreUpdateWindow invokes this method from its WPF click handler.
+                var operation = storeContext.RequestDownloadAndInstallStorePackageUpdatesAsync(rawUpdates);
+                operation.Progress = (_, status) =>
+                {
+                    try
+                    {
+                        progress?.Report(new StoreUpdateInstallProgressInfo(
+                            status.PackageFamilyName,
+                            status.PackageUpdateState.ToString(),
+                            status.PackageDownloadProgress.ToString("P0"),
+                            $"Total={status.TotalDownloadProgress:P0}",
+                            string.Empty,
+                            "Started"));
+                    }
+                    catch (Exception progressException)
+                    {
+                        LogCheckException("Store update progress reporting failed.", progressException);
+                    }
+                };
+
+                var installResult = await operation;
+                result.OverallState = installResult.OverallState.ToString();
+                result.PackageStatuses = installResult.StorePackageUpdateStatuses
+                    .Select(status => new StoreUpdateInstallStatusInfo(
+                        status.PackageFamilyName,
+                        status.PackageUpdateState.ToString(),
+                        status.PackageDownloadProgress.ToString("P0"),
+                        $"Total={status.TotalDownloadProgress:P0}",
+                        string.Empty,
+                        string.Empty,
+                        string.Empty,
+                        string.Empty))
+                    .ToList();
 
                 LogCheckStep(
-                    "Store update install request completed.",
+                    "Direct Store update install request completed.",
                     new Dictionary<string, object?> { ["overallState"] = result.OverallState });
 
                 foreach (var status in result.PackageStatuses)
@@ -288,14 +310,16 @@ namespace PS7ScriptDesk.Shell.Services
                             ["packageFamilyName"] = status.PackageFamilyName,
                             ["status"] = status.Status,
                             ["packageUpdateState"] = status.PackageUpdateState,
-                            ["downloadProgress"] = status.PackageDownloadProgress,
-                            ["errorCode"] = status.ErrorCode,
-                            ["statusKind"] = status.StatusKind,
-                            ["statusCode"] = status.StatusCode,
-                            ["statusMessage"] = status.StatusMessage
+                            ["downloadProgress"] = status.PackageDownloadProgress
                         });
                 }
 
+                return result;
+            }
+            catch (OperationCanceledException ex)
+            {
+                result.ExceptionSummary = BuildExceptionSummary(ex);
+                LogCheckException("Store update install request was canceled.", ex);
                 return result;
             }
             catch (Exception ex)
@@ -542,50 +566,39 @@ namespace PS7ScriptDesk.Shell.Services
         {
             public StorePackageEnvironmentInfo ReadPackageEnvironment()
             {
-                var packageEnvironment = new StorePackageEnvironmentInfo();
-                var packageType = Type.GetType(PackageTypeName, throwOnError: false);
-                packageEnvironment.PackageTypeAvailable = packageType is not null;
-                if (packageType is not null)
+                var packageEnvironment = new StorePackageEnvironmentInfo
                 {
-                    try
-                    {
-                        var currentPackage = packageType.GetProperty("Current", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-                        packageEnvironment.PackageCurrentAvailable = currentPackage is not null;
-                        if (currentPackage is not null)
-                        {
-                            packageEnvironment.HasPackageIdentity = true;
-                            packageEnvironment.PackageIdentityReadSucceeded = true;
-                            packageEnvironment.PackageIdentityApi = "Package.Current";
-                            packageEnvironment.SignatureKind = NormalizePackageSignatureKind(ReadPropertyValue(currentPackage, "SignatureKind"));
-                            packageEnvironment.IsDevelopmentMode = ReadBooleanProperty(currentPackage, "IsDevelopmentMode") ?? false;
-                            packageEnvironment.IsFramework = ReadBooleanProperty(currentPackage, "IsFramework") ?? false;
-                            packageEnvironment.IsResourcePackage = ReadBooleanProperty(currentPackage, "IsResourcePackage") ?? false;
-                            packageEnvironment.PackageName = ReadStringProperty(currentPackage, "Id", "Name");
-                            packageEnvironment.PackageFullName = ReadStringProperty(currentPackage, "Id", "FullName");
-                            packageEnvironment.PackageFamilyName = ReadStringProperty(currentPackage, "Id", "FamilyName");
-                            packageEnvironment.PackagePublisherId = ReadStringProperty(currentPackage, "Id", "PublisherId");
-                            packageEnvironment.PackageVersion = ReadPackageVersion(currentPackage);
-                        }
-                    }
-                    catch (TargetInvocationException ex)
-                    {
-                        var effectiveException = ex.InnerException ?? ex;
-                        packageEnvironment.PackageIdentityReadFailure = BuildExceptionSummary(effectiveException);
-                        LogCheckException("Package identity lookup failed.", effectiveException);
-                    }
-                    catch (Exception ex)
-                    {
-                        packageEnvironment.PackageIdentityReadFailure = BuildExceptionSummary(ex);
-                        LogCheckException("Package identity lookup failed.", ex);
-                    }
+                    ProcessPath = Environment.ProcessPath ?? string.Empty,
+                    BaseDirectory = AppContext.BaseDirectory ?? string.Empty,
+                    PackageTypeAvailable = true
+                };
+
+                try
+                {
+                    var currentPackage = Package.Current;
+                    packageEnvironment.PackageCurrentAvailable = true;
+                    packageEnvironment.HasPackageIdentity = true;
+                    packageEnvironment.PackageIdentityReadSucceeded = true;
+                    packageEnvironment.PackageIdentityApi = "Package.Current";
+                    packageEnvironment.SignatureKind = NormalizePackageSignatureKind(currentPackage.SignatureKind);
+                    packageEnvironment.IsDevelopmentMode = currentPackage.IsDevelopmentMode;
+                    packageEnvironment.IsFramework = currentPackage.IsFramework;
+                    packageEnvironment.IsResourcePackage = currentPackage.IsResourcePackage;
+                    packageEnvironment.PackageName = currentPackage.Id.Name;
+                    packageEnvironment.PackageFullName = currentPackage.Id.FullName;
+                    packageEnvironment.PackageFamilyName = currentPackage.Id.FamilyName;
+                    packageEnvironment.PackagePublisherId = currentPackage.Id.PublisherId;
+                    packageEnvironment.PackageVersion = FormatPackageVersion(currentPackage.Id.Version);
+                    return packageEnvironment;
+                }
+                catch (Exception ex)
+                {
+                    packageEnvironment.PackageCurrentAvailable = false;
+                    packageEnvironment.PackageIdentityReadFailure = BuildExceptionSummary(ex);
+                    LogCheckException("Direct Package.Current identity lookup failed.", ex);
                 }
 
-                packageEnvironment.ProcessPath = Environment.ProcessPath ?? string.Empty;
-                packageEnvironment.BaseDirectory = AppContext.BaseDirectory ?? string.Empty;
-                if (!packageEnvironment.HasPackageIdentity)
-                {
-                    TryReadNativePackageEnvironment(packageEnvironment);
-                }
+                TryReadNativePackageEnvironment(packageEnvironment);
 
                 var packageFamilyName = Environment.GetEnvironmentVariable("APPX_PACKAGE_FAMILY_NAME") ?? string.Empty;
                 packageEnvironment.IsInferredPackagedFallback = !packageEnvironment.HasPackageIdentity &&
@@ -624,36 +637,36 @@ namespace PS7ScriptDesk.Shell.Services
                     packageEnvironment.PackageIdentityApi = "NativeAppModel";
                     packageEnvironment.PackageFullName = packageFullName;
                     packageEnvironment.PackageFamilyName = packageFamilyName;
-                    ApplyPackageFullNameParts(packageEnvironment, packageFullName);
+                    packageEnvironment.PackageIdentityFallbackSource = "NativeAppModel";
 
                     var origin = NativePackageIdentity.TryGetStagedPackageOrigin(packageFullName, out var originStatus);
                     packageEnvironment.NativePackageOriginStatus = originStatus;
                     packageEnvironment.PackageOrigin = origin;
-                    var originSignature = MapPackageOriginToSignatureKind(origin);
-                    if (!string.IsNullOrWhiteSpace(originSignature))
-                    {
-                        packageEnvironment.SignatureKind = originSignature;
-                    }
+                    packageEnvironment.SignatureKind = MapPackageOriginToSignatureKind(origin);
+
+                    PopulatePackageIdentityFromFullName(packageEnvironment, packageFullName);
                 }
                 catch (Exception ex)
                 {
                     packageEnvironment.PackageIdentityReadFailure = BuildExceptionSummary(ex);
-                    LogCheckException("Native package identity lookup failed.", ex);
+                    LogCheckException("Native AppModel package identity lookup failed.", ex);
                 }
             }
 
-            private static void ApplyPackageFullNameParts(StorePackageEnvironmentInfo packageEnvironment, string packageFullName)
+            private static void PopulatePackageIdentityFromFullName(StorePackageEnvironmentInfo packageEnvironment, string packageFullName)
             {
                 var parts = packageFullName.Split('_');
-                if (parts.Length >= 5)
+                if (parts.Length < 5)
                 {
-                    packageEnvironment.PackageName = parts[0];
-                    packageEnvironment.PackageVersion = parts[1];
-                    packageEnvironment.PackagePublisherId = parts[^1];
-                    if (string.IsNullOrWhiteSpace(packageEnvironment.PackageFamilyName))
-                    {
-                        packageEnvironment.PackageFamilyName = $"{parts[0]}_{parts[^1]}";
-                    }
+                    return;
+                }
+
+                packageEnvironment.PackageName = parts[0];
+                packageEnvironment.PackageVersion = parts[1];
+                packageEnvironment.PackagePublisherId = parts[^1];
+                if (string.IsNullOrWhiteSpace(packageEnvironment.PackageFamilyName))
+                {
+                    packageEnvironment.PackageFamilyName = $"{parts[0]}_{parts[^1]}";
                 }
             }
 
@@ -669,79 +682,87 @@ namespace PS7ScriptDesk.Shell.Services
             }
         }
 
-        private sealed class ReflectionStoreUpdateQuery : IStoreUpdateQuery
+        private sealed class DirectStoreUpdateQuery : IStoreUpdateQuery
         {
             public async Task<StoreUpdateQueryResult> CheckForUpdatesAsync(CancellationToken cancellationToken)
             {
-                var storeContextType = Type.GetType(StoreContextTypeName, throwOnError: false);
-                if (storeContextType is null)
-                {
-                    LogCheckStep("StoreContext type was not available.");
-                    return StoreUpdateQueryResult.Unavailable(
-                        StoreUpdateAvailabilityState.UpdateCheckUnavailable,
-                        "Store update APIs were not available at runtime.",
-                        "StoreContext type was not available.");
-                }
+                cancellationToken.ThrowIfCancellationRequested();
 
-                var getDefaultMethod = storeContextType.GetMethod("GetDefault", BindingFlags.Public | BindingFlags.Static);
-                if (getDefaultMethod is null)
+                StoreContext? storeContext = null;
+                try
                 {
-                    LogCheckStep("StoreContext.GetDefault was not available.");
-                    return StoreUpdateQueryResult.Unavailable(
-                        StoreUpdateAvailabilityState.UpdateCheckUnavailable,
-                        "StoreContext.GetDefault was not available at runtime.",
-                        "StoreContext.GetDefault was not available.");
-                }
+                    storeContext = StoreContext.GetDefault();
+                    LogCheckStep(
+                        "Direct StoreContext availability evaluated.",
+                        new Dictionary<string, object?>
+                        {
+                            ["storeContextAttempted"] = true,
+                            ["storeContextAvailable"] = storeContext is not null
+                        });
 
-                var storeContext = getDefaultMethod.Invoke(null, null);
-                LogCheckStep(
-                    "StoreContext availability evaluated.",
-                    new Dictionary<string, object?>
+                    if (storeContext is null)
                     {
-                        ["storeContextAttempted"] = true,
-                        ["storeContextAvailable"] = storeContext is not null
-                    });
+                        return StoreUpdateQueryResult.Unavailable(
+                            StoreUpdateAvailabilityState.UpdateCheckUnavailable,
+                            "Microsoft Store update status could not be queried at startup.",
+                            "StoreContext.GetDefault() returned null.",
+                            storeContextAttempted: true);
+                    }
 
-                if (storeContext is null)
-                {
-                    return StoreUpdateQueryResult.Unavailable(
-                        StoreUpdateAvailabilityState.UpdateCheckUnavailable,
-                        "StoreContext was unavailable for this packaged build.",
-                        "StoreContext was unavailable for this packaged build.",
-                        storeContextAttempted: true);
+                    LogCheckStep("Calling direct GetAppAndOptionalStorePackageUpdatesAsync.");
+                    var queryTask = QueryUpdatesAsync(storeContext);
+                    var updates = await queryTask.WaitAsync(CheckTimeout, cancellationToken).ConfigureAwait(false);
+
+                    return StoreUpdateQueryResult.UpdatesReturned(
+                        storeContext,
+                        updates,
+                        updates.Select(ToPackageInfo).ToList());
                 }
-
-                var checkMethod = storeContextType.GetMethod("GetAppAndOptionalStorePackageUpdatesAsync", BindingFlags.Public | BindingFlags.Instance);
-                if (checkMethod is null)
+                catch (TimeoutException ex)
                 {
-                    LogCheckStep("GetAppAndOptionalStorePackageUpdatesAsync was unavailable.");
+                    LogCheckException("Direct Microsoft Store update query timed out.", ex);
                     return StoreUpdateQueryResult.Unavailable(
                         StoreUpdateAvailabilityState.UpdateCheckUnavailable,
-                        "GetAppAndOptionalStorePackageUpdatesAsync was unavailable at runtime.",
-                        "GetAppAndOptionalStorePackageUpdatesAsync was unavailable.",
+                        "Microsoft Store update status could not be queried at startup.",
+                        "Direct Store update query timed out.",
                         storeContext,
                         storeContextAttempted: true);
                 }
-
-                LogCheckStep("Calling GetAppAndOptionalStorePackageUpdatesAsync.");
-                var operation = checkMethod.Invoke(storeContext, null);
-                var updatesObject = await AwaitWinRtOperationAsync(operation, CheckTimeout, "GetAppAndOptionalStorePackageUpdatesAsync", cancellationToken).ConfigureAwait(false);
-                if (updatesObject is not IEnumerable)
+                catch (OperationCanceledException)
                 {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    LogCheckException("Direct Microsoft Store update query failed.", ex);
                     return StoreUpdateQueryResult.Unavailable(
-                        StoreUpdateAvailabilityState.ManualCheckRequired,
-                        "No per-package Microsoft Store update list was returned for this build. Use Microsoft Store -> Library -> Get updates.",
-                        "Store update query completed without a per-package update list. Treating the result as manual-check-required.",
+                        StoreUpdateAvailabilityState.UpdateCheckUnavailable,
+                        "Microsoft Store update status could not be queried at startup.",
+                        $"Direct Store update query failed: {BuildExceptionSummary(ex)}",
                         storeContext,
-                        updatesObject,
                         storeContextAttempted: true);
                 }
-
-                return StoreUpdateQueryResult.UpdatesReturned(
-                    storeContext,
-                    updatesObject,
-                    ExtractUpdates(updatesObject));
             }
+
+            private static async Task<IReadOnlyList<StorePackageUpdate>> QueryUpdatesAsync(StoreContext storeContext)
+            {
+                var updates = await storeContext.GetAppAndOptionalStorePackageUpdatesAsync();
+                return updates;
+            }
+
+            private static StoreUpdatePackageInfo ToPackageInfo(StorePackageUpdate update)
+            {
+                var packageId = update.Package?.Id;
+                return new StoreUpdatePackageInfo(
+                    packageId?.FamilyName ?? string.Empty,
+                    update.Mandatory,
+                    packageId is null ? string.Empty : FormatPackageVersion(packageId.Version));
+            }
+        }
+
+        private static string FormatPackageVersion(PackageVersion version)
+        {
+            return $"{version.Major}.{version.Minor}.{version.Build}.{version.Revision}";
         }
 
         private static string ReadPackageVersion(object currentPackage)
@@ -1238,15 +1259,18 @@ namespace PS7ScriptDesk.Shell.Services
 
     public sealed class StoreUpdatePackageInfo
     {
-        public StoreUpdatePackageInfo(string packageFamilyName, bool isMandatory)
+        public StoreUpdatePackageInfo(string packageFamilyName, bool isMandatory, string version = "")
         {
             PackageFamilyName = packageFamilyName ?? string.Empty;
             IsMandatory = isMandatory;
+            Version = version ?? string.Empty;
         }
 
         public string PackageFamilyName { get; }
 
         public bool IsMandatory { get; }
+
+        public string Version { get; }
     }
 
     public sealed class StoreUpdateInstallResult
