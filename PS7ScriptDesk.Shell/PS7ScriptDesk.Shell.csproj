@@ -11,10 +11,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
 	<UseWindowsForms>true</UseWindowsForms>
-    <Version>2.2.5</Version>
-    <AssemblyVersion>2.2.5.0</AssemblyVersion>
-    <FileVersion>2.2.5.0</FileVersion>
-    <InformationalVersion>2.2.5</InformationalVersion>
+    <Version>3.0.0</Version>
+    <AssemblyVersion>3.0.0.0</AssemblyVersion>
+    <FileVersion>3.0.0.0</FileVersion>
+    <InformationalVersion>3.0.0</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <AssemblyTitle>PS7 ScriptDesk</AssemblyTitle>
     <Product>PS7 ScriptDesk</Product>

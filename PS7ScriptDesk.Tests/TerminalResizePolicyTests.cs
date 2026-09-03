@@ -66,7 +66,7 @@ public sealed class TerminalResizePolicyTests
 
         Assert.True(resize.Accepted);
         Assert.Equal("output\r\n", first.VisibleText);
-        Assert.Equal("PS C:\\> ", second.VisibleText);
+        Assert.Equal("\r\nPS C:\\> ", second.VisibleText);
         Assert.Equal(string.Empty, filter.Flush().VisibleText);
     }
 

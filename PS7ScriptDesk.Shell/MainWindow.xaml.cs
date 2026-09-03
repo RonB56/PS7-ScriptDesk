@@ -1771,6 +1771,8 @@ namespace PS7ScriptDesk.Shell
                     case '{': AutoInsertClosingDelimiter(editorTextEditor, '}'); break;
                     case '(': AutoInsertClosingDelimiter(editorTextEditor, ')'); break;
                     case '[': AutoInsertClosingDelimiter(editorTextEditor, ']'); break;
+                    case '"': AutoInsertClosingDelimiter(editorTextEditor, '"'); break;
+                    case '\'': AutoInsertClosingDelimiter(editorTextEditor, '\''); break;
                 }
             }
 
@@ -1827,18 +1829,37 @@ namespace PS7ScriptDesk.Shell
             {
                 var ch = e.Text[0];
 
+                if (editor.SelectionLength > 0 && TryGetMatchingDelimiter(ch, out var surroundCloser))
+                {
+                    e.Handled = true;
+                    ApplyEditorCommand(editor, "SurroundSelection", () => EditorProductivityCommands.SurroundSelection(editor.Document!, editor.SelectionStart, editor.SelectionLength, ch, surroundCloser));
+                    return;
+                }
+
                 // Skip over an auto-inserted closing delimiter when the caret is already
                 // sitting in front of that exact character (prevents double-brace syndrome).
                 if (ch == '}' || ch == ')' || ch == ']')
                 {
-                    if (editor?.Document is not null &&
-                        editor.CaretOffset < editor.Document.TextLength &&
-                        editor.Document.GetCharAt(editor.CaretOffset) == ch)
+                    var closingDocument = editor?.Document;
+                    if (closingDocument is not null &&
+                        (editor?.CaretOffset ?? 0) < closingDocument.TextLength &&
+                        closingDocument.GetCharAt(editor?.CaretOffset ?? 0) == ch)
                     {
-                        editor.CaretOffset++;
+                        editor!.CaretOffset++;
                         e.Handled = true;
                         return;
                     }
+                }
+
+                var document = editor?.Document;
+                if ((ch == '\'' || ch == '"') &&
+                    document is not null &&
+                    (editor?.CaretOffset ?? 0) < document.TextLength &&
+                    document.GetCharAt(editor?.CaretOffset ?? 0) == ch)
+                {
+                    editor!.CaretOffset++;
+                    e.Handled = true;
+                    return;
                 }
 
                 if (_activeCompletionWindow is not null && ShouldDismissActivePathCompletionForTextInput(ch))
@@ -1854,6 +1875,20 @@ namespace PS7ScriptDesk.Shell
                     _activeCompletionWindow.CompletionList.RequestInsertion(e);
                 }
             }
+        }
+
+        private static bool TryGetMatchingDelimiter(char opener, out char closer)
+        {
+            closer = opener switch
+            {
+                '(' => ')',
+                '[' => ']',
+                '{' => '}',
+                '"' => '"',
+                '\'' => '\'',
+                _ => '\0'
+            };
+            return closer != '\0';
         }
 
         private bool ShouldDismissActivePathCompletionForTextInput(char ch)
@@ -1920,6 +1955,23 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            if (Keyboard.Modifiers == ModifierKeys.Shift && e.Key == Key.Tab)
+            {
+                if (HasMultiLineEditorSelection(editorTextEditor))
+                {
+                    e.Handled = true;
+                    ApplyEditorCommand(editorTextEditor, "Outdent", () => EditorProductivityCommands.Outdent(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength, editorTextEditor.Options.IndentationSize));
+                }
+                return;
+            }
+
+            if (Keyboard.Modifiers == ModifierKeys.None && e.Key == Key.Tab && HasMultiLineEditorSelection(editorTextEditor))
+            {
+                e.Handled = true;
+                ApplyEditorCommand(editorTextEditor, "Indent", () => EditorProductivityCommands.Indent(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength, editorTextEditor.Options.IndentationSize));
+                return;
+            }
+
             if (Keyboard.Modifiers == ModifierKeys.Alt && e.Key == Key.Up)
             {
                 e.Handled = true;
@@ -1931,6 +1983,27 @@ namespace PS7ScriptDesk.Shell
             {
                 e.Handled = true;
                 MoveLineDown(editorTextEditor);
+                return;
+            }
+
+            if (Keyboard.Modifiers == (ModifierKeys.Alt | ModifierKeys.Shift) && e.Key == Key.Down)
+            {
+                e.Handled = true;
+                ApplyEditorCommand(editorTextEditor, "DuplicateDown", () => EditorProductivityCommands.DuplicateLines(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength, 1));
+                return;
+            }
+
+            if (Keyboard.Modifiers == (ModifierKeys.Alt | ModifierKeys.Shift) && e.Key == Key.Up)
+            {
+                e.Handled = true;
+                ApplyEditorCommand(editorTextEditor, "DuplicateUp", () => EditorProductivityCommands.DuplicateLines(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength, -1));
+                return;
+            }
+
+            if (Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift) && e.Key == Key.K)
+            {
+                e.Handled = true;
+                ApplyEditorCommand(editorTextEditor, "DeleteLine", () => EditorProductivityCommands.DeleteLines(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength));
                 return;
             }
 
@@ -2826,6 +2899,81 @@ namespace PS7ScriptDesk.Shell
             }
 
             e.Handled = true;
+        }
+
+        private void EditorToggleComment_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor)
+            {
+                ToggleCommentForEditor(editor);
+            }
+        }
+
+        private void EditorIndent_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor && editor.Document is not null)
+            {
+                ApplyEditorCommand(editor, "Indent", () => EditorProductivityCommands.Indent(editor.Document, editor.SelectionStart, editor.SelectionLength, editor.Options.IndentationSize));
+            }
+        }
+
+        private void EditorOutdent_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor && editor.Document is not null)
+            {
+                ApplyEditorCommand(editor, "Outdent", () => EditorProductivityCommands.Outdent(editor.Document, editor.SelectionStart, editor.SelectionLength, editor.Options.IndentationSize));
+            }
+        }
+
+        private void EditorMoveLineUp_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor && editor.Document is not null)
+            {
+                ApplyEditorCommand(editor, "MoveLineUp", () => EditorProductivityCommands.MoveLines(editor.Document, editor.SelectionStart, editor.SelectionLength, -1));
+            }
+        }
+
+        private void EditorMoveLineDown_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor && editor.Document is not null)
+            {
+                ApplyEditorCommand(editor, "MoveLineDown", () => EditorProductivityCommands.MoveLines(editor.Document, editor.SelectionStart, editor.SelectionLength, 1));
+            }
+        }
+
+        private void EditorDuplicateDown_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor && editor.Document is not null)
+            {
+                ApplyEditorCommand(editor, "DuplicateDown", () => EditorProductivityCommands.DuplicateLines(editor.Document, editor.SelectionStart, editor.SelectionLength, 1));
+            }
+        }
+
+        private void EditorDeleteLine_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor && editor.Document is not null)
+            {
+                ApplyEditorCommand(editor, "DeleteLine", () => EditorProductivityCommands.DeleteLines(editor.Document, editor.SelectionStart, editor.SelectionLength));
+            }
+        }
+
+        private void EditorSelectCurrentLine_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is not TextEditor editor || editor.Document is null)
+            {
+                return;
+            }
+
+            var line = editor.Document.GetLineByOffset(Math.Clamp(editor.CaretOffset, 0, editor.Document.TextLength));
+            editor.Select(line.Offset, line.Length);
+            DeveloperDiagnostics.LogInfo(
+                "EditorProductivity",
+                "Selected the current logical line.",
+                new Dictionary<string, object?>
+                {
+                    ["lineNumber"] = line.LineNumber,
+                    ["selectionLength"] = line.Length
+                });
         }
 
         private void EditorCut_Click(object sender, RoutedEventArgs e)
@@ -4012,6 +4160,15 @@ namespace PS7ScriptDesk.Shell
             var offset = editor.CaretOffset;
             editor.Document.Insert(offset, closing.ToString());
             editor.CaretOffset = offset;
+            DeveloperDiagnostics.LogInfo(
+                "EditorProductivity",
+                "Auto-inserted a matching closing delimiter.",
+                new Dictionary<string, object?>
+                {
+                    ["openingDelimiter"] = closing switch { '}' => '{', ')' => '(', ']' => '[', _ => closing },
+                    ["closingDelimiter"] = closing,
+                    ["offset"] = offset
+                });
         }
 
         private static bool ShouldAutoInsertClosingDelimiter(TextEditor editor)
@@ -4267,102 +4424,45 @@ namespace PS7ScriptDesk.Shell
         private static void ToggleCommentForEditor(TextEditor editor)
         {
             if (editor.Document is null) return;
-            var doc = editor.Document;
-
-            int firstLine, lastLine;
-            if (editor.SelectionLength > 0)
-            {
-                firstLine = doc.GetLineByOffset(editor.SelectionStart).LineNumber;
-                var selEnd = editor.SelectionStart + editor.SelectionLength;
-                // Don't include a trailing line where the selection ends at column 1
-                var lastLineCandidate = doc.GetLineByOffset(Math.Min(selEnd, doc.TextLength)).LineNumber;
-                if (lastLineCandidate > firstLine && selEnd == doc.GetLineByNumber(lastLineCandidate).Offset)
-                    lastLineCandidate--;
-                lastLine = lastLineCandidate;
-            }
-            else
-            {
-                firstLine = lastLine = doc.GetLineByOffset(editor.CaretOffset).LineNumber;
-            }
-
-            // Determine whether ALL selected lines already start with #
-            var allCommented = true;
-            for (var ln = firstLine; ln <= lastLine; ln++)
-            {
-                var lineText = doc.GetText(doc.GetLineByNumber(ln)).TrimStart();
-                if (!lineText.StartsWith("#", StringComparison.Ordinal))
-                {
-                    allCommented = false;
-                    break;
-                }
-            }
-
-            using (doc.RunUpdate())
-            {
-                for (var ln = lastLine; ln >= firstLine; ln--)
-                {
-                    var line = doc.GetLineByNumber(ln);
-                    var lineText = doc.GetText(line);
-                    var indent = lineText.Length - lineText.TrimStart().Length;
-
-                    if (allCommented)
-                    {
-                        // Remove leading #
-                        var hashIndex = lineText.IndexOf('#', StringComparison.Ordinal);
-                        if (hashIndex >= 0)
-                            doc.Remove(line.Offset + hashIndex, 1);
-                    }
-                    else
-                    {
-                        // Add # at the indentation level
-                        doc.Insert(line.Offset + indent, "#");
-                    }
-                }
-            }
+            ApplyEditorCommand(editor, "ToggleComment", () => EditorProductivityCommands.ToggleComment(editor.Document, editor.SelectionStart, editor.SelectionLength));
         }
 
         private static void MoveLineUp(TextEditor editor)
         {
             if (editor.Document is null) return;
-            var doc = editor.Document;
-            var caretLine = doc.GetLineByOffset(editor.CaretOffset);
-            if (caretLine.LineNumber <= 1) return;
-            var prevLine = doc.GetLineByNumber(caretLine.LineNumber - 1);
-            var col = editor.CaretOffset - caretLine.Offset;
-            var targetLineNumber = caretLine.LineNumber - 1;
-
-            using (doc.RunUpdate())
-            {
-                var currentText = doc.GetText(caretLine.Offset, caretLine.Length);
-                var prevText = doc.GetText(prevLine.Offset, prevLine.Length);
-                doc.Replace(caretLine.Offset, caretLine.Length, prevText);
-                doc.Replace(prevLine.Offset, prevLine.Length, currentText);
-            }
-
-            var newLine = doc.GetLineByNumber(targetLineNumber);
-            editor.CaretOffset = newLine.Offset + Math.Min(col, newLine.Length);
+            ApplyEditorCommand(editor, "MoveLineUp", () => EditorProductivityCommands.MoveLines(editor.Document, editor.SelectionStart, editor.SelectionLength, -1));
         }
 
         private static void MoveLineDown(TextEditor editor)
         {
             if (editor.Document is null) return;
-            var doc = editor.Document;
-            var caretLine = doc.GetLineByOffset(editor.CaretOffset);
-            if (caretLine.LineNumber >= doc.LineCount) return;
-            var nextLine = doc.GetLineByNumber(caretLine.LineNumber + 1);
-            var col = editor.CaretOffset - caretLine.Offset;
-            var targetLineNumber = caretLine.LineNumber + 1;
+            ApplyEditorCommand(editor, "MoveLineDown", () => EditorProductivityCommands.MoveLines(editor.Document, editor.SelectionStart, editor.SelectionLength, 1));
+        }
 
-            using (doc.RunUpdate())
+        private static bool HasMultiLineEditorSelection(TextEditor editor)
+        {
+            return editor.Document is not null &&
+                   editor.SelectionLength > 0 &&
+                   editor.Document.GetLineByOffset(editor.SelectionStart).LineNumber !=
+                   editor.Document.GetLineByOffset(Math.Min(editor.SelectionStart + editor.SelectionLength, editor.Document.TextLength)).LineNumber;
+        }
+
+        private static void ApplyEditorCommand(TextEditor editor, string commandName, Func<EditorCommandResult> command)
+        {
+            if (editor.Document is null || editor.IsReadOnly)
             {
-                var currentText = doc.GetText(caretLine.Offset, caretLine.Length);
-                var nextText = doc.GetText(nextLine.Offset, nextLine.Length);
-                doc.Replace(nextLine.Offset, nextLine.Length, currentText);
-                doc.Replace(caretLine.Offset, caretLine.Length, nextText);
+                DeveloperDiagnostics.LogDecision("Editor", commandName, "Editor command ignored because the document is unavailable or read-only.", "Rejected");
+                return;
             }
 
-            var newLine = doc.GetLineByNumber(targetLineNumber);
-            editor.CaretOffset = newLine.Offset + Math.Min(col, newLine.Length);
+            var result = command();
+            editor.Select(Math.Clamp(result.SelectionStart, 0, editor.Document.TextLength), Math.Clamp(result.SelectionLength, 0, editor.Document.TextLength - Math.Clamp(result.SelectionStart, 0, editor.Document.TextLength)));
+            DeveloperDiagnostics.LogInfo("Editor", $"Editor productivity command applied: {commandName}.", new Dictionary<string, object?>
+            {
+                ["selectionStart"] = result.SelectionStart,
+                ["selectionLength"] = result.SelectionLength,
+                ["documentLength"] = editor.Document.TextLength
+            });
         }
 
         private async System.Threading.Tasks.Task RunSelectionFromEditorAsync(TextEditor editorTextEditor)

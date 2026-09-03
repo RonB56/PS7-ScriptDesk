@@ -30,6 +30,7 @@ namespace PS7ScriptDesk.Shell.Editor
     {
         private const int MaxQuickInfoCacheEntries = 10000;
         private const int MaxCommandCatalogEntries = 12000;
+        private static readonly TimeSpan ColdCompletionResponseTimeout = TimeSpan.FromMilliseconds(5000);
 
         private readonly object _syncRoot = new();
         private readonly SemaphoreSlim _requestGate = new(1, 1);
@@ -43,9 +44,13 @@ namespace PS7ScriptDesk.Shell.Editor
         private Task? _stdoutReaderTask;
         private Task? _stderrReaderTask;
         private TaskCompletionSource<bool>? _readyCompletionSource;
+        private TaskCompletionSource<bool>? _quickInfoPreloadCompletionSource;
         private ActiveRequest? _activeRequest;
         private string? _readyMarker;
+        private string? _quickInfoPreloadMarker;
         private string? _activeRuntimePath;
+        private int _completionProcessGeneration;
+        private int _completionWarmGeneration = -1;
         private Process? _metadataBuilderProcess;
         private CancellationTokenSource? _metadataBuilderCancellationTokenSource;
         private Task? _metadataBuilderStdoutReaderTask;
@@ -87,8 +92,10 @@ namespace PS7ScriptDesk.Shell.Editor
                     pwshExecutablePath,
                     request => BuildCompletionCommand(scriptText, cursorOffset, request.StartMarker, request.EndMarker),
                     effectiveResponseTimeout,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    isCompletionRequest: true).ConfigureAwait(false);
 
+                AppLogger.Debug("EditorCompletion", $"Completion payload received. ElapsedMs={stopwatch.ElapsedMilliseconds:N0}.");
                 stopwatch.Stop();
                 return ParsePayload(payload, cursorOffset, scriptText);
             }
@@ -158,7 +165,7 @@ namespace PS7ScriptDesk.Shell.Editor
             var quickInfo = await FetchCommandQuickInfoAsync(
                     fetchCommandName,
                     pwshExecutablePath,
-                    includeHelp: true,
+                    includeHelp: false,
                     timeout: TimeSpan.FromSeconds(4),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -841,16 +848,25 @@ namespace PS7ScriptDesk.Shell.Editor
                         pwshExecutablePath,
                         request => BuildCommandQuickInfoCommand(commandName, request.StartMarker, request.EndMarker, includeHelp),
                         timeout,
-                        cancellationToken)
+                        cancellationToken,
+                        isCompletionRequest: false)
                     .ConfigureAwait(false);
 
                 stopwatch.Stop();
-                return ParseQuickInfoPayload(payload);
+                var quickInfo = ParseQuickInfoPayload(payload);
+                if (quickInfo is null)
+                {
+                    AppLogger.Warning(
+                        "EditorCompletion",
+                        $"Quick-info response was not usable. Classification=MalformedOrHelperFailure; CommandName='{commandName}'; PayloadLength={payload.Length}; ElapsedMs={stopwatch.ElapsedMilliseconds:N0}.");
+                }
+                return quickInfo;
             }
             catch (OperationCanceledException)
             {
                 stopwatch.Stop();
-                AppLogger.Debug("EditorCompletion", $"Quick-info request for '{commandName}' canceled after {stopwatch.ElapsedMilliseconds:N0} ms.");
+                var classification = cancellationToken.IsCancellationRequested ? "CallerCanceled" : "TransportTimeout";
+                AppLogger.Debug("EditorCompletion", $"Quick-info request for '{commandName}' canceled after {stopwatch.ElapsedMilliseconds:N0} ms. Classification={classification}.");
                 return null;
             }
             catch (Exception ex)
@@ -1574,6 +1590,7 @@ namespace PS7ScriptDesk.Shell.Editor
         private async Task EnsureProcessReadyAsync(string pwshExecutablePath, CancellationToken cancellationToken)
         {
             ThrowIfDisposed();
+            var stopwatch = Stopwatch.StartNew();
             var normalizedPath = NormalizePath(pwshExecutablePath);
 
             lock (_syncRoot)
@@ -1587,7 +1604,9 @@ namespace PS7ScriptDesk.Shell.Editor
 
             var processCts = new CancellationTokenSource();
             var readyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var quickInfoPreloadTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var readyMarker = $"##PSSTUDIO_COMP_READY_{Guid.NewGuid():N}##";
+            var quickInfoPreloadMarker = $"##PSSTUDIO_COMP_QI_PRELOAD_READY_{Guid.NewGuid():N}##";
 
             var process = new Process
             {
@@ -1619,11 +1638,17 @@ namespace PS7ScriptDesk.Shell.Editor
                 _stdin = process.StandardInput;
                 _processCancellationTokenSource = processCts;
                 _readyCompletionSource = readyTcs;
+                _quickInfoPreloadCompletionSource = quickInfoPreloadTcs;
                 _readyMarker = readyMarker;
+                _quickInfoPreloadMarker = quickInfoPreloadMarker;
                 _activeRuntimePath = normalizedPath;
+                _completionProcessGeneration++;
+                _completionWarmGeneration = -1;
                 _sharedOutputTail.Clear();
                 _activeRequest = null;
             }
+
+            AppLogger.Debug("EditorCompletion", $"Completion helper startup initiated. Pid={process.Id}, Generation={_completionProcessGeneration}, Runtime='{normalizedPath}'.");
 
             _stdoutReaderTask = Task.Run(
                 () => ReadLoopAsync(process, process.StandardOutput, false, processCts.Token),
@@ -1636,23 +1661,27 @@ namespace PS7ScriptDesk.Shell.Editor
 
             try
             {
+                AppLogger.Debug("EditorCompletion", $"Completion readiness wait initiated. Pid={process.Id}, Generation={_completionProcessGeneration}.");
                 await SendCommandAsync(
-                    $"[Console]::Out.Write('{readyMarker}'); [Console]::Out.Flush()",
-                    cancellationToken).ConfigureAwait(false);
+                    BuildQuickInfoPreloadAndReadinessCommand(quickInfoPreloadMarker, readyMarker),
+                    CancellationToken.None).ConfigureAwait(false);
             }
             catch { TeardownProcess(); throw; }
 
-            using var readinessCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var readinessCts = CancellationTokenSource.CreateLinkedTokenSource(processCts.Token);
             readinessCts.CancelAfter(TimeSpan.FromSeconds(8));
 
             try
             {
+                await quickInfoPreloadTcs.Task.WaitAsync(readinessCts.Token).ConfigureAwait(false);
+                AppLogger.Debug("EditorCompletion", $"Quick Info preload ready. Pid={process.Id}, Generation={_completionProcessGeneration}, ElapsedMs={stopwatch.ElapsedMilliseconds:N0}.");
                 var ready = await readyTcs.Task.WaitAsync(readinessCts.Token).ConfigureAwait(false);
                 if (!ready)
                 {
                     TeardownProcess();
                     throw new IOException("Completion PS process exited before it was ready.");
                 }
+                AppLogger.Debug("EditorCompletion", $"Completion readiness marker received. Pid={process.Id}, Generation={_completionProcessGeneration}, ElapsedMs={stopwatch.ElapsedMilliseconds:N0}.");
             }
             catch { TeardownProcess(); throw; }
         }
@@ -1670,25 +1699,45 @@ namespace PS7ScriptDesk.Shell.Editor
             string pwshExecutablePath,
             Func<ActiveRequest, string> commandFactory,
             TimeSpan timeout,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool isCompletionRequest)
         {
             var entered = false;
             try
             {
                 await _requestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 entered = true;
+                AppLogger.Debug("EditorCompletion", "Completion request gate acquired.");
 
                 await EnsureProcessReadyAsync(pwshExecutablePath, cancellationToken).ConfigureAwait(false);
                 AppLogger.Debug("EditorCompletion", "Completion helper ready; live response budget now active.");
 
+                var effectiveTimeout = timeout;
+                lock (_syncRoot)
+                {
+                    if (_completionWarmGeneration != _completionProcessGeneration &&
+                        timeout >= TimeSpan.FromMilliseconds(300) &&
+                        timeout <= TimeSpan.FromMilliseconds(500))
+                    {
+                        effectiveTimeout = ColdCompletionResponseTimeout;
+                        AppLogger.Debug("EditorCompletion", $"Completion generation is cold. Applying measured cold response budget. Generation={_completionProcessGeneration}, ResponseBudgetMs={effectiveTimeout.TotalMilliseconds:N0}.");
+                    }
+                }
+
                 var request = new ActiveRequest();
                 lock (_syncRoot) { _activeRequest = request; }
+                AppLogger.Debug("EditorCompletion", $"Completion request received. RequestId={request.RequestId}, TimeoutMs={effectiveTimeout.TotalMilliseconds:N0}.");
 
+                var constructionStopwatch = Stopwatch.StartNew();
                 var command = commandFactory(request);
+                constructionStopwatch.Stop();
+                AppLogger.Debug("EditorCompletion", $"Completion command constructed. RequestId={request.RequestId}, CommandLength={command.Length}, ConstructionMs={constructionStopwatch.ElapsedMilliseconds:N0}.");
 
                 try
                 {
+                    AppLogger.Debug("EditorCompletion", $"Completion stdin write begins. RequestId={request.RequestId}.");
                     await SendCommandAsync(command, cancellationToken).ConfigureAwait(false);
+                    AppLogger.Debug("EditorCompletion", $"Completion stdin write/flush completed. RequestId={request.RequestId}.");
                 }
                 catch
                 {
@@ -1697,10 +1746,20 @@ namespace PS7ScriptDesk.Shell.Editor
                 }
 
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeoutCts.CancelAfter(timeout);
+                timeoutCts.CancelAfter(effectiveTimeout);
                 try
                 {
-                    return await request.CompletionSource.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                    var payload = await request.CompletionSource.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                    AppLogger.Debug("EditorCompletion", $"Completion request completed. RequestId={request.RequestId}, ElapsedMs={request.ElapsedMilliseconds:N0}, PayloadLength={payload.Length}.");
+                    if (isCompletionRequest && IsSuccessfulCompletionPayload(payload))
+                    {
+                        lock (_syncRoot)
+                        {
+                            _completionWarmGeneration = _completionProcessGeneration;
+                        }
+                        AppLogger.Debug("EditorCompletion", $"Completion generation transitioned to warm. Generation={_completionProcessGeneration}, RequestId={request.RequestId}.");
+                    }
+                    return payload;
                 }
                 catch (OperationCanceledException)
                 {
@@ -1708,7 +1767,15 @@ namespace PS7ScriptDesk.Shell.Editor
                     {
                         var reason = cancellationToken.IsCancellationRequested
                             ? "canceled before the completion transport replied"
-                            : $"timed out after {timeout.TotalMilliseconds:N0} ms";
+                            : $"timed out after {effectiveTimeout.TotalMilliseconds:N0} ms";
+                        if (request.ErrorCapture.Length > 0)
+                        {
+                            AppLogger.Debug("EditorCompletion", $"Quick-info/completion helper stderr before request abandonment. RequestId={request.RequestId}, StderrLength={request.ErrorCapture.Length}, StderrLineCount={request.ErrorCapture.ToString().Count(ch => ch == '\n') + 1}, Preview='{TrimForLog(request.ErrorCapture.ToString())}'.");
+                        }
+                        var requestCapture = request.Capture.ToString();
+                        var payloadPrefixCount = requestCapture.Split('\n').Count(line => line.Trim().StartsWith("PAYLOAD:", StringComparison.Ordinal));
+                        AppLogger.Warning("EditorCompletion", $"Completion transport timeout diagnostics. RequestId={request.RequestId}, CaptureLength={requestCapture.Length}, HasStartMarker={requestCapture.Contains(request.StartMarker, StringComparison.Ordinal)}, HasEndMarker={requestCapture.Contains(request.EndMarker, StringComparison.Ordinal)}, PayloadPrefixCount={payloadPrefixCount}.");
+                        AppLogger.Debug("EditorCompletion", $"Completion request abandoned. RequestId={request.RequestId}, ElapsedMs={request.ElapsedMilliseconds:N0}, Reason='{reason}'.");
                         AbortActiveRequestAndResetProcess(request, reason);
                     }
 
@@ -1741,7 +1808,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 {
                     var read = await reader.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
                     if (read == 0) break;
-                    ProcessIncomingChunk(new string(buffer, 0, read), isError);
+                    ProcessIncomingChunk(owningProcess, new string(buffer, 0, read), isError);
                 }
             }
             catch (OperationCanceledException) { }
@@ -1756,14 +1823,25 @@ namespace PS7ScriptDesk.Shell.Editor
             }
         }
 
-        private void ProcessIncomingChunk(string chunk, bool isError)
+        private void ProcessIncomingChunk(Process owningProcess, string chunk, bool isError)
         {
             TaskCompletionSource<bool>? readyTcs = null;
+            TaskCompletionSource<bool>? preloadTcs = null;
             ActiveRequest? request;
             string? completedPayload = null;
+            ActiveRequest? firstOutputRequest = null;
+            var captureLength = 0;
+            var hasStartMarker = false;
+            var hasEndMarker = false;
 
             lock (_syncRoot)
             {
+                if (!ReferenceEquals(_process, owningProcess))
+                {
+                    AppLogger.Debug("EditorCompletion", $"Ignoring stdout/stderr from stale completion helper generation. Pid={GetProcessId(owningProcess)}.");
+                    return;
+                }
+
                 if (isError)
                 {
                     _activeRequest?.ErrorCapture.Append(chunk);
@@ -1772,6 +1850,13 @@ namespace PS7ScriptDesk.Shell.Editor
                 {
                     _sharedOutputTail.Append(chunk);
                     TrimIfNeeded(_sharedOutputTail);
+
+                    if (_quickInfoPreloadCompletionSource?.Task.IsCompleted == false &&
+                        !string.IsNullOrWhiteSpace(_quickInfoPreloadMarker) &&
+                        _sharedOutputTail.ToString().Contains(_quickInfoPreloadMarker, StringComparison.Ordinal))
+                    {
+                        preloadTcs = _quickInfoPreloadCompletionSource;
+                    }
 
                     if (_readyCompletionSource?.Task.IsCompleted == false &&
                         !string.IsNullOrWhiteSpace(_readyMarker) &&
@@ -1785,21 +1870,51 @@ namespace PS7ScriptDesk.Shell.Editor
                 request = _activeRequest;
                 if (request is not null && !isError)
                 {
+                    if (!request.HasObservedOutput)
+                    {
+                        request.HasObservedOutput = true;
+                        firstOutputRequest = request;
+                    }
                     request.Capture.Append(chunk);
-                    if (TryExtractPayloadBlock(request.Capture.ToString(), request.StartMarker, request.EndMarker, out var extracted))
+                    captureLength = request.Capture.Length;
+                    hasStartMarker = request.Capture.ToString().Contains(request.StartMarker, StringComparison.Ordinal);
+                    hasEndMarker = request.Capture.ToString().Contains(request.EndMarker, StringComparison.Ordinal);
+                    var extractionSucceeded = TryExtractPayloadBlock(request.Capture.ToString(), request.StartMarker, request.EndMarker, out var extracted);
+                    if (extractionSucceeded)
                         completedPayload = extracted;
+                    if (hasEndMarker && !extractionSucceeded)
+                    {
+                        var normalized = request.Capture.ToString().Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+                        var lines = normalized.Split('\n');
+                        var exactStartLines = lines.Count(line => string.Equals(line.Trim(), request.StartMarker, StringComparison.Ordinal));
+                        var exactEndLines = lines.Count(line => string.Equals(line.Trim(), request.EndMarker, StringComparison.Ordinal));
+                        var payloadPrefixLines = lines.Count(line => line.Trim().StartsWith("PAYLOAD:", StringComparison.Ordinal));
+                        var carriageReturns = request.Capture.ToString().Count(ch => ch == '\r');
+                        var lineFeeds = request.Capture.ToString().Count(ch => ch == '\n');
+                        var startIndex = request.Capture.ToString().IndexOf(request.StartMarker, StringComparison.Ordinal);
+                        var endIndex = request.Capture.ToString().IndexOf(request.EndMarker, StringComparison.Ordinal);
+                        AppLogger.Debug("EditorCompletion", $"Completion marker shape incomplete. RequestId={request.RequestId}, ExactStartLines={exactStartLines}, ExactEndLines={exactEndLines}, PayloadPrefixLines={payloadPrefixLines}, LineCount={lines.Length}, CaptureLength={captureLength}, CR={carriageReturns}, LF={lineFeeds}, StartIndex={startIndex}, EndIndex={endIndex}.");
+                    }
                 }
             }
 
+            preloadTcs?.TrySetResult(true);
             readyTcs?.TrySetResult(true);
             if (request is not null && completedPayload is not null)
-                request.CompletionSource.TrySetResult(completedPayload);
+            {
+                AppLogger.Debug("EditorCompletion", $"Completion end marker recognized. RequestId={request.RequestId}, ElapsedMs={request.ElapsedMilliseconds:N0}, PayloadLength={completedPayload.Length}.");
+                var completed = request.CompletionSource.TrySetResult(completedPayload);
+                AppLogger.Debug("EditorCompletion", $"Completion result signaled. RequestId={request.RequestId}, SignalAccepted={completed}, ElapsedMs={request.ElapsedMilliseconds:N0}.");
+            }
+            if (firstOutputRequest is not null)
+                AppLogger.Debug("EditorCompletion", $"Completion first stdout data observed. RequestId={firstOutputRequest.RequestId}, ChunkLength={chunk.Length}, ElapsedMs={firstOutputRequest.ElapsedMilliseconds:N0}.");
         }
 
         private void HandleProcessExited(Process exitedProcess)
         {
             ActiveRequest? request;
             TaskCompletionSource<bool>? readyTcs;
+            TaskCompletionSource<bool>? preloadTcs;
             string? runtimePath;
             bool expectedShutdown;
             lock (_syncRoot)
@@ -1812,16 +1927,18 @@ namespace PS7ScriptDesk.Shell.Editor
 
                 request = _activeRequest;
                 readyTcs = _readyCompletionSource;
+                preloadTcs = _quickInfoPreloadCompletionSource;
                 runtimePath = _activeRuntimePath;
                 expectedShutdown = _disposed || _processCancellationTokenSource?.IsCancellationRequested == true;
-                _activeRequest = null; _readyCompletionSource = null;
-                _stdin = null; _readyMarker = null; _activeRuntimePath = null;
+                _activeRequest = null; _readyCompletionSource = null; _quickInfoPreloadCompletionSource = null;
+                _stdin = null; _readyMarker = null; _quickInfoPreloadMarker = null; _activeRuntimePath = null;
                 _sharedOutputTail.Clear();
             }
 
             if (expectedShutdown)
             {
                 readyTcs?.TrySetCanceled();
+                preloadTcs?.TrySetCanceled();
                 request?.CompletionSource.TrySetCanceled();
                 return;
             }
@@ -1838,6 +1955,7 @@ namespace PS7ScriptDesk.Shell.Editor
             }
 
             readyTcs?.TrySetResult(false);
+            preloadTcs?.TrySetResult(false);
             request?.CompletionSource.TrySetResult(BuildFailurePayload("The completion PowerShell process exited unexpectedly."));
         }
 
@@ -1853,22 +1971,25 @@ namespace PS7ScriptDesk.Shell.Editor
         private void TeardownProcess()
         {
             Process? process; CancellationTokenSource? cts;
-            TaskCompletionSource<bool>? readyTcs; ActiveRequest? request;
+            TaskCompletionSource<bool>? readyTcs; TaskCompletionSource<bool>? preloadTcs; ActiveRequest? request;
             Task? stdout, stderr;
 
             lock (_syncRoot)
             {
                 process = _process; cts = _processCancellationTokenSource;
-                readyTcs = _readyCompletionSource; request = _activeRequest;
+                readyTcs = _readyCompletionSource; preloadTcs = _quickInfoPreloadCompletionSource; request = _activeRequest;
                 stdout = _stdoutReaderTask; stderr = _stderrReaderTask;
                 _process = null; _stdin = null; _processCancellationTokenSource = null;
                 _readyCompletionSource = null; _activeRequest = null;
+                _quickInfoPreloadCompletionSource = null;
                 _readyMarker = null; _activeRuntimePath = null;
+                _quickInfoPreloadMarker = null;
                 _stdoutReaderTask = null; _stderrReaderTask = null;
                 _sharedOutputTail.Clear();
             }
 
             readyTcs?.TrySetCanceled();
+            preloadTcs?.TrySetCanceled();
             request?.CompletionSource.TrySetCanceled();
             try { cts?.Cancel(); } catch { }
             try { if (process is not null && !process.HasExited) process.Kill(entireProcessTree: true); } catch { }
@@ -1894,7 +2015,7 @@ namespace PS7ScriptDesk.Shell.Editor
 
             AppLogger.Info(
                 "EditorCompletion",
-                $"Resetting completion PowerShell session because an in-flight request was abandoned: {reason}. Runtime='{runtimePath ?? "(unknown)"}'.");
+                $"Resetting completion PowerShell session because an in-flight request was abandoned: RequestId={request.RequestId}, {reason}. Runtime='{runtimePath ?? "(unknown)"}'.");
 
             TeardownProcess();
         }
@@ -1928,6 +2049,12 @@ namespace PS7ScriptDesk.Shell.Editor
             {
                 return true;
             }
+        }
+
+        private static string GetProcessId(Process process)
+        {
+            try { return process.Id.ToString(CultureInfo.InvariantCulture); }
+            catch { return "unknown"; }
         }
 
         private static string TryGetExitCodeText(Process process)
@@ -1978,9 +2105,11 @@ namespace PS7ScriptDesk.Shell.Editor
             sb.Clear(); sb.Append(tail);
         }
 
-        private static string BuildCompletionCommand(string scriptText, int cursorOffset, string startMarker, string endMarker)
+        internal static string BuildCompletionCommand(string scriptText, int cursorOffset, string startMarker, string endMarker)
         {
             var b64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(scriptText));
+            var startMarkerB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(startMarker));
+            var endMarkerB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(endMarker));
             var cursor = Math.Max(0, Math.Min(cursorOffset, scriptText.Length));
 
             return
@@ -1991,243 +2120,95 @@ namespace PS7ScriptDesk.Shell.Editor
                 "try { " +
                 $"$b64='{b64}'; " +
                 "$s=[System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String($b64)); " +
+                "$simpleCommand = $s -match '^[A-Za-z_][A-Za-z0-9_-]*$'; " +
+                "if ($simpleCommand) { " +
+                "$items=@(Get-Command -Name ($s + '*') -ErrorAction SilentlyContinue|Select-Object -First 100|ForEach-Object{" +
+                "[PSCustomObject]@{t=[string]$_.Name;l=[string]$_.Name;k=1;d=''}}); " +
+                "$resp=[PSCustomObject]@{ok=$true;ri=0;rl=$s.Length;items=@($items)}; " +
+                "} else { " +
                 $"$r=[System.Management.Automation.CommandCompletion]::CompleteInput($s,{cursor},$null); " +
-                "$items=@($r.CompletionMatches|Select-Object -First 500|ForEach-Object{" +
-                "[PSCustomObject]@{t=$_.CompletionText;l=$_.ListItemText;k=[int]$_.ResultType;d=$_.ToolTip}}); " +
+                "$items=@($r.CompletionMatches|Select-Object -First 100|ForEach-Object{" +
+                "[PSCustomObject]@{t=[string]$_.CompletionText;l=[string]$_.ListItemText;k=[int]$_.ResultType;d=''}}); " +
                 "$resp=[PSCustomObject]@{ok=$true;ri=$r.ReplacementIndex;rl=$r.ReplacementLength;items=@($items)}; " +
+                "}; " +
                 "} catch { " +
                 "$resp=[PSCustomObject]@{ok=$false;msg=$_.Exception.Message;ri=0;rl=0;items=@()}; " +
                 "}; " +
                 "$json=$resp|ConvertTo-Json -Compress -Depth 5; " +
                 "$payload=[System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json)); " +
-                $"$t=[string]::Concat([Environment]::NewLine,'{startMarker}',[Environment]::NewLine,'PAYLOAD:',$payload,[Environment]::NewLine,'{endMarker}',[Environment]::NewLine); " +
+                $"$sm=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{startMarkerB64}')); " +
+                $"$em=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{endMarkerB64}')); " +
+                "$t=[string]::Concat([Environment]::NewLine,$sm,[Environment]::NewLine,'PAYLOAD:',$payload,[Environment]::NewLine,$em,[Environment]::NewLine); " +
                 "[Console]::Out.Write($t); " +
                 "[Console]::Out.Flush(); " +
                 "}";
         }
 
-        private static string BuildCommandQuickInfoCommand(string commandName, string startMarker, string endMarker, bool includeHelp)
+        internal static string BuildQuickInfoPreloadCommand()
+        {
+            return @"
+function Invoke-ScriptDeskQuickInfo {
+    param([string]$Name)
+    $cmd = @(Get-Command -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($cmd.Count -eq 0) {
+        return [PSCustomObject]@{ ok = $true; info = $null }
+    }
+    $commandName = [string]$cmd[0].Name
+    $commandKind = [string]$cmd[0].CommandType
+    $moduleName = [string]$cmd[0].ModuleName
+    $parameterNames = @($cmd[0].Parameters.Keys | Select-Object -First 100)
+    $parameters = @($parameterNames | ForEach-Object {
+        [PSCustomObject]@{ n = [string]$_; t = ''; m = $false; p = $null; a = @(); v = @(); e = @(); s = $false }
+    })
+    $info = [PSCustomObject]@{
+        title = $commandName
+        kind = $commandKind
+        module = $moduleName
+        synopsis = ''
+        syntax = $commandName
+        parameters = @($parameters)
+    }
+    return [PSCustomObject]@{ ok = $true; info = $info }
+}
+";
+        }
+
+        private static string BuildQuickInfoPreloadAndReadinessCommand(string preloadMarker, string readyMarker)
+        {
+            var preloadMarkerB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(preloadMarker));
+            var readyMarkerB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(readyMarker));
+            return BuildQuickInfoPreloadCommand() +
+                "\nif (@(Get-Command Invoke-ScriptDeskQuickInfo -CommandType Function).Count -ne 1) { throw 'Quick Info preload function was not installed.' }; " +
+                "$qpm=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + preloadMarkerB64 + "')); " +
+                "$qrm=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + readyMarkerB64 + "')); " +
+                "[Console]::Out.Write($qpm); [Console]::Out.Flush(); [Console]::Out.Write($qrm); [Console]::Out.Flush()";
+        }
+
+        internal static string BuildCommandQuickInfoCommand(string commandName, string startMarker, string endMarker, bool includeHelp)
         {
             var b64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(commandName));
-            var includeHelpLiteral = includeHelp ? "$true" : "$false";
-
-            return $$"""
-& {
-$ErrorActionPreference = 'Stop'
-$WarningPreference = 'SilentlyContinue'
-$ProgressPreference = 'SilentlyContinue'
-
-function Resolve-QuickInfoCommand {
-    param([string]$CommandName)
-
-    $commands = @(
-        Get-Command -Name $CommandName -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandType -ne [System.Management.Automation.CommandTypes]::Alias }
-    )
-
-    if ($commands.Count -eq 0) {
-        $commands = @(Get-Command -Name $CommandName -ErrorAction SilentlyContinue)
-    }
-
-    if ($commands.Count -eq 0) {
-        return $null
-    }
-
-    return $commands[0]
-}
-
-function Get-CommandMetadataView {
-    param($Command)
-
-    if ($null -eq $Command) {
-        return $null
-    }
-
-    $parameterSets = @()
-    $parameterDictionary = $null
-
-    try {
-        $commandMetadata = [System.Management.Automation.CommandMetadata]::new($Command)
-        if ($null -ne $commandMetadata) {
-            $parameterSets = @($commandMetadata.ParameterSets)
-            $parameterDictionary = $commandMetadata.Parameters
-        }
-    }
-    catch {
-        # Fall back to the original command metadata below.
-    }
-
-    if (($null -eq $parameterDictionary -or $parameterDictionary.Count -eq 0)) {
-        try {
-            $parameterDictionary = $Command.Parameters
-        }
-        catch {
-            $parameterDictionary = $null
-        }
-    }
-
-    if ($parameterSets.Count -eq 0) {
-        try {
-            $parameterSets = @($Command.ParameterSets)
-        }
-        catch {
-            $parameterSets = @()
-        }
-    }
-
-    return [PSCustomObject]@{
-        Command = $Command
-        ParameterSets = $parameterSets
-        Parameters = $parameterDictionary
-    }
-}
-
-function Build-SyntaxText {
-    param(
-        [string]$CommandName,
-        $ParameterSets
-    )
-
-    $lines = New-Object 'System.Collections.Generic.List[string]'
-    $resolvedParameterSets = @($ParameterSets | Select-Object -First 6)
-    if ($resolvedParameterSets.Count -eq 0) {
-        $lines.Add([string]$CommandName)
-        return ($lines -join [Environment]::NewLine)
-    }
-
-    foreach ($parameterSet in $resolvedParameterSets) {
-        $segments = New-Object 'System.Collections.Generic.List[string]'
-        $segments.Add([string]$CommandName)
-
-        $orderedParameters = @(
-            $parameterSet.Parameters |
-                Sort-Object @{ Expression = { if ($_.IsMandatory) { 0 } else { 1 } } }, Position, Name
-        )
-
-        foreach ($parameter in ($orderedParameters | Select-Object -First 16)) {
-            $segment = '-' + [string]$parameter.Name
-            $isSwitch = $false
-            if ($null -ne $parameter.ParameterType) {
-                $isSwitch = $parameter.ParameterType.FullName -eq 'System.Management.Automation.SwitchParameter'
-            }
-
-            if (-not $isSwitch) {
-                $typeName = if ($null -ne $parameter.ParameterType -and -not [string]::IsNullOrWhiteSpace([string]$parameter.ParameterType.Name)) {
-                    [string]$parameter.ParameterType.Name
-                }
-                else {
-                    'Object'
-                }
-
-                $segment += ' <' + $typeName + '>'
-            }
-
-            if (-not $parameter.IsMandatory) {
-                $segment = '[' + $segment + ']'
-            }
-
-            $segments.Add($segment)
+            var startMarkerB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(startMarker));
+            var endMarkerB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(endMarker));
+            return
+                "& { " +
+                "$ErrorActionPreference = 'Stop'; " +
+                "$b64='" + b64 + "'; " +
+                "$name=[System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String($b64)); " +
+                "$resp=Invoke-ScriptDeskQuickInfo -Name $name; " +
+                "$json=$resp|ConvertTo-Json -Compress -Depth 5; " +
+                "$payload=[System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json)); " +
+                "$sm=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + startMarkerB64 + "')); " +
+                "$em=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + endMarkerB64 + "')); " +
+                "$t=[string]::Concat([Environment]::NewLine,$sm,[Environment]::NewLine,'PAYLOAD:',$payload,[Environment]::NewLine,$em,[Environment]::NewLine); " +
+                "[Console]::Out.Write($t); [Console]::Out.Flush(); " +
+                "}";
         }
 
-        $lines.Add(($segments -join ' '))
-    }
-
-    return ($lines -join [Environment]::NewLine)
-}
-
-function Build-ParameterItems {
-    param($ParameterDictionary)
-
-    if ($null -eq $ParameterDictionary) {
-        return @()
-    }
-
-    return @(
-        $ParameterDictionary.GetEnumerator() |
-            Sort-Object Key |
-            Select-Object -First 250 |
-            ForEach-Object {
-                $attrs = @($_.Value.Attributes | Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] })
-                $mandatory = [bool](@($attrs | Where-Object { $_.Mandatory } | Select-Object -First 1))
-                $positionAttribute = @($attrs | Where-Object { $_.Position -ge 0 } | Select-Object -First 1)
-                $position = if ($positionAttribute.Count -gt 0) { [int]$positionAttribute[0].Position } else { $null }
-                $aliases = @($_.Value.Aliases)
-                $validateValues = @()
-                $validateSetAttrs = @($_.Value.Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] })
-                foreach ($validateSetAttr in $validateSetAttrs) {
-                    $validateValues += @($validateSetAttr.ValidValues)
-                }
-
-                $type = $_.Value.ParameterType
-                $enumValues = if ($type -and $type.IsEnum) { [System.Enum]::GetNames($type) } else { @() }
-                $isSwitch = if ($type) { $type.FullName -eq 'System.Management.Automation.SwitchParameter' } else { $false }
-                $typeName = if ($type) { [string]$type.Name } else { '' }
-
-                [PSCustomObject]@{
-                    n = $_.Key
-                    t = $typeName
-                    m = $mandatory
-                    p = $position
-                    a = @($aliases)
-                    v = @($validateValues)
-                    e = @($enumValues)
-                    s = [bool]$isSwitch
-                }
-            }
-    )
-}
-
-try {
-    $b64 = '{{b64}}'
-    $name = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String($b64))
-    $includeHelp = {{includeHelpLiteral}}
-    $cmd = Resolve-QuickInfoCommand -CommandName $name
-
-    if ($null -eq $cmd) {
-        $resp = [PSCustomObject]@{ ok = $false; msg = 'Command not found' }
-    }
-    else {
-        $metadataView = Get-CommandMetadataView -Command $cmd
-        $parameterSets = if ($null -ne $metadataView) { @($metadataView.ParameterSets) } else { @() }
-        $parameterDictionary = if ($null -ne $metadataView) { $metadataView.Parameters } else { $null }
-        $syntax = Build-SyntaxText -CommandName ([string]$cmd.Name) -ParameterSets $parameterSets
-
-        if ($includeHelp) {
-            $help = Get-Help -Name $cmd.Name -ErrorAction SilentlyContinue
-            $synopsis = if ($help -and $help.Synopsis) { [string]$help.Synopsis } else { '' }
-        }
-        else {
-            $synopsis = ''
-        }
-
-        $paramItems = Build-ParameterItems -ParameterDictionary $parameterDictionary
-        $resp = [PSCustomObject]@{
-            ok = $true
-            title = $cmd.Name
-            kind = $cmd.CommandType.ToString()
-            module = $cmd.ModuleName
-            synopsis = $synopsis
-            syntax = $syntax
-            parameters = @($paramItems)
-        }
-    }
-}
-catch {
-    $resp = [PSCustomObject]@{ ok = $false; msg = $_.Exception.Message }
-}
-
-$json = $resp | ConvertTo-Json -Compress -Depth 7
-$payload = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
-$t = [string]::Concat([Environment]::NewLine, '{{startMarker}}', [Environment]::NewLine, 'PAYLOAD:', $payload, [Environment]::NewLine, '{{endMarker}}', [Environment]::NewLine)
-[Console]::Out.Write($t)
-[Console]::Out.Flush()
-}
-""";
-        }
-
-        private static string BuildCommandCatalogCommand(string startMarker, string endMarker)
+        internal static string BuildCommandCatalogCommand(string startMarker, string endMarker)
         {
             var limit = MaxCommandCatalogEntries.ToString(CultureInfo.InvariantCulture);
+            var startMarkerB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(startMarker));
+            var endMarkerB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(endMarker));
             return
                 "& { " +
                 "$ErrorActionPreference = 'Stop'; " +
@@ -2245,40 +2226,58 @@ $t = [string]::Concat([Environment]::NewLine, '{{startMarker}}', [Environment]::
                 "}; " +
                 "$json=$resp|ConvertTo-Json -Compress -Depth 5; " +
                 "$payload=[System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json)); " +
-                $"$t=[string]::Concat([Environment]::NewLine,'{startMarker}',[Environment]::NewLine,'PAYLOAD:',$payload,[Environment]::NewLine,'{endMarker}',[Environment]::NewLine); " +
+                $"$sm=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{startMarkerB64}')); " +
+                $"$em=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{endMarkerB64}')); " +
+                "$t=[string]::Concat([Environment]::NewLine,$sm,[Environment]::NewLine,'PAYLOAD:',$payload,[Environment]::NewLine,$em,[Environment]::NewLine); " +
                 "[Console]::Out.Write($t); " +
                 "[Console]::Out.Flush(); " +
                 "}";
         }
 
-        private static bool TryExtractPayloadBlock(string text, string startMarker, string endMarker, out string payload)
+        internal static bool TryExtractPayloadBlock(string text, string startMarker, string endMarker, out string payload)
         {
             payload = string.Empty;
             if (string.IsNullOrEmpty(text)) return false;
 
-            var normalized = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
-            var lines = normalized.Split('\n');
-            var blockStart = -1;
-
-            for (var i = 0; i < lines.Length; i++)
+            var searchStart = text.Length;
+            while (searchStart > 0)
             {
-                var trimmed = lines[i].Trim();
-                if (string.Equals(trimmed, startMarker, StringComparison.Ordinal)) { blockStart = i; continue; }
-                if (blockStart >= 0 && string.Equals(trimmed, endMarker, StringComparison.Ordinal))
+                var blockStart = text.LastIndexOf(startMarker, searchStart - 1, StringComparison.Ordinal);
+                if (blockStart < 0) return false;
+
+                var payloadBoundary = blockStart + startMarker.Length;
+                var end = text.IndexOf(endMarker, payloadBoundary, StringComparison.Ordinal);
+                if (end < 0) return false;
+
+                var block = text.Substring(payloadBoundary, end - payloadBoundary);
+                var payloadPrefix = block.IndexOf("PAYLOAD:", StringComparison.Ordinal);
+                if (payloadPrefix >= 0 && string.IsNullOrWhiteSpace(block[..payloadPrefix]))
                 {
-                    for (var j = blockStart + 1; j < i; j++)
+                    var candidate = block[(payloadPrefix + "PAYLOAD:".Length)..].Trim();
+                    if (candidate.Length > 0 && IsBase64(candidate))
                     {
-                        var pl = lines[j].Trim();
-                        if (pl.StartsWith("PAYLOAD:", StringComparison.Ordinal))
-                        {
-                            payload = pl.Substring("PAYLOAD:".Length).Trim();
-                            return true;
-                        }
+                        payload = candidate;
+                        return true;
                     }
-                    return false;
                 }
+
+                searchStart = blockStart;
             }
+
             return false;
+        }
+
+        private static bool IsBase64(string value)
+        {
+            try
+            {
+                Convert.FromBase64String(value);
+                return true;
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
         }
 
         private static CompletionServiceResult ParsePayload(string payload, int cursorOffset, string scriptText)
@@ -2343,16 +2342,20 @@ $t = [string]::Concat([Environment]::NewLine, '{{startMarker}}', [Environment]::
                 if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
                     return null;
 
-                var title = root.TryGetProperty("title", out var titleEl) ? titleEl.GetString() ?? string.Empty : string.Empty;
+                if (!root.TryGetProperty("info", out var infoEl) || infoEl.ValueKind == JsonValueKind.Null)
+                    return null;
+                var info = infoEl;
+
+                var title = info.TryGetProperty("title", out var titleEl) ? titleEl.GetString() ?? string.Empty : string.Empty;
                 if (string.IsNullOrWhiteSpace(title)) return null;
 
-                var kind = root.TryGetProperty("kind", out var kindEl) ? kindEl.GetString() ?? string.Empty : string.Empty;
-                var module = root.TryGetProperty("module", out var moduleEl) ? moduleEl.GetString() ?? string.Empty : string.Empty;
-                var synopsis = root.TryGetProperty("synopsis", out var synopsisEl) ? synopsisEl.GetString() ?? string.Empty : string.Empty;
-                var syntax = root.TryGetProperty("syntax", out var syntaxEl) ? syntaxEl.GetString() ?? string.Empty : string.Empty;
+                var kind = info.TryGetProperty("kind", out var kindEl) ? kindEl.GetString() ?? string.Empty : string.Empty;
+                var module = info.TryGetProperty("module", out var moduleEl) ? moduleEl.GetString() ?? string.Empty : string.Empty;
+                var synopsis = info.TryGetProperty("synopsis", out var synopsisEl) ? synopsisEl.GetString() ?? string.Empty : string.Empty;
+                var syntax = info.TryGetProperty("syntax", out var syntaxEl) ? syntaxEl.GetString() ?? string.Empty : string.Empty;
 
                 var parameters = new List<PowerShellParameterQuickInfo>();
-                if (root.TryGetProperty("parameters", out var paramsEl) && paramsEl.ValueKind == JsonValueKind.Array)
+                if (info.TryGetProperty("parameters", out var paramsEl) && paramsEl.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var paramEl in paramsEl.EnumerateArray())
                     {
@@ -2387,6 +2390,21 @@ $t = [string]::Concat([Environment]::NewLine, '{{startMarker}}', [Environment]::
                 return new PowerShellQuickInfo(title, kind, module, synopsis, syntax, parameters);
             }
             catch { return null; }
+        }
+
+        private static bool IsSuccessfulCompletionPayload(string payload)
+        {
+            if (string.IsNullOrWhiteSpace(payload)) return false;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(payload)));
+                return doc.RootElement.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static IReadOnlyList<string> ReadStringArray(JsonElement element, string propertyName)
@@ -2498,10 +2516,15 @@ $t = [string]::Concat([Environment]::NewLine, '{{startMarker}}', [Environment]::
             public ActiveRequest()
             {
                 var id = Guid.NewGuid().ToString("N");
+                RequestId = id;
                 StartMarker = $"##PSSTUDIO_COMP_START_{id}##";
                 EndMarker = $"##PSSTUDIO_COMP_END_{id}##";
             }
 
+            public string RequestId { get; }
+            public Stopwatch Stopwatch { get; } = Stopwatch.StartNew();
+            public bool HasObservedOutput { get; set; }
+            public long ElapsedMilliseconds => Stopwatch.ElapsedMilliseconds;
             public string StartMarker { get; }
             public string EndMarker { get; }
             public StringBuilder Capture { get; } = new();

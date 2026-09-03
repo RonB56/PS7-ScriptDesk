@@ -169,6 +169,15 @@
                 <Separator />
                 <MenuItem Header="Go to _Line..." InputGestureText="Ctrl+G" Click="GoToLine_Click" help:ContextHelp.Key="Command.GoToLine" />
                 <Separator />
+                <MenuItem Header="_Toggle Comment" InputGestureText="Ctrl+/" Click="EditorToggleComment_Click" />
+                <MenuItem Header="_Indent" InputGestureText="Tab" Click="EditorIndent_Click" />
+                <MenuItem Header="_Outdent" InputGestureText="Shift+Tab" Click="EditorOutdent_Click" />
+                <MenuItem Header="Move Line _Up" InputGestureText="Alt+Up" Click="EditorMoveLineUp_Click" />
+                <MenuItem Header="Move Line _Down" InputGestureText="Alt+Down" Click="EditorMoveLineDown_Click" />
+                <MenuItem Header="Duplicate Line Down" InputGestureText="Shift+Alt+Down" Click="EditorDuplicateDown_Click" />
+                <MenuItem Header="_Delete Line" InputGestureText="Ctrl+Shift+K" Click="EditorDeleteLine_Click" />
+                <MenuItem Header="Select Current Line" Click="EditorSelectCurrentLine_Click" />
+                <Separator />
                 <MenuItem Header="_Clear Output" Command="{Binding ClearConsoleCommand}" help:ContextHelp.Key="Command.ClearOutput" />
             </MenuItem>
 
@@ -1223,6 +1232,15 @@
                                                                   help:ContextHelp.Key="Editor.Surface"
                                                                   InputGestureText="Ctrl+A"
                                                                   Click="EditorSelectAll_Click" />
+                                                        <Separator />
+                                                        <MenuItem Header="Toggle Comment" InputGestureText="Ctrl+/" Click="EditorToggleComment_Click" />
+                                                        <MenuItem Header="Indent" InputGestureText="Tab" Click="EditorIndent_Click" />
+                                                        <MenuItem Header="Outdent" InputGestureText="Shift+Tab" Click="EditorOutdent_Click" />
+                                                        <MenuItem Header="Move Line Up" InputGestureText="Alt+Up" Click="EditorMoveLineUp_Click" />
+                                                        <MenuItem Header="Move Line Down" InputGestureText="Alt+Down" Click="EditorMoveLineDown_Click" />
+                                                        <MenuItem Header="Duplicate Line Down" InputGestureText="Shift+Alt+Down" Click="EditorDuplicateDown_Click" />
+                                                        <MenuItem Header="Delete Line" InputGestureText="Ctrl+Shift+K" Click="EditorDeleteLine_Click" />
+                                                        <MenuItem Header="Select Current Line" Click="EditorSelectCurrentLine_Click" />
                                                         <Separator />
                                                         <MenuItem Header="Run Selection"
                                                                   help:ContextHelp.Key="Command.RunSelection"
