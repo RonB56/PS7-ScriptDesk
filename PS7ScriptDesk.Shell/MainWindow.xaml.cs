@@ -1985,6 +1985,25 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            var registeredShortcutRegistry = CreateEditorCommandRegistry(editorTextEditor);
+            if (EditorShortcutRouting.TryGetRegisteredCommand(registeredShortcutRegistry, e.Key, e.SystemKey, modifiers, out var registeredShortcut) &&
+                registeredShortcut!.CanExecute())
+            {
+                e.Handled = true;
+                DeveloperDiagnostics.LogUserAction(
+                    "Editor",
+                    "RegisteredShortcut",
+                    $"Editor shortcut routed to registered command {registeredShortcut.Id}.",
+                    new Dictionary<string, object?>
+                    {
+                        ["commandId"] = registeredShortcut.Id,
+                        ["key"] = key.ToString(),
+                        ["modifiers"] = modifiers.ToString()
+                    });
+                registeredShortcut.Execute();
+                return;
+            }
+
             if (EditorShortcutRouting.TryGetMoveLineDirection(key, modifiers, out var moveDirection))
             {
                 e.Handled = true;
@@ -2989,6 +3008,8 @@ namespace PS7ScriptDesk.Shell
         private EditorCommandRegistry CreateEditorCommandRegistry(TextEditor? editor)
         {
             bool CanEdit() => editor?.Document is not null && !editor.IsReadOnly;
+            bool CanCaretEdit() => CanEdit() && editor!.SelectionLength == 0;
+            bool CanSelectionEdit() => CanEdit() && editor!.SelectionLength > 0;
             void Apply(string name, Func<EditorCommandResult> command)
             {
                 if (editor is not null)
@@ -2998,6 +3019,12 @@ namespace PS7ScriptDesk.Shell
             }
             void ApplyTransform(string name, Func<TextDocument, int, int, EditorCommandResult> command) =>
                 Apply(name, () => command(editor!.Document!, editor.SelectionStart, editor.SelectionLength));
+            void ApplyNative(string name, RoutedCommand command) =>
+                Apply(name, () =>
+                {
+                    command.Execute(null, editor!.TextArea);
+                    return new EditorCommandResult(editor.SelectionStart, editor.SelectionLength);
+                });
 
             var commands = new List<EditorCommandDefinition>
             {
@@ -3010,6 +3037,19 @@ namespace PS7ScriptDesk.Shell
                 new("editor.duplicateDown", "Duplicate Line/Selection Down", "Editor", "Shift+Alt+Down", new[] { "duplicate", "copy", "line" }, CanEdit, () => ApplyTransform("DuplicateDown", (document, start, length) => EditorProductivityCommands.DuplicateLines(document, start, length, 1))),
                 new("editor.deleteLine", "Delete Current Line", "Editor", "Ctrl+Shift+K", new[] { "delete", "line" }, CanEdit, () => ApplyTransform("DeleteLine", EditorProductivityCommands.DeleteLines)),
                 new("editor.selectLine", "Select Current Line", "Selection", "", new[] { "select", "line" }, () => editor?.Document is not null, () => SelectCurrentLine(editor!)),
+                new("editor.insertLineAbove", "Insert Line Above", "Editor", "Ctrl+Shift+Enter", new[] { "insert", "line", "above" }, CanCaretEdit, () => Apply("InsertLineAbove", () => EditorProductivityCommands.InsertLineAbove(editor!.Document!, editor.CaretOffset)), ShortcutGesture: new KeyGesture(Key.Enter, ModifierKeys.Control | ModifierKeys.Shift)),
+                new("editor.insertLineBelow", "Insert Line Below", "Editor", "Ctrl+Enter", new[] { "insert", "line", "below" }, CanCaretEdit, () => Apply("InsertLineBelow", () => EditorProductivityCommands.InsertLineBelow(editor!.Document!, editor.CaretOffset)), ShortcutGesture: new KeyGesture(Key.Enter, ModifierKeys.Control)),
+                new("editor.deleteToLineStart", "Delete to Beginning of Line", "Editor", "", new[] { "delete", "beginning", "line" }, CanCaretEdit, () => Apply("DeleteToLineStart", () => EditorProductivityCommands.DeleteToLineStart(editor!.Document!, editor.CaretOffset, editor.SelectionLength))),
+                new("editor.deleteToLineEnd", "Delete to End of Line", "Editor", "", new[] { "delete", "end", "line" }, CanCaretEdit, () => Apply("DeleteToLineEnd", () => EditorProductivityCommands.DeleteToLineEnd(editor!.Document!, editor.CaretOffset, editor.SelectionLength))),
+                new("editor.deleteWordLeft", "Delete Word Left", "Editor", "Ctrl+Backspace", new[] { "delete", "word", "left" }, CanCaretEdit, () => ApplyNative("DeleteWordLeft", System.Windows.Documents.EditingCommands.DeletePreviousWord)),
+                new("editor.deleteWordRight", "Delete Word Right", "Editor", "Ctrl+Delete", new[] { "delete", "word", "right" }, CanCaretEdit, () => ApplyNative("DeleteWordRight", System.Windows.Documents.EditingCommands.DeleteNextWord)),
+                new("selection.duplicate", "Duplicate Selection", "Selection", "", new[] { "duplicate", "selection" }, CanSelectionEdit, () => ApplyTransform("DuplicateSelection", EditorProductivityCommands.DuplicateSelection)),
+                new("transform.tabsToSpaces", "Convert Tabs to Spaces", "Transform", "", new[] { "tabs", "spaces", "indent" }, CanSelectionEdit, () => ApplyNative("ConvertTabsToSpaces", AvalonEditCommands.ConvertLeadingTabsToSpaces)),
+                new("transform.spacesToTabs", "Convert Spaces to Tabs", "Transform", "", new[] { "spaces", "tabs", "indent" }, CanSelectionEdit, () => ApplyNative("ConvertSpacesToTabs", AvalonEditCommands.ConvertLeadingSpacesToTabs)),
+                new("transform.trimDocumentTrailingWhitespace", "Trim Document Trailing Whitespace", "Transform", "", new[] { "trim", "trailing", "document", "whitespace" }, CanEdit, () => Apply("TrimDocumentTrailingWhitespace", () => EditorTransformCommands.TrimDocumentTrailingWhitespace(editor!.Document!)), CommandSurfaces.CommandPalette),
+                new("transform.sortIgnoreCaseAsc", "Sort Lines Case-Insensitive Ascending", "Transform", "", new[] { "sort", "case insensitive", "ascending" }, CanSelectionEdit, () => ApplyTransform("SortLinesIgnoreCaseAscending", EditorTransformCommands.SortLinesIgnoreCaseAscending)),
+                new("transform.sortIgnoreCaseDesc", "Sort Lines Case-Insensitive Descending", "Transform", "", new[] { "sort", "case insensitive", "descending" }, CanSelectionEdit, () => ApplyTransform("SortLinesIgnoreCaseDescending", EditorTransformCommands.SortLinesIgnoreCaseDescending)),
+                new("transform.joinLines", "Join Lines", "Transform", "", new[] { "join", "lines" }, CanSelectionEdit, () => ApplyTransform("JoinLines", EditorTransformCommands.JoinLines)),
                 new("transform.sortAsc", "Sort Lines Ascending", "Transform", "", new[] { "sort", "ascending", "alphabetize" }, CanEdit, () => ApplyTransform("SortLinesAscending", EditorTransformCommands.SortLinesAscending)),
                 new("transform.sortDesc", "Sort Lines Descending", "Transform", "", new[] { "sort", "descending", "reverse" }, CanEdit, () => ApplyTransform("SortLinesDescending", EditorTransformCommands.SortLinesDescending)),
                 new("transform.removeDuplicates", "Remove Duplicate Lines", "Transform", "", new[] { "unique", "deduplicate", "duplicates" }, CanEdit, () => ApplyTransform("RemoveDuplicateLines", EditorTransformCommands.RemoveDuplicateLines)),
@@ -3031,7 +3071,9 @@ namespace PS7ScriptDesk.Shell
             // Future registry entries can opt out by retaining the default palette-only surface.
             return new EditorCommandRegistry(commands.Select(command => command with
             {
-                Surfaces = CommandSurfaces.CommandPalette | CommandSurfaces.EditorContextMenu
+                Surfaces = command.Surfaces == CommandSurfaces.CommandPalette && command.Id != "transform.trimDocumentTrailingWhitespace"
+                    ? CommandSurfaces.CommandPalette | CommandSurfaces.EditorContextMenu
+                    : command.Surfaces
             }));
         }
 

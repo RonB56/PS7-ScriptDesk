@@ -213,4 +213,64 @@ public sealed class EditorProductivityCommandsTests
         document.UndoStack.Undo();
         Assert.Equal("$Name", document.Text);
     }
+
+    [Theory]
+    [InlineData("one\ntwo\nthree", 4, "one\n\ntwo\nthree", 4)]
+    [InlineData("one\r\ntwo", 0, "\r\none\r\ntwo", 0)]
+    [InlineData("one\ntwo", 4, "one\n\ntwo", 4)]
+    public void InsertLineAbove_PreservesLineEndingsCaretAndUndo(string source, int caret, string expected, int expectedCaret)
+    {
+        var document = new TextDocument(source);
+        var result = EditorProductivityCommands.InsertLineAbove(document, caret);
+
+        Assert.Equal(expected, document.Text);
+        Assert.Equal(expectedCaret, result.SelectionStart);
+        document.UndoStack.Undo();
+        Assert.Equal(source, document.Text);
+    }
+
+    [Fact]
+    public void InsertLineBelow_HandlesFinalUnterminatedLine()
+    {
+        var document = new TextDocument("one\ntwo");
+        var result = EditorProductivityCommands.InsertLineBelow(document, document.TextLength);
+
+        Assert.Equal("one\ntwo\n", document.Text);
+        Assert.Equal(document.TextLength, result.SelectionStart);
+        document.UndoStack.Undo();
+        Assert.Equal("one\ntwo", document.Text);
+    }
+
+    [Fact]
+    public void DeleteToLineStartAndEnd_DoNotDeleteLineDelimitersAndRejectSelections()
+    {
+        var startDocument = new TextDocument("alpha\r\nbeta\r\ngamma");
+        var startResult = EditorProductivityCommands.DeleteToLineStart(startDocument, 9, 0);
+        Assert.Equal("alpha\r\nta\r\ngamma", startDocument.Text);
+        Assert.Equal(7, startResult.SelectionStart);
+        startDocument.UndoStack.Undo();
+        Assert.Equal("alpha\r\nbeta\r\ngamma", startDocument.Text);
+
+        var endDocument = new TextDocument("alpha\r\nbeta\r\ngamma");
+        var endResult = EditorProductivityCommands.DeleteToLineEnd(endDocument, 9, 0);
+        Assert.Equal("alpha\r\nbe\r\ngamma", endDocument.Text);
+        Assert.Equal(9, endResult.SelectionStart);
+        var unchanged = EditorProductivityCommands.DeleteToLineEnd(endDocument, 0, 2);
+        Assert.Equal("alpha\r\nbe\r\ngamma", endDocument.Text);
+        Assert.Equal(2, unchanged.SelectionLength);
+    }
+
+    [Fact]
+    public void DuplicateSelection_DuplicatesExactCharactersAndUndoRestores()
+    {
+        var document = new TextDocument("Get-Process\r\n$Name");
+        var start = document.Text.IndexOf("Process", StringComparison.Ordinal);
+        var result = EditorProductivityCommands.DuplicateSelection(document, start, "Process".Length);
+
+        Assert.Equal("Get-ProcessProcess\r\n$Name", document.Text);
+        Assert.Equal(start + "Process".Length, result.SelectionStart);
+        Assert.Equal("Process", document.GetText(result.SelectionStart, result.SelectionLength));
+        document.UndoStack.Undo();
+        Assert.Equal("Get-Process\r\n$Name", document.Text);
+    }
 }

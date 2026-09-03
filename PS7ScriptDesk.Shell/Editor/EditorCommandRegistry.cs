@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Windows.Input;
 
 namespace PS7ScriptDesk.Shell.Editor;
 
@@ -20,7 +21,8 @@ public sealed record EditorCommandDefinition(
     IReadOnlyList<string> Keywords,
     Func<bool> CanExecute,
     Action Execute,
-    CommandSurfaces Surfaces = CommandSurfaces.CommandPalette);
+    CommandSurfaces Surfaces = CommandSurfaces.CommandPalette,
+    KeyGesture? ShortcutGesture = null);
 
 public sealed class EditorCommandRegistry
 {
@@ -44,6 +46,14 @@ public sealed class EditorCommandRegistry
     }
 
     public IReadOnlyList<EditorCommandDefinition> Commands => _commands;
+
+    public EditorCommandDefinition? FindByShortcut(Key key, ModifierKeys modifiers)
+    {
+        return _commands.SingleOrDefault(command =>
+            command.ShortcutGesture is { } gesture &&
+            gesture.Key == key &&
+            gesture.Modifiers == modifiers);
+    }
 
     public IReadOnlyList<EditorCommandDefinition> Search(string? query)
     {

@@ -24,6 +24,51 @@ public static class EditorTransformCommands
     public static EditorCommandResult AddTrailingComma(TextDocument document, int start, int length) => ApplyLines(document, start, length, lines => lines.Select(line => line.EndsWith(",", StringComparison.Ordinal) ? line : line + ",").ToArray());
     public static EditorCommandResult RemoveTrailingComma(TextDocument document, int start, int length) => ApplyLines(document, start, length, lines => lines.Select(line => line.EndsWith(",", StringComparison.Ordinal) ? line[..^1] : line).ToArray());
 
+    public static EditorCommandResult TrimDocumentTrailingWhitespace(TextDocument document)
+    {
+        var lines = Enumerable.Range(1, document.LineCount).Select(number => document.GetLineByNumber(number)).ToArray();
+        var replacements = lines
+            .Select(line => (Line: line, Text: document.GetText(line.Offset, line.Length)))
+            .Where(item => item.Text.Length > 0 && item.Text.TrimEnd(' ', '\t').Length != item.Text.Length)
+            .ToArray();
+        using (BeginUndoGroup(document))
+        {
+            foreach (var replacement in replacements.Reverse())
+            {
+                var trimmed = replacement.Text.TrimEnd(' ', '\t');
+                document.Replace(replacement.Line.Offset, replacement.Line.Length, trimmed);
+            }
+        }
+
+        return new EditorCommandResult(0, document.TextLength);
+    }
+
+    public static EditorCommandResult SortLinesIgnoreCaseAscending(TextDocument document, int start, int length) =>
+        ApplyLines(document, start, length, lines => lines.OrderBy(line => line, StringComparer.OrdinalIgnoreCase).ToArray());
+
+    public static EditorCommandResult SortLinesIgnoreCaseDescending(TextDocument document, int start, int length) =>
+        ApplyLines(document, start, length, lines => lines.OrderByDescending(line => line, StringComparer.OrdinalIgnoreCase).ToArray());
+
+    public static EditorCommandResult JoinLines(TextDocument document, int start, int length)
+    {
+        var range = GetLineRange(document, start, length);
+        var lines = Enumerable.Range(range.FirstLine, range.LastLine - range.FirstLine + 1)
+            .Select(number => document.GetLineByNumber(number))
+            .Select(line => new
+            {
+                Line = line,
+                Text = document.GetText(line.Offset, line.Length),
+                Delimiter = document.GetText(line.Offset + line.Length, line.TotalLength - line.Length)
+            })
+            .ToArray();
+        var joined = string.Join(" ", lines.Select(item => item.Text.Trim()).Where(text => text.Length > 0));
+        var replacement = joined + lines[^1].Delimiter;
+        var sourceStart = lines[0].Line.Offset;
+        var sourceLength = lines.Sum(item => item.Line.TotalLength);
+        using (BeginUndoGroup(document)) document.Replace(sourceStart, sourceLength, replacement);
+        return new EditorCommandResult(sourceStart, joined.Length);
+    }
+
     private static EditorCommandResult ApplySelection(TextDocument document, int start, int length, Func<string, string> transform)
     {
         if (length <= 0) return new EditorCommandResult(start, 0);

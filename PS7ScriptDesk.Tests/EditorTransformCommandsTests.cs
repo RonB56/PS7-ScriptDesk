@@ -59,4 +59,43 @@ public sealed class EditorTransformCommandsTests
         EditorTransformCommands.RemoveBlankLines(document, 0, document.TextLength);
         Assert.Equal("A\nB\n", document.Text);
     }
+
+    [Fact]
+    public void TrimDocumentTrailingWhitespace_PreservesDelimitersAndOneUndo()
+    {
+        var source = " one \r\n two\t\nthree";
+        var document = new TextDocument(source);
+
+        EditorTransformCommands.TrimDocumentTrailingWhitespace(document);
+
+        Assert.Equal(" one\r\n two\nthree", document.Text);
+        document.UndoStack.Undo();
+        Assert.Equal(source, document.Text);
+    }
+
+    [Fact]
+    public void IgnoreCaseSort_IsStableAndPreservesLineEndings()
+    {
+        var document = new TextDocument("b\r\nA\r\na\r\nB");
+
+        EditorTransformCommands.SortLinesIgnoreCaseAscending(document, 0, document.TextLength);
+        Assert.Equal("A\r\na\r\nb\r\nB", document.Text);
+        document.UndoStack.Undo();
+        EditorTransformCommands.SortLinesIgnoreCaseDescending(document, 0, document.TextLength);
+        Assert.Equal("b\r\nB\r\nA\r\na", document.Text);
+    }
+
+    [Theory]
+    [InlineData("Get-Process\nWhere-Object {$_.CPU -gt 10}\nSelect-Object Name,CPU", "Get-Process Where-Object {$_.CPU -gt 10} Select-Object Name,CPU")]
+    [InlineData("one\r\n\r\n  two\r\n", "one two\r\n")]
+    public void JoinLines_TrimsOnlyBoundariesSkipsBlankLinesAndPreservesLastDelimiter(string source, string expected)
+    {
+        var document = new TextDocument(source);
+
+        EditorTransformCommands.JoinLines(document, 0, document.TextLength);
+
+        Assert.Equal(expected, document.Text);
+        document.UndoStack.Undo();
+        Assert.Equal(source, document.Text);
+    }
 }

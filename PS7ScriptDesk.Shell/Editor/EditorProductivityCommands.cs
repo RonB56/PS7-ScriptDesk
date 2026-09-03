@@ -10,6 +10,61 @@ public readonly record struct EditorCommandResult(int SelectionStart, int Select
 
 public static class EditorProductivityCommands
 {
+    public static EditorCommandResult InsertLineAbove(TextDocument document, int caretOffset)
+    {
+        var line = document.GetLineByOffset(Math.Clamp(caretOffset, 0, document.TextLength));
+        var delimiter = GetPreferredLineEnding(document);
+        using (BeginUndoGroup(document)) document.Insert(line.Offset, delimiter);
+        return new EditorCommandResult(line.Offset, 0);
+    }
+
+    public static EditorCommandResult InsertLineBelow(TextDocument document, int caretOffset)
+    {
+        var line = document.GetLineByOffset(Math.Clamp(caretOffset, 0, document.TextLength));
+        var delimiter = GetPreferredLineEnding(document);
+        var insertOffset = line.Offset + line.TotalLength;
+        using (BeginUndoGroup(document)) document.Insert(insertOffset, delimiter);
+        return new EditorCommandResult(insertOffset + delimiter.Length, 0);
+    }
+
+    public static EditorCommandResult DeleteToLineStart(TextDocument document, int caretOffset, int selectionLength)
+    {
+        if (selectionLength != 0) return new EditorCommandResult(caretOffset, selectionLength);
+        var line = document.GetLineByOffset(Math.Clamp(caretOffset, 0, document.TextLength));
+        var start = line.Offset;
+        var length = Math.Clamp(caretOffset, start, start + line.Length) - start;
+        if (length > 0)
+        {
+            using (BeginUndoGroup(document)) document.Remove(start, length);
+        }
+
+        return new EditorCommandResult(start, 0);
+    }
+
+    public static EditorCommandResult DeleteToLineEnd(TextDocument document, int caretOffset, int selectionLength)
+    {
+        if (selectionLength != 0) return new EditorCommandResult(caretOffset, selectionLength);
+        var line = document.GetLineByOffset(Math.Clamp(caretOffset, 0, document.TextLength));
+        var caret = Math.Clamp(caretOffset, line.Offset, line.Offset + line.Length);
+        var length = line.Offset + line.Length - caret;
+        if (length > 0)
+        {
+            using (BeginUndoGroup(document)) document.Remove(caret, length);
+        }
+
+        return new EditorCommandResult(caret, 0);
+    }
+
+    public static EditorCommandResult DuplicateSelection(TextDocument document, int selectionStart, int selectionLength)
+    {
+        if (selectionLength <= 0) return new EditorCommandResult(selectionStart, 0);
+        var start = Math.Clamp(selectionStart, 0, document.TextLength);
+        var length = Math.Min(selectionLength, document.TextLength - start);
+        var selected = document.GetText(start, length);
+        using (BeginUndoGroup(document)) document.Insert(start + length, selected);
+        return new EditorCommandResult(start + length, length);
+    }
+
     public static EditorCommandResult ToggleComment(TextDocument document, int selectionStart, int selectionLength)
     {
         var range = GetLineRange(document, selectionStart, selectionLength);
