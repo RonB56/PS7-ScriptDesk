@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using ICSharpCode.AvalonEdit.Document;
+using PS7ScriptDesk.Application.Diagnostics;
 
 namespace PS7ScriptDesk.Shell.Editor;
 
@@ -64,7 +65,7 @@ public static class EditorProductivityCommands
         var range = GetLineRange(document, selectionStart, selectionLength);
         var lines = GetLines(document, range.FirstLine, range.LastLine);
         var width = Math.Max(1, indentationSize);
-        var removedBeforeSelection = 0;
+        var removedFromFirstLine = 0;
         using (BeginUndoGroup(document))
         {
             foreach (var line in lines.AsEnumerable().Reverse())
@@ -78,17 +79,15 @@ public static class EditorProductivityCommands
                 if (remove > 0)
                 {
                     document.Remove(line.Offset, remove);
-                    if (line.Offset < selectionStart)
+                    if (line.LineNumber == range.FirstLine)
                     {
-                        removedBeforeSelection += remove;
+                        removedFromFirstLine = remove;
                     }
                 }
             }
         }
 
-        return new EditorCommandResult(
-            Math.Max(0, selectionStart - removedBeforeSelection),
-            selectionLength == 0 ? 0 : Math.Max(0, selectionLength - removedBeforeSelection));
+        return GetTransformedSelection(document, range, selectionStart, selectionLength, -removedFromFirstLine);
     }
 
     public static EditorCommandResult MoveLines(TextDocument document, int selectionStart, int selectionLength, int direction)
@@ -99,8 +98,22 @@ public static class EditorProductivityCommands
         }
 
         var range = GetLineRange(document, selectionStart, selectionLength);
+        DeveloperDiagnostics.LogInfo(
+            "Editor",
+            "MoveLines resolved the selected logical range.",
+            new Dictionary<string, object?>
+            {
+                ["selectionStart"] = selectionStart,
+                ["selectionLength"] = selectionLength,
+                ["selectionEndExclusive"] = Math.Clamp(selectionStart + Math.Max(0, selectionLength), 0, document.TextLength),
+                ["firstLine"] = range.FirstLine,
+                ["lastLine"] = range.LastLine,
+                ["lineCount"] = document.LineCount,
+                ["direction"] = direction
+            });
         if (direction < 0 && range.FirstLine == 1 || direction > 0 && range.LastLine == document.LineCount)
         {
+            DeveloperDiagnostics.LogDecision("Editor", "MoveLines", "Move request reached a document boundary and was left unchanged.", "NoOpBoundary");
             return new EditorCommandResult(selectionStart, selectionLength);
         }
 
@@ -113,16 +126,33 @@ public static class EditorProductivityCommands
             : lines.Skip(blockCount).Concat(lines.Take(blockCount)).ToArray();
         var startOffset = lines[0].Offset;
         var totalLength = lines.Sum(line => line.TotalLength);
-        var movedText = string.Concat(moved.Select(line => line.FullText));
+        // Keep line content separate from delimiter ownership. Moving a final
+        // unterminated line must not concatenate it with the next moved line.
+        // The existing delimiter slots remain in document order, preserving LF,
+        // CRLF, mixed endings, and whether the region ends with a delimiter.
+        var delimiters = lines.Select(line => line.Delimiter).ToArray();
+        var movedText = string.Concat(moved.Select((line, index) =>
+            line.Text + (index < delimiters.Length ? delimiters[index] : string.Empty)));
 
         using (BeginUndoGroup(document))
         {
+            DeveloperDiagnostics.LogInfo(
+                "Editor",
+                "MoveLines entering one grouped document replacement.",
+                new Dictionary<string, object?>
+                {
+                    ["sourceOffset"] = startOffset,
+                    ["sourceLength"] = totalLength,
+                    ["replacementLength"] = movedText.Length,
+                    ["selectedLineCount"] = blockCount,
+                    ["adjacentLineNumber"] = direction > 0 ? lines[blockCount].LineNumber : lines[0].LineNumber
+                });
             document.Replace(startOffset, totalLength, movedText);
         }
 
         var newStart = direction < 0
             ? startOffset
-            : startOffset + lines.Take(lines.Count - blockCount).Sum(line => line.TotalLength);
+            : startOffset + lines[blockCount].Text.Length + delimiters[0].Length;
         return new EditorCommandResult(newStart, Math.Min(selectionLength, Math.Max(0, document.TextLength - newStart)));
     }
 
@@ -130,7 +160,7 @@ public static class EditorProductivityCommands
     {
         var range = GetLineRange(document, selectionStart, selectionLength);
         var lines = GetLines(document, range.FirstLine, range.LastLine);
-        var blockText = string.Concat(lines.Select(line => line.FullText));
+        var blockText = string.Concat(lines.Select(line => line.Text + line.Delimiter));
         var insertedText = blockText;
         if (direction >= 0 && lines[^1].TotalLength == lines[^1].Length)
         {
@@ -194,7 +224,11 @@ public static class EditorProductivityCommands
 
         var start = document.GetLineByNumber(range.FirstLine).Offset;
         var endLine = document.GetLineByNumber(Math.Min(range.LastLine, document.LineCount));
-        return new EditorCommandResult(start, Math.Min(document.TextLength - start, endLine.Offset + endLine.Length - start + perLineDelta));
+        // SelectionLength is a character count with an exclusive end. Do not add
+        // an indentation delta here: endLine.Offset/Length already describe the
+        // post-mutation line, and adding a delta selects the following line.
+        var end = endLine.Offset + endLine.Length;
+        return new EditorCommandResult(start, Math.Clamp(end - start, 0, document.TextLength - start));
     }
 
     private static LineRange GetLineRange(TextDocument document, int selectionStart, int selectionLength)
@@ -223,7 +257,7 @@ public static class EditorProductivityCommands
                     line.Length,
                     line.TotalLength,
                     document.GetText(line.Offset, line.Length),
-                    document.GetText(line.Offset, line.TotalLength));
+                    document.GetText(line.Offset + line.Length, line.TotalLength - line.Length));
             })
             .ToList();
     }
@@ -244,7 +278,7 @@ public static class EditorProductivityCommands
     }
 
     private readonly record struct LineRange(int FirstLine, int LastLine);
-    private readonly record struct LineInfo(int LineNumber, int Offset, int Length, int TotalLength, string Text, string FullText);
+    private readonly record struct LineInfo(int LineNumber, int Offset, int Length, int TotalLength, string Text, string Delimiter);
 
     private static IDisposable BeginUndoGroup(TextDocument document)
     {

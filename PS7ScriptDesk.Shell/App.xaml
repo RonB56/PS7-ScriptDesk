@@ -1296,7 +1296,8 @@
                         <Border x:Name="RootBorder"
                                 Background="{TemplateBinding Background}"
                                 CornerRadius="{StaticResource Radius.Small}">
-                            <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center" />
+                            <ContentPresenter ContentTemplate="{TemplateBinding ContentTemplate}"
+                                              HorizontalAlignment="Stretch" VerticalAlignment="Center" />
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsSelected" Value="True">

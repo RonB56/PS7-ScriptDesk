@@ -34,6 +34,7 @@ using WpfSolidColorBrush = System.Windows.Media.SolidColorBrush;
 using WpfColors = System.Windows.Media.Colors;
 using ICSharpCode.AvalonEdit;
 using ICSharpCode.AvalonEdit.CodeCompletion;
+using ICSharpCode.AvalonEdit.Document;
 using ICSharpCode.AvalonEdit.Editing;
 using ICSharpCode.AvalonEdit.Folding;
 using ICSharpCode.AvalonEdit.Rendering;
@@ -94,6 +95,7 @@ namespace PS7ScriptDesk.Shell
         private readonly ConcurrentQueue<TerminalOutputEnvelope> _terminalOutputEnvelopeQueue = new();
         private readonly Dispatcher _terminalOutputDispatcher;
         private MainWindowViewModel? _viewModel;
+        private CommandPaletteWindow? _commandPaletteWindow;
         private int _terminalOutputDrainScheduled;
         private int _terminalOutputQueuedEnvelopeCount;
         private const string ThemeIconSuccessResourceKey = "Theme.Icon.Success";
@@ -1080,6 +1082,14 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            if ((Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Shift)) == (ModifierKeys.Control | ModifierKeys.Shift) &&
+                e.Key == Key.P)
+            {
+                e.Handled = true;
+                OpenCommandPalette();
+                return;
+            }
+
             if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseUiEnabled())
             {
                 DeveloperDiagnostics.LogUserAction(
@@ -1915,6 +1925,9 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            var key = EditorShortcutRouting.ResolveKey(e.Key, e.SystemKey);
+            var modifiers = Keyboard.Modifiers;
+
              if (_terminalIsActive)
             {
                 AppLogger.Debug(
@@ -1923,21 +1936,21 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            if (_activeCompletionWindow is not null && e.Key == Key.Tab)
+            if (_activeCompletionWindow is not null && key == Key.Tab)
             {
                 e.Handled = true;
                 _activeCompletionWindow.CompletionList.RequestInsertion(e);
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.Space)
+            if (modifiers == ModifierKeys.Control && key == Key.Space)
             {
                 e.Handled = true;
                 ForceCompletionNow(editorTextEditor, "Ctrl+Space");
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.None && e.Key == Key.F1)
+            if (modifiers == ModifierKeys.None && key == Key.F1)
             {
                 e.Handled = true;
                 var quickInfoShown = await ShowEditorQuickInfoAtCaretAsync(editorTextEditor, updateStatusOnly: false).ConfigureAwait(true);
@@ -1948,14 +1961,14 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.OemQuestion)
+            if (modifiers == ModifierKeys.Control && key == Key.OemQuestion)
             {
                 e.Handled = true;
                 ToggleCommentForEditor(editorTextEditor);
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.Shift && e.Key == Key.Tab)
+            if (modifiers == ModifierKeys.Shift && key == Key.Tab)
             {
                 if (HasMultiLineEditorSelection(editorTextEditor))
                 {
@@ -1965,67 +1978,67 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.None && e.Key == Key.Tab && HasMultiLineEditorSelection(editorTextEditor))
+            if (modifiers == ModifierKeys.None && key == Key.Tab && HasMultiLineEditorSelection(editorTextEditor))
             {
                 e.Handled = true;
                 ApplyEditorCommand(editorTextEditor, "Indent", () => EditorProductivityCommands.Indent(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength, editorTextEditor.Options.IndentationSize));
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.Alt && e.Key == Key.Up)
+            if (EditorShortcutRouting.TryGetMoveLineDirection(key, modifiers, out var moveDirection))
             {
                 e.Handled = true;
-                MoveLineUp(editorTextEditor);
+                if (moveDirection < 0)
+                {
+                    MoveLineUp(editorTextEditor);
+                }
+                else
+                {
+                    MoveLineDown(editorTextEditor);
+                }
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.Alt && e.Key == Key.Down)
-            {
-                e.Handled = true;
-                MoveLineDown(editorTextEditor);
-                return;
-            }
-
-            if (Keyboard.Modifiers == (ModifierKeys.Alt | ModifierKeys.Shift) && e.Key == Key.Down)
+            if (modifiers == (ModifierKeys.Alt | ModifierKeys.Shift) && key == Key.Down)
             {
                 e.Handled = true;
                 ApplyEditorCommand(editorTextEditor, "DuplicateDown", () => EditorProductivityCommands.DuplicateLines(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength, 1));
                 return;
             }
 
-            if (Keyboard.Modifiers == (ModifierKeys.Alt | ModifierKeys.Shift) && e.Key == Key.Up)
+            if (modifiers == (ModifierKeys.Alt | ModifierKeys.Shift) && key == Key.Up)
             {
                 e.Handled = true;
                 ApplyEditorCommand(editorTextEditor, "DuplicateUp", () => EditorProductivityCommands.DuplicateLines(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength, -1));
                 return;
             }
 
-            if (Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift) && e.Key == Key.K)
+            if (modifiers == (ModifierKeys.Control | ModifierKeys.Shift) && key == Key.K)
             {
                 e.Handled = true;
                 ApplyEditorCommand(editorTextEditor, "DeleteLine", () => EditorProductivityCommands.DeleteLines(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength));
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.C)
+            if (modifiers == ModifierKeys.Control && key == Key.C)
             {
                 e.Handled = TryCopySelectedEditorTextToClipboard(editorTextEditor);
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.X)
+            if (modifiers == ModifierKeys.Control && key == Key.X)
             {
                 e.Handled = TryCutSelectedEditorTextToClipboard(editorTextEditor);
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.V)
+            if (modifiers == ModifierKeys.Control && key == Key.V)
             {
                 e.Handled = TryPasteClipboardTextIntoEditor(editorTextEditor);
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.A)
+            if (modifiers == ModifierKeys.Control && key == Key.A)
             {
                 e.Handled = true;
                 editorTextEditor.SelectAll();
@@ -2033,7 +2046,7 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.F)
+            if (modifiers == ModifierKeys.Control && key == Key.F)
             {
                 e.Handled = true;
                 OpenFindReplaceWindow(showReplace: false);
@@ -2899,6 +2912,143 @@ namespace PS7ScriptDesk.Shell
             }
 
             e.Handled = true;
+        }
+
+        private void CommandPalette_Click(object sender, RoutedEventArgs e) => OpenCommandPalette();
+
+        private void EditorContextMenu_Opened(object sender, RoutedEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.ContextMenu contextMenu || contextMenu.PlacementTarget is not TextEditor editor)
+            {
+                return;
+            }
+
+            var availableMenu = contextMenu.Items
+                .OfType<WpfMenuItem>()
+                .FirstOrDefault(item => string.Equals(item.Header as string, "Available Commands", StringComparison.Ordinal));
+            if (availableMenu is null)
+            {
+                return;
+            }
+
+            var registry = CreateEditorCommandRegistry(editor);
+            var commands = EditorContextMenuBuilder.Populate(
+                availableMenu,
+                registry,
+                editor.SelectionLength > 0,
+                command => ExecuteEditorContextCommand(editor, command));
+
+            DeveloperDiagnostics.LogInfo("EditorProductivity", "Available Commands context submenu rebuilt.", new Dictionary<string, object?>
+            {
+                ["commandCount"] = commands.Count,
+                ["selectionLength"] = editor.SelectionLength,
+                ["editorReadOnly"] = editor.IsReadOnly
+            });
+        }
+
+        private void ExecuteEditorContextCommand(TextEditor editor, EditorCommandDefinition command)
+        {
+            if (editor.SelectionLength <= 0 || !command.CanExecute())
+            {
+                return;
+            }
+
+            DeveloperDiagnostics.LogUserAction("EditorProductivity", "ContextCommandInvoked", "Available Commands entry invoked.", new Dictionary<string, object?>
+            {
+                ["commandId"] = command.Id,
+                ["selectionLength"] = editor.SelectionLength
+            });
+            command.Execute();
+        }
+
+        private void OpenCommandPalette()
+        {
+            if (_commandPaletteWindow is not null)
+            {
+                _commandPaletteWindow.Activate();
+                return;
+            }
+
+            var editor = FindActiveEditor();
+            var registry = CreateEditorCommandRegistry(editor);
+            var palette = new CommandPaletteWindow(this, registry);
+            _commandPaletteWindow = palette;
+            palette.Closed += (_, _) =>
+            {
+                _commandPaletteWindow = null;
+                FocusActiveEditorSoon();
+            };
+            DeveloperDiagnostics.LogInfo("Editor", "Command Palette opened.", new Dictionary<string, object?>
+            {
+                ["commandCount"] = registry.Commands.Count,
+                ["editorAvailable"] = editor?.Document is not null
+            });
+            palette.Show();
+        }
+
+        private EditorCommandRegistry CreateEditorCommandRegistry(TextEditor? editor)
+        {
+            bool CanEdit() => editor?.Document is not null && !editor.IsReadOnly;
+            void Apply(string name, Func<EditorCommandResult> command)
+            {
+                if (editor is not null)
+                {
+                    ApplyEditorCommand(editor, name, command);
+                }
+            }
+            void ApplyTransform(string name, Func<TextDocument, int, int, EditorCommandResult> command) =>
+                Apply(name, () => command(editor!.Document!, editor.SelectionStart, editor.SelectionLength));
+
+            var commands = new List<EditorCommandDefinition>
+            {
+                new("editor.toggleComment", "Toggle Line Comment", "Editor", "Ctrl+/", new[] { "comment", "uncomment", "hash" }, CanEdit, () => ToggleCommentForEditor(editor!)),
+                new("editor.indent", "Indent Selection", "Editor", "Tab", new[] { "indent", "tab" }, CanEdit, () => ApplyTransform("Indent", (document, start, length) => EditorProductivityCommands.Indent(document, start, length))),
+                new("editor.outdent", "Outdent Selection", "Editor", "Shift+Tab", new[] { "outdent", "unindent" }, CanEdit, () => ApplyTransform("Outdent", (document, start, length) => EditorProductivityCommands.Outdent(document, start, length))),
+                new("editor.moveUp", "Move Line/Selection Up", "Editor", "Alt+Up", new[] { "move", "line", "block" }, CanEdit, () => MoveLineUp(editor!)),
+                new("editor.moveDown", "Move Line/Selection Down", "Editor", "Alt+Down", new[] { "move", "line", "block" }, CanEdit, () => MoveLineDown(editor!)),
+                new("editor.duplicateUp", "Duplicate Line/Selection Up", "Editor", "Shift+Alt+Up", new[] { "duplicate", "copy", "line" }, CanEdit, () => ApplyTransform("DuplicateUp", (document, start, length) => EditorProductivityCommands.DuplicateLines(document, start, length, -1))),
+                new("editor.duplicateDown", "Duplicate Line/Selection Down", "Editor", "Shift+Alt+Down", new[] { "duplicate", "copy", "line" }, CanEdit, () => ApplyTransform("DuplicateDown", (document, start, length) => EditorProductivityCommands.DuplicateLines(document, start, length, 1))),
+                new("editor.deleteLine", "Delete Current Line", "Editor", "Ctrl+Shift+K", new[] { "delete", "line" }, CanEdit, () => ApplyTransform("DeleteLine", EditorProductivityCommands.DeleteLines)),
+                new("editor.selectLine", "Select Current Line", "Selection", "", new[] { "select", "line" }, () => editor?.Document is not null, () => SelectCurrentLine(editor!)),
+                new("transform.sortAsc", "Sort Lines Ascending", "Transform", "", new[] { "sort", "ascending", "alphabetize" }, CanEdit, () => ApplyTransform("SortLinesAscending", EditorTransformCommands.SortLinesAscending)),
+                new("transform.sortDesc", "Sort Lines Descending", "Transform", "", new[] { "sort", "descending", "reverse" }, CanEdit, () => ApplyTransform("SortLinesDescending", EditorTransformCommands.SortLinesDescending)),
+                new("transform.removeDuplicates", "Remove Duplicate Lines", "Transform", "", new[] { "unique", "deduplicate", "duplicates" }, CanEdit, () => ApplyTransform("RemoveDuplicateLines", EditorTransformCommands.RemoveDuplicateLines)),
+                new("transform.reverse", "Reverse Lines", "Transform", "", new[] { "reverse", "lines" }, CanEdit, () => ApplyTransform("ReverseLines", EditorTransformCommands.ReverseLines)),
+                new("transform.trimLines", "Trim Leading and Trailing Whitespace", "Transform", "", new[] { "trim", "whitespace", "spaces" }, CanEdit, () => ApplyTransform("TrimLines", EditorTransformCommands.TrimLines)),
+                new("transform.trimTrailing", "Trim Trailing Whitespace", "Transform", "", new[] { "trim", "trailing", "whitespace" }, CanEdit, () => ApplyTransform("TrimTrailingWhitespace", EditorTransformCommands.TrimTrailingWhitespace)),
+                new("transform.removeBlank", "Remove Blank Lines", "Transform", "", new[] { "blank", "empty", "remove" }, CanEdit, () => ApplyTransform("RemoveBlankLines", EditorTransformCommands.RemoveBlankLines)),
+                new("transform.upper", "Convert Selection to Uppercase", "Transform", "", new[] { "upper", "uppercase", "caps" }, CanEdit, () => ApplyTransform("UppercaseSelection", EditorTransformCommands.UppercaseSelection)),
+                new("transform.lower", "Convert Selection to Lowercase", "Transform", "", new[] { "lower", "lowercase" }, CanEdit, () => ApplyTransform("LowercaseSelection", EditorTransformCommands.LowercaseSelection)),
+                new("transform.title", "Convert Selection to Title Case", "Transform", "", new[] { "title", "titlecase" }, CanEdit, () => ApplyTransform("TitleCaseSelection", EditorTransformCommands.TitleCaseSelection)),
+                new("transform.prefix", "Prefix Each Line", "Transform", "", new[] { "prefix", "prepend" }, CanEdit, () => PromptAndApplyLineText(editor!, true)),
+                new("transform.suffix", "Suffix Each Line", "Transform", "", new[] { "suffix", "append" }, CanEdit, () => PromptAndApplyLineText(editor!, false)),
+                new("transform.quoteSingle", "Quote Each Line with Single Quotes", "Transform", "", new[] { "quote", "single", "apostrophe" }, CanEdit, () => ApplyTransform("QuoteSingle", (document, start, length) => EditorTransformCommands.QuoteLines(document, start, length, '\''))),
+                new("transform.quoteDouble", "Quote Each Line with Double Quotes", "Transform", "", new[] { "quote", "double" }, CanEdit, () => ApplyTransform("QuoteDouble", (document, start, length) => EditorTransformCommands.QuoteLines(document, start, length, '"'))),
+                new("transform.addComma", "Add Trailing Comma to Each Line", "Transform", "", new[] { "comma", "append" }, CanEdit, () => ApplyTransform("AddTrailingComma", EditorTransformCommands.AddTrailingComma)),
+                new("transform.removeComma", "Remove Trailing Comma from Each Line", "Transform", "", new[] { "comma", "remove" }, CanEdit, () => ApplyTransform("RemoveTrailingComma", EditorTransformCommands.RemoveTrailingComma))
+            };
+            // All current editor productivity commands are valid on both command surfaces.
+            // Future registry entries can opt out by retaining the default palette-only surface.
+            return new EditorCommandRegistry(commands.Select(command => command with
+            {
+                Surfaces = CommandSurfaces.CommandPalette | CommandSurfaces.EditorContextMenu
+            }));
+        }
+
+        private void SelectCurrentLine(TextEditor editor)
+        {
+            if (editor.Document is null) return;
+            var line = editor.Document.GetLineByOffset(Math.Clamp(editor.CaretOffset, 0, editor.Document.TextLength));
+            editor.Select(line.Offset, line.Length);
+        }
+
+        private void PromptAndApplyLineText(TextEditor editor, bool prefix)
+        {
+            var value = Microsoft.VisualBasic.Interaction.InputBox(prefix ? "Prefix for each selected line:" : "Suffix for each selected line:", prefix ? "Prefix Lines" : "Suffix Lines", prefix ? "# " : string.Empty);
+            if (value is null) return;
+            ApplyEditorCommand(editor, prefix ? "PrefixLines" : "SuffixLines", () => prefix
+                ? EditorTransformCommands.PrefixLines(editor.Document!, editor.SelectionStart, editor.SelectionLength, value)
+                : EditorTransformCommands.SuffixLines(editor.Document!, editor.SelectionStart, editor.SelectionLength, value));
         }
 
         private void EditorToggleComment_Click(object sender, RoutedEventArgs e)

@@ -47,6 +47,53 @@ public sealed class EditorProductivityCommandsTests
         Assert.Equal("one\ntwo\nthree", document.Text);
     }
 
+    [Theory]
+    [InlineData("if ($Enabled) {\n    Get-Service\n    Get-Process\n    Get-ChildItem\n}", "\n")]
+    [InlineData("if ($Enabled) {\r\n    Get-Service\r\n    Get-Process\r\n    Get-ChildItem\r\n}\r\n", "\r\n")]
+    public void IndentSelection_RestoresExactlyTheSameLogicalBlock(string source, string lineEnding)
+    {
+        var document = new TextDocument(source);
+        var start = document.Text.IndexOf("    Get-Service", StringComparison.Ordinal);
+        var end = document.Text.IndexOf("    Get-ChildItem", start, StringComparison.Ordinal) + "    Get-ChildItem".Length;
+
+        var indented = EditorProductivityCommands.Indent(document, start, end - start, 4);
+        Assert.Equal(start, indented.SelectionStart);
+        Assert.Equal(end - start + 12, indented.SelectionLength);
+        Assert.StartsWith("        Get-Service", document.GetText(document.GetLineByNumber(2).Offset, document.GetLineByNumber(2).Length), StringComparison.Ordinal);
+        Assert.DoesNotContain("}" + lineEnding, document.GetText(indented.SelectionStart, indented.SelectionLength), StringComparison.Ordinal);
+
+        var indentedAgain = EditorProductivityCommands.Indent(document, indented.SelectionStart, indented.SelectionLength, 4);
+        Assert.Equal(indented.SelectionStart, indentedAgain.SelectionStart);
+        Assert.Equal(indented.SelectionLength + 12, indentedAgain.SelectionLength);
+        Assert.DoesNotContain("}" + lineEnding, document.GetText(indentedAgain.SelectionStart, indentedAgain.SelectionLength), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void IndentSelection_EndingAtNextLineOffset_DoesNotSelectNextLine()
+    {
+        var document = new TextDocument("one\ntwo\nthree\n}");
+        var start = document.Text.IndexOf("two", StringComparison.Ordinal);
+        var end = document.Text.IndexOf("three", StringComparison.Ordinal);
+
+        var result = EditorProductivityCommands.Indent(document, start, end - start, 4);
+
+        Assert.Equal("    two", document.GetText(result.SelectionStart, result.SelectionLength));
+    }
+
+    [Fact]
+    public void IndentThenOutdent_ReusesExactBlockWithoutDrift()
+    {
+        var document = new TextDocument("{\r\n    one\r\n    two\r\n    three\r\n}\r\n");
+        var start = document.Text.IndexOf("    one", StringComparison.Ordinal);
+        var end = document.Text.IndexOf("    three", StringComparison.Ordinal) + "    three".Length;
+
+        var indented = EditorProductivityCommands.Indent(document, start, end - start, 4);
+        var outdented = EditorProductivityCommands.Outdent(document, indented.SelectionStart, indented.SelectionLength, 4);
+
+        Assert.Equal("    one\r\n    two\r\n    three", document.GetText(outdented.SelectionStart, outdented.SelectionLength));
+        Assert.Equal(end - start, outdented.SelectionLength);
+    }
+
     [Fact]
     public void MoveLines_SwapsWholeBlocksAtBoundaries()
     {
@@ -55,6 +102,83 @@ public sealed class EditorProductivityCommandsTests
         Assert.Equal("two\none\nthree\n", document.Text);
         EditorProductivityCommands.MoveLines(document, 0, 8, 1);
         Assert.Equal("three\ntwo\none\n", document.Text);
+    }
+
+    [Theory]
+    [InlineData("A\nB\nC\nD\n", "\n")]
+    [InlineData("A\r\nB\r\nC\r\nD\r\n", "\r\n")]
+    public void MoveLines_MultiLineBlockPreservesExactDocumentText(string source, string lineEnding)
+    {
+        var document = new TextDocument(source);
+        var start = document.Text.IndexOf("B", StringComparison.Ordinal);
+        var end = document.Text.IndexOf("C", StringComparison.Ordinal) + 1;
+
+        var down = EditorProductivityCommands.MoveLines(document, start, end - start, 1);
+        Assert.Equal($"A{lineEnding}D{lineEnding}B{lineEnding}C{lineEnding}", document.Text);
+        Assert.Equal($"B{lineEnding}C", document.GetText(down.SelectionStart, down.SelectionLength));
+
+        var up = EditorProductivityCommands.MoveLines(document, down.SelectionStart, down.SelectionLength, -1);
+        Assert.Equal(source, document.Text);
+        Assert.Equal($"B{lineEnding}C", document.GetText(up.SelectionStart, up.SelectionLength));
+    }
+
+    [Fact]
+    public void MoveLines_ExactFirstTwoSelectedLinesDownMutatesProductionDocument()
+    {
+        const string source = "Get-Service\nGet-Process\nGet-ChildItem\nWrite-Host \"Done\"";
+        var document = new TextDocument(source);
+        var start = 0;
+        var end = source.IndexOf("Get-ChildItem", StringComparison.Ordinal);
+
+        var result = EditorProductivityCommands.MoveLines(document, start, end - start, 1);
+
+        Assert.NotEqual(source, document.Text);
+        Assert.Equal("Get-ChildItem\nGet-Service\nGet-Process\nWrite-Host \"Done\"", document.Text);
+        Assert.Equal("Get-Service\nGet-Process\n", document.GetText(result.SelectionStart, result.SelectionLength));
+    }
+
+    [Fact]
+    public void MoveLines_ThreeLineBlockDownAndUpDoesNotConcatenateNeighbors()
+    {
+        var source = "Get-Service\nGet-Process\nGet-ChildItem\nWrite-Host \"Done\"";
+        var document = new TextDocument(source);
+        var start = 0;
+        var end = document.Text.IndexOf("Get-ChildItem", StringComparison.Ordinal) + "Get-ChildItem".Length;
+
+        var down = EditorProductivityCommands.MoveLines(document, start, end, 1);
+        Assert.Equal("Write-Host \"Done\"\nGet-Service\nGet-Process\nGet-ChildItem", document.Text);
+        Assert.Equal("Get-Service\nGet-Process\nGet-ChildItem", document.GetText(down.SelectionStart, down.SelectionLength));
+
+        EditorProductivityCommands.MoveLines(document, down.SelectionStart, down.SelectionLength, -1);
+        Assert.Equal(source, document.Text);
+    }
+
+    [Fact]
+    public void MoveLines_FinalUnterminatedNeighborRemainsSeparated()
+    {
+        var document = new TextDocument("A\nB\nC");
+        var start = document.Text.IndexOf("A", StringComparison.Ordinal);
+
+        var result = EditorProductivityCommands.MoveLines(document, start, 3, 1);
+
+        Assert.Equal("C\nA\nB", document.Text);
+        Assert.Equal("A\nB", document.GetText(result.SelectionStart, result.SelectionLength));
+    }
+
+    [Fact]
+    public void MoveLines_UndoRestoresExactOriginalAndRedoRestoresMove()
+    {
+        const string source = "A\r\nB\r\nC\r\nD";
+        var document = new TextDocument(source);
+        var start = source.IndexOf("B", StringComparison.Ordinal);
+        var end = source.IndexOf("C", StringComparison.Ordinal) + 1;
+
+        EditorProductivityCommands.MoveLines(document, start, end - start, 1);
+        Assert.Equal("A\r\nD\r\nB\r\nC", document.Text);
+        document.UndoStack.Undo();
+        Assert.Equal(source, document.Text);
+        document.UndoStack.Redo();
+        Assert.Equal("A\r\nD\r\nB\r\nC", document.Text);
     }
 
     [Fact]

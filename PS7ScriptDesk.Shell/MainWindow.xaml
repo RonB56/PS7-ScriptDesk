@@ -164,6 +164,8 @@
             </MenuItem>
 
             <MenuItem Header="_Edit" help:ContextHelp.Key="Command.Find">
+                <MenuItem Header="Command _Palette..." InputGestureText="Ctrl+Shift+P" Click="CommandPalette_Click" />
+                <Separator />
                 <MenuItem Header="_Find" InputGestureText="Ctrl+F" Click="Find_Click" help:ContextHelp.Key="Command.Find" />
                 <MenuItem Header="_Replace" InputGestureText="Ctrl+H" Click="Replace_Click" help:ContextHelp.Key="Command.Replace" />
                 <Separator />
@@ -1215,7 +1217,7 @@
                                                                        PreviewDragOver="EditorTextEditor_PreviewDragOver"
                                                                        Drop="EditorTextEditor_Drop">
                                                 <avalonedit:TextEditor.ContextMenu>
-                                                    <ContextMenu>
+                                                    <ContextMenu Opened="EditorContextMenu_Opened">
                                                         <MenuItem Header="Cut"
                                                                   help:ContextHelp.Key="Editor.Surface"
                                                                   InputGestureText="Ctrl+X"
@@ -1228,19 +1230,13 @@
                                                                   help:ContextHelp.Key="Editor.Surface"
                                                                   InputGestureText="Ctrl+V"
                                                                   Click="EditorPaste_Click" />
+                                                        <Separator />
+                                                        <MenuItem x:Name="AvailableCommandsMenu"
+                                                                  Header="Available Commands" />
                                                         <MenuItem Header="Select All"
                                                                   help:ContextHelp.Key="Editor.Surface"
                                                                   InputGestureText="Ctrl+A"
                                                                   Click="EditorSelectAll_Click" />
-                                                        <Separator />
-                                                        <MenuItem Header="Toggle Comment" InputGestureText="Ctrl+/" Click="EditorToggleComment_Click" />
-                                                        <MenuItem Header="Indent" InputGestureText="Tab" Click="EditorIndent_Click" />
-                                                        <MenuItem Header="Outdent" InputGestureText="Shift+Tab" Click="EditorOutdent_Click" />
-                                                        <MenuItem Header="Move Line Up" InputGestureText="Alt+Up" Click="EditorMoveLineUp_Click" />
-                                                        <MenuItem Header="Move Line Down" InputGestureText="Alt+Down" Click="EditorMoveLineDown_Click" />
-                                                        <MenuItem Header="Duplicate Line Down" InputGestureText="Shift+Alt+Down" Click="EditorDuplicateDown_Click" />
-                                                        <MenuItem Header="Delete Line" InputGestureText="Ctrl+Shift+K" Click="EditorDeleteLine_Click" />
-                                                        <MenuItem Header="Select Current Line" Click="EditorSelectCurrentLine_Click" />
                                                         <Separator />
                                                         <MenuItem Header="Run Selection"
                                                                   help:ContextHelp.Key="Command.RunSelection"
