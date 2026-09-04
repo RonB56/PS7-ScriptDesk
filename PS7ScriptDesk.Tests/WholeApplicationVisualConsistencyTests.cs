@@ -77,13 +77,16 @@ public sealed class WholeApplicationVisualConsistencyTests
 
         Assert.Contains("<Setter Property=\"Padding\" Value=\"12,5\" />", wizardStylesXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"MinHeight\" Value=\"30\" />", wizardStylesXaml, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"Padding\" Value=\"14\" />", wizardStylesXaml, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"CornerRadius\" Value=\"4\" />", wizardStylesXaml, StringComparison.Ordinal);
+        Assert.Contains("BasedOn=\"{StaticResource IdeDialogPanelStyle}\"", wizardStylesXaml, StringComparison.Ordinal);
+        Assert.Contains("Value=\"{StaticResource Padding.Card}\"", wizardStylesXaml, StringComparison.Ordinal);
+        Assert.Contains("Value=\"{StaticResource Radius.Medium}\"", wizardStylesXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"Margin\" Value=\"0,0,0,6\" />", wizardStylesXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("<Setter Property=\"Padding\" Value=\"16,7\" />", wizardStylesXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("<Setter Property=\"CornerRadius\" Value=\"5\" />", wizardStylesXaml, StringComparison.Ordinal);
 
-        Assert.Contains("Style=\"{DynamicResource IdeSectionHeaderTextStyle}\"", debugPaneXaml, StringComparison.Ordinal);
+        Assert.True(
+            debugPaneXaml.Contains("Style=\"{DynamicResource IdeToolWindowHeaderTextStyle}\"", StringComparison.Ordinal) ||
+            debugPaneXaml.Contains("Style=\"{DynamicResource IdeSectionHeaderTextStyle}\"", StringComparison.Ordinal));
         Assert.Equal(3, CountOccurrences(debugPaneXaml, "Style=\"{DynamicResource IdeToolWindowDataGridStyle}\""));
         Assert.True(CountOccurrences(debugPaneXaml, "Style=\"{DynamicResource IdeDialogSecondaryButtonStyle}\"") >= 2);
     }
@@ -254,7 +257,8 @@ public sealed class WholeApplicationVisualConsistencyTests
         Assert.DoesNotContain("StepBadge", exportWizardXaml, StringComparison.Ordinal);
 
         Assert.Contains("<Setter Property=\"Padding\" Value=\"12,5\" />", exportWizardStylesXaml, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"CornerRadius\" Value=\"4\" />", exportWizardStylesXaml, StringComparison.Ordinal);
+        Assert.Contains("BasedOn=\"{StaticResource IdeDialogResultPanelStyle}\"", exportWizardStylesXaml, StringComparison.Ordinal);
+        Assert.Contains("Value=\"{StaticResource Radius.Small}\"", exportWizardStylesXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("CornerRadius=\"18\"", mainXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Background=\"#", mainXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("BorderBrush=\"#", mainXaml, StringComparison.Ordinal);

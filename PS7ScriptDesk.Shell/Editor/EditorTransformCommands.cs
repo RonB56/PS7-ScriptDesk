@@ -29,6 +29,12 @@ public static class EditorTransformCommands
     public static EditorCommandResult AddTrailingComma(TextDocument document, int start, int length) => ApplyLines(document, start, length, lines => lines.Select(line => line.EndsWith(",", StringComparison.Ordinal) ? line : line + ",").ToArray());
     public static EditorCommandResult RemoveTrailingComma(TextDocument document, int start, int length) => ApplyLines(document, start, length, lines => lines.Select(line => line.EndsWith(",", StringComparison.Ordinal) ? line[..^1] : line).ToArray());
 
+    public static EditorCommandResult ConvertListToPowerShellArray(TextDocument document, int start, int length, int indentationSize = 4) =>
+        TryApplySelection(document, start, length, text => ConvertListToPowerShellArrayText(document.Text, text, indentationSize), nameof(ConvertListToPowerShellArray), typeof(FormatException));
+
+    public static EditorCommandResult ConvertPowerShellArrayToList(TextDocument document, int start, int length) =>
+        TryApplySelection(document, start, length, text => ConvertPowerShellArrayToListText(document.Text, text), nameof(ConvertPowerShellArrayToList), typeof(FormatException));
+
     public static EditorCommandResult TrimDocumentTrailingWhitespace(TextDocument document)
     {
         var lines = Enumerable.Range(1, document.LineCount).Select(number => document.GetLineByNumber(number)).ToArray();
@@ -254,6 +260,94 @@ public static class EditorTransformCommands
             return JsonSerializer.Serialize(parsed.RootElement, new JsonSerializerOptions { WriteIndented = writeIndented });
         }, commandName, typeof(JsonException));
     }
+
+    private static string ConvertListToPowerShellArrayText(string documentText, string selectedText, int indentationSize)
+    {
+        var lines = SplitLines(selectedText);
+        var values = lines.Select(line => line.Trim()).Where(line => line.Length > 0).ToArray();
+        if (values.Length == 0)
+        {
+            throw new FormatException("The selection contains no nonblank lines.");
+        }
+
+        var firstValue = lines.First(line => line.Trim().Length > 0);
+        var baseIndent = firstValue[..(firstValue.Length - firstValue.TrimStart(' ', '\t').Length)];
+        var memberIndent = baseIndent + (baseIndent.Contains('\t', StringComparison.Ordinal) ? "\t" : new string(' ', Math.Max(1, indentationSize)));
+        var lineEnding = DetectLineEnding(documentText, selectedText);
+        var renderedValues = values.Select(RenderArrayValue);
+        var result = string.Join(lineEnding, new[] { baseIndent + "@(" }.Concat(renderedValues.Select(value => memberIndent + value)).Append(baseIndent + ")"));
+        return EndsWithLineBreak(selectedText) ? result + lineEnding : result;
+    }
+
+    private static string ConvertPowerShellArrayToListText(string documentText, string selectedText)
+    {
+        var lines = SplitLines(selectedText);
+        var first = Array.FindIndex(lines, line => line.Trim().Length > 0);
+        var last = Array.FindLastIndex(lines, line => line.Trim().Length > 0);
+        if (first < 0 || last <= first || lines[first].Trim() != "@(" || lines[last].Trim() != ")")
+        {
+            throw new FormatException("The selection is not a supported PowerShell array.");
+        }
+
+        var baseIndent = lines[first][..(lines[first].Length - lines[first].TrimStart(' ', '\t').Length)];
+        var values = new List<string>();
+        for (var index = first + 1; index < last; index++)
+        {
+            var value = lines[index].Trim();
+            if (value.Length == 0) continue;
+            if (value.EndsWith(",", StringComparison.Ordinal)) value = value[..^1].TrimEnd();
+            values.Add(DecodeArrayValue(value));
+        }
+
+        var lineEnding = DetectLineEnding(documentText, selectedText);
+        var result = string.Join(lineEnding, values.Select(value => baseIndent + value));
+        return EndsWithLineBreak(selectedText) ? result + lineEnding : result;
+    }
+
+    private static string RenderArrayValue(string value)
+    {
+        if (IsSimplePowerShellValue(value) || SingleQuotedLiteral.IsMatch(value) || DoubleQuotedLiteral.IsMatch(value)) return value;
+        return $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+    }
+
+    private static string DecodeArrayValue(string value)
+    {
+        if (SingleQuotedLiteral.IsMatch(value)) return value[1..^1].Replace("''", "'", StringComparison.Ordinal);
+        if (DoubleQuotedLiteral.IsMatch(value)) return value[1..^1];
+        if (IsSimplePowerShellValue(value)) return value;
+        throw new FormatException("The array contains an unsupported expression.");
+    }
+
+    private static bool IsSimplePowerShellValue(string value) =>
+        SimpleNumberLiteral.IsMatch(value) || SimplePowerShellLiteral.IsMatch(value);
+
+    private static string[] SplitLines(string text) => text.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None);
+
+    private static string DetectLineEnding(string documentText, string selectedText)
+    {
+        if (selectedText.Contains("\r\n", StringComparison.Ordinal)) return "\r\n";
+        if (selectedText.Contains('\n')) return "\n";
+        if (documentText.Contains("\r\n", StringComparison.Ordinal)) return "\r\n";
+        return "\n";
+    }
+
+    private static bool EndsWithLineBreak(string text) => text.EndsWith("\r\n", StringComparison.Ordinal) || text.EndsWith('\n') || text.EndsWith('\r');
+
+    private static readonly Regex SimpleNumberLiteral = new(
+        @"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex SimplePowerShellLiteral = new(
+        @"^\$(?:true|false|null)$",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex SingleQuotedLiteral = new(
+        @"^'(?:''|[^'])*'$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex DoubleQuotedLiteral = new(
+        "^\"[^\"]*\"$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private static EditorCommandResult ApplyLines(TextDocument document, int start, int length, Func<IReadOnlyList<string>, IReadOnlyList<string>> transform)
     {

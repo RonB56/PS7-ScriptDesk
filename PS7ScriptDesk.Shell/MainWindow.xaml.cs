@@ -44,8 +44,8 @@ using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.PowerShell.Services;
-using PS7ScriptDesk.Shell.Debug;
 using PS7ScriptDesk.Shell.Dialogs;
+using PS7ScriptDesk.Shell.Debug;
 using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.Shell.Help;
 using PS7ScriptDesk.Shell.Services;
@@ -932,12 +932,7 @@ namespace PS7ScriptDesk.Shell
             {
                 StartupTimingLogger.Log("MainWindow", $"Startup exception: {ex}");
                 DeveloperDiagnostics.LogException("Startup", ex, "MainWindow.Window_Loaded failed.");
-                System.Windows.MessageBox.Show(
-                    this,
-                    $"PS7 ScriptDesk failed during startup.\n\n{ex}",
-                    "Startup Error",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
+                ShowIdeMessage("Startup Error", $"PS7 ScriptDesk failed during startup.\n\n{ex}");
             }
         }
 
@@ -1560,12 +1555,7 @@ namespace PS7ScriptDesk.Shell
             }
 
             ViewModel.StatusText = $"Recent script open failed: {message}";
-            System.Windows.MessageBox.Show(
-                this,
-                $"{message}{Environment.NewLine}{Environment.NewLine}{recentPath}",
-                "Recent Script",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+            ShowIdeMessage("Recent Script", $"{message}{Environment.NewLine}{Environment.NewLine}{recentPath}");
         }
 
         private static string EscapeMenuItemHeader(string text)
@@ -2160,13 +2150,9 @@ namespace PS7ScriptDesk.Shell
                     ViewModel.StatusText = "Startup update check is still in progress.";
                 }
 
-                System.Windows.MessageBox.Show(
-                    this,
+                ShowIdeMessage("PS7 ScriptDesk - Store Update Status",
                     "PS7 ScriptDesk is still completing the one-time Microsoft Store update check that started with the application.\n\n" +
-                    "Open Store Update Status again in a moment.",
-                    "PS7 ScriptDesk - Store Update Status",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                    "Open Store Update Status again in a moment.");
                 return;
             }
 
@@ -2177,13 +2163,9 @@ namespace PS7ScriptDesk.Shell
                     ViewModel.StatusText = "No startup update status is available.";
                 }
 
-                System.Windows.MessageBox.Show(
-                    this,
+                ShowIdeMessage("PS7 ScriptDesk - Store Update Status",
                     "No Microsoft Store update status was captured for this application session.\n\n" +
-                    "ScriptDesk checks Microsoft Store once after startup and does not poll again during the session.",
-                    "PS7 ScriptDesk - Store Update Status",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                    "ScriptDesk checks Microsoft Store once after startup and does not poll again during the session.");
                 return;
             }
 
@@ -2925,12 +2907,7 @@ namespace PS7ScriptDesk.Shell
                     : $"Opened {openedFileCount} file(s). Some files could not be opened.";
 
                 var failureDetails = string.Join(Environment.NewLine, failedFiles.Select(static failure => $"• {failure}"));
-                System.Windows.MessageBox.Show(
-                    this,
-                    $"{summary}{Environment.NewLine}{Environment.NewLine}{failureDetails}",
-                    "Dropped File Results",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Warning);
+                ShowIdeMessage("Dropped File Results", $"{summary}{Environment.NewLine}{Environment.NewLine}{failureDetails}");
 
                 ViewModel.StatusText = openedFileCount == 0
                     ? "Drop failed"
@@ -3091,6 +3068,8 @@ namespace PS7ScriptDesk.Shell
                 new("transform.title", "Convert Selection to Title Case", "Transform", "", new[] { "title", "titlecase" }, CanEdit, () => ApplyTransform("TitleCaseSelection", EditorTransformCommands.TitleCaseSelection)),
                 new("transform.prefix", "Prefix Each Line", "Transform", "", new[] { "prefix", "prepend" }, CanEdit, () => PromptAndApplyLineText(editor!, true)),
                 new("transform.suffix", "Suffix Each Line", "Transform", "", new[] { "suffix", "append" }, CanEdit, () => PromptAndApplyLineText(editor!, false)),
+                new("transform.listToPowerShellArray", "Convert List to PowerShell Array", "Transform", "", new[] { "list", "array", "powershell", "selection", "convert", "transform" }, CanSelectionEdit, () => ApplyTransform("ConvertListToPowerShellArray", (document, start, length) => EditorTransformCommands.ConvertListToPowerShellArray(document, start, length, editor!.Options.IndentationSize))),
+                new("transform.powerShellArrayToList", "Convert PowerShell Array to List", "Transform", "", new[] { "array", "list", "powershell", "selection", "convert", "transform" }, CanSelectionEdit, () => ApplyTransform("ConvertPowerShellArrayToList", EditorTransformCommands.ConvertPowerShellArrayToList)),
                 new("transform.quoteSingle", "Quote Each Line with Single Quotes", "Transform", "", new[] { "quote", "single", "apostrophe" }, CanEdit, () => ApplyTransform("QuoteSingle", (document, start, length) => EditorTransformCommands.QuoteLines(document, start, length, '\''))),
                 new("transform.quoteDouble", "Quote Each Line with Double Quotes", "Transform", "", new[] { "quote", "double" }, CanEdit, () => ApplyTransform("QuoteDouble", (document, start, length) => EditorTransformCommands.QuoteLines(document, start, length, '"'))),
                 new("transform.addComma", "Add Trailing Comma to Each Line", "Transform", "", new[] { "comma", "append" }, CanEdit, () => ApplyTransform("AddTrailingComma", EditorTransformCommands.AddTrailingComma)),
@@ -3118,11 +3097,32 @@ namespace PS7ScriptDesk.Shell
 
         private void PromptAndApplyLineText(TextEditor editor, bool prefix)
         {
-            var value = Microsoft.VisualBasic.Interaction.InputBox(prefix ? "Prefix for each selected line:" : "Suffix for each selected line:", prefix ? "Prefix Lines" : "Suffix Lines", prefix ? "# " : string.Empty);
-            if (value is null) return;
+            var dialog = new TextInputDialog(
+                this,
+                prefix ? "Prefix Lines" : "Suffix Lines",
+                prefix ? "Prefix for each selected line:" : "Suffix for each selected line:",
+                prefix ? "# " : string.Empty);
+            if (dialog.ShowDialog() != true || dialog.Result is null) return;
+            var value = dialog.Result;
             ApplyEditorCommand(editor, prefix ? "PrefixLines" : "SuffixLines", () => prefix
                 ? EditorTransformCommands.PrefixLines(editor.Document!, editor.SelectionStart, editor.SelectionLength, value)
                 : EditorTransformCommands.SuffixLines(editor.Document!, editor.SelectionStart, editor.SelectionLength, value));
+        }
+
+        private void ConvertListToPowerShellArray_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor)
+            {
+                ApplyEditorCommand(editor, "ConvertListToPowerShellArray", () => EditorTransformCommands.ConvertListToPowerShellArray(editor.Document!, editor.SelectionStart, editor.SelectionLength, editor.Options.IndentationSize));
+            }
+        }
+
+        private void ConvertPowerShellArrayToList_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor)
+            {
+                ApplyEditorCommand(editor, "ConvertPowerShellArrayToList", () => EditorTransformCommands.ConvertPowerShellArrayToList(editor.Document!, editor.SelectionStart, editor.SelectionLength));
+            }
         }
 
         private void EditorToggleComment_Click(object sender, RoutedEventArgs e)
@@ -5213,12 +5213,7 @@ namespace PS7ScriptDesk.Shell
             {
                 if (!TryNormalizeHexColor(input.Text, out var normalizedHex))
                 {
-                    System.Windows.MessageBox.Show(
-                        this,
-                        "Please enter a valid color in #RRGGBB format. Example: #0F4C81",
-                        "Invalid Color",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
+                    ShowIdeMessage("Invalid Color", "Please enter a valid color in #RRGGBB format. Example: #0F4C81");
                     input.Focus();
                     input.SelectAll();
                     return;
@@ -7740,12 +7735,7 @@ namespace PS7ScriptDesk.Shell
             var runtimeInfo = ViewModel?.EffectiveRuntimeItem?.RuntimeInfo;
             if (runtimeInfo is null || string.IsNullOrWhiteSpace(runtimeInfo.LaunchExecutablePath))
             {
-                System.Windows.MessageBox.Show(
-                    this,
-                    "No PowerShell runtime is currently selected.",
-                    "PowerShell Metadata Cache",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                ShowIdeMessage("PowerShell Metadata Cache", "No PowerShell runtime is currently selected.");
                 return;
             }
 
@@ -7767,13 +7757,7 @@ namespace PS7ScriptDesk.Shell
                 cacheSummary + "\n\n" +
                 "After deletion, PS7 ScriptDesk will rebuild metadata for this runtime in the background.";
 
-            var confirmation = System.Windows.MessageBox.Show(
-                this,
-                message,
-                "Delete Current Runtime Metadata Cache",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning);
-            if (confirmation != MessageBoxResult.Yes)
+            if (!ShowIdeConfirmation("Delete Current Runtime Metadata Cache", message, "Delete", "Keep"))
             {
                 return;
             }
@@ -7807,13 +7791,7 @@ namespace PS7ScriptDesk.Shell
                 $"Approximate size: {FormatByteSize(totalSize)}\n\n" +
                 "This does not delete app logs or user scripts. Metadata will be rebuilt the next time each PowerShell runtime is used.";
 
-            var confirmation = System.Windows.MessageBox.Show(
-                this,
-                message,
-                "Delete All PowerShell Metadata Caches",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning);
-            if (confirmation != MessageBoxResult.Yes)
+            if (!ShowIdeConfirmation("Delete All PowerShell Metadata Caches", message, "Delete", "Keep"))
             {
                 return;
             }
@@ -8405,13 +8383,9 @@ namespace PS7ScriptDesk.Shell
 
         private void ClearDeveloperDiagnosticsLogs_Click(object sender, RoutedEventArgs e)
         {
-            var decision = System.Windows.MessageBox.Show(
-                this,
+            if (!ShowIdeConfirmation("Clear Developer Diagnostics Logs",
                 "Delete all files under the Developer Debugging folder? This does not delete normal app logs.",
-                "Clear Developer Diagnostics Logs",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning);
-            if (decision != MessageBoxResult.Yes)
+                "Delete", "Keep"))
             {
                 return;
             }
@@ -8460,12 +8434,8 @@ namespace PS7ScriptDesk.Shell
 
                 if (showConfirmation)
                 {
-                    System.Windows.MessageBox.Show(
-                        this,
-                        $"A support logs ZIP was created and its full path was copied to the clipboard. Send this ZIP for support.\n\n{packagePath}",
-                        "Support Logs ZIP Created",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Information);
+                    ShowIdeMessage("Support Logs ZIP Created",
+                        $"A support logs ZIP was created and its full path was copied to the clipboard. Send this ZIP for support.\n\n{packagePath}");
                 }
 
                 if (openContainingFolder)
@@ -8481,12 +8451,7 @@ namespace PS7ScriptDesk.Shell
                     ViewModel.StatusText = $"Create support logs ZIP failed: {ex.Message}";
                 }
 
-                System.Windows.MessageBox.Show(
-                    this,
-                    $"PS7 ScriptDesk could not create the support logs ZIP.\n\n{ex.Message}",
-                    "Support Logs ZIP Failed",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
+                ShowIdeMessage("Support Logs ZIP Failed", $"PS7 ScriptDesk could not create the support logs ZIP.\n\n{ex.Message}");
             }
         }
 
@@ -11212,6 +11177,17 @@ namespace PS7ScriptDesk.Shell
             }
 
             RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
+        }
+
+        private void ShowIdeMessage(string title, string message)
+        {
+            _ = new IdeMessageDialog(this, title, message).ShowDialog();
+        }
+
+        private bool ShowIdeConfirmation(string title, string message, string primaryText, string secondaryText)
+        {
+            var dialog = new IdeMessageDialog(this, title, message, primaryText, secondaryText);
+            return dialog.ShowDialog() == true && dialog.PrimaryAccepted;
         }
     }
 }

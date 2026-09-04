@@ -712,15 +712,15 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
 
     private void BrowseOutputDirectory_Click(object sender, RoutedEventArgs e)
     {
-        using var dialog = new System.Windows.Forms.FolderBrowserDialog
+        var dialog = new Microsoft.Win32.OpenFolderDialog
         {
-            Description = "Choose the generated REST API project folder",
-            UseDescriptionForTitle = true
+            Title = "Choose the generated REST API project folder",
+            Multiselect = false
         };
 
-        if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+        if (dialog.ShowDialog(this) == true)
         {
-            OutputDirectoryBox.Text = dialog.SelectedPath;
+            OutputDirectoryBox.Text = dialog.FolderName;
         }
     }
 

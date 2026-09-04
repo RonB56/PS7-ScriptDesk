@@ -11,8 +11,24 @@
         ShowInTaskbar="False"
         Background="{DynamicResource Theme.App.Background}"
         Foreground="{DynamicResource Theme.Text.Primary}"
+        Style="{DynamicResource IdeToolWindowStyle}"
+        AutomationProperties.Name="Problems, Debug Output, and Activity"
         help:ContextHelp.Key="Debug.Area"
         Loaded="Window_Loaded"
         PreviewKeyDown="Window_PreviewKeyDown">
-    <ContentControl x:Name="ToolContentHost" Margin="8" />
+    <Grid Margin="{DynamicResource Padding.SubtleCard}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" Style="{DynamicResource IdeToolWindowHeaderStyle}">
+            <TextBlock Text="Problems / Debug Output / Activity"
+                       Style="{DynamicResource IdeToolWindowHeaderTextStyle}"
+                       AutomationProperties.Name="Floating tool window title" />
+        </Border>
+        <Border Grid.Row="1" Style="{DynamicResource IdeToolWindowContentBorderStyle}">
+            <ContentControl x:Name="ToolContentHost"
+                            AutomationProperties.Name="Floating tool window content" />
+        </Border>
+    </Grid>
 </Window>

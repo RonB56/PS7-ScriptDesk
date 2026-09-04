@@ -187,6 +187,10 @@
                 <MenuItem Header="Duplicate Line Down" InputGestureText="Shift+Alt+Down" Click="EditorDuplicateDown_Click" />
                 <MenuItem Header="_Delete Line" InputGestureText="Ctrl+Shift+K" Click="EditorDeleteLine_Click" />
                 <MenuItem Header="Select Current Line" Click="EditorSelectCurrentLine_Click" />
+                <MenuItem Header="Transform Selection">
+                    <MenuItem Header="Convert List to PowerShell Array" Click="ConvertListToPowerShellArray_Click" />
+                    <MenuItem Header="Convert PowerShell Array to List" Click="ConvertPowerShellArrayToList_Click" />
+                </MenuItem>
                 <Separator />
                 <MenuItem Header="_Clear Output" Command="{Binding ClearConsoleCommand}" help:ContextHelp.Key="Command.ClearOutput" />
             </MenuItem>

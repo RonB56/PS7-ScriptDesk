@@ -11,10 +11,11 @@
         ShowInTaskbar="False"
         Background="{DynamicResource Theme.App.Background}"
         Foreground="{DynamicResource Theme.Text.Primary}"
+        Style="{DynamicResource IdeSecondaryWindowStyle}"
         help:ContextHelp.Key="Files.ExternalChanges"
         Loaded="Window_Loaded"
         PreviewKeyDown="Window_PreviewKeyDown">
-    <Grid Margin="20">
+    <Grid Margin="{DynamicResource Padding.Card}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -22,39 +23,48 @@
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0"
-                   FontSize="16"
-                   FontWeight="SemiBold"
+                   Style="{DynamicResource IdeDialogTitleStyle}"
                    Text="This script changed outside PS7 ScriptDesk."
                    Margin="0,0,0,12" />
 
         <StackPanel Grid.Row="1" Margin="0,0,0,18">
             <TextBlock TextWrapping="Wrap"
+                       Style="{DynamicResource IdeDialogDescriptionStyle}"
                        Text="Saving normally would overwrite the version currently on disk." />
+            <Border Style="{DynamicResource IdeDialogResultPanelStyle}" Margin="0,10,0,0">
+              <StackPanel>
             <TextBlock x:Name="FilePathText"
                        Margin="0,10,0,0"
                        FontWeight="SemiBold"
-                       TextWrapping="Wrap" />
+                       TextWrapping="Wrap"
+                       AutomationProperties.Name="Affected file path" />
             <TextBlock x:Name="ConflictReasonText"
                        Margin="0,6,0,0"
                        TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
         </StackPanel>
 
-        <UniformGrid Grid.Row="2" Rows="1" Columns="4">
+        <Border Grid.Row="2" Style="{DynamicResource IdeDialogFooterStyle}">
+          <UniformGrid Rows="1" Columns="4">
             <Button Content="Reload from Disk"
                     Margin="0,0,6,0"
                     Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
+                    AutomationProperties.Name="Reload file from disk"
                     Click="ReloadButton_Click"
                     ToolTip="Discard the editor changes and load the current file from disk."
                     help:ContextHelp.Key="Files.ExternalChanges" />
             <Button Content="Overwrite Disk"
                     Margin="2,0,4,0"
                     Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
+                    AutomationProperties.Name="Overwrite disk file"
                     Click="OverwriteButton_Click"
                     ToolTip="Replace the current disk version with the editor content."
                     help:ContextHelp.Key="Files.ExternalChanges" />
             <Button Content="Save As..."
                     Margin="4,0,2,0"
                     Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
+                    AutomationProperties.Name="Save file as another path"
                     Click="SaveAsButton_Click"
                     ToolTip="Keep the changed disk file and save the editor content to another path."
                     help:ContextHelp.Key="Files.ExternalChanges" />
@@ -63,8 +73,10 @@
                     IsDefault="True"
                     IsCancel="True"
                     Style="{DynamicResource IdeDialogPrimaryButtonStyle}"
+                    AutomationProperties.Name="Cancel external file change"
                     Click="CancelButton_Click"
                     help:ContextHelp.Key="Files.ExternalChanges" />
-        </UniformGrid>
+          </UniformGrid>
+        </Border>
     </Grid>
 </Window>

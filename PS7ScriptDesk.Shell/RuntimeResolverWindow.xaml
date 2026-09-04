@@ -11,6 +11,7 @@
         ResizeMode="CanMinimize"
         ShowInTaskbar="False"
         Background="{DynamicResource Theme.App.Background}"
+        Style="{DynamicResource IdeSecondaryWindowStyle}"
         help:ContextHelp.Key="Runtime.Resolver"
         Loaded="Window_Loaded"
         PreviewKeyDown="Window_PreviewKeyDown">
@@ -21,7 +22,7 @@
         </Style>
     </Window.Resources>
 
-    <Grid Margin="20">
+    <Grid Margin="{DynamicResource Padding.Card}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -33,8 +34,7 @@
 
         <TextBlock Grid.Row="0"
                    Text="PS7 ScriptDesk requires PowerShell 7.0 or newer."
-                   FontSize="20"
-                   FontWeight="SemiBold"
+                   Style="{DynamicResource IdeDialogTitleStyle}"
                    TextWrapping="Wrap" />
 
         <Border Grid.Row="1"
@@ -56,7 +56,8 @@
         <TextBlock Grid.Row="2"
                    Margin="0,16,0,6"
                    Text="Selected runtime path"
-                   FontWeight="SemiBold" />
+                   Style="{DynamicResource IdeDialogFieldLabelStyle}"
+                   AutomationProperties.Name="Selected runtime path label" />
 
         <DockPanel Grid.Row="3"
                    LastChildFill="True">
@@ -70,6 +71,7 @@
             <TextBox x:Name="SelectedPathTextBox"
                      IsReadOnly="True"
                      Padding="8,5"
+                     AutomationProperties.Name="Selected runtime path"
                      VerticalContentAlignment="Center" />
         </DockPanel>
 
@@ -79,12 +81,13 @@
             <StackPanel>
                 <Border Style="{DynamicResource IdeDialogPanelStyle}">
                     <StackPanel>
-                        <TextBlock Text="Status"
-                                   FontWeight="SemiBold" />
+                        <TextBlock Text="Status" Style="{DynamicResource IdeDialogFieldLabelStyle}" />
                         <TextBlock x:Name="StatusMessageTextBlock"
                                    Margin="0,8,0,0"
                                    TextWrapping="Wrap"
-                                   LineHeight="20" />
+                                   LineHeight="20"
+                                   AutomationProperties.Name="Runtime resolver status"
+                                   AutomationProperties.LiveSetting="Polite" />
                     </StackPanel>
                 </Border>
 
@@ -115,33 +118,39 @@
             <Button Content="Try Automatic Search Again"
                     Margin="0,0,7,7"
                     Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
+                    AutomationProperties.Name="Try automatic runtime search again"
                     Click="RetryDiscoveryButton_Click"
                     help:ContextHelp.Key="Runtime.Refresh" />
             <Button Content="Browse for pwsh.exe"
                     Margin="0,0,7,7"
                     IsDefault="True"
                     Style="{DynamicResource IdeDialogPrimaryButtonStyle}"
+                    AutomationProperties.Name="Browse for PowerShell executable"
                     Click="BrowseButton_Click"
                     help:ContextHelp.Key="Runtime.Resolver" />
             <Button Content="Open Logs Folder"
                     Margin="0,0,7,7"
                     Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
+                    AutomationProperties.Name="Open runtime logs folder"
                     Click="OpenLogsFolderButton_Click"
                     help:ContextHelp.Key="Help.Logs" />
             <Button Content="Copy Logs Path"
                     Margin="0,0,7,7"
                     Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
+                    AutomationProperties.Name="Copy runtime logs path"
                     Click="CopyLogsPathButton_Click"
                     help:ContextHelp.Key="Help.Logs" />
             <Button Content="Exit"
                     Margin="0,0,7,0"
                     IsCancel="True"
                     Style="{DynamicResource IdeDialogTertiaryButtonStyle}"
+                    AutomationProperties.Name="Exit runtime resolver"
                     Click="ExitButton_Click"
                     help:ContextHelp.Key="Runtime.Resolver" />
             <Button Content="Copy Setup Help Text"
                     Margin="0"
                     Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
+                    AutomationProperties.Name="Copy setup help text"
                     Click="CopyHelpTextButton_Click"
                     help:ContextHelp.Key="Runtime.Resolver" />
         </WrapPanel>

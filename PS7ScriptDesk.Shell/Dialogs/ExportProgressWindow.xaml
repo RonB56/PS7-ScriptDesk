@@ -10,6 +10,7 @@
         ShowInTaskbar="False"
         WindowStartupLocation="CenterOwner"
         Background="{DynamicResource Theme.App.Background}"
+        Style="{StaticResource IdeSecondaryWindowStyle}"
         help:ContextHelp.Key="Command.ExportAsExe"
         Loaded="Window_Loaded"
         PreviewKeyDown="Window_PreviewKeyDown">
@@ -20,7 +21,7 @@
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Window.Resources>
-    <Grid Margin="24" KeyboardNavigation.TabNavigation="Cycle">
+    <Grid Margin="{StaticResource Padding.Card}" KeyboardNavigation.TabNavigation="Cycle">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -32,12 +33,10 @@
 
         <TextBlock Grid.Row="0"
                    Text="Export as EXE"
-                   FontSize="{StaticResource Theme.FontSize.Heading}"
-                   FontWeight="Bold"
-                   Foreground="{DynamicResource Theme.Text.Primary}"
+                   Style="{StaticResource IdeDialogTitleStyle}"
                    AutomationProperties.Name="Export as EXE progress" />
 
-        <Border Grid.Row="1" Margin="0,14,0,0" Style="{StaticResource WizardSectionCardStyle}">
+        <Border Grid.Row="1" Margin="0,14,0,0" Style="{StaticResource IdeDialogSectionStyle}">
         <StackPanel>
             <TextBlock x:Name="OutputFileNameText"
                        FontWeight="SemiBold"
@@ -50,7 +49,7 @@
         </StackPanel>
         </Border>
 
-        <Border Grid.Row="2" Margin="0,10,0,0" Style="{StaticResource WizardSectionCardStyle}">
+        <Border Grid.Row="2" Margin="0,10,0,0" Style="{StaticResource IdeDialogSectionStyle}">
         <StackPanel>
             <TextBlock x:Name="StageText"
                        FontWeight="SemiBold"
@@ -74,7 +73,7 @@
                 x:Name="CompletionBorder"
                 Margin="0,16,0,0"
                 Visibility="Collapsed"
-                Style="{StaticResource WizardSectionCardStyle}">
+                Style="{StaticResource IdeDialogSectionStyle}">
             <TextBlock x:Name="CompletionText"
                        Foreground="{DynamicResource Theme.Text.Primary}"
                        TextWrapping="Wrap" />
@@ -97,10 +96,8 @@
                      AutomationProperties.Name="Export details" />
         </Expander>
 
-        <StackPanel Grid.Row="5"
-                    Margin="0,18,0,0"
-                    HorizontalAlignment="Right"
-                    Orientation="Horizontal">
+        <Border Grid.Row="5" Style="{StaticResource IdeDialogFooterStyle}">
+          <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
             <Button x:Name="OpenFolderButton"
                     Content="Open Folder"
                     Margin="0,0,8,0"
@@ -111,12 +108,13 @@
                     AutomationProperties.Name="Open exported executable folder" />
             <Button x:Name="CloseButton"
                     Content="Close"
-                    Style="{StaticResource WizardPrimaryButtonStyle}"
+                    Style="{StaticResource IdeDialogPrimaryButtonStyle}"
                     IsEnabled="False"
                     IsDefault="True"
                     Click="CloseButton_Click"
                     help:ContextHelp.Key="Command.ExportAsExe"
                     AutomationProperties.Name="Close export progress" />
-        </StackPanel>
+          </StackPanel>
+        </Border>
     </Grid>
 </Window>

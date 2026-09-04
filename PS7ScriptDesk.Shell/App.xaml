@@ -187,6 +187,28 @@
             <Setter Property="Padding" Value="10,8" />
         </Style>
 
+        <Style x:Key="IdeToolWindowStyle" TargetType="Window">
+            <Setter Property="Background" Value="{DynamicResource Theme.App.Background}" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+            <Setter Property="FontFamily" Value="{StaticResource Theme.FontFamily}" />
+            <Setter Property="FontSize" Value="{StaticResource Theme.FontSize.Body}" />
+        </Style>
+
+        <Style x:Key="IdeToolWindowHeaderStyle" TargetType="Border" BasedOn="{StaticResource IdeHeaderPanelStyle}">
+            <Setter Property="Padding" Value="{StaticResource Padding.SubtleCard}" />
+            <Setter Property="Margin" Value="0,0,0,8" />
+        </Style>
+
+        <Style x:Key="IdeToolWindowHeaderTextStyle" TargetType="TextBlock" BasedOn="{StaticResource IdeSectionHeaderTextStyle}">
+            <Setter Property="FontSize" Value="{StaticResource Theme.FontSize.Body}" />
+        </Style>
+
+        <Style x:Key="IdeToolWindowContentBorderStyle" TargetType="Border" BasedOn="{StaticResource IdePaneBorderStyle}">
+            <Setter Property="Background" Value="{DynamicResource Theme.Surface.Primary}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
+            <Setter Property="CornerRadius" Value="{StaticResource Radius.Small}" />
+        </Style>
+
         <Style x:Key="IdeCompactEditorHeaderPanelStyle" TargetType="Border" BasedOn="{StaticResource IdeHeaderPanelStyle}">
             <Setter Property="Padding" Value="8,3" />
         </Style>
@@ -535,6 +557,57 @@
             <Setter Property="Padding" Value="12" />
             <Setter Property="CornerRadius" Value="4" />
             <Setter Property="Effect" Value="{x:Null}" />
+        </Style>
+
+        <!-- Shared contract for product-owned secondary windows. Keep these styles
+             semantic so utility dialogs can adopt the existing theme without
+             duplicating local visual values. -->
+        <Style x:Key="IdeSecondaryWindowStyle" TargetType="Window">
+            <Setter Property="Background" Value="{DynamicResource Theme.App.Background}" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+            <Setter Property="FontFamily" Value="{StaticResource Theme.FontFamily}" />
+            <Setter Property="FontSize" Value="{StaticResource Theme.FontSize.Body}" />
+        </Style>
+
+        <Style x:Key="IdeDialogTitleStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+            <Setter Property="FontSize" Value="{StaticResource Theme.FontSize.Section}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
+        <Style x:Key="IdeDialogDescriptionStyle" TargetType="TextBlock">
+            <Setter Property="Margin" Value="0,4,0,0" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+
+        <Style x:Key="IdeDialogSectionStyle" TargetType="Border" BasedOn="{StaticResource IdeDialogPanelStyle}">
+            <Setter Property="Margin" Value="0,0,0,12" />
+            <Setter Property="Padding" Value="{StaticResource Padding.Card}" />
+            <Setter Property="CornerRadius" Value="{StaticResource Radius.Medium}" />
+        </Style>
+
+        <Style x:Key="IdeDialogFieldLabelStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="0,0,12,10" />
+        </Style>
+
+        <Style x:Key="IdeDialogFieldHelpStyle" TargetType="TextBlock" BasedOn="{StaticResource IdeDialogDescriptionStyle}">
+            <Setter Property="FontSize" Value="{StaticResource Theme.FontSize.Caption}" />
+        </Style>
+
+        <Style x:Key="IdeDialogFooterStyle" TargetType="Border">
+            <Setter Property="Margin" Value="0,12,0,0" />
+            <Setter Property="Padding" Value="0,14,0,0" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
+            <Setter Property="BorderThickness" Value="0,1,0,0" />
+        </Style>
+
+        <Style x:Key="IdeDialogResultPanelStyle" TargetType="Border" BasedOn="{StaticResource IdeDialogPanelStyle}">
+            <Setter Property="Margin" Value="0,0,0,8" />
+            <Setter Property="Padding" Value="{StaticResource Padding.SubtleCard}" />
+            <Setter Property="CornerRadius" Value="{StaticResource Radius.Small}" />
         </Style>
 
         <Style x:Key="IdeBottomPaneTabToggleButtonStyle" TargetType="ToggleButton">

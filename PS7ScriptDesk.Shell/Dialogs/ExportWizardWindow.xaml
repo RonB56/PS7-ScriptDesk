@@ -3,7 +3,8 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
         Title="Export as EXE" Width="820" Height="650" MinWidth="680" MinHeight="540"
-        WindowStartupLocation="CenterOwner" Background="{DynamicResource Theme.App.Background}"
+        WindowStartupLocation="CenterOwner" Style="{DynamicResource WizardWindowStyle}"
+        AutomationProperties.Name="Export PowerShell script as EXE"
         help:ContextHelp.Key="Command.ExportAsExe" Loaded="Window_Loaded" PreviewKeyDown="Window_PreviewKeyDown">
     <Window.Resources>
         <ResourceDictionary>
@@ -13,7 +14,7 @@
         </ResourceDictionary>
     </Window.Resources>
 
-    <Grid Margin="24" KeyboardNavigation.TabNavigation="Cycle">
+    <Grid Margin="{DynamicResource Padding.Card}" KeyboardNavigation.TabNavigation="Cycle">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -22,8 +23,8 @@
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0">
-            <TextBlock Text="Export as EXE" FontSize="{StaticResource Theme.FontSize.Heading}" FontWeight="Bold" Foreground="{DynamicResource Theme.Text.Primary}" />
-            <TextBlock Text="Choose a preset, review the deployment details, then export." Margin="0,4,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" />
+            <TextBlock Text="Export as EXE" Style="{DynamicResource WizardTitleStyle}" AutomationProperties.Name="Export as EXE title" />
+            <TextBlock Text="Choose a preset, review the deployment details, then export." Style="{DynamicResource WizardDescriptionStyle}" />
         </StackPanel>
 
         <TextBlock Grid.Row="1" x:Name="ValidationText" Style="{StaticResource WizardValidationTextStyle}" />
@@ -116,7 +117,7 @@
             </Grid>
         </Border>
 
-        <Border Grid.Row="3" Margin="0,18,0,0" Padding="0,14,0,0" BorderBrush="{DynamicResource Theme.Border.Subtle}" BorderThickness="0,1,0,0">
+        <Border Grid.Row="3" Style="{DynamicResource WizardFooterStyle}">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="BackButton" Content="Back" Margin="0,0,8,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="BackButton_Click" IsEnabled="False" />
                 <Button x:Name="NextButton" Content="Next" Margin="0,0,8,0" Style="{StaticResource WizardPrimaryButtonStyle}" Click="NextButton_Click" IsDefault="True" />

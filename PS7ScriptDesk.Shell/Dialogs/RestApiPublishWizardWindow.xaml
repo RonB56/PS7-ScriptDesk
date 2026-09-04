@@ -5,7 +5,8 @@
         xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
         Title="Publish as API" Width="900" Height="680" MinWidth="760" MinHeight="560"
         WindowStartupLocation="CenterOwner"
-        Background="{DynamicResource Theme.App.Background}"
+        Style="{DynamicResource WizardWindowStyle}"
+        AutomationProperties.Name="Publish PowerShell script as REST API"
         help:ContextHelp.Key="Command.PublishRestApi"
         Loaded="Window_Loaded"
         Closing="Window_Closing"
@@ -18,7 +19,7 @@
         </ResourceDictionary>
     </Window.Resources>
 
-    <Grid Margin="24" KeyboardNavigation.TabNavigation="Cycle">
+    <Grid Margin="{DynamicResource Padding.Card}" KeyboardNavigation.TabNavigation="Cycle">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -28,13 +29,11 @@
 
         <StackPanel Grid.Row="0">
             <TextBlock Text="Publish as API"
-                       FontSize="{StaticResource Theme.FontSize.Heading}"
-                       FontWeight="Bold"
-                       Foreground="{DynamicResource Theme.Text.Primary}" />
+                       Style="{DynamicResource WizardTitleStyle}"
+                       AutomationProperties.Name="Publish as API title" />
             <TextBlock x:Name="SourceText"
-                       Margin="0,4,0,0"
-                       Foreground="{DynamicResource Theme.Text.Secondary}"
-                       TextWrapping="Wrap" />
+                       Style="{DynamicResource WizardDescriptionStyle}"
+                       AutomationProperties.Name="API source description" />
         </StackPanel>
 
         <TextBlock Grid.Row="1"
@@ -452,7 +451,7 @@
             </Border>
         </Grid>
 
-        <Border Grid.Row="3" Margin="0,18,0,0" Padding="0,14,0,0" BorderBrush="{DynamicResource Theme.Border.Subtle}" BorderThickness="0,1,0,0">
+        <Border Grid.Row="3" Style="{DynamicResource WizardFooterStyle}">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="BackButton" Content="Back" Style="{StaticResource WizardSecondaryButtonStyle}" Margin="0,0,8,0" Click="BackButton_Click" IsEnabled="False" />
                 <Button x:Name="NextButton" Content="Next" Style="{StaticResource WizardPrimaryButtonStyle}" Margin="0,0,8,0" Click="NextButton_Click" IsDefault="True" />

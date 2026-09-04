@@ -1,0 +1,26 @@
+<Window x:Class="PS7ScriptDesk.Shell.Dialogs.IdeMessageDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Message"
+        Width="480"
+        SizeToContent="Height"
+        MinWidth="360"
+        MaxWidth="720"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Style="{DynamicResource IdeSecondaryWindowStyle}"
+        AutomationProperties.Name="ScriptDesk message dialog"
+        PreviewKeyDown="Window_PreviewKeyDown">
+    <Grid Margin="{DynamicResource Padding.Card}">
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+        <TextBlock Grid.Row="0" Text="{Binding DialogTitle, RelativeSource={RelativeSource AncestorType=Window}}" Style="{DynamicResource IdeDialogTitleStyle}" AutomationProperties.Name="Message title" />
+        <TextBlock Grid.Row="1" Margin="0,8,0,14" Text="{Binding Message, RelativeSource={RelativeSource AncestorType=Window}}" Style="{DynamicResource IdeDialogDescriptionStyle}" AutomationProperties.Name="Message content" />
+        <Border Grid.Row="2" Style="{DynamicResource IdeDialogFooterStyle}">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="PrimaryButton" Content="{Binding PrimaryText, RelativeSource={RelativeSource AncestorType=Window}}" IsDefault="True" Style="{DynamicResource IdeDialogPrimaryButtonStyle}" AutomationProperties.Name="Confirm message" Click="PrimaryButton_Click" />
+                <Button x:Name="SecondaryButton" Content="{Binding SecondaryText, RelativeSource={RelativeSource AncestorType=Window}}" Margin="8,0,0,0" Style="{DynamicResource IdeDialogTertiaryButtonStyle}" AutomationProperties.Name="Cancel message" Click="SecondaryButton_Click" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

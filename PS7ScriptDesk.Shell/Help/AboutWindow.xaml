@@ -9,8 +9,9 @@
         ShowInTaskbar="False"
         WindowStartupLocation="CenterOwner"
         Background="{DynamicResource Theme.App.Background}"
+        Style="{StaticResource IdeSecondaryWindowStyle}"
         AutomationProperties.Name="About PS7 ScriptDesk">
-    <Grid Margin="18" KeyboardNavigation.TabNavigation="Cycle">
+    <Grid Margin="{StaticResource Padding.Card}" KeyboardNavigation.TabNavigation="Cycle">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -19,14 +20,11 @@
         </Grid.RowDefinitions>
 
         <Border Grid.Row="0"
-                Padding="0,0,0,14"
-                BorderBrush="{DynamicResource Theme.Border.Subtle}"
-                BorderThickness="0,0,0,1">
+                Style="{StaticResource IdeDialogFooterStyle}"
+                Padding="0,0,0,14">
             <StackPanel>
                 <TextBlock x:Name="ProductNameText"
-                           FontSize="{StaticResource Theme.FontSize.Section}"
-                           FontWeight="SemiBold"
-                           Foreground="{DynamicResource Theme.Text.Primary}"
+                           Style="{StaticResource IdeDialogTitleStyle}"
                            AutomationProperties.Name="Product name" />
                 <TextBlock x:Name="VersionText"
                            Margin="0,4,0,0"
@@ -41,14 +39,14 @@
                    Grid.Row="1"
                    Margin="0,14,0,0"
                    TextWrapping="Wrap"
-                   Foreground="{DynamicResource Theme.Text.Primary}"
+                   Style="{StaticResource IdeDialogDescriptionStyle}"
                    AutomationProperties.Name="Product description" />
 
         <TextBlock x:Name="PackageMetadataText"
                    Grid.Row="2"
                    Margin="0,12,0,0"
                    TextWrapping="Wrap"
-                   Foreground="{DynamicResource Theme.Text.Secondary}"
+                   Style="{StaticResource IdeDialogFieldHelpStyle}"
                    AutomationProperties.Name="Package metadata status" />
 
         <Button Grid.Row="3"

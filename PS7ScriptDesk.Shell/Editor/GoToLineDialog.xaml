@@ -10,10 +10,11 @@
         ShowInTaskbar="False"
         Background="{DynamicResource Theme.App.Background}"
         Foreground="{DynamicResource Theme.Text.Primary}"
+        Style="{StaticResource IdeSecondaryWindowStyle}"
         Loaded="Window_Loaded"
         PreviewKeyDown="Window_PreviewKeyDown"
         help:ContextHelp.Key="GoToLine.Dialog">
-    <Grid Margin="16">
+    <Grid Margin="{StaticResource Padding.Card}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -21,28 +22,32 @@
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10" help:ContextHelp.Key="GoToLine.Dialog">
-            <TextBlock Text="Line number" VerticalAlignment="Center" Margin="0,0,10,0" help:ContextHelp.Key="GoToLine.LineNumber" />
+            <TextBlock Text="Line number" Style="{StaticResource IdeDialogFieldLabelStyle}" Margin="0,0,10,0" AutomationProperties.Name="Line number label" help:ContextHelp.Key="GoToLine.LineNumber" />
             <TextBlock x:Name="RangeHintText"
                        Foreground="{DynamicResource Theme.Text.Secondary}"
-                       FontSize="11"
+                       FontSize="{StaticResource Theme.FontSize.Caption}"
                        VerticalAlignment="Center"
+                       AutomationProperties.Name="Valid line range"
                        help:ContextHelp.Key="GoToLine.LineNumber" />
         </StackPanel>
 
         <TextBox x:Name="LineNumberBox"
                  Grid.Row="1"
                  Margin="0,0,0,12"
-                 Padding="6,4"
+                 AutomationProperties.Name="Line number"
+                 AutomationProperties.HelpText="Enter a line number within the displayed range"
                  KeyDown="LineNumberBox_KeyDown"
                  TextChanged="LineNumberBox_TextChanged"
                  help:ContextHelp.Key="GoToLine.LineNumber" />
 
-        <UniformGrid Grid.Row="2" Rows="1" Columns="2">
+        <Border Grid.Row="2" Style="{StaticResource IdeDialogFooterStyle}">
+          <UniformGrid Rows="1" Columns="2">
             <Button x:Name="OkButton"
                     Content="Go"
                     IsDefault="True"
                     Margin="0,0,6,0"
                     Style="{StaticResource IdeDialogPrimaryButtonStyle}"
+                    AutomationProperties.Name="Go to line"
                     Click="OkButton_Click"
                     IsEnabled="False"
                     help:ContextHelp.Key="GoToLine.Go" />
@@ -50,8 +55,10 @@
                     IsCancel="True"
                     Margin="6,0,0,0"
                     Style="{StaticResource IdeDialogSecondaryButtonStyle}"
+                    AutomationProperties.Name="Cancel go to line"
                     Click="CancelButton_Click"
                     help:ContextHelp.Key="GoToLine.Dialog" />
-        </UniformGrid>
+          </UniformGrid>
+        </Border>
     </Grid>
 </Window>

@@ -11,29 +11,36 @@
         ShowInTaskbar="False"
         Background="{DynamicResource Theme.App.Background}"
         Foreground="{DynamicResource Theme.Text.Primary}"
+        Style="{DynamicResource IdeToolWindowStyle}"
+        AutomationProperties.Name="Floating Debug Pane"
         help:ContextHelp.Key="Debug.Area"
         Loaded="Window_Loaded"
         PreviewKeyDown="Window_PreviewKeyDown">
-    <Grid Margin="12">
+    <Grid Margin="{DynamicResource Padding.SubtleCard}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <DockPanel Grid.Row="0" Margin="0,0,0,8">
+        <Border Grid.Row="0" Style="{DynamicResource IdeToolWindowHeaderStyle}">
+          <DockPanel>
             <TextBlock Text="Debug"
-                       Style="{DynamicResource IdeSectionHeaderTextStyle}"
+                       Style="{DynamicResource IdeToolWindowHeaderTextStyle}"
+                       AutomationProperties.Name="Debug pane title"
                        VerticalAlignment="Center" />
             <Button DockPanel.Dock="Right"
                     Content="Dock Back"
                     Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
+                    AutomationProperties.Name="Dock debug pane back"
                     Click="DockBackButton_Click"
                     help:ContextHelp.Key="Debug.Area" />
-        </DockPanel>
+          </DockPanel>
+        </Border>
 
-        <TabControl x:Name="DebugTabControl"
-                    Grid.Row="1"
-                    SelectionChanged="DebugTabControl_SelectionChanged">
+        <Border Grid.Row="1" Style="{DynamicResource IdeToolWindowContentBorderStyle}">
+          <TabControl x:Name="DebugTabControl"
+                      SelectionChanged="DebugTabControl_SelectionChanged"
+                      AutomationProperties.Name="Debugger tool content">
             <TabItem Header="Variables"
                      help:ContextHelp.Key="Debug.Variables">
                 <DataGrid x:Name="DebugVariablesGrid"
@@ -109,6 +116,7 @@
                             help:ContextHelp.Key="Debug.RemoveBreakpoint" />
                 </Grid>
             </TabItem>
-        </TabControl>
+          </TabControl>
+        </Border>
     </Grid>
 </Window>

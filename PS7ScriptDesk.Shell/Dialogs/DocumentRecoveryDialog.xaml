@@ -1,0 +1,77 @@
+<Window x:Class="PS7ScriptDesk.Shell.Dialogs.DocumentRecoveryDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Recover Unsaved Script"
+        Width="560"
+        SizeToContent="Height"
+        MinHeight="260"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource Theme.App.Background}"
+        Style="{StaticResource IdeSecondaryWindowStyle}"
+        AutomationProperties.Name="Recover Unsaved Script"
+        PreviewKeyDown="Window_PreviewKeyDown">
+    <Grid Margin="{StaticResource Padding.Card}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="PS7 ScriptDesk found unsaved editor content from an earlier session."
+                   Style="{StaticResource IdeDialogTitleStyle}"
+                   TextWrapping="Wrap"
+                   AutomationProperties.Name="Recovery prompt title" />
+
+        <Border Grid.Row="1" Style="{StaticResource IdeDialogResultPanelStyle}" Margin="0,14,0,0">
+            <TextBlock x:Name="RecoveryDetailsText"
+                       TextWrapping="Wrap"
+                       AutomationProperties.Name="Recovery details" />
+        </Border>
+
+        <TextBlock Grid.Row="2"
+                   Margin="0,12,0,0"
+                   Text="Recovered content is temporary. Restoring it opens a dirty editor tab; saving is still explicit and will not overwrite the original file automatically."
+                   Style="{StaticResource IdeDialogFieldHelpStyle}"
+                   TextWrapping="Wrap"
+                   AutomationProperties.Name="Recovery guidance" />
+
+        <Border Grid.Row="3" Style="{StaticResource IdeDialogFooterStyle}">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="Restore"
+                        Margin="6,0,0,0"
+                        Style="{StaticResource IdeDialogPrimaryButtonStyle}"
+                        IsDefault="True"
+                        AutomationProperties.Name="Restore recovered script"
+                        ToolTip="Open recovered content in an editor tab."
+                        Tag="Restore"
+                        Click="RecoveryAction_Click" />
+                <Button Content="Discard"
+                        Margin="6,0,0,0"
+                        Style="{StaticResource IdeDialogSecondaryButtonStyle}"
+                        AutomationProperties.Name="Discard recovery snapshot"
+                        ToolTip="Delete this recovery snapshot and leave the original file untouched."
+                        Tag="Discard"
+                        Click="RecoveryAction_Click" />
+                <Button Content="Save As..."
+                        Margin="6,0,0,0"
+                        Style="{StaticResource IdeDialogSecondaryButtonStyle}"
+                        AutomationProperties.Name="Save recovered script as"
+                        ToolTip="Restore the content and choose a new file path."
+                        Tag="SaveAs"
+                        Click="RecoveryAction_Click" />
+                <Button Content="Later"
+                        Margin="6,0,0,0"
+                        Style="{StaticResource IdeDialogTertiaryButtonStyle}"
+                        IsCancel="True"
+                        AutomationProperties.Name="Keep recovery snapshot for later"
+                        ToolTip="Keep this recovery snapshot for the next startup."
+                        Tag="KeepForLater"
+                        Click="RecoveryAction_Click" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
