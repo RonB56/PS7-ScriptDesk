@@ -171,5 +171,18 @@ Notice:
 PS7 ScriptDesk is built using Microsoft .NET, ASP.NET Core, and Windows desktop technologies. Runtime components included with the application or REST API local test host, when present, are provided under Microsoft’s applicable license terms.
 
 ============================================================
+PSScriptAnalyzer 1.25.0
+============================================================
+
+Project:
+PSScriptAnalyzer 1.25.0, bundled under PS7ScriptDesk.PowerShell/Dependencies/PSScriptAnalyzer/1.25.0
+
+License:
+MIT License
+
+Notice:
+The bundled module is distributed under the MIT License. The complete upstream license and dependency notices are included beside the bundled module.
+
+============================================================
 End of third-party notices
 ============================================================

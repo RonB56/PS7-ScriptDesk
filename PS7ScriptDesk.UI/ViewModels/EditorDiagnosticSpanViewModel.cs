@@ -12,7 +12,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         public const string ErrorSeverity = "Error";
         public const string WarningSeverity = "Warning";
 
-        public EditorDiagnosticSpanViewModel(int lineNumber, int columnNumber, string message, int startOffset, int endOffset, string? severity = null)
+        public EditorDiagnosticSpanViewModel(int lineNumber, int columnNumber, string message, int startOffset, int endOffset, string? severity = null, string? sourceId = null, string? ruleId = null)
         {
             LineNumber = Math.Max(1, lineNumber);
             ColumnNumber = Math.Max(1, columnNumber);
@@ -20,6 +20,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             StartOffset = Math.Max(0, startOffset);
             EndOffset = Math.Max(StartOffset, endOffset);
             Severity = NormalizeSeverity(severity);
+            SourceId = sourceId;
+            RuleId = ruleId;
         }
 
         public int LineNumber { get; }
@@ -33,6 +35,10 @@ namespace PS7ScriptDesk.UI.ViewModels
         public int EndOffset { get; }
 
         public string Severity { get; }
+
+        public string? SourceId { get; }
+
+        public string? RuleId { get; }
 
         public bool IsError => string.Equals(Severity, ErrorSeverity, StringComparison.OrdinalIgnoreCase);
 

@@ -5,7 +5,7 @@ namespace PS7ScriptDesk.Shell.Editor
     /// StartOffset and EndOffset are zero-based character offsets into the script text.
     /// Parser failures are errors; editor authoring guidance is usually warning-level.
     /// </summary>
-    public sealed record ParseErrorInfo(string Message, int StartOffset, int EndOffset, string Severity = ParseErrorInfo.ErrorSeverity)
+    public sealed record ParseErrorInfo(string Message, int StartOffset, int EndOffset, string Severity = ParseErrorInfo.ErrorSeverity, string? SourceId = null, string? RuleId = null)
     {
         public const string ErrorSeverity = "Error";
         public const string WarningSeverity = "Warning";

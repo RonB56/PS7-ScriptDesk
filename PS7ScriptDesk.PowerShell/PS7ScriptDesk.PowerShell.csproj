@@ -23,6 +23,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="Dependencies\PSScriptAnalyzer\1.25.0\**\*"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="..\PS7ScriptDesk.Domain\Models\ApiPublishConfiguration.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Domain.Models.ApiPublishConfiguration.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.Domain\Models\ApiStreamingInvocationModels.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Domain.Models.ApiStreamingInvocationModels.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.Domain\Models\ApiMetadataResult.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Domain.Models.ApiMetadataResult.cs" />

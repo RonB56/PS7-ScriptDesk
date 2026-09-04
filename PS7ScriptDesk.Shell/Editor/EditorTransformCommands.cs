@@ -2,7 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
+using System.Text.RegularExpressions;
+using System.Text;
+using System.Text.Json;
 using ICSharpCode.AvalonEdit.Document;
+using PS7ScriptDesk.Application.Diagnostics;
 
 namespace PS7ScriptDesk.Shell.Editor;
 
@@ -49,6 +54,61 @@ public static class EditorTransformCommands
     public static EditorCommandResult SortLinesIgnoreCaseDescending(TextDocument document, int start, int length) =>
         ApplyLines(document, start, length, lines => lines.OrderByDescending(line => line, StringComparer.OrdinalIgnoreCase).ToArray());
 
+    public static EditorCommandResult SortLinesByLength(TextDocument document, int start, int length) =>
+        ApplyLines(document, start, length, lines => lines.OrderBy(line => line.Length).ToArray());
+
+    public static EditorCommandResult UniqueSortLines(TextDocument document, int start, int length) =>
+        ApplyLines(document, start, length, lines => lines.Distinct(StringComparer.Ordinal).OrderBy(line => line, StringComparer.Ordinal).ToArray());
+
+    public static EditorCommandResult CollapseConsecutiveBlankLines(TextDocument document, int start, int length) =>
+        ApplyLines(document, start, length, CollapseBlankLines);
+
+    public static EditorCommandResult AddLineNumbers(TextDocument document, int start, int length)
+    {
+        var range = GetLineRange(document, start, length);
+        var sourceLines = GetLineTexts(document, range);
+        if (sourceLines.Count > 0 && IsGeneratedNumbering(sourceLines))
+        {
+            return new EditorCommandResult(document.GetLineByNumber(range.FirstLine).Offset, GetRangeLength(document, range));
+        }
+
+        var width = sourceLines.Count.ToString(CultureInfo.InvariantCulture).Length;
+        return ApplyLines(document, start, length, lines => lines
+            .Select((line, index) => $"{(index + 1).ToString(CultureInfo.InvariantCulture).PadLeft(width)}. {line}")
+            .ToArray());
+    }
+
+    public static EditorCommandResult RemoveLineNumbers(TextDocument document, int start, int length) =>
+        ApplyLines(document, start, length, lines => lines.Select(RemoveGeneratedNumberPrefix).ToArray());
+
+    public static EditorCommandResult ConvertLineEndingsToCrlf(TextDocument document) => ConvertLineEndings(document, "\r\n");
+
+    public static EditorCommandResult ConvertLineEndingsToLf(TextDocument document) => ConvertLineEndings(document, "\n");
+
+    public static EditorCommandResult UrlEncode(TextDocument document, int start, int length) =>
+        ApplySelection(document, start, length, WebUtility.UrlEncode);
+
+    public static EditorCommandResult UrlDecode(TextDocument document, int start, int length) =>
+        ApplySelection(document, start, length, WebUtility.UrlDecode);
+
+    public static EditorCommandResult Base64Encode(TextDocument document, int start, int length) =>
+        ApplySelection(document, start, length, text => Convert.ToBase64String(Encoding.UTF8.GetBytes(text)));
+
+    public static EditorCommandResult Base64Decode(TextDocument document, int start, int length)
+    {
+        return TryApplySelection(document, start, length, text =>
+        {
+            var bytes = Convert.FromBase64String(text);
+            return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetString(bytes);
+        }, nameof(Base64Decode), typeof(FormatException), typeof(DecoderFallbackException));
+    }
+
+    public static EditorCommandResult JsonPrettyPrint(TextDocument document, int start, int length) =>
+        TryFormatJson(document, start, length, writeIndented: true, nameof(JsonPrettyPrint));
+
+    public static EditorCommandResult JsonMinify(TextDocument document, int start, int length) =>
+        TryFormatJson(document, start, length, writeIndented: false, nameof(JsonMinify));
+
     public static EditorCommandResult JoinLines(TextDocument document, int start, int length)
     {
         var range = GetLineRange(document, start, length);
@@ -69,11 +129,130 @@ public static class EditorTransformCommands
         return new EditorCommandResult(sourceStart, joined.Length);
     }
 
+    private static IReadOnlyList<string> CollapseBlankLines(IReadOnlyList<string> lines)
+    {
+        var result = new List<string>(lines.Count);
+        var inBlankRun = false;
+        foreach (var line in lines)
+        {
+            if (!string.IsNullOrWhiteSpace(line))
+            {
+                result.Add(line);
+                inBlankRun = false;
+            }
+            else if (!inBlankRun)
+            {
+                result.Add(string.Empty);
+                inBlankRun = true;
+            }
+        }
+
+        return result;
+    }
+
+    private static EditorCommandResult ConvertLineEndings(TextDocument document, string delimiter)
+    {
+        var lines = document.Lines.ToArray();
+        var replacement = string.Concat(lines.Select(line =>
+            document.GetText(line.Offset, line.Length) +
+            (line.DelimiterLength == 0 ? string.Empty : delimiter)));
+        if (!string.Equals(replacement, document.Text, StringComparison.Ordinal))
+        {
+            using (BeginUndoGroup(document)) document.Replace(0, document.TextLength, replacement);
+        }
+
+        return new EditorCommandResult(0, document.TextLength);
+    }
+
+    private static IReadOnlyList<string> GetLineTexts(TextDocument document, (int FirstLine, int LastLine) range) =>
+        Enumerable.Range(range.FirstLine, range.LastLine - range.FirstLine + 1)
+            .Select(number => document.GetLineByNumber(number))
+            .Select(line => document.GetText(line.Offset, line.Length))
+            .ToArray();
+
+    private static int GetRangeLength(TextDocument document, (int FirstLine, int LastLine) range)
+    {
+        var first = document.GetLineByNumber(range.FirstLine);
+        var last = document.GetLineByNumber(range.LastLine);
+        return Math.Min(document.TextLength - first.Offset, last.Offset + last.Length - first.Offset);
+    }
+
+    private static bool IsGeneratedNumbering(IReadOnlyList<string> lines)
+    {
+        for (var index = 0; index < lines.Count; index++)
+        {
+            var match = GeneratedNumberPrefix.Match(lines[index]);
+            if (!match.Success || !int.TryParse(match.Groups["number"].Value, out var number) || number != index + 1)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string RemoveGeneratedNumberPrefix(string line)
+    {
+        var match = GeneratedNumberPrefix.Match(line);
+        return match.Success ? line[match.Length..] : line;
+    }
+
+    private static readonly Regex GeneratedNumberPrefix = new(
+        "^[ ]*(?<number>[1-9][0-9]*)\\. ",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     private static EditorCommandResult ApplySelection(TextDocument document, int start, int length, Func<string, string> transform)
     {
         if (length <= 0) return new EditorCommandResult(start, 0);
-        using (BeginUndoGroup(document)) document.Replace(start, length, transform(document.GetText(start, length)));
+        var original = document.GetText(start, length);
+        var transformed = transform(original);
+        if (!string.Equals(original, transformed, StringComparison.Ordinal))
+        {
+            using (BeginUndoGroup(document)) document.Replace(start, length, transformed);
+        }
+
         return new EditorCommandResult(start, length);
+    }
+
+    private static EditorCommandResult TryApplySelection(
+        TextDocument document,
+        int start,
+        int length,
+        Func<string, string> transform,
+        string commandName,
+        params Type[] expectedExceptions)
+    {
+        if (length <= 0) return new EditorCommandResult(start, 0);
+
+        var original = document.GetText(start, length);
+        try
+        {
+            var transformed = transform(original);
+            if (!string.Equals(original, transformed, StringComparison.Ordinal))
+            {
+                using (BeginUndoGroup(document)) document.Replace(start, length, transformed);
+            }
+
+            return new EditorCommandResult(start, transformed.Length);
+        }
+        catch (Exception exception) when (expectedExceptions.Any(type => type.IsInstanceOfType(exception)))
+        {
+            DeveloperDiagnostics.LogDecision(
+                "Editor",
+                commandName,
+                $"{commandName} left the selection unchanged because the input was invalid.",
+                "InvalidInput");
+            return new EditorCommandResult(start, length);
+        }
+    }
+
+    private static EditorCommandResult TryFormatJson(TextDocument document, int start, int length, bool writeIndented, string commandName)
+    {
+        return TryApplySelection(document, start, length, text =>
+        {
+            using var parsed = JsonDocument.Parse(text);
+            return JsonSerializer.Serialize(parsed.RootElement, new JsonSerializerOptions { WriteIndented = writeIndented });
+        }, commandName, typeof(JsonException));
     }
 
     private static EditorCommandResult ApplyLines(TextDocument document, int start, int length, Func<IReadOnlyList<string>, IReadOnlyList<string>> transform)
@@ -83,7 +262,16 @@ public static class EditorTransformCommands
         var sourceTexts = lines.Select(line => document.GetText(line.Offset, line.Length)).ToArray();
         var delimiters = lines.Select(line => document.GetText(line.Offset + line.Length, line.TotalLength - line.Length)).ToArray();
         var transformed = transform(sourceTexts);
-        var replacement = string.Concat(transformed.Select((text, index) => text + (index < delimiters.Length ? delimiters[index] : string.Empty)));
+        var transformedDelimiters = delimiters.Take(transformed.Count).ToArray();
+        if (transformed.Count > 0 && delimiters[^1].Length == 0)
+        {
+            transformedDelimiters = transformedDelimiters
+                .Take(transformed.Count - 1)
+                .Append(string.Empty)
+                .ToArray();
+        }
+
+        var replacement = string.Concat(transformed.Select((text, index) => text + transformedDelimiters[index]));
         var sourceStart = lines[0].Offset;
         var sourceLength = lines.Sum(line => line.TotalLength);
         using (BeginUndoGroup(document)) document.Replace(sourceStart, sourceLength, replacement);

@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using PS7ScriptDesk.Application.Diagnostics;
 
 namespace PS7ScriptDesk.UI.ViewModels
 {
@@ -30,6 +31,8 @@ namespace PS7ScriptDesk.UI.ViewModels
         private string _recoveryId;
         private bool _isRecoveredContent;
         private string _recoveryNoticeText = string.Empty;
+
+        public ScriptDocumentIdentity DiagnosticDocument { get; } = new();
 
         public EditorTabViewModel(string title, string content, string? filePath = null, string? recoveryId = null)
         {
@@ -86,6 +89,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 if (_content != value)
                 {
                     _content = value;
+                    DiagnosticDocument.AdvanceRevision();
                     OnPropertyChanged();
 
                     RecalculateEditorMetrics();
@@ -112,6 +116,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (contentChanged)
             {
                 _content = normalizedContent;
+                DiagnosticDocument.AdvanceRevision();
                 OnPropertyChanged(nameof(Content));
 
                 if (!IsDirty)
@@ -444,7 +449,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             foreach (var diagnostic in incomingDiagnostics)
             {
                 _syntaxDiagnosticSpans.Add(diagnostic);
-                _syntaxErrors.Add(new SyntaxErrorViewModel(diagnostic.LineNumber, diagnostic.ColumnNumber, diagnostic.Message, diagnostic.StartOffset, diagnostic.EndOffset, diagnostic.Severity));
+                _syntaxErrors.Add(new SyntaxErrorViewModel(diagnostic.LineNumber, diagnostic.ColumnNumber, diagnostic.Message, diagnostic.StartOffset, diagnostic.EndOffset, diagnostic.Severity, diagnostic.SourceId, diagnostic.RuleId));
             }
 
             _syntaxDiagnosticsStatusText = nextStatusText;
@@ -535,6 +540,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                     existing.StartOffset != incoming.StartOffset ||
                     existing.EndOffset != incoming.EndOffset ||
                     !string.Equals(existing.Message, incoming.Message, StringComparison.Ordinal) ||
+                    !string.Equals(existing.SourceId, incoming.SourceId, StringComparison.Ordinal) ||
+                    !string.Equals(existing.RuleId, incoming.RuleId, StringComparison.Ordinal) ||
                     !string.Equals(existing.Severity, incoming.Severity, StringComparison.OrdinalIgnoreCase))
                 {
                     return false;

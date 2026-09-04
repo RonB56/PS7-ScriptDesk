@@ -165,6 +165,14 @@
 
             <MenuItem Header="_Edit" help:ContextHelp.Key="Command.Find">
                 <MenuItem Header="Command _Palette..." InputGestureText="Ctrl+Shift+P" Click="CommandPalette_Click" />
+                <MenuItem x:Name="AnalyzeCurrentDocumentMenuItem" Header="_Analyze Current Document" Click="AnalyzeCurrentDocument_Click" />
+                <MenuItem x:Name="PSScriptAnalyzerEnabledMenuItem" Header="Enable PSScriptAnalyzer" IsCheckable="True" Click="PSScriptAnalyzerEnabled_Click" />
+                <MenuItem x:Name="PSScriptAnalyzerAnalyzeWhileEditingMenuItem" Header="Analyze While Editing" IsCheckable="True" Click="PSScriptAnalyzerAnalyzeWhileEditing_Click" />
+                <MenuItem Header="PSScriptAnalyzer Severity">
+                    <MenuItem x:Name="PSScriptAnalyzerSeverityAllMenuItem" Header="All" IsCheckable="True" Click="PSScriptAnalyzerSeverity_Click" />
+                    <MenuItem x:Name="PSScriptAnalyzerSeverityErrorMenuItem" Header="Error" IsCheckable="True" Click="PSScriptAnalyzerSeverity_Click" />
+                    <MenuItem x:Name="PSScriptAnalyzerSeverityWarningMenuItem" Header="Warning" IsCheckable="True" Click="PSScriptAnalyzerSeverity_Click" />
+                </MenuItem>
                 <Separator />
                 <MenuItem Header="_Find" InputGestureText="Ctrl+F" Click="Find_Click" help:ContextHelp.Key="Command.Find" />
                 <MenuItem Header="_Replace" InputGestureText="Ctrl+H" Click="Replace_Click" help:ContextHelp.Key="Command.Replace" />
@@ -195,7 +203,7 @@
                           IsChecked="False"
                           Click="ShowDebugPanel_Click" />
                 <MenuItem x:Name="ShowBottomToolWindowMenuItem"
-                          Header="Show _Problems / Activity"
+                          Header="Show _Problems"
                           IsCheckable="True"
                           IsChecked="False"
                           Click="ShowBottomToolWindow_Click" />
@@ -1619,7 +1627,12 @@
                                                         <TextBlock Text="{Binding DisplayText}"
                                                                    TextWrapping="Wrap"
                                                                    FontWeight="SemiBold" />
-                                                        <TextBlock Text="Click to navigate to this diagnostic in the active editor"
+                                    <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                                        <TextBlock Text="{Binding SourceId}" Style="{StaticResource CaptionTextStyle}" />
+                                        <TextBlock Text="  " Style="{StaticResource CaptionTextStyle}" />
+                                        <TextBlock Text="{Binding RuleId}" Style="{StaticResource CaptionTextStyle}" />
+                                    </StackPanel>
+                                    <TextBlock Text="Click to navigate to this diagnostic"
                                                                    Style="{StaticResource CaptionTextStyle}"
                                                                    Margin="0,4,0,0" />
                                                     </StackPanel>

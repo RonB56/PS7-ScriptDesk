@@ -43,6 +43,7 @@ using PS7ScriptDesk.Application.Interfaces;
 using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Domain.Models;
+using PS7ScriptDesk.PowerShell.Services;
 using PS7ScriptDesk.Shell.Debug;
 using PS7ScriptDesk.Shell.Dialogs;
 using PS7ScriptDesk.Shell.Editor;
@@ -202,6 +203,8 @@ namespace PS7ScriptDesk.Shell
         private readonly Dictionary<TextEditor, int> _diagnosticsRequestVersions = new();
         private readonly Dictionary<TextEditor, DiagnosticLayerSnapshot> _liveSyntaxDiagnosticLayers = new();
         private readonly Dictionary<TextEditor, DiagnosticLayerSnapshot> _authoringDiagnosticLayers = new();
+        private readonly Dictionary<TextEditor, DiagnosticLayerSnapshot> _analyzerDiagnosticLayers = new();
+        private readonly HashSet<(Guid DocumentId, long Revision)> _liveAnalyzerEligibleRevisions = new();
         private readonly Dictionary<TextEditor, int> _editorRegistrationVersions = new();
         private readonly Dictionary<TextEditor, FoldingManager> _foldingManagers = new();
         private readonly Dictionary<TextEditor, CancellationTokenSource> _foldingCancellationSources = new();
@@ -214,6 +217,11 @@ namespace PS7ScriptDesk.Shell
         private readonly PowerShellIntelliSenseService _intelliSenseService = new();
         private readonly InProcessPowerShellSyntaxDiagnosticsService _liveSyntaxDiagnosticsService = new();
         private readonly PowerShellDiagnosticsService _diagnosticsService = new();
+        private readonly ScriptDiagnosticStore _scriptDiagnosticStore = new();
+        private PSScriptAnalyzerService? _psScriptAnalyzerService;
+        private PSScriptAnalyzerDiagnosticsCoordinator? _psScriptAnalyzerCoordinator;
+        private CancellationTokenSource? _manualAnalyzerCancellation;
+        private PSScriptAnalyzerLiveAnalysisScheduler? _liveAnalyzerScheduler;
         private readonly DispatcherTimer _editorHoverTimer;
         private readonly DispatcherTimer _editorMetadataWarmupTimer;
         private readonly DispatcherTimer _metadataToastShowDelayTimer;
@@ -346,6 +354,8 @@ namespace PS7ScriptDesk.Shell
             _terminalOutputDispatcher = Dispatcher;
             _applicationSettingsService = applicationSettingsService;
             _loadedSettings = loadedSettings ?? new ApplicationSettings();
+            _scriptDiagnosticStore.Changed += ScriptDiagnosticStore_Changed;
+            UpdateAnalyzerSettingsMenu();
             _uiScaleService = uiScaleService ?? UiScaleServiceHost.Current;
             var processElevation = CurrentProcessElevation.TryGetIsElevated();
             _administratorModeBannerState = AdministratorModeBannerState.Create(processElevation == true);
@@ -402,6 +412,7 @@ namespace PS7ScriptDesk.Shell
             }
 
             InitializeComponent();
+            UpdateAnalyzerSettingsMenu();
             InitializeUiScaleMenu();
             _uiScaleService.ScaleChanged += UiScaleService_ScaleChanged;
 
@@ -1718,8 +1729,10 @@ namespace PS7ScriptDesk.Shell
                 editorTextEditor.DataContext is EditorTabViewModel tab)
             {
                 var editorText = editorTextEditor.Text ?? string.Empty;
+                var contentChanged = !string.Equals(tab.Content, editorText, StringComparison.Ordinal);
                 var lineCount = editorTextEditor.Document?.LineCount ?? 1;
                 tab.UpdateContentFromEditor(editorText, lineCount);
+                if (contentChanged) _liveAnalyzerEligibleRevisions.Add((tab.DiagnosticDocument.DocumentId, tab.DiagnosticDocument.Revision));
             }
 
             UpdateEditorCaretMetrics(editorTextEditor);
@@ -3028,6 +3041,9 @@ namespace PS7ScriptDesk.Shell
 
             var commands = new List<EditorCommandDefinition>
             {
+                new("diagnostics.analyzeCurrentDocument", "Analyze Current Document", "Diagnostics", "", new[] { "analyze", "script analyzer", "psscriptanalyzer", "diagnostics" },
+                    () => ViewModel?.SelectedTab is not null,
+                    () => _ = AnalyzeCurrentDocumentAsync()),
                 new("editor.toggleComment", "Toggle Line Comment", "Editor", "Ctrl+/", new[] { "comment", "uncomment", "hash" }, CanEdit, () => ToggleCommentForEditor(editor!)),
                 new("editor.indent", "Indent Selection", "Editor", "Tab", new[] { "indent", "tab" }, CanEdit, () => ApplyTransform("Indent", (document, start, length) => EditorProductivityCommands.Indent(document, start, length))),
                 new("editor.outdent", "Outdent Selection", "Editor", "Shift+Tab", new[] { "outdent", "unindent" }, CanEdit, () => ApplyTransform("Outdent", (document, start, length) => EditorProductivityCommands.Outdent(document, start, length))),
@@ -3050,6 +3066,19 @@ namespace PS7ScriptDesk.Shell
                 new("transform.sortIgnoreCaseAsc", "Sort Lines Case-Insensitive Ascending", "Transform", "", new[] { "sort", "case insensitive", "ascending" }, CanSelectionEdit, () => ApplyTransform("SortLinesIgnoreCaseAscending", EditorTransformCommands.SortLinesIgnoreCaseAscending)),
                 new("transform.sortIgnoreCaseDesc", "Sort Lines Case-Insensitive Descending", "Transform", "", new[] { "sort", "case insensitive", "descending" }, CanSelectionEdit, () => ApplyTransform("SortLinesIgnoreCaseDescending", EditorTransformCommands.SortLinesIgnoreCaseDescending)),
                 new("transform.joinLines", "Join Lines", "Transform", "", new[] { "join", "lines" }, CanSelectionEdit, () => ApplyTransform("JoinLines", EditorTransformCommands.JoinLines)),
+                new("transform.sortByLength", "Sort Lines by Length", "Transform", "", new[] { "sort", "length", "shortest" }, CanSelectionEdit, () => ApplyTransform("SortLinesByLength", EditorTransformCommands.SortLinesByLength)),
+                new("transform.uniqueSort", "Unique + Sort Lines", "Transform", "", new[] { "unique", "sort", "deduplicate" }, CanSelectionEdit, () => ApplyTransform("UniqueSortLines", EditorTransformCommands.UniqueSortLines)),
+                new("transform.collapseBlankLines", "Collapse Consecutive Blank Lines", "Transform", "", new[] { "collapse", "blank", "whitespace" }, CanSelectionEdit, () => ApplyTransform("CollapseConsecutiveBlankLines", EditorTransformCommands.CollapseConsecutiveBlankLines)),
+                new("transform.addLineNumbers", "Add Line Numbers", "Transform", "", new[] { "number", "numbering", "lines" }, CanSelectionEdit, () => ApplyTransform("AddLineNumbers", EditorTransformCommands.AddLineNumbers)),
+                new("transform.removeLineNumbers", "Remove Line Numbers", "Transform", "", new[] { "remove", "number", "numbering" }, CanSelectionEdit, () => ApplyTransform("RemoveLineNumbers", EditorTransformCommands.RemoveLineNumbers)),
+                new("transform.convertToCrlf", "Convert Line Endings to CRLF", "Transform", "", new[] { "line endings", "crlf", "windows" }, CanEdit, () => Apply("ConvertLineEndingsToCrlf", () => EditorTransformCommands.ConvertLineEndingsToCrlf(editor!.Document!)), CommandSurfaces.CommandPalette),
+                new("transform.convertToLf", "Convert Line Endings to LF", "Transform", "", new[] { "line endings", "lf", "unix" }, CanEdit, () => Apply("ConvertLineEndingsToLf", () => EditorTransformCommands.ConvertLineEndingsToLf(editor!.Document!)), CommandSurfaces.CommandPalette),
+                new("transform.urlEncode", "URL Encode", "Transform", "", new[] { "url", "encode", "percent", "escape" }, CanSelectionEdit, () => ApplyTransform("UrlEncode", EditorTransformCommands.UrlEncode)),
+                new("transform.urlDecode", "URL Decode", "Transform", "", new[] { "url", "decode", "percent", "unescape" }, CanSelectionEdit, () => ApplyTransform("UrlDecode", EditorTransformCommands.UrlDecode)),
+                new("transform.base64Encode", "Base64 Encode", "Transform", "", new[] { "base64", "encode", "utf8" }, CanSelectionEdit, () => ApplyTransform("Base64Encode", EditorTransformCommands.Base64Encode)),
+                new("transform.base64Decode", "Base64 Decode", "Transform", "", new[] { "base64", "decode", "utf8" }, CanSelectionEdit, () => ApplyTransform("Base64Decode", EditorTransformCommands.Base64Decode)),
+                new("transform.jsonPrettyPrint", "JSON Pretty Print", "Transform", "", new[] { "json", "pretty", "format", "indent" }, CanSelectionEdit, () => ApplyTransform("JsonPrettyPrint", EditorTransformCommands.JsonPrettyPrint)),
+                new("transform.jsonMinify", "JSON Minify", "Transform", "", new[] { "json", "minify", "compact" }, CanSelectionEdit, () => ApplyTransform("JsonMinify", EditorTransformCommands.JsonMinify)),
                 new("transform.sortAsc", "Sort Lines Ascending", "Transform", "", new[] { "sort", "ascending", "alphabetize" }, CanEdit, () => ApplyTransform("SortLinesAscending", EditorTransformCommands.SortLinesAscending)),
                 new("transform.sortDesc", "Sort Lines Descending", "Transform", "", new[] { "sort", "descending", "reverse" }, CanEdit, () => ApplyTransform("SortLinesDescending", EditorTransformCommands.SortLinesDescending)),
                 new("transform.removeDuplicates", "Remove Duplicate Lines", "Transform", "", new[] { "unique", "deduplicate", "duplicates" }, CanEdit, () => ApplyTransform("RemoveDuplicateLines", EditorTransformCommands.RemoveDuplicateLines)),
@@ -3071,7 +3100,10 @@ namespace PS7ScriptDesk.Shell
             // Future registry entries can opt out by retaining the default palette-only surface.
             return new EditorCommandRegistry(commands.Select(command => command with
             {
-                Surfaces = command.Surfaces == CommandSurfaces.CommandPalette && command.Id != "transform.trimDocumentTrailingWhitespace"
+                Surfaces = command.Surfaces == CommandSurfaces.CommandPalette &&
+                           command.Id is not "transform.trimDocumentTrailingWhitespace" and
+                           not "transform.convertToCrlf" and
+                           not "transform.convertToLf"
                     ? CommandSurfaces.CommandPalette | CommandSurfaces.EditorContextMenu
                     : command.Surfaces
             }));
@@ -3960,6 +3992,8 @@ namespace PS7ScriptDesk.Shell
 
             if (_tabByEditor.TryGetValue(editorTextEditor, out var tab))
             {
+                _liveAnalyzerEligibleRevisions.RemoveWhere(item => item.DocumentId == tab.DiagnosticDocument.DocumentId);
+                _scriptDiagnosticStore.ClearDocument(tab.DiagnosticDocument.DocumentId);
                 tab.PropertyChanged -= EditorTab_PropertyChanged;
                 _editorByTab.Remove(tab);
                 _tabByEditor.Remove(editorTextEditor);
@@ -6528,6 +6562,175 @@ namespace PS7ScriptDesk.Shell
             Close();
         }
 
+        private void PSScriptAnalyzerEnabled_Click(object sender, RoutedEventArgs e)
+        {
+            _loadedSettings.PSScriptAnalyzerEnabled = PSScriptAnalyzerEnabledMenuItem.IsChecked;
+            if (!_loadedSettings.PSScriptAnalyzerEnabled)
+            {
+                _liveAnalyzerScheduler?.CancelAll();
+                foreach (var tab in _editorByTab.Keys.ToList()) _scriptDiagnosticStore.ClearDiagnostics(tab.DiagnosticDocument.DocumentId, ScriptDiagnosticSource.PSScriptAnalyzer);
+            }
+            SaveAnalyzerSettings();
+            if (ViewModel is not null) ViewModel.StatusText = _loadedSettings.PSScriptAnalyzerEnabled ? "PSScriptAnalyzer enabled" : "PSScriptAnalyzer disabled";
+        }
+
+        private void AnalyzeCurrentDocument_Click(object sender, RoutedEventArgs e)
+        {
+            _ = AnalyzeCurrentDocumentAsync();
+        }
+
+        private void PSScriptAnalyzerAnalyzeWhileEditing_Click(object sender, RoutedEventArgs e)
+        {
+            _loadedSettings.PSScriptAnalyzerAnalyzeWhileEditing = PSScriptAnalyzerAnalyzeWhileEditingMenuItem.IsChecked;
+            if (!_loadedSettings.PSScriptAnalyzerAnalyzeWhileEditing) _liveAnalyzerScheduler?.CancelAll();
+            else if (FindActiveEditor() is TextEditor activeEditor) ScheduleDiagnostics(activeEditor);
+            SaveAnalyzerSettings();
+            if (ViewModel is not null) ViewModel.StatusText = _loadedSettings.PSScriptAnalyzerAnalyzeWhileEditing ? "PSScriptAnalyzer live analysis enabled" : "PSScriptAnalyzer live analysis disabled";
+        }
+
+        private void PSScriptAnalyzerSeverity_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not WpfMenuItem item) return;
+            _loadedSettings.PSScriptAnalyzerSeverityFilter = item.Header?.ToString() switch
+            {
+                "Error" => "Error",
+                "Warning" => "Warning",
+                _ => "All"
+            };
+            UpdateAnalyzerSettingsMenu();
+            if (ViewModel?.SelectedTab is EditorTabViewModel tab)
+                _liveAnalyzerEligibleRevisions.Add((tab.DiagnosticDocument.DocumentId, tab.DiagnosticDocument.Revision));
+            SaveAnalyzerSettings();
+        }
+
+        private void SaveAnalyzerSettings()
+        {
+            try { _applicationSettingsService.SaveSettings(_loadedSettings); }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogOperationFailure("Settings", "SaveAnalyzerSettings", "Analyzer settings could not be persisted.", ex);
+                if (ViewModel is not null) ViewModel.StatusText = "Analyzer settings could not be saved";
+            }
+        }
+
+        private void UpdateAnalyzerSettingsMenu()
+        {
+            if (PSScriptAnalyzerEnabledMenuItem is null) return;
+            PSScriptAnalyzerEnabledMenuItem.IsChecked = _loadedSettings.PSScriptAnalyzerEnabled;
+            PSScriptAnalyzerAnalyzeWhileEditingMenuItem.IsChecked = _loadedSettings.PSScriptAnalyzerAnalyzeWhileEditing;
+            var severity = _loadedSettings.PSScriptAnalyzerSeverityFilter;
+            PSScriptAnalyzerSeverityAllMenuItem.IsChecked = severity.Equals("All", StringComparison.OrdinalIgnoreCase);
+            PSScriptAnalyzerSeverityErrorMenuItem.IsChecked = severity.Equals("Error", StringComparison.OrdinalIgnoreCase);
+            PSScriptAnalyzerSeverityWarningMenuItem.IsChecked = severity.Equals("Warning", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private async Task AnalyzeCurrentDocumentAsync()
+        {
+            var viewModel = ViewModel;
+            var tab = viewModel?.SelectedTab;
+            if (tab is null || viewModel is null) { if (viewModel is not null) viewModel.StatusText = "No current document"; return; }
+            if (!_loadedSettings.PSScriptAnalyzerEnabled) { viewModel.StatusText = "PSScriptAnalyzer is disabled"; return; }
+            var runtimePath = viewModel.EffectiveRuntimeExecutablePath;
+            if (string.IsNullOrWhiteSpace(runtimePath)) { viewModel.StatusText = "PSScriptAnalyzer unavailable: no PowerShell 7 runtime"; return; }
+
+            _manualAnalyzerCancellation?.Cancel();
+            _manualAnalyzerCancellation?.Dispose();
+            _manualAnalyzerCancellation = new CancellationTokenSource();
+            var cancellationToken = _manualAnalyzerCancellation.Token;
+            var snapshot = tab.DiagnosticDocument.Capture();
+            viewModel.StatusText = "PSScriptAnalyzer: Analyzing...";
+            try
+            {
+                _psScriptAnalyzerCoordinator ??= CreatePSScriptAnalyzerCoordinator(runtimePath);
+                var request = new PSScriptAnalyzerRequest($"manual-{Guid.NewGuid():N}", snapshot.DocumentId.ToString(), snapshot.DocumentRevision, tab.FilePath, tab.Content, _loadedSettings.PSScriptAnalyzerSeverityFilter);
+                var published = await _psScriptAnalyzerCoordinator.AnalyzeAndPublishAsync(request, cancellationToken).ConfigureAwait(true);
+                if (published && tab.DiagnosticDocument.Revision == snapshot.DocumentRevision)
+                {
+                    var count = _scriptDiagnosticStore.GetDiagnostics(snapshot.DocumentId, ScriptDiagnosticSource.PSScriptAnalyzer).Count;
+                    viewModel.StatusText = count > 0 ? $"PSScriptAnalyzer: Completed with {count} findings" : "PSScriptAnalyzer: No findings";
+                }
+                else if (!cancellationToken.IsCancellationRequested) viewModel.StatusText = "PSScriptAnalyzer: analysis failed";
+            }
+            catch (OperationCanceledException) { viewModel.StatusText = "PSScriptAnalyzer: Canceled"; }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogOperationFailure("PSScriptAnalyzer", "ManualAnalyzeCurrentDocument", "Manual analyzer command failed.", ex);
+                viewModel.StatusText = "PSScriptAnalyzer: unavailable";
+            }
+        }
+
+        private PSScriptAnalyzerDiagnosticsCoordinator CreatePSScriptAnalyzerCoordinator(string runtimePath)
+        {
+            _psScriptAnalyzerService = new PSScriptAnalyzerService(runtimePath);
+            return new PSScriptAnalyzerDiagnosticsCoordinator(_psScriptAnalyzerService, _scriptDiagnosticStore);
+        }
+
+        private void ScheduleLiveAnalyzer(TextEditor editorTextEditor, string scriptSnapshot, bool parserHasErrors)
+        {
+            if (!_loadedSettings.PSScriptAnalyzerEnabled || !_loadedSettings.PSScriptAnalyzerAnalyzeWhileEditing || parserHasErrors || editorTextEditor.DataContext is not EditorTabViewModel tab) return;
+            var snapshot = tab.DiagnosticDocument.Capture();
+            if (!_liveAnalyzerEligibleRevisions.Contains((snapshot.DocumentId, snapshot.DocumentRevision))) return;
+            if (scriptSnapshot.Length >= AuthoringDiagnosticsVeryLargeCharacterThreshold || CountLines(scriptSnapshot) >= AuthoringDiagnosticsVeryLargeLineThreshold)
+            {
+                if (ViewModel is not null && ReferenceEquals(ViewModel.SelectedTab, tab)) ViewModel.StatusText = "PSScriptAnalyzer: large document — manual analysis only";
+                _liveAnalyzerScheduler?.Cancel(tab.DiagnosticDocument.DocumentId);
+                return;
+            }
+            var runtimePath = ViewModel?.EffectiveRuntimeExecutablePath;
+            if (string.IsNullOrWhiteSpace(runtimePath)) return;
+            _psScriptAnalyzerCoordinator ??= CreatePSScriptAnalyzerCoordinator(runtimePath);
+            _liveAnalyzerScheduler ??= new PSScriptAnalyzerLiveAnalysisScheduler(
+                (request, cancellationToken) => _psScriptAnalyzerCoordinator?.AnalyzeAndPublishAsync(request, cancellationToken) ?? Task.FromResult(false));
+            _liveAnalyzerScheduler.ActivityChanged -= LiveAnalyzerScheduler_ActivityChanged;
+            _liveAnalyzerScheduler.ActivityChanged += LiveAnalyzerScheduler_ActivityChanged;
+            _liveAnalyzerEligibleRevisions.Remove((snapshot.DocumentId, snapshot.DocumentRevision));
+            _liveAnalyzerScheduler.Schedule(snapshot.DocumentId, snapshot.DocumentRevision, tab.FilePath, scriptSnapshot, _loadedSettings.PSScriptAnalyzerSeverityFilter);
+            if (ViewModel is not null && ReferenceEquals(ViewModel.SelectedTab, tab)) ViewModel.StatusText = "PSScriptAnalyzer: waiting for edit pause";
+        }
+
+        private void LiveAnalyzerScheduler_ActivityChanged(object? sender, PSScriptAnalyzerActivity activity)
+        {
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (ViewModel?.SelectedTab is not EditorTabViewModel tab || tab.DiagnosticDocument.DocumentId != activity.DocumentId || tab.DiagnosticDocument.Revision != activity.Revision) return;
+                ViewModel.StatusText = activity.State switch
+                {
+                    "Analyzing" => "PSScriptAnalyzer: Analyzing...",
+                    "Canceled" => "PSScriptAnalyzer: Canceled",
+                    _ => "PSScriptAnalyzer: waiting for edit pause"
+                };
+            }), DispatcherPriority.Background);
+        }
+
+        private void ResetPSScriptAnalyzerRuntime()
+        {
+            _liveAnalyzerScheduler?.CancelAll();
+            _manualAnalyzerCancellation?.Cancel();
+            _psScriptAnalyzerService?.Dispose();
+            _psScriptAnalyzerService = null;
+            _psScriptAnalyzerCoordinator = null;
+            foreach (var tab in _editorByTab.Keys.ToList()) _scriptDiagnosticStore.ClearDiagnostics(tab.DiagnosticDocument.DocumentId, ScriptDiagnosticSource.PSScriptAnalyzer);
+        }
+
+        private void ScriptDiagnosticStore_Changed(object? sender, ScriptDiagnosticsChangedEventArgs e)
+        {
+            if (!Dispatcher.CheckAccess()) { _ = Dispatcher.BeginInvoke(new Action(() => ScriptDiagnosticStore_Changed(sender, e))); return; }
+            foreach (var pair in _editorByTab.Where(pair => pair.Key.DiagnosticDocument.DocumentId == e.DocumentId).ToList())
+            {
+                var tab = pair.Key;
+                var editor = pair.Value;
+                var diagnostics = _scriptDiagnosticStore.GetDiagnostics(tab.DiagnosticDocument.DocumentId)
+                    .Where(diagnostic => diagnostic.DocumentRevision == tab.DiagnosticDocument.Revision)
+                    .Select(diagnostic =>
+                    {
+                        var range = ScriptDiagnosticRangeMapper.Map(tab.Content, diagnostic.StartLine, diagnostic.StartColumn, diagnostic.EndLine, diagnostic.EndColumn);
+                        return new ParseErrorInfo(diagnostic.Message, range.StartOffset, range.EndOffset, diagnostic.Severity == ScriptDiagnosticSeverity.Error ? "Error" : "Warning", diagnostic.SourceId.ToString(), diagnostic.RuleId);
+                    }).ToList();
+                _analyzerDiagnosticLayers[editor] = new DiagnosticLayerSnapshot(tab.Content, diagnostics);
+                ApplyCombinedDiagnosticsToTab(editor, tab.Content, "Diagnostics: OK");
+            }
+        }
+
         private async void Window_Closing(object? sender, CancelEventArgs e)
         {
             DeveloperDiagnostics.LogEventHandlerEntry("UI", "Window_Closing", "Window_Closing entered.");
@@ -6541,6 +6744,7 @@ namespace PS7ScriptDesk.Shell
 
                 _intelliSenseService.MetadataWarmupStatusChanged -= IntelliSenseService_MetadataWarmupStatusChanged;
                 _intelliSenseService.CompletionEngineStatusChanged -= IntelliSenseService_CompletionEngineStatusChanged;
+                _scriptDiagnosticStore.Changed -= ScriptDiagnosticStore_Changed;
                 _bottomToolWindow?.CloseForOwnerShutdown();
                 _debugPaneWindow?.CloseForOwnerShutdown();
                 _exportProgressWindow?.CloseForOwnerShutdown();
@@ -6548,6 +6752,11 @@ namespace PS7ScriptDesk.Shell
                 DisposeAuthoringDiagnosticsPumps();
                 _liveSyntaxDiagnosticsService.Dispose();
                 _diagnosticsService.Dispose();
+                _manualAnalyzerCancellation?.Cancel();
+                _manualAnalyzerCancellation?.Dispose();
+                _psScriptAnalyzerService?.Dispose();
+                if (_liveAnalyzerScheduler is not null) _liveAnalyzerScheduler.ActivityChanged -= LiveAnalyzerScheduler_ActivityChanged;
+                _liveAnalyzerScheduler?.Dispose();
                 _intelliSenseService.Dispose();
                 _activeCompletionCts?.Cancel();
                 _activeCompletionCts?.Dispose();
@@ -6773,6 +6982,7 @@ namespace PS7ScriptDesk.Shell
 
             if (e.PropertyName == nameof(MainWindowViewModel.EffectiveRuntimeItem))
             {
+                ResetPSScriptAnalyzerRuntime();
                 DeveloperDiagnostics.LogInfo(
                     "Startup",
                     "Effective runtime changed.",
@@ -9086,6 +9296,8 @@ namespace PS7ScriptDesk.Shell
                 RemoveStaleAuthoringDiagnostics(editorTextEditor, scriptSnapshot);
             }
 
+            ScheduleLiveAnalyzer(editorTextEditor, scriptSnapshot, parserDiagnostics.Any(static diagnostic => diagnostic.IsError));
+
             var diagnosticsChanged = ApplyCombinedDiagnosticsToTab(editorTextEditor, scriptSnapshot, successStatusText);
             if (parserTokensChanged && !diagnosticsChanged)
             {
@@ -9128,6 +9340,12 @@ namespace PS7ScriptDesk.Shell
                 combinedDiagnostics.AddRange(authoringLayer.Diagnostics);
             }
 
+            if (_analyzerDiagnosticLayers.TryGetValue(editorTextEditor, out var analyzerLayer) &&
+                analyzerLayer.IsForSnapshot(scriptSnapshot))
+            {
+                combinedDiagnostics.AddRange(analyzerLayer.Diagnostics);
+            }
+
             var orderedDiagnostics = combinedDiagnostics
                 .OrderBy(error => error.StartOffset)
                 .ThenBy(error => error.EndOffset)
@@ -9150,6 +9368,7 @@ namespace PS7ScriptDesk.Shell
         {
             _liveSyntaxDiagnosticLayers.Remove(editorTextEditor);
             _authoringDiagnosticLayers.Remove(editorTextEditor);
+            _analyzerDiagnosticLayers.Remove(editorTextEditor);
         }
 
         private void ApplyDiagnosticsFailure(
@@ -9198,7 +9417,7 @@ namespace PS7ScriptDesk.Shell
                     var lineNumber = line.LineNumber;
                     var columnNumber = Math.Max(1, safeOffset - line.Offset + 1);
 
-                    return new EditorDiagnosticSpanViewModel(lineNumber, columnNumber, error.Message, error.StartOffset, error.EndOffset, error.Severity);
+                    return new EditorDiagnosticSpanViewModel(lineNumber, columnNumber, error.Message, error.StartOffset, error.EndOffset, error.Severity, error.SourceId, error.RuleId);
                 })
                 .ToList();
 

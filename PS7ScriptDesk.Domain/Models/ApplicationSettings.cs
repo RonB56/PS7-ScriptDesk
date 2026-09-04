@@ -60,6 +60,15 @@ namespace PS7ScriptDesk.Domain.Models
 
         public string? SelectedRuntimeExecutablePath { get; set; }
 
+        /// <summary>Whether the manual PSScriptAnalyzer command is enabled.</summary>
+        public bool PSScriptAnalyzerEnabled { get; set; } = true;
+
+        /// <summary>Severity filter passed to the bundled PSScriptAnalyzer worker.</summary>
+        public string PSScriptAnalyzerSeverityFilter { get; set; } = "All";
+
+        /// <summary>Whether PSScriptAnalyzer runs automatically after suitable edit pauses.</summary>
+        public bool PSScriptAnalyzerAnalyzeWhileEditing { get; set; } = true;
+
         public string? SelectedTabFilePath { get; set; }
 
         public List<string> RecentFilePaths { get; set; } = new();
