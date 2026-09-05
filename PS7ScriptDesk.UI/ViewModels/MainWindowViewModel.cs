@@ -23,7 +23,7 @@ using PS7ScriptDesk.UI.Commands;
 
 namespace PS7ScriptDesk.UI.ViewModels
 {
-    public class MainWindowViewModel : INotifyPropertyChanged
+public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
     {
         private const int MaximumRecentFiles = 10;
         private readonly IFileDocumentService _fileDocumentService;
@@ -90,6 +90,8 @@ namespace PS7ScriptDesk.UI.ViewModels
         private int _currentTerminalGeneration;
         private int _resetConsoleInProgress;
         private bool _isDebugSessionActive;
+        private bool? _lastForensicRunEnabled;
+        private bool? _lastForensicSelectionEnabled;
         private string _workspaceText;
         private string _workspaceFilterText = string.Empty;
         private string _consoleCommandText = string.Empty;
@@ -177,6 +179,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _editorExecutionAdapter = editorExecutionAdapter;
             _editorExecutionFeatureGate = editorExecutionFeatureGate ?? new EditorExecutionFeatureGate();
             _interactiveTerminalCoordinator = interactiveTerminalCoordinator ?? new InteractiveTerminalCoordinator();
+            _interactiveTerminalCoordinator.StateChanged += OnInteractiveTerminalStateChanged;
             _terminalOutputMultiplexer = terminalOutputMultiplexer ?? new TerminalOutputMultiplexer();
             _terminalOutputMultiplexer.OutputPublished += OnTerminalOutputEnvelopePublished;
             if (_editorExecutionAdapter is not null)
@@ -895,6 +898,12 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public bool IsRunAvailable => CanRunScript();
 
+        public string InteractiveTerminalCoordinatorInstanceId => _interactiveTerminalCoordinator.InstanceId;
+
+        public InteractiveTerminalState InteractiveTerminalCoordinatorState => _interactiveTerminalCoordinator.State;
+
+        public int InteractiveTerminalCoordinatorGeneration => _interactiveTerminalCoordinator.Snapshot.Generation;
+
         public string WorkspaceFileCountText => $"Workspace Files: {_workspaceFileCount}";
 
         public string WorkspaceFolderCountText => $"Workspace Folders: {_workspaceFolderCount}";
@@ -937,6 +946,11 @@ namespace PS7ScriptDesk.UI.ViewModels
         public ICommand PublishRestApiCommand { get; }
 
         public event EventHandler<ExeExportProgressUpdate>? ExeExportProgressChanged;
+
+        public void Dispose()
+        {
+            _interactiveTerminalCoordinator.StateChanged -= OnInteractiveTerminalStateChanged;
+        }
 
         public ICommand ZoomInCommand    { get; }
         public ICommand ZoomOutCommand   { get; }
@@ -1019,6 +1033,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 StatusText = "No script tab selected";
                 return;
             }
+
+            LogForensicRunAdmission("RunSelectionEntry");
 
             if (!CanRunScript())
             {
@@ -1264,14 +1280,19 @@ namespace PS7ScriptDesk.UI.ViewModels
         public void NotifyTerminalRendererReady()
         {
             var generation = Volatile.Read(ref _currentTerminalGeneration);
-            _interactiveTerminalCoordinator.TryReplaceGeneration(
-                generation,
-                InteractiveTerminalState.Starting,
-                "Renderer reported ready; waiting for backend prompt observation.");
-            _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
-                generation,
-                InteractiveTerminalState.Starting,
-                "Renderer reported ready; waiting for backend prompt observation.");
+            var coordinatorSnapshot = _interactiveTerminalCoordinator.Snapshot;
+            if (coordinatorSnapshot.Generation != generation ||
+                coordinatorSnapshot.State != InteractiveTerminalState.InteractiveIdleAtPrompt)
+            {
+                _interactiveTerminalCoordinator.TryReplaceGeneration(
+                    generation,
+                    InteractiveTerminalState.Starting,
+                    "Renderer reported ready; waiting for backend prompt observation.");
+                _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
+                    generation,
+                    InteractiveTerminalState.Starting,
+                    "Renderer reported ready; waiting for backend prompt observation.");
+            }
             RequestTerminalFocusAfterReset(Volatile.Read(ref _currentTerminalGeneration), "RendererReady");
         }
 
@@ -1334,11 +1355,15 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             try
             {
-                var inputState = data.Contains('\r') || data.Contains('\n')
-                    ? InteractiveTerminalState.InteractiveCommandRunning
-                    : InteractiveTerminalState.InteractiveInputEditing;
-                _interactiveTerminalCoordinator.SetState(inputState, "User input was forwarded to the interactive terminal.");
-                _terminalOutputMultiplexer.SetInteractiveState(inputState, "User input was forwarded to the interactive terminal.");
+                var inputClass = TerminalInputClassifier.Classify(data);
+                if (TerminalInputClassifier.EstablishesUserEditOwnership(inputClass))
+                {
+                    var inputState = data.Contains('\r') || data.Contains('\n')
+                        ? InteractiveTerminalState.InteractiveCommandRunning
+                        : InteractiveTerminalState.InteractiveInputEditing;
+                    _interactiveTerminalCoordinator.SetState(inputState, "User input was forwarded to the interactive terminal.");
+                    _terminalOutputMultiplexer.SetInteractiveState(inputState, "User input was forwarded to the interactive terminal.");
+                }
                 AppLogger.Debug("Console", $"ViewModel forwarding raw terminal input to LiveConsoleService. Length={data.Length}.");
                 await _liveConsoleService.WriteRawInputAsync(data).ConfigureAwait(false);
             }
@@ -3716,6 +3741,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 StatusText = "No script tab selected";
                 return;
             }
+
+            LogForensicRunAdmission("RunScriptEntry");
 
             // A restored tab can look clean even when the file changed on disk after the
             // workspace was saved.  Before Run, verify that a clean saved tab still
@@ -6381,13 +6408,149 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private bool CanRunScript()
         {
-            return SelectedTab is not null &&
-                   (SelectedRuntimeItem is not null || _preferredRuntimeItem is not null) &&
-                   !IsExecutionRunning &&
-                   !_liveConsoleService.IsCommandInProgress &&
-                   !IsStopInProgress &&
-                   !IsRuntimeDiscoveryInProgress &&
-                   !IsDebugSessionActive;
+            var hasSelectedTab = SelectedTab is not null;
+            var hasRuntime = SelectedRuntimeItem is not null || _preferredRuntimeItem is not null;
+            var canStartEditorExecution = _interactiveTerminalCoordinator.CanStartEditorExecution;
+            var preferredRuntimeAvailable = _preferredRuntimeItem is not null;
+            var effectiveRuntimeAvailable = hasRuntime;
+            var canRun = hasSelectedTab &&
+                         hasRuntime &&
+                         !IsExecutionRunning &&
+                         !_liveConsoleService.IsCommandInProgress &&
+                         canStartEditorExecution &&
+                         !IsStopInProgress &&
+                         !IsRuntimeDiscoveryInProgress &&
+                         !IsDebugSessionActive;
+
+            StartupEnablementForensicLog.ObserveDependency("SelectedTab", hasSelectedTab, "MainWindowViewModel.CanRunScript");
+            StartupEnablementForensicLog.ObserveDependency("SelectedRuntimeItem", SelectedRuntimeItem is not null, "MainWindowViewModel.CanRunScript");
+            StartupEnablementForensicLog.ObserveDependency("preferredRuntimeItem", preferredRuntimeAvailable, "MainWindowViewModel.CanRunScript");
+            StartupEnablementForensicLog.ObserveDependency("effectiveRuntimeAvailable", effectiveRuntimeAvailable, "MainWindowViewModel.CanRunScript");
+            StartupEnablementForensicLog.ObserveDependency("IsExecutionRunning", IsExecutionRunning, "MainWindowViewModel.CanRunScript");
+            StartupEnablementForensicLog.ObserveDependency("liveConsoleService.IsCommandInProgress", _liveConsoleService.IsCommandInProgress, "MainWindowViewModel.CanRunScript");
+            StartupEnablementForensicLog.ObserveDependency("IsStopInProgress", IsStopInProgress, "MainWindowViewModel.CanRunScript");
+            StartupEnablementForensicLog.ObserveDependency("IsRuntimeDiscoveryInProgress", IsRuntimeDiscoveryInProgress, "MainWindowViewModel.CanRunScript");
+            StartupEnablementForensicLog.ObserveDependency("IsDebugSessionActive", IsDebugSessionActive, "MainWindowViewModel.CanRunScript");
+
+            var failingFactors = new List<string>();
+            if (!hasSelectedTab) failingFactors.Add("activeTabMissing");
+            if (!hasRuntime) failingFactors.Add("runtimeUnavailable");
+            if (IsExecutionRunning) failingFactors.Add("executionBusy");
+            if (_liveConsoleService.IsCommandInProgress) failingFactors.Add("commandInProgress");
+            if (!canStartEditorExecution) failingFactors.Add("interactiveAdmission");
+            if (IsStopInProgress) failingFactors.Add("stopInProgress");
+            if (IsRuntimeDiscoveryInProgress) failingFactors.Add("runtimeDiscoveryInProgress");
+            if (IsDebugSessionActive) failingFactors.Add("debugSessionActive");
+            var tab = SelectedTab;
+            var forensicProperties = new Dictionary<string, object?>
+            {
+                ["enabled"] = canRun,
+                ["activeTabExists"] = hasSelectedTab,
+                ["activeTabType"] = tab?.GetType().FullName ?? "(none)",
+                ["activeDocumentId"] = tab?.DiagnosticDocument.DocumentId.ToString("N"),
+                ["editorReady"] = "not_tracked_by_viewmodel",
+                ["documentLoaded"] = tab is not null,
+                ["language"] = ".ps1/PowerShell",
+                ["scriptTextLength"] = tab?.Content?.Length ?? 0,
+                ["selectionLength"] = "not_available_in_viewmodel",
+                ["runtimeSelected"] = SelectedRuntimeItem is not null,
+                ["preferredRuntimeAvailable"] = preferredRuntimeAvailable,
+                ["effectiveRuntimeAvailable"] = effectiveRuntimeAvailable,
+                ["runtimeAvailable"] = hasRuntime,
+                ["terminalSessionRunning"] = _liveConsoleService.IsSessionRunning,
+                ["terminalCoordinatorState"] = _interactiveTerminalCoordinator.State,
+                ["canStartEditorExecution"] = canStartEditorExecution,
+                ["isCommandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                ["isExecutionRunning"] = IsExecutionRunning,
+                ["isStopInProgress"] = IsStopInProgress,
+                ["isRuntimeDiscoveryInProgress"] = IsRuntimeDiscoveryInProgress,
+                ["isDebugSessionActive"] = IsDebugSessionActive,
+                ["failingFactors"] = failingFactors.Count == 0 ? "(none)" : string.Join(',', failingFactors),
+                ["selectionEnablementUsesSameBinding"] = true
+            };
+            forensicProperties["coordinatorInstanceId"] = _interactiveTerminalCoordinator.InstanceId;
+            StartupEnablementForensicLog.RunEnablementEvaluated(
+                canRun,
+                _interactiveTerminalCoordinator.Snapshot.Generation,
+                new Dictionary<string, object?>(forensicProperties),
+                failingFactors);
+            AdmissionForensicLog.Write("RUN_ENABLEMENT_EVALUATED", forensicProperties);
+            AdmissionForensicLog.Write("RUN_SELECTION_ENABLEMENT_EVALUATED", forensicProperties);
+            if (_lastForensicRunEnabled != canRun)
+            {
+                AdmissionForensicLog.Write("RUN_ENABLEMENT_CHANGED", new Dictionary<string, object?>
+                {
+                    ["previous"] = _lastForensicRunEnabled?.ToString() ?? "(unknown)",
+                    ["new"] = canRun,
+                    ["failingFactors"] = forensicProperties["failingFactors"]
+                });
+                _lastForensicRunEnabled = canRun;
+            }
+            if (_lastForensicSelectionEnabled != canRun)
+            {
+                AdmissionForensicLog.Write("RUN_SELECTION_ENABLEMENT_CHANGED", new Dictionary<string, object?>
+                {
+                    ["previous"] = _lastForensicSelectionEnabled?.ToString() ?? "(unknown)",
+                    ["new"] = canRun,
+                    ["failingFactors"] = forensicProperties["failingFactors"]
+                });
+                _lastForensicSelectionEnabled = canRun;
+            }
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseUiEnabled())
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Execution",
+                    "RunAdmission",
+                    "Evaluated Run and Run Selection command availability during forensic diagnosis.",
+                    canRun ? "Accepted" : "Rejected",
+                    new Dictionary<string, object?>
+                    {
+                        ["hasSelectedTab"] = hasSelectedTab,
+                        ["hasRuntime"] = hasRuntime,
+                        ["isExecutionRunning"] = IsExecutionRunning,
+                        ["isCommandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                        ["canStartEditorExecution"] = canStartEditorExecution,
+                        ["interactiveTerminalState"] = _interactiveTerminalCoordinator.State.ToString(),
+                        ["interactiveTerminalGeneration"] = _interactiveTerminalCoordinator.Snapshot.Generation,
+                        ["isStopInProgress"] = IsStopInProgress,
+                        ["isRuntimeDiscoveryInProgress"] = IsRuntimeDiscoveryInProgress,
+                        ["isDebugSessionActive"] = IsDebugSessionActive
+                    });
+            }
+
+            return canRun;
+        }
+
+        private void OnInteractiveTerminalStateChanged(object? sender, EventArgs e)
+        {
+            PostToUi(RefreshCommandStates);
+        }
+
+        private void LogForensicRunAdmission(string eventName)
+        {
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            var snapshot = _interactiveTerminalCoordinator.Snapshot;
+            DeveloperDiagnostics.LogInfo(
+                "Execution",
+                "Editor execution entry point reached during forensic diagnosis.",
+                new Dictionary<string, object?>
+                {
+                    ["eventName"] = eventName,
+                    ["interactiveTerminalState"] = snapshot.State.ToString(),
+                    ["interactiveTerminalGeneration"] = snapshot.Generation,
+                    ["interactiveTerminalReason"] = snapshot.Reason,
+                    ["canStartEditorExecution"] = _interactiveTerminalCoordinator.CanStartEditorExecution,
+                    ["isExecutionRunning"] = IsExecutionRunning,
+                    ["isCommandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                    ["isStopInProgress"] = IsStopInProgress,
+                    ["isRuntimeDiscoveryInProgress"] = IsRuntimeDiscoveryInProgress,
+                    ["isDebugSessionActive"] = IsDebugSessionActive
+                });
         }
 
         private bool CanExportAsExe()
@@ -6440,6 +6603,12 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public void RefreshCommandStates()
         {
+            AdmissionForensicLog.Write("COMMAND_REQUERY", new Dictionary<string, object?>
+            {
+                ["runEnabled"] = CanRunScript(),
+                ["terminalCoordinatorState"] = _interactiveTerminalCoordinator.State,
+                ["terminalSessionRunning"] = _liveConsoleService.IsSessionRunning
+            });
             _closeAllTabsCommand.RaiseCanExecuteChanged();
             _runCommand.RaiseCanExecuteChanged();
             _stopCommand.RaiseCanExecuteChanged();
@@ -6564,6 +6733,14 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
+            if (propertyName is nameof(SelectedTab) or nameof(IsExecutionRunning) or nameof(IsRuntimeDiscoveryInProgress) or nameof(IsDebugSessionActive) or nameof(SelectedRuntimeItem))
+            {
+                AdmissionForensicLog.Write("ENABLEMENT_RELATED_PROPERTY_CHANGED", new Dictionary<string, object?>
+                {
+                    ["property"] = propertyName,
+                    ["runEnabledAfterPropertyChange"] = CanRunScript()
+                });
+            }
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
     }

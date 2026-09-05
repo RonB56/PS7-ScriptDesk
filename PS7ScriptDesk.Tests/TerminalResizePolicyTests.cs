@@ -429,8 +429,5 @@ public sealed class TerminalResizePolicyTests
     }
 
     private static string ReadRepositoryFile(params string[] parts)
-    {
-        var path = Path.Combine(new[] { AppContext.BaseDirectory, "..", "..", "..", ".." }.Concat(parts).ToArray());
-        return File.ReadAllText(path);
-    }
+        => TestRepositoryPaths.ReadFile(parts);
 }

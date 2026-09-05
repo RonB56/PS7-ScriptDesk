@@ -83,7 +83,8 @@ public sealed class PopupMenuThemeContrastTests
 
         var editorContextMenuXaml = mainXaml[menuStart..menuEnd];
 
-        Assert.Contains("<ContextMenu>", editorContextMenuXaml, StringComparison.Ordinal);
+        // AvalonEdit owns the ContextMenu property element; menu items are
+        // declared directly inside it rather than beneath a nested ContextMenu.
         Assert.Contains("<MenuItem Header=\"Cut\"", editorContextMenuXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("<ContextMenu Style=", editorContextMenuXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Foreground=\"Gray\"", editorContextMenuXaml, StringComparison.OrdinalIgnoreCase);

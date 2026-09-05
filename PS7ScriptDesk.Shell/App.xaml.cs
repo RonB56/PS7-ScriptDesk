@@ -31,6 +31,8 @@ namespace PS7ScriptDesk.Shell
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            AdmissionForensicLog.Start();
+            StartupEnablementForensicLog.Start();
             var startupArgs = e.Args ?? Array.Empty<string>();
             TerminalCriticalTrace.ConfigureUiThreadSnapshotProvider(() =>
                 new TerminalCriticalUiThreadSnapshot(
@@ -129,7 +131,13 @@ namespace PS7ScriptDesk.Shell
                     ["savedRuntimePath"] = applicationSettings.SelectedRuntimeExecutablePath
                 });
 
+            StartupEnablementForensicLog.Write("RUNTIME_DISCOVERY_BEGIN");
             var startupRuntime = ResolveStartupRuntime(applicationSettings);
+            StartupEnablementForensicLog.Write("RUNTIME_DISCOVERY_RESULT", new Dictionary<string, object?>
+            {
+                ["runtimeAvailable"] = startupRuntime is not null,
+                ["runtimePath"] = startupRuntime?.LaunchExecutablePath
+            });
             if (startupRuntime is null)
             {
                 AppLogger.Info("App", "Startup canceled because no valid PowerShell 7 runtime was available.");
@@ -139,6 +147,11 @@ namespace PS7ScriptDesk.Shell
             }
 
             applicationSettings.SelectedRuntimeExecutablePath = startupRuntime.LaunchExecutablePath;
+            StartupEnablementForensicLog.Write("RUNTIME_SELECTED", new Dictionary<string, object?>
+            {
+                ["runtimePath"] = startupRuntime.LaunchExecutablePath,
+                ["runtimeVersion"] = startupRuntime.VersionText
+            });
             SafeSaveSettings(applicationSettingsService, applicationSettings, startupRuntime);
 
             var shellWindow = AppBootstrapper.CreateMainWindow(applicationSettingsService, applicationSettings, startupRuntime, uiScaleService);
@@ -153,6 +166,8 @@ namespace PS7ScriptDesk.Shell
 
         protected override void OnExit(ExitEventArgs e)
         {
+            StartupEnablementForensicLog.Stop();
+            AdmissionForensicLog.Stop();
             DeveloperDiagnostics.LogInfo("Startup", $"App.OnExit invoked with exit code {e.ApplicationExitCode}.");
             DeveloperDiagnostics.Shutdown();
             base.OnExit(e);

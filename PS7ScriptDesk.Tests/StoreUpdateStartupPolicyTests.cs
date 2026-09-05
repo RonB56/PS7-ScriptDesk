@@ -51,8 +51,5 @@ public sealed class StoreUpdateStartupPolicyTests
     }
 
     private static string ReadRepositoryFile(params string[] segments)
-    {
-        var path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", Path.Combine(segments)));
-        return File.ReadAllText(path);
-    }
+        => TestRepositoryPaths.ReadFile(segments);
 }

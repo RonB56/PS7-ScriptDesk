@@ -479,7 +479,7 @@
                 <Separator Style="{StaticResource IdeToolbarSeparatorStyle}" />
 
                 <!-- Run group -->
-                <Button Click="RunScript_Click"
+                <Button x:Name="RunButton" Click="RunScript_Click"
                         help:ContextHelp.Key="Command.RunScript"
                         IsEnabled="{Binding IsRunAvailable}"
                         Style="{StaticResource IdeToolbarPrimaryButtonStyle}"
@@ -493,7 +493,7 @@
                     </StackPanel>
                 </Button>
 
-                <Button Click="RunSelection_Click"
+                <Button x:Name="RunSelectionButton" Click="RunSelection_Click"
                         help:ContextHelp.Key="Command.RunSelection"
                         IsEnabled="{Binding IsRunAvailable}"
                         Style="{StaticResource IdeToolbarButtonStyle}"

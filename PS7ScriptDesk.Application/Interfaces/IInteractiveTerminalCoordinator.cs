@@ -10,6 +10,10 @@ public interface IInteractiveTerminalCoordinator
 
     bool CanStartEditorExecution { get; }
 
+    string InstanceId { get; }
+
+    event EventHandler? StateChanged;
+
     void SetState(InteractiveTerminalState state, string? reason = null);
 
     bool TryReplaceGeneration(int generation, InteractiveTerminalState state, string? reason = null);

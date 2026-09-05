@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.ExceptionServices;
+using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.PowerShell.Services;
 
@@ -209,6 +210,24 @@ public sealed class LiveConsoleServiceCharacterizationTests
         Assert.DoesNotContain("__psstudioSnapshotRoot", startup, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void TerminalStartup_InstallsMarkedPsReadLineHistoryFilterAndChainsExistingHandler()
+    {
+        using var service = new LiveConsoleService();
+        var startup = Assert.IsType<string>(InvokePrivate(service, "BuildTerminalStartupCommand"));
+
+        Assert.Contains("AddToHistoryHandler", startup, StringComparison.Ordinal);
+        Assert.Contains("SkipAdding", startup, StringComparison.Ordinal);
+        Assert.Contains("__pssdPreviousAddToHistoryHandler", startup, StringComparison.Ordinal);
+        Assert.Contains("TerminalSnapshots", startup, StringComparison.Ordinal);
+        Assert.Contains("(?:psd|psh|psi)-[0-9a-f]{32}", startup, StringComparison.Ordinal);
+        Assert.Contains("#PS7SDi", startup, StringComparison.Ordinal);
+        Assert.Contains("return 'MemoryAndFile'", startup, StringComparison.Ordinal);
+        Assert.DoesNotContain("HistorySaveStyle", startup, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Clear-History", startup, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Remove-History", startup, StringComparison.OrdinalIgnoreCase);
+    }
+
 
 
     [Fact]
@@ -282,6 +301,62 @@ public sealed class LiveConsoleServiceCharacterizationTests
         finally
         {
             File.Delete(helperPath);
+        }
+    }
+
+    [Fact]
+    public void DispatchHelper_HistoryProbeIsReadOnlyBoundedAndContentFree()
+    {
+        using var service = new LiveConsoleService();
+        var helperPath = Assert.IsType<string>(InvokePrivate(service, "CreateDispatchHelperSnapshot"));
+        try
+        {
+            var helper = File.ReadAllText(helperPath);
+            Assert.Contains("Get-History -Count 64", helper, StringComparison.Ordinal);
+            Assert.Contains("HISTORY;", helper, StringComparison.Ordinal);
+            Assert.Contains("engineHistoryMatchingEntryHashes", helper, StringComparison.Ordinal);
+            Assert.Contains("operationId", helper, StringComparison.Ordinal);
+            Assert.Contains("dispatchHash", helper, StringComparison.Ordinal);
+            Assert.DoesNotContain("Clear-History", helper, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Remove-History", helper, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Set-PSReadLineOption", helper, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("CommandLine =", helper, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            File.Delete(helperPath);
+        }
+    }
+
+    [Fact]
+    public void HistoryProbeMetadata_IsOmittedWhenDeveloperDiagnosticsAreDisabled()
+    {
+        DeveloperDiagnostics.Disable("characterization test");
+        using var service = new LiveConsoleService();
+        var instructionPath = Assert.IsType<string>(InvokePrivate(
+            service,
+            "CreateDispatchInstructionSnapshot",
+            "script.ps1",
+            "start",
+            "done",
+            "location_",
+            true));
+        try
+        {
+            InvokePrivate(
+                service,
+                "WriteHistoryProbeMetadata",
+                instructionPath,
+                "operation-123",
+                @"C:\Temp\TerminalSnapshots\psd-0123456789abcdef0123456789abcdef.ps1",
+                "ABCDEF",
+                12);
+
+            Assert.Equal(5, File.ReadAllLines(instructionPath).Length);
+        }
+        finally
+        {
+            File.Delete(instructionPath);
         }
     }
 

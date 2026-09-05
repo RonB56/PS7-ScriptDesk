@@ -1,12 +1,120 @@
 using PS7ScriptDesk.Application.Interfaces;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.Infrastructure.Services;
+using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.UI.ViewModels;
 
 namespace PS7ScriptDesk.Tests;
 
 public sealed class TerminalLifecycleViewModelTests
 {
+    [Theory]
+    [InlineData("\u001b[I")]
+    [InlineData("\u001b[O")]
+    public async Task FocusProtocolInput_DoesNotLeaveIdleStateOrDisableRun(string input)
+    {
+        var coordinator = new InteractiveTerminalCoordinator();
+        coordinator.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "test-idle");
+        var viewModel = await CreateViewModelAsync(new RecordingLiveConsoleService(), CreateRuntime(), coordinator);
+
+        await viewModel.WriteRawInputAsync(input);
+
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
+        Assert.True(coordinator.CanStartEditorExecution);
+        Assert.True(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task RendererReadyBeforePromptReadiness_PreservesStartingWaitState()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var coordinator = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+        console.RaiseSessionStarted(7);
+
+        viewModel.NotifyTerminalRendererReady();
+
+        Assert.Equal(InteractiveTerminalState.Starting, coordinator.State);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task LateRendererReady_DoesNotRegressPromptReadyState()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var coordinator = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+        console.RaiseSessionStarted(8);
+        console.RaisePromptReady(8, "C:\\");
+
+        viewModel.NotifyTerminalRendererReady();
+
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
+        Assert.True(coordinator.CanStartEditorExecution);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task CoordinatorStateChangesRefreshRunPropertyAndCommandAvailability()
+    {
+        var coordinator = new InteractiveTerminalCoordinator();
+        coordinator.SetState(InteractiveTerminalState.Starting, "test-starting");
+        var viewModel = await CreateViewModelAsync(new RecordingLiveConsoleService(), CreateRuntime(), coordinator);
+        var propertyChanges = new List<string?>();
+        var commandChangeCount = 0;
+        viewModel.PropertyChanged += (_, args) => propertyChanges.Add(args.PropertyName);
+        viewModel.RunCommand.CanExecuteChanged += (_, _) => commandChangeCount++;
+
+        Assert.False(viewModel.IsRunAvailable);
+        Assert.False(viewModel.RunCommand.CanExecute(null));
+
+        coordinator.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "test-idle");
+
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+        Assert.Contains(nameof(MainWindowViewModel.IsRunAvailable), propertyChanges);
+        Assert.True(commandChangeCount > 0);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task CoordinatorEditingAndCommandRunningStatesDisableRunUntilPromptReturns()
+    {
+        var coordinator = new InteractiveTerminalCoordinator();
+        coordinator.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "test-idle");
+        var viewModel = await CreateViewModelAsync(new RecordingLiveConsoleService(), CreateRuntime(), coordinator);
+
+        Assert.True(viewModel.IsRunAvailable);
+
+        coordinator.SetState(InteractiveTerminalState.InteractiveInputEditing, "test-editing");
+        Assert.False(viewModel.IsRunAvailable);
+        Assert.False(viewModel.RunCommand.CanExecute(null));
+
+        coordinator.SetState(InteractiveTerminalState.InteractiveCommandRunning, "test-running");
+        Assert.False(viewModel.IsRunAvailable);
+
+        coordinator.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "test-idle-again");
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task CoordinatorStoppingAndUnavailableStatesDisableSharedRunEnablement()
+    {
+        var coordinator = new InteractiveTerminalCoordinator();
+        coordinator.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "test-idle");
+        var viewModel = await CreateViewModelAsync(new RecordingLiveConsoleService(), CreateRuntime(), coordinator);
+
+        Assert.True(viewModel.IsRunAvailable);
+        coordinator.SetState(InteractiveTerminalState.Stopping, "test-stopping");
+        Assert.False(viewModel.IsRunAvailable);
+        coordinator.SetState(InteractiveTerminalState.Unavailable, "test-unavailable");
+        Assert.False(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
     [Fact]
     public async Task StopCommand_UsesInterruptRecoveryAndReturnsUiToIdle()
     {
@@ -301,7 +409,8 @@ public sealed class TerminalLifecycleViewModelTests
 
     private static Task<MainWindowViewModel> CreateViewModelAsync(
         RecordingLiveConsoleService console,
-        PowerShellRuntimeInfo? runtime = null)
+        PowerShellRuntimeInfo? runtime = null,
+        IInteractiveTerminalCoordinator? coordinator = null)
     {
         return Task.Run(() => new MainWindowViewModel(
             new FakeWorkspaceService(),
@@ -311,7 +420,8 @@ public sealed class TerminalLifecycleViewModelTests
             new FakeUserPromptService(),
             console,
             new FakeExeExportService(),
-            startupRuntimeInfo: runtime));
+            startupRuntimeInfo: runtime,
+            interactiveTerminalCoordinator: coordinator));
     }
 
     private static PowerShellRuntimeInfo CreateRuntime()
@@ -462,6 +572,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public void RaiseScriptCompleted() => ScriptExecutionCompleted?.Invoke();
     public void RaiseCommandCompleted() => CommandExecutionCompleted?.Invoke();
     public void RaiseSessionTerminated() => SessionTerminated?.Invoke();
+    public void RaiseSessionStarted(int generation) => TerminalSessionStarted?.Invoke(generation);
     public void RaiseRawOutput(string text) => RawOutputReceived?.Invoke(1, text);
 
     public void RaisePromptReady(int generation, string path) => PromptReadyObserved?.Invoke(generation, path);

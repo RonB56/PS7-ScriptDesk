@@ -16,6 +16,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media.Animation;
 using System.Windows.Media;
@@ -96,6 +97,9 @@ namespace PS7ScriptDesk.Shell
         private readonly ConcurrentQueue<TerminalOutputEnvelope> _terminalOutputEnvelopeQueue = new();
         private readonly Dispatcher _terminalOutputDispatcher;
         private MainWindowViewModel? _viewModel;
+        private DependencyPropertyDescriptor? _isEnabledDescriptor;
+        private bool _lastRunControlIsEnabled;
+        private bool _lastRunSelectionControlIsEnabled;
         private CommandPaletteWindow? _commandPaletteWindow;
         private int _terminalOutputDrainScheduled;
         private int _terminalOutputQueuedEnvelopeCount;
@@ -457,6 +461,17 @@ namespace PS7ScriptDesk.Shell
             Dispatcher.VerifyAccess();
             Volatile.Write(ref _viewModel, viewModel);
             DataContext = viewModel;
+            _isEnabledDescriptor = DependencyPropertyDescriptor.FromProperty(UIElement.IsEnabledProperty, typeof(UIElement));
+            _lastRunControlIsEnabled = RunButton.IsEnabled;
+            _lastRunSelectionControlIsEnabled = RunSelectionButton.IsEnabled;
+            _isEnabledDescriptor?.AddValueChanged(RunButton, RunButton_IsEnabledChanged);
+            _isEnabledDescriptor?.AddValueChanged(RunSelectionButton, RunSelectionButton_IsEnabledChanged);
+            StartupEnablementForensicLog.Write("VIEWMODEL_ATTACHED", new Dictionary<string, object?>
+            {
+                ["viewModelCoordinatorInstanceId"] = viewModel.InteractiveTerminalCoordinatorInstanceId,
+                ["runIsAvailable"] = viewModel.IsRunAvailable,
+                ["runCommandCanExecute"] = viewModel.RunCommand.CanExecute(null)
+            });
             DeveloperDiagnostics.LogInfo(
                 "Startup",
                 "MainWindow attached its view model reference before DataContext exposure.",
@@ -830,6 +845,8 @@ namespace PS7ScriptDesk.Shell
                 // Forward xterm.js keystrokes to ConPTY stdin.
                 TerminalConsole.UserInput += async data =>
                 {
+                    var coordinatorStateBefore = ViewModel?.InteractiveTerminalCoordinatorState;
+                    var inputClass = TerminalInputClassifier.Classify(data);
                     AppLogger.Debug("Terminal", $"MainWindow received terminal input for forwarding. Length={data.Length}, ContentOmitted=True.");
                     DeveloperDiagnostics.LogUserAction(
                         "Terminal",
@@ -844,6 +861,15 @@ namespace PS7ScriptDesk.Shell
                         try
                         {
                             await ViewModel.WriteRawInputAsync(data).ConfigureAwait(false);
+                            StartupEnablementForensicLog.InputClassification(
+                                data.Length,
+                                inputClass,
+                                ViewModel.InteractiveTerminalCoordinatorGeneration,
+                                coordinatorStateBefore,
+                                ViewModel.InteractiveTerminalCoordinatorState,
+                                coordinatorStateBefore == InteractiveTerminalState.InteractiveInputEditing ? "UserInteractiveEditing" : "NoUserEditOwned",
+                                ViewModel.InteractiveTerminalCoordinatorState == InteractiveTerminalState.InteractiveInputEditing ? "UserInteractiveEditing" : "NoUserEditOwned",
+                                "TerminalControl.UserInput -> MainWindow -> MainWindowViewModel.WriteRawInputAsync");
                             AppLogger.Debug("Terminal", "MainWindow forwarded terminal input to the view model.");
                             DeveloperDiagnostics.LogInfo("Terminal", "Terminal input forwarded to view model.");
                         }
@@ -881,6 +907,7 @@ namespace PS7ScriptDesk.Shell
                 TerminalConsole.TerminalReady += () =>
                 {
                     _terminalIsReady = true;
+                    StartupEnablementForensicLog.Write("RENDERER_READY");
                     AppLogger.Debug("Terminal", "MainWindow received terminal-ready signal.");
                     DeveloperDiagnostics.LogStateTransition("Terminal", "TerminalReady", "Initializing", "Ready", "Terminal ready signal received.");
                     // Apply the current app theme to the terminal colour scheme.
@@ -4693,11 +4720,19 @@ namespace PS7ScriptDesk.Shell
 
         private async System.Threading.Tasks.Task RunSelectionFromEditorAsync(TextEditor editorTextEditor)
         {
+            using var forensicRequest = AdmissionForensicLog.BeginRequest("RUN_SELECTION_CLICK");
             if (ViewModel?.IsRunAvailable != true)
             {
+                AdmissionForensicLog.Write("RUN_SELECTION_REJECT_APPLICATION", new Dictionary<string, object?>
+                {
+                    ["reason"] = "IsRunAvailable=false",
+                    ["viewModelPresent"] = ViewModel is not null
+                });
                 DeveloperDiagnostics.LogDecision("Execution", "RunSelection", "Run Selection requested while execution was unavailable.", "Rejected");
                 return;
             }
+
+            AdmissionForensicLog.Write("RUN_SELECTION_ADMIT_APPLICATION");
 
             var selectedText = editorTextEditor.SelectedText;
 
@@ -4727,8 +4762,14 @@ namespace PS7ScriptDesk.Shell
 
         private async Task RunScriptWithBreakpointAwarenessAsync()
         {
+            using var forensicRequest = AdmissionForensicLog.BeginRequest("RUN_CLICK");
             if (ViewModel?.SelectedTab is null)
             {
+                AdmissionForensicLog.Write("RUN_REJECT_APPLICATION", new Dictionary<string, object?>
+                {
+                    ["reason"] = "NoSelectedTab",
+                    ["viewModelPresent"] = ViewModel is not null
+                });
                 DeveloperDiagnostics.LogDecision("Execution", "RunScript", "Run requested without a selected tab.", "Rejected");
                 return;
             }
@@ -4754,8 +4795,17 @@ namespace PS7ScriptDesk.Shell
 
             if (ViewModel.RunCommand.CanExecute(null))
             {
+                AdmissionForensicLog.Write("RUN_ADMIT_APPLICATION");
                 ViewModel.RunCommand.Execute(null);
                 DeveloperDiagnostics.LogInfo("Execution", "Run command executed.");
+            }
+            else
+            {
+                AdmissionForensicLog.Write("RUN_REJECT_APPLICATION", new Dictionary<string, object?>
+                {
+                    ["reason"] = "RunCommand.CanExecute=false",
+                    ["isRunAvailable"] = ViewModel.IsRunAvailable
+                });
             }
 
             await Task.CompletedTask;
@@ -6735,6 +6785,7 @@ namespace PS7ScriptDesk.Shell
                 {
                     ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
                     ViewModel.ExeExportProgressChanged -= ViewModel_ExeExportProgressChanged;
+                    ViewModel.Dispose();
                 }
 
                 _intelliSenseService.MetadataWarmupStatusChanged -= IntelliSenseService_MetadataWarmupStatusChanged;
@@ -7070,7 +7121,35 @@ namespace PS7ScriptDesk.Shell
 
         private void Window_Closed(object? sender, EventArgs e)
         {
+            _isEnabledDescriptor?.RemoveValueChanged(RunButton, RunButton_IsEnabledChanged);
+            _isEnabledDescriptor?.RemoveValueChanged(RunSelectionButton, RunSelectionButton_IsEnabledChanged);
             _uiScaleService.ScaleChanged -= UiScaleService_ScaleChanged;
+        }
+
+        private void RunButton_IsEnabledChanged(object? sender, EventArgs e)
+        {
+            var current = RunButton.IsEnabled;
+            StartupEnablementForensicLog.ControlEdge(
+                "RUN_CONTROL_ISENABLED_EDGE",
+                _lastRunControlIsEnabled,
+                current,
+                ViewModel?.IsRunAvailable ?? false,
+                ViewModel?.RunCommand.CanExecute(null) ?? false,
+                BindingOperations.GetBindingExpressionBase(RunButton, UIElement.IsEnabledProperty) is not null);
+            _lastRunControlIsEnabled = current;
+        }
+
+        private void RunSelectionButton_IsEnabledChanged(object? sender, EventArgs e)
+        {
+            var current = RunSelectionButton.IsEnabled;
+            StartupEnablementForensicLog.ControlEdge(
+                "RUN_SELECTION_CONTROL_ISENABLED_EDGE",
+                _lastRunSelectionControlIsEnabled,
+                current,
+                ViewModel?.IsRunAvailable ?? false,
+                ViewModel?.RunCommand.CanExecute(null) ?? false,
+                BindingOperations.GetBindingExpressionBase(RunSelectionButton, UIElement.IsEnabledProperty) is not null);
+            _lastRunSelectionControlIsEnabled = current;
         }
 
         private void ViewModel_ExeExportProgressChanged(object? sender, ExeExportProgressUpdate update)

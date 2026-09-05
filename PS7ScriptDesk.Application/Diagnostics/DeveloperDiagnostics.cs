@@ -74,6 +74,8 @@ namespace PS7ScriptDesk.Application.Diagnostics
 
         public static string? CurrentSessionId => _sessionState?.SessionId;
 
+        public static string? CurrentOperationId => CurrentScope.Value?.OperationId;
+
         public static void RegisterSummaryProvider(Func<DeveloperDiagnosticsStateSnapshot> provider)
         {
             _summaryProvider = provider;

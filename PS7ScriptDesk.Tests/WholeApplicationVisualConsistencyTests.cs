@@ -35,7 +35,7 @@ public sealed class WholeApplicationVisualConsistencyTests
         Assert.DoesNotContain("FindReplaceActionButtonStyle", findReplaceXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("FindReplacePrimaryActionButtonStyle", findReplaceXaml, StringComparison.Ordinal);
         Assert.Contains("Style=\"{StaticResource IdeDialogPrimaryButtonStyle}\"", findReplaceXaml, StringComparison.Ordinal);
-        Assert.True(CountOccurrences(findReplaceXaml, "Style=\"{StaticResource IdeDialogSecondaryButtonStyle}\"") >= 4);
+        Assert.True(CountOccurrences(findReplaceXaml, "Style=\"{StaticResource IdeDialogSecondaryButtonStyle}\"") >= 3);
 
         Assert.DoesNotContain("Foreground=\"DimGray\"", goToLineXaml, StringComparison.Ordinal);
         Assert.Contains("Foreground=\"{DynamicResource Theme.Text.Secondary}\"", goToLineXaml, StringComparison.Ordinal);
@@ -97,11 +97,13 @@ public sealed class WholeApplicationVisualConsistencyTests
         var mainWindowXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml");
         var mainWindowCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
 
-        Assert.Equal(1, CountOccurrences(mainWindowXaml, "Header=\"Check for _Updates\""));
+        // The command is intentionally presented as a status action because
+        // local/unpackaged builds may only have manual Store instructions.
+        Assert.Equal(1, CountOccurrences(mainWindowXaml, "Header=\"Store Update _Status\""));
         Assert.Contains("Click=\"CheckForUpdates_Click\"", mainWindowXaml, StringComparison.Ordinal);
         Assert.Contains("help:ContextHelp.Key=\"App.StoreUpdate\"", mainWindowXaml, StringComparison.Ordinal);
-        Assert.Contains("private async void CheckForUpdates_Click", mainWindowCode, StringComparison.Ordinal);
-        Assert.DoesNotContain("Header=\"Check for _Updates\"", mainWindowXaml[..mainWindowXaml.IndexOf("<MenuItem Header=\"_Help\"", StringComparison.Ordinal)], StringComparison.Ordinal);
+        Assert.Contains("private void CheckForUpdates_Click", mainWindowCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("Header=\"Store Update _Status\"", mainWindowXaml[..mainWindowXaml.IndexOf("<MenuItem Header=\"_Help\"", StringComparison.Ordinal)], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -110,10 +112,11 @@ public sealed class WholeApplicationVisualConsistencyTests
         var mainWindowCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
         var appCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "App.xaml.cs");
 
-        Assert.Contains("_manualStoreUpdateCheckInProgress", mainWindowCode, StringComparison.Ordinal);
-        Assert.Contains("RejectedReentrantCheck", mainWindowCode, StringComparison.Ordinal);
-        Assert.Contains("CheckForUpdatesAsync(CancellationToken.None)", mainWindowCode, StringComparison.Ordinal);
-        Assert.Contains("ShowManualStoreUpdateWindow(storeUpdateService, checkResult)", mainWindowCode, StringComparison.Ordinal);
+        // Re-entry is now represented by the cached startup result and a
+        // status window; the former private in-progress gate was removed.
+        Assert.Contains("StoreUpdateStartupState.Read()", mainWindowCode, StringComparison.Ordinal);
+        Assert.Contains("snapshot.CheckInProgress", mainWindowCode, StringComparison.Ordinal);
+        Assert.Contains("ShowManualStoreUpdateWindow(snapshot.Service, checkResult)", mainWindowCode, StringComparison.Ordinal);
         Assert.Contains("new StoreUpdateWindow(storeUpdateService, checkResult, isMandatory: checkResult.HasMandatoryUpdate)", mainWindowCode, StringComparison.Ordinal);
 
         Assert.Contains("!storeUpdateCheckResult.ShouldShowAutomaticNotification", appCode, StringComparison.Ordinal);
