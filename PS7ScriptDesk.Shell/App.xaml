@@ -46,6 +46,14 @@
             <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
         </Style>
 
+        <DataTemplate x:Key="WrappedTooltipContentTemplate">
+            <TextBlock Text="{Binding}"
+                       MaxWidth="520"
+                       TextWrapping="Wrap"
+                       TextTrimming="None"
+                       Foreground="{DynamicResource Theme.ToolTip.Foreground}" />
+        </DataTemplate>
+
         <Style TargetType="ToolTip">
             <Setter Property="Background" Value="{DynamicResource Theme.ToolTip.Background}" />
             <Setter Property="Foreground" Value="{DynamicResource Theme.ToolTip.Foreground}" />
@@ -53,6 +61,8 @@
             <Setter Property="BorderBrush" Value="{DynamicResource Theme.ToolTip.Border}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Padding" Value="8,6" />
+            <Setter Property="MaxWidth" Value="520" />
+            <Setter Property="ContentTemplate" Value="{StaticResource WrappedTooltipContentTemplate}" />
             <Setter Property="FontFamily" Value="{StaticResource Theme.FontFamily}" />
             <Setter Property="FontSize" Value="{StaticResource Theme.FontSize.Body}" />
         </Style>
@@ -338,13 +348,25 @@
             </Style.Triggers>
         </Style>
 
+        <Style x:Key="IdeButtonFocusVisualStyle" TargetType="Control">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Control">
+                        <Border Margin="1" BorderBrush="{DynamicResource Theme.Button.FocusAccent}" BorderThickness="0,0,0,2" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style TargetType="Button">
-            <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Control.Border}" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.Control.Foreground}" />
-            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Background" Value="{DynamicResource Theme.Button.RestingBackground}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Button.Foreground}" />
+            <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="{StaticResource Padding.Control}" />
+            <Setter Property="MinHeight" Value="28" />
             <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{StaticResource IdeButtonFocusVisualStyle}" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
@@ -364,19 +386,16 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Control.HoverBackground}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.HoverBackground}" />
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Control.PressedBackground}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Pressed}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.PressedBackground}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Button.DisabledForeground}" />
                                 <Setter Property="Cursor" Value="Arrow" />
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Secondary}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Border.Strong}" />
-                                <Setter TargetName="RootBorder" Property="Opacity" Value="0.6" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.RestingBackground}" />
+                                <Setter TargetName="RootBorder" Property="Opacity" Value="0.58" />
                             </Trigger>
                             <EventTrigger RoutedEvent="MouseEnter">
                                 <BeginStoryboard>
@@ -414,11 +433,12 @@
 
         <Style TargetType="ToggleButton">
             <Setter Property="Background" Value="{DynamicResource Theme.Surface.Secondary}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
-            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Button.Foreground}" />
+            <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="{StaticResource Padding.Control}" />
             <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{StaticResource IdeButtonFocusVisualStyle}" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="ToggleButton">
@@ -438,12 +458,11 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsChecked" Value="True">
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Accent.Primary}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.SelectedBackground}" />
                                 <Setter Property="Foreground" Value="{DynamicResource Theme.Accent.Foreground}" />
                             </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Hover}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.HoverBackground}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter TargetName="RootBorder" Property="Opacity" Value="0.55" />
@@ -482,25 +501,38 @@
             </Setter>
         </Style>
 
-        <Style x:Key="IdeSecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-            <Setter Property="Padding" Value="8,3" />
-            <Setter Property="MinHeight" Value="26" />
-            <Setter Property="Background" Value="{DynamicResource Theme.Surface.Primary}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+        <Style x:Key="IdeActionButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
             <Setter Property="ToolTipService.InitialShowDelay" Value="700" />
             <Setter Property="ToolTipService.ShowDuration" Value="12000" />
         </Style>
 
+        <Style x:Key="IdeSecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeActionButtonStyle}">
+            <Setter Property="Padding" Value="8,3" />
+            <Setter Property="MinHeight" Value="26" />
+        </Style>
+
+        <Style x:Key="IdePrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeActionButtonStyle}">
+            <Setter Property="Background" Value="{DynamicResource Theme.Button.PrimaryBackground}" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Button.PrimaryForeground}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
+        <Style x:Key="IdeDestructiveButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeActionButtonStyle}">
+            <Setter Property="Background" Value="{DynamicResource Theme.Button.DestructiveBackground}" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Button.DestructiveForeground}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
         <Style x:Key="IdeDialogButtonBaseStyle" TargetType="Button">
             <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Strong}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
-            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="12,5" />
             <Setter Property="MinHeight" Value="30" />
             <Setter Property="MinWidth" Value="84" />
             <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{StaticResource IdeButtonFocusVisualStyle}" />
             <Setter Property="ToolTipService.InitialShowDelay" Value="700" />
             <Setter Property="ToolTipService.ShowDuration" Value="12000" />
             <Setter Property="Template">
@@ -518,19 +550,16 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Hover}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.HoverBackground}" />
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Pressed}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Pressed}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.PressedBackground}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Button.DisabledForeground}" />
                                 <Setter Property="Cursor" Value="Arrow" />
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Secondary}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
-                                <Setter TargetName="RootBorder" Property="Opacity" Value="0.72" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.RestingBackground}" />
+                                <Setter TargetName="RootBorder" Property="Opacity" Value="0.58" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -541,9 +570,9 @@
         <Style x:Key="IdeDialogSecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeDialogButtonBaseStyle}" />
 
         <Style x:Key="IdeDialogPrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeDialogButtonBaseStyle}">
-            <Setter Property="Background" Value="{DynamicResource Theme.Accent.Primary}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.Accent.Foreground}" />
+            <Setter Property="Background" Value="{DynamicResource Theme.Button.PrimaryBackground}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Button.PrimaryForeground}" />
         </Style>
 
         <Style x:Key="IdeDialogTertiaryButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeDialogButtonBaseStyle}">
@@ -613,7 +642,7 @@
         <Style x:Key="IdeBottomPaneTabToggleButtonStyle" TargetType="ToggleButton">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
-            <Setter Property="BorderThickness" Value="0,0,0,1" />
+            <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="MinHeight" Value="28" />
@@ -645,7 +674,7 @@
                                 <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Hover}" />
                             </Trigger>
                             <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.HoverBackground}" />
                             </Trigger>
                             <Trigger Property="IsChecked" Value="True">
                                 <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
@@ -674,10 +703,11 @@
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
-            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="8,2" />
             <Setter Property="MinHeight" Value="22" />
             <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{StaticResource IdeButtonFocusVisualStyle}" />
             <Setter Property="ToolTipService.InitialShowDelay" Value="700" />
             <Setter Property="ToolTipService.ShowDuration" Value="12000" />
             <Setter Property="Template">
@@ -696,15 +726,13 @@
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Hover}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
                                 <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
                             </Trigger>
                             <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.HoverBackground}" />
                             </Trigger>
-                            <Trigger Property="IsChecked" Value="True">
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Tertiary}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.SelectedBackground}" />
                                 <Setter Property="Foreground" Value="{DynamicResource Theme.Accent.Primary}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
@@ -1159,13 +1187,14 @@
         <Style x:Key="IdeToolbarButtonStyle" TargetType="Button">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.Control.Foreground}" />
-            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Button.Foreground}" />
+            <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="6,2" />
             <Setter Property="MinHeight" Value="26" />
             <Setter Property="MinWidth" Value="0" />
             <Setter Property="Margin" Value="1,0" />
             <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{StaticResource IdeButtonFocusVisualStyle}" />
             <Setter Property="ToolTipService.InitialShowDelay" Value="700" />
             <Setter Property="ToolTipService.ShowDuration" Value="12000" />
             <Setter Property="Template">
@@ -1183,22 +1212,19 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Control.HoverBackground}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.HoverBackground}" />
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Control.PressedBackground}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Pressed}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.PressedBackground}" />
                             </Trigger>
                             <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.HoverBackground}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Button.DisabledForeground}" />
                                 <Setter Property="Cursor" Value="Arrow" />
-                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Surface.Secondary}" />
-                                <Setter TargetName="RootBorder" Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
-                                <Setter TargetName="RootBorder" Property="Opacity" Value="0.72" />
+                                <Setter TargetName="RootBorder" Property="Background" Value="{DynamicResource Theme.Button.RestingBackground}" />
+                                <Setter TargetName="RootBorder" Property="Opacity" Value="0.58" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>

@@ -10,10 +10,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
-    <Version>3.1.4</Version>
-    <AssemblyVersion>3.1.4.0</AssemblyVersion>
-    <FileVersion>3.1.4.0</FileVersion>
-    <InformationalVersion>3.1.4</InformationalVersion>
+    <Version>3.2.0</Version>
+    <AssemblyVersion>3.2.0.0</AssemblyVersion>
+    <FileVersion>3.2.0.0</FileVersion>
+    <InformationalVersion>3.2.0</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <AssemblyTitle>PS7 ScriptDesk</AssemblyTitle>
     <Product>PS7 ScriptDesk</Product>

@@ -20,6 +20,10 @@ namespace PS7ScriptDesk.Shell.Composition
             var fileDocumentService = new FileDocumentService();
             var documentRecoveryService = new DocumentRecoveryService();
             var workspaceFolderService = new WorkspaceFolderService();
+            var gitCommandRunner = new GitCommandRunner();
+            var gitRepositoryLocator = new GitRepositoryLocator(gitCommandRunner);
+            var gitService = new GitService(gitCommandRunner, gitRepositoryLocator);
+            var gitWorkspaceCoordinator = new GitWorkspaceCoordinator(gitService);
             var userPromptService = new UserPromptService();
             var liveConsoleService = new LiveConsoleService();
             var exeExportService = new ExeExportService();
@@ -63,7 +67,10 @@ namespace PS7ScriptDesk.Shell.Composition
                 editorExecutionAdapter,
                 structuredExecutionFeatureGate,
                 new InteractiveTerminalCoordinator(),
-                new TerminalOutputMultiplexer());
+                new TerminalOutputMultiplexer(),
+                gitService,
+                userPromptService,
+                gitWorkspaceCoordinator);
 
             var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService);
             window.AttachViewModel(viewModel);

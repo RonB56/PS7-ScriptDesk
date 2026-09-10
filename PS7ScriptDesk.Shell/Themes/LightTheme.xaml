@@ -43,6 +43,18 @@
     <SolidColorBrush x:Key="Theme.Control.HoverBackground" Color="#F5F9FF"/>
     <SolidColorBrush x:Key="Theme.Control.PressedBackground" Color="#EAF2FD"/>
 
+    <SolidColorBrush x:Key="Theme.Button.RestingBackground" Color="Transparent"/>
+    <SolidColorBrush x:Key="Theme.Button.HoverBackground" Color="#E2ECF8"/>
+    <SolidColorBrush x:Key="Theme.Button.PressedBackground" Color="#D8E5F5"/>
+    <SolidColorBrush x:Key="Theme.Button.Foreground" Color="#172033"/>
+    <SolidColorBrush x:Key="Theme.Button.DisabledForeground" Color="#8A9AAE"/>
+    <SolidColorBrush x:Key="Theme.Button.FocusAccent" Color="#2563EB"/>
+    <SolidColorBrush x:Key="Theme.Button.PrimaryBackground" Color="#2563EB"/>
+    <SolidColorBrush x:Key="Theme.Button.PrimaryForeground" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="Theme.Button.DestructiveBackground" Color="#FEF2F2"/>
+    <SolidColorBrush x:Key="Theme.Button.DestructiveForeground" Color="#991B1B"/>
+    <SolidColorBrush x:Key="Theme.Button.SelectedBackground" Color="#DBEAFE"/>
+
     <SolidColorBrush x:Key="Theme.Input.Background" Color="#FFFFFF"/>
     <SolidColorBrush x:Key="Theme.Input.Foreground" Color="#172033"/>
     <SolidColorBrush x:Key="Theme.Input.Border" Color="#C8D5E5"/>
@@ -67,6 +79,7 @@
     <SolidColorBrush x:Key="Theme.Status.Error.Border" Color="#F87171"/>
     <SolidColorBrush x:Key="Theme.Status.Error.Foreground" Color="#991B1B"/>
     <SolidColorBrush x:Key="Theme.Status.Info.Foreground" Color="#1D4ED8"/>
+    <SolidColorBrush x:Key="Theme.Status.Success.Background" Color="#E6F7EF"/>
 
     <SolidColorBrush x:Key="Theme.ScrollBar.Track" Color="#DDE6F1"/>
     <SolidColorBrush x:Key="Theme.ScrollBar.Thumb" Color="#9FB0C4"/>
@@ -103,5 +116,8 @@
     <SolidColorBrush x:Key="Theme.Syntax.Type" Color="#0F766E"/>
     <SolidColorBrush x:Key="Theme.Syntax.Number" Color="#047857"/>
     <SolidColorBrush x:Key="Theme.Syntax.Parameter" Color="#4338CA"/>
+    <SolidColorBrush x:Key="Theme.Diff.AddedBackground" Color="#DCFCE7"/>
+    <SolidColorBrush x:Key="Theme.Diff.RemovedBackground" Color="#FEE2E2"/>
+    <SolidColorBrush x:Key="Theme.Warning.Foreground" Color="#B45309"/>
 
 </ResourceDictionary>

@@ -3197,7 +3197,6 @@ namespace PS7ScriptDesk.Shell.Controls
                             var data = dataProp.GetString();
                             if (!string.IsNullOrEmpty(data))
                             {
-                                TerminalRecallEnterForensicLog.LogXtermInput(_outputFlowController.ActiveGeneration ?? 0, data);
                                 if (!_firstInputReceivedLogged)
                                 {
                                     _firstInputReceivedLogged = true;

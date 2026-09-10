@@ -5,6 +5,7 @@
         xmlns:avalonedit="http://icsharpcode.net/sharpdevelop/avalonedit"
         xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
         xmlns:controls="clr-namespace:PS7ScriptDesk.Shell.Controls"
+        xmlns:local="clr-namespace:PS7ScriptDesk.Shell"
                 Title="{Binding Title}"
         Height="700"
         Width="1360"
@@ -21,6 +22,135 @@
 
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+
+        <Style x:Key="ExplorerTreeItemTextStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+            <Setter Property="TextElement.Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="True">
+                    <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+                    <Setter Property="TextElement.Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsEnabled, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="False">
+                    <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+                    <Setter Property="TextElement.Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="ExplorerTreeExpanderStyle" TargetType="ToggleButton">
+            <Setter Property="Width" Value="16" />
+            <Setter Property="Height" Value="20" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}">
+                            <Path x:Name="ExpanderGlyph"
+                                  Width="8"
+                                  Height="8"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center"
+                                  Fill="{DynamicResource Theme.Icon.Muted}"
+                                  Data="M 0,0 L 8,0 L 4,5 Z" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="ExpanderGlyph" Property="RenderTransform">
+                                    <Setter.Value>
+                                        <RotateTransform Angle="180" CenterX="4" CenterY="2.5" />
+                                    </Setter.Value>
+                                </Setter>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource Theme.Surface.Hover}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ExpanderGlyph" Property="Fill" Value="{DynamicResource Theme.Text.Secondary}" />
+                                <Setter Property="Opacity" Value="0.75" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ExplorerTreeItemStyle" TargetType="TreeViewItem">
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="2,1" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TreeViewItem">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <ToggleButton x:Name="Expander"
+                                          Grid.Row="0"
+                                          Grid.Column="0"
+                                          IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}}"
+                                          Style="{StaticResource ExplorerTreeExpanderStyle}" />
+                            <Border x:Name="ItemBorder"
+                                    Grid.Row="0"
+                                    Grid.Column="1"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="{StaticResource Radius.Small}"
+                                    Padding="{TemplateBinding Padding}">
+                                <ContentPresenter Content="{TemplateBinding Header}"
+                                                  ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                                  ContentStringFormat="{TemplateBinding HeaderStringFormat}"
+                                                  HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                            </Border>
+
+                            <ItemsPresenter x:Name="ItemsHost"
+                                            Grid.Row="1"
+                                            Grid.Column="1"
+                                            Margin="16,0,0,0" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="HasItems" Value="False">
+                                <Setter TargetName="Expander" Property="Visibility" Value="Hidden" />
+                            </Trigger>
+                            <Trigger Property="IsExpanded" Value="False">
+                                <Setter TargetName="ItemsHost" Property="Visibility" Value="Collapsed" />
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ItemBorder" Property="Background" Value="{DynamicResource Theme.Surface.Hover}" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="ItemBorder" Property="Background" Value="{DynamicResource Theme.Selection.Background}" />
+                                <Setter TargetName="ItemBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="ItemBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
         <Style x:Key="ToolbarIconPathStyle" TargetType="Path">
             <Setter Property="Fill" Value="{DynamicResource Theme.Icon.Accent}" />
@@ -153,8 +283,8 @@
                           IsEnabled="False" />
                 <Separator x:Name="RecentScriptsSectionBottomSeparator" />
                 <Separator />
-                <MenuItem Header="_Save" InputGestureText="Ctrl+S" Click="SaveFile_Click" help:ContextHelp.Key="Command.Save" />
-                <MenuItem Header="Save _As..." InputGestureText="Ctrl+Shift+S" Click="SaveFileAs_Click" help:ContextHelp.Key="Command.SaveAs" />
+                <MenuItem Header="_Save" InputGestureText="Ctrl+S" Click="SaveFile_Click" IsEnabled="{Binding IsDocumentEditingAvailable}" help:ContextHelp.Key="Command.Save" />
+                <MenuItem Header="Save _As..." InputGestureText="Ctrl+Shift+S" Click="SaveFileAs_Click" IsEnabled="{Binding IsDocumentEditingAvailable}" help:ContextHelp.Key="Command.SaveAs" />
                 <MenuItem Header="Publish as _API" help:ContextHelp.Key="Command.PublishRestApi">
                     <MenuItem Header="_REST API..." Command="{Binding PublishRestApiCommand}" help:ContextHelp.Key="Command.PublishRestApi" />
                 </MenuItem>
@@ -379,6 +509,17 @@
                           help:ContextHelp.Key="Help.Logs" />
             </MenuItem>
 
+            <MenuItem Header="_Git" help:ContextHelp.Key="Git.Menu">
+                <MenuItem Header="Open Git _Workspace"
+                          Click="OpenGitWorkspace_Click"
+                          ToolTip="Open the dedicated Git Workspace for repository changes, history, branches, remotes, and setup." />
+                <Separator />
+                <MenuItem Header="Refresh Git _Status"
+                          Command="{Binding RefreshGitStatusCommand}"
+                          ToolTip="Refresh the read-only Git repository state for the current workspace."
+                          help:ContextHelp.Key="Git.RefreshStatus" />
+            </MenuItem>
+
             <MenuItem Header="_Help" help:ContextHelp.Key="Help.Menu">
                 <MenuItem Header="Context _Help" InputGestureText="F1" Click="ContextHelp_Click" help:ContextHelp.Key="Help.Context" />
                 <MenuItem Header="Help _Enabled"
@@ -436,6 +577,7 @@
                 </Button>
 
                 <Button Click="SaveFile_Click"
+                        IsEnabled="{Binding IsDocumentEditingAvailable}"
                         help:ContextHelp.Key="Command.Save"
                         Style="{StaticResource IdeToolbarPrimaryButtonStyle}"
                         ToolTip="Save (Ctrl+S)">
@@ -741,6 +883,11 @@
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Workspace">
                 <TextBlock Text="{Binding WorkspaceText}" />
+            </StatusBarItem>
+            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
+            <StatusBarItem help:ContextHelp.Key="Status.Git">
+                <TextBlock Text="{Binding GitStatusText}"
+                           ToolTip="{Binding GitRepositoryRootText}" />
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Zoom">
@@ -1103,6 +1250,10 @@
                                       help:ContextHelp.Key="Explorer.WorkspaceTree"
                                       Grid.Row="1"
                                       MinHeight="0"
+                                      Background="{DynamicResource Theme.Surface.Primary}"
+                                      BorderBrush="{DynamicResource Theme.Border.Subtle}"
+                                      BorderThickness="0"
+                                      Foreground="{DynamicResource Theme.Text.Primary}"
                                       ItemsSource="{Binding WorkspaceItems}"
                                       SelectedItemChanged="WorkspaceTree_SelectedItemChanged"
                                       MouseDoubleClick="WorkspaceTree_MouseDoubleClick"
@@ -1110,13 +1261,13 @@
                                       VirtualizingPanel.IsVirtualizing="True"
                                       VirtualizingPanel.VirtualizationMode="Recycling">
                                 <TreeView.ItemContainerStyle>
-                                    <Style TargetType="TreeViewItem">
+                                    <Style TargetType="TreeViewItem" BasedOn="{StaticResource ExplorerTreeItemStyle}">
                                         <EventSetter Event="Expanded" Handler="WorkspaceTreeItem_Expanded" />
                                     </Style>
                                 </TreeView.ItemContainerStyle>
                                 <TreeView.ItemTemplate>
                                     <HierarchicalDataTemplate ItemsSource="{Binding Children}">
-                                        <TextBlock Text="{Binding DisplayText}" />
+                                        <TextBlock Text="{Binding DisplayText}" Style="{StaticResource ExplorerTreeItemTextStyle}" />
                                     </HierarchicalDataTemplate>
                                 </TreeView.ItemTemplate>
                             </TreeView>
@@ -1254,8 +1405,16 @@
                                     </Grid.RowDefinitions>
 
                                     <Grid Grid.Row="0">
-                                        <Border help:ContextHelp.Key="Editor.Surface"
-                                                Style="{StaticResource EditorSurfaceBorderStyle}">
+                                        <Border help:ContextHelp.Key="Editor.Surface">
+                                            <Border.Style>
+                                                <Style TargetType="Border" BasedOn="{StaticResource EditorSurfaceBorderStyle}">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsDiffDocument}" Value="True">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
                                             <avalonedit:TextEditor FontFamily="Consolas"
                                                                        help:ContextHelp.Key="Editor.Surface"
                                                                        FontSize="14"
@@ -1317,6 +1476,26 @@
                                                 </avalonedit:TextEditor.ContextMenu>
                                             </avalonedit:TextEditor>
                                         </Border>
+                                        <local:HistoryDocumentView Grid.Row="0">
+                                            <local:HistoryDocumentView.Style>
+                                                <Style TargetType="{x:Type local:HistoryDocumentView}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers><DataTrigger Binding="{Binding IsGitHistoryDocument}" Value="True"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers>
+                                                </Style>
+                                            </local:HistoryDocumentView.Style>
+                                        </local:HistoryDocumentView>
+                                        <local:DiffDocumentView Grid.Row="0">
+                                            <local:DiffDocumentView.Style>
+                                                <Style TargetType="{x:Type local:DiffDocumentView}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsDiffDocument}" Value="True">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </local:DiffDocumentView.Style>
+                                        </local:DiffDocumentView>
                                     </Grid>
 
                                     <Border Grid.Row="1"
@@ -1760,7 +1939,8 @@
                                      FontFamily="Consolas"
                                      ToolTip="Application notifications, warnings, and operation details. Interactive PowerShell output remains in Console." />
                         </Grid>
-                    </Grid>
+
+                </Grid>
                 </Grid>
                 </Grid>
             </Border>

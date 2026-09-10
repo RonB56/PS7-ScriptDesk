@@ -21,15 +21,15 @@
     </Style>
 
     <Style x:Key="WizardPrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeDialogPrimaryButtonStyle}">
-        <Setter Property="Background" Value="{DynamicResource Theme.Accent.Primary}" />
-        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
-        <Setter Property="Foreground" Value="{DynamicResource Theme.Accent.Foreground}" />
-        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Background" Value="{DynamicResource Theme.Button.PrimaryBackground}" />
+        <Setter Property="BorderBrush" Value="Transparent" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Button.PrimaryForeground}" />
+        <Setter Property="BorderThickness" Value="0" />
         <Setter Property="Padding" Value="12,5" />
         <Setter Property="MinHeight" Value="30" />
         <Setter Property="MinWidth" Value="96" />
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FocusVisualStyle" Value="{StaticResource WizardFocusVisualStyle}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource IdeButtonFocusVisualStyle}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
@@ -48,14 +48,14 @@
 
     <Style x:Key="WizardSecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeDialogSecondaryButtonStyle}">
         <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
-        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Strong}" />
+        <Setter Property="BorderBrush" Value="Transparent" />
         <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
-        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="BorderThickness" Value="0" />
         <Setter Property="Padding" Value="12,5" />
         <Setter Property="MinHeight" Value="30" />
         <Setter Property="MinWidth" Value="84" />
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FocusVisualStyle" Value="{StaticResource WizardFocusVisualStyle}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource IdeButtonFocusVisualStyle}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">

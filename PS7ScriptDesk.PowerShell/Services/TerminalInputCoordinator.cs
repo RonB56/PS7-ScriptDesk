@@ -17,14 +17,6 @@ internal sealed class TerminalInputCoordinator : IDisposable
     private bool _userEditBufferMayContainText;
     private bool _internalSubmissionActive;
 
-    internal (bool InternalSubmissionActive, bool UserEditOwnershipActive, bool PromptReady) GetForensicState()
-    {
-        lock (_syncRoot)
-        {
-            return (_internalSubmissionActive, _userEditBufferMayContainText, _promptReady);
-        }
-    }
-
     public TerminalInputCoordinator(TerminalInputRouter router)
     {
         _router = router ?? throw new ArgumentNullException(nameof(router));
@@ -92,28 +84,14 @@ internal sealed class TerminalInputCoordinator : IDisposable
 
             if (data.Contains('\x03'))
             {
-                var previousEdit = _userEditBufferMayContainText;
                 _userEditBufferMayContainText = false;
                 _promptReady = false;
-                AdmissionForensicLog.Write("USER_EDIT_STATE", new Dictionary<string, object?>
-                {
-                    ["previous"] = previousEdit,
-                    ["new"] = false,
-                    ["reason"] = "Ctrl+C",
-                    ["generation"] = generation
-                });
                 return;
             }
 
             var inputClass = TerminalInputClassifier.Classify(data);
             if (!TerminalInputClassifier.EstablishesUserEditOwnership(inputClass))
             {
-                AdmissionForensicLog.Write("USER_EDIT_STATE_IGNORED_PROTOCOL", new Dictionary<string, object?>
-                {
-                    ["inputClass"] = inputClass,
-                    ["generation"] = generation,
-                    ["reason"] = "Terminal frontend protocol does not establish an editable command line."
-                });
                 return;
             }
 
@@ -124,29 +102,13 @@ internal sealed class TerminalInputCoordinator : IDisposable
             // without attempting to reproduce PSReadLine's buffer implementation.
             if (data.Contains('\r') || data.Contains('\n'))
             {
-                var previousEdit = _userEditBufferMayContainText;
                 _userEditBufferMayContainText = false;
                 _promptReady = false;
-                AdmissionForensicLog.Write("USER_EDIT_STATE", new Dictionary<string, object?>
-                {
-                    ["previous"] = previousEdit,
-                    ["new"] = false,
-                    ["reason"] = "Enter",
-                    ["generation"] = generation
-                });
                 return;
             }
 
-            var previous = _userEditBufferMayContainText;
             _userEditBufferMayContainText = true;
             _promptReady = false;
-            AdmissionForensicLog.Write("USER_EDIT_STATE", new Dictionary<string, object?>
-            {
-                ["previous"] = previous,
-                ["new"] = true,
-                ["reason"] = "PrintableOrHistoryEditingInput",
-                ["generation"] = generation
-            });
         }
     }
 
@@ -154,18 +116,7 @@ internal sealed class TerminalInputCoordinator : IDisposable
     {
         lock (_syncRoot)
         {
-            var accepted = CanAcceptInternalDispatchNoLock(generation, out reason);
-            AdmissionForensicLog.Write(accepted ? "INTERNAL_DISPATCH_ACCEPTED" : "INTERNAL_DISPATCH_REJECTED", new Dictionary<string, object?>
-            {
-                ["generation"] = generation,
-                ["coordinatorGeneration"] = _sessionGeneration,
-                ["isActive"] = _sessionActive,
-                ["promptReady"] = _promptReady,
-                ["possibleUserEditOwned"] = _userEditBufferMayContainText,
-                ["internalSubmissionActive"] = _internalSubmissionActive,
-                ["reason"] = reason
-            });
-            return accepted;
+            return CanAcceptInternalDispatchNoLock(generation, out reason);
         }
     }
 
@@ -181,12 +132,6 @@ internal sealed class TerminalInputCoordinator : IDisposable
         }
 
         await _submissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        AdmissionForensicLog.Write("ROUTER_WRITE_BEGIN", new Dictionary<string, object?>
-        {
-            ["origin"] = origin,
-            ["generation"] = generation,
-            ["payloadLength"] = payload.Length
-        });
         var internalSubmission = false;
         try
         {
@@ -194,46 +139,18 @@ internal sealed class TerminalInputCoordinator : IDisposable
             {
                 lock (_syncRoot)
                 {
-                    AdmissionForensicLog.Write("INTERNAL_DISPATCH_REQUEST", new Dictionary<string, object?>
-                    {
-                        ["generation"] = generation,
-                        ["coordinatorGeneration"] = _sessionGeneration,
-                        ["isActive"] = _sessionActive,
-                        ["promptReady"] = _promptReady,
-                        ["possibleUserEditOwned"] = _userEditBufferMayContainText,
-                        ["internalSubmissionActive"] = _internalSubmissionActive,
-                        ["origin"] = origin
-                    });
                     if (!CanAcceptInternalDispatchNoLock(generation, out var reason))
                     {
-                        AdmissionForensicLog.Write("INTERNAL_DISPATCH_REJECTED", new Dictionary<string, object?>
-                        {
-                            ["generation"] = generation,
-                            ["coordinatorGeneration"] = _sessionGeneration,
-                            ["reason"] = reason
-                        });
                         throw new InvalidOperationException(reason);
                     }
 
                     _internalSubmissionActive = true;
                     _promptReady = false;
                     internalSubmission = true;
-                    AdmissionForensicLog.Write("INTERNAL_DISPATCH_ACCEPTED", new Dictionary<string, object?>
-                    {
-                        ["generation"] = generation,
-                        ["coordinatorGeneration"] = _sessionGeneration,
-                        ["origin"] = origin
-                    });
                 }
             }
 
             await _router.WriteAsync(generation, payload, cancellationToken).ConfigureAwait(false);
-            AdmissionForensicLog.Write("ROUTER_WRITE_END", new Dictionary<string, object?>
-            {
-                ["origin"] = origin,
-                ["generation"] = generation,
-                ["payloadLength"] = payload.Length
-            });
         }
         finally
         {

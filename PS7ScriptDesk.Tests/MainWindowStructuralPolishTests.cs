@@ -44,7 +44,7 @@ public sealed class MainWindowStructuralPolishTests
         Assert.DoesNotContain("x:Key=\"BottomPaneTabToggleButtonStyle\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("ItemContainerStyle=\"{StaticResource IdeTabItemStyle}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("ItemContainerStyle=\"{StaticResource IdeCompactEditorTabItemStyle}\"", mainXaml, StringComparison.Ordinal);
-        Assert.Equal(4, CountOccurrences(mainXaml, "Style=\"{StaticResource IdeBottomPaneTabToggleButtonStyle}\""));
+        Assert.Equal(5, CountOccurrences(mainXaml, "Style=\"{StaticResource IdeBottomPaneTabToggleButtonStyle}\""));
         Assert.Contains("Content=\"Reset Console\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Content=\"Pop Out\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Content=\"Open Folder\"", mainXaml, StringComparison.Ordinal);
@@ -299,18 +299,12 @@ public sealed class MainWindowStructuralPolishTests
     }
 
     [Fact]
-    public void DisabledToolbarTooltipForensicsAreDeveloperGatedAndObserveOnly()
+    public void RetiredDisabledToolbarTooltipForensicsAreNotAttached()
     {
-        var loggerCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "Diagnostics", "DisabledToolbarTooltipForensicLogger.cs");
+        var mainWindowCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
 
-        Assert.Contains("if (_attached || !DeveloperDiagnostics.IsEnabled)", loggerCode, StringComparison.Ordinal);
-        Assert.Contains("ToolTipOpeningEvent", loggerCode, StringComparison.Ordinal);
-        Assert.Contains("DependencyPropertyHelper.GetValueSource", loggerCode, StringComparison.Ordinal);
-        Assert.Contains("VisualTreeHelper.HitTest", loggerCode, StringComparison.Ordinal);
-        Assert.Contains("SHA256.HashData", loggerCode, StringComparison.Ordinal);
-        Assert.DoesNotContain("IsEnabled =", loggerCode, StringComparison.Ordinal);
-        Assert.DoesNotContain(".Command", loggerCode, StringComparison.Ordinal);
-        Assert.DoesNotContain(".Click", loggerCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("DisabledToolbarTooltipForensicLogger", mainWindowCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("TOOLTIP_FORENSIC", mainWindowCode, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -334,7 +328,7 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("Header=\"Open Tabs\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Style=\"{StaticResource IdeToolWindowPrimaryTextStyle}\"", mainXaml, StringComparison.Ordinal);
         Assert.True(CountOccurrences(mainXaml, "Style=\"{StaticResource IdeToolWindowMetaTextStyle}\"") >= 7);
-        Assert.Equal(2, CountOccurrences(mainXaml, "ItemContainerStyle=\"{StaticResource IdeToolWindowListBoxItemStyle}\""));
+        Assert.Equal(3, CountOccurrences(mainXaml, "ItemContainerStyle=\"{StaticResource IdeToolWindowListBoxItemStyle}\""));
         Assert.Contains("Command=\"{Binding RefreshRuntimesCommand}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding RefreshWorkspaceCommand}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding OpenWorkspaceFolderCommand}\"", mainXaml, StringComparison.Ordinal);

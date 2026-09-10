@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Windows;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Interfaces;
@@ -7,7 +8,7 @@ using PS7ScriptDesk.Shell.Dialogs;
 
 namespace PS7ScriptDesk.Shell.Services
 {
-    public class UserPromptService : IUserPromptService
+    public class UserPromptService : IUserPromptService, IGitSetupPromptService
     {
         public UnsavedChangesDecision ShowUnsavedChangesPrompt(string documentName)
         {
@@ -104,6 +105,24 @@ namespace PS7ScriptDesk.Shell.Services
                 message).ShowDialog();
         }
 
+        public bool ShowConfirmation(string title, string message, string primaryText, string secondaryText)
+        {
+            var dialog = new IdeMessageDialog(
+                System.Windows.Application.Current?.MainWindow,
+                title,
+                message,
+                primaryText,
+                secondaryText);
+            var confirmed = dialog.ShowDialog() == true && dialog.PrimaryAccepted;
+            DeveloperDiagnostics.LogDecision(
+                "UI",
+                "ConfirmationPrompt",
+                "Confirmation prompt completed.",
+                confirmed ? "Confirmed" : "Canceled",
+                new Dictionary<string, object?> { ["titleLength"] = title?.Length ?? 0 });
+            return confirmed;
+        }
+
         public string? ShowOpenPowerShellExecutableDialog()
         {
             var dialog = new Microsoft.Win32.OpenFileDialog
@@ -130,6 +149,40 @@ namespace PS7ScriptDesk.Shell.Services
             return dialog.ShowDialog(System.Windows.Application.Current?.MainWindow) == true
                 ? dialog.FolderName
                 : null;
+        }
+
+        public GitCloneRequest? ShowCloneDialog()
+        {
+            var sourceBox = new System.Windows.Controls.TextBox { Text = "https://", MinWidth = 420 };
+            var parentBox = new System.Windows.Controls.TextBox { MinWidth = 360, IsReadOnly = true };
+            var nameBox = new System.Windows.Controls.TextBox { MinWidth = 420 };
+            var browse = new System.Windows.Controls.Button { Content = "Browse", Margin = new Thickness(6, 0, 0, 0) };
+            var clone = new System.Windows.Controls.Button { Content = "Clone", IsDefault = true, Padding = new Thickness(14, 6, 14, 6), Margin = new Thickness(6, 0, 0, 0) };
+            var cancel = new System.Windows.Controls.Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(14, 6, 14, 6) };
+            var panel = new System.Windows.Controls.StackPanel { Margin = new Thickness(18) };
+            panel.Children.Add(new System.Windows.Controls.TextBlock { Text = "Repository" }); panel.Children.Add(sourceBox);
+            panel.Children.Add(new System.Windows.Controls.TextBlock { Text = "Destination parent", Margin = new Thickness(0, 10, 0, 0) });
+            var parentRow = new System.Windows.Controls.StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal }; parentRow.Children.Add(parentBox); parentRow.Children.Add(browse); panel.Children.Add(parentRow);
+            panel.Children.Add(new System.Windows.Controls.TextBlock { Text = "Repository folder name", Margin = new Thickness(0, 10, 0, 0) }); panel.Children.Add(nameBox);
+            var buttons = new System.Windows.Controls.StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 14, 0, 0) }; buttons.Children.Add(cancel); buttons.Children.Add(clone); panel.Children.Add(buttons);
+            var dialogWindow = new Window { Title = "Clone Repository", Owner = System.Windows.Application.Current?.MainWindow, WindowStartupLocation = WindowStartupLocation.CenterOwner, SizeToContent = SizeToContent.WidthAndHeight, Content = panel };
+            browse.Click += (_, _) => { var folder = new Microsoft.Win32.OpenFolderDialog { Title = "Choose clone destination parent" }; if (folder.ShowDialog(dialogWindow) == true) parentBox.Text = folder.FolderName; };
+            sourceBox.TextChanged += (_, _) => { var trimmed = sourceBox.Text.TrimEnd('/', '\\'); var proposed = Path.GetFileName(trimmed); if (proposed.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) proposed = proposed[..^4]; if (string.IsNullOrWhiteSpace(nameBox.Text) || nameBox.Tag is null) { nameBox.Text = proposed; nameBox.Tag = proposed; } };
+            clone.Click += (_, _) => dialogWindow.DialogResult = true;
+            if (dialogWindow.ShowDialog() != true || string.IsNullOrWhiteSpace(sourceBox.Text) || string.IsNullOrWhiteSpace(parentBox.Text) || string.IsNullOrWhiteSpace(nameBox.Text)) return null;
+            return new GitCloneRequest(sourceBox.Text.Trim(), parentBox.Text, nameBox.Text.Trim());
+        }
+
+        public string? ShowInitializeDialog(string folderPath)
+        {
+            var selected = folderPath;
+            if (string.IsNullOrWhiteSpace(selected))
+            {
+                var dialog = new Microsoft.Win32.OpenFolderDialog { Title = "Choose folder to initialize as a Git repository" };
+                if (dialog.ShowDialog(System.Windows.Application.Current?.MainWindow) != true) return null;
+                selected = dialog.FolderName;
+            }
+            return ShowConfirmation("Initialize Git Repository", $"Initialize Git in:\n{selected}\n\nThis creates .git metadata in this folder. No files will be staged or committed.", "Initialize", "Cancel") ? selected : null;
         }
 
     }

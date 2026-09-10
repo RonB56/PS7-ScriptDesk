@@ -376,18 +376,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                 CleanupStaleExecutionSnapshots();
                 var workingDirectory = NormalizeWorkingDirectory(startupWorkingDirectory);
                 var sessionGeneration = BeginTerminalSessionGeneration();
-                AdmissionForensicLog.SetTerminalGeneration(sessionGeneration);
-                StartupEnablementForensicLog.Write("TERMINAL_SESSION_STARTING", new Dictionary<string, object?>
-                {
-                    ["terminalGeneration"] = sessionGeneration,
-                    ["runtimePath"] = runtime.LaunchExecutablePath
-                });
                 _terminalInputCoordinator.BeginSession(sessionGeneration);
                 NotifyTerminalSessionStarted(sessionGeneration);
-                StartupEnablementForensicLog.Write("TERMINAL_SESSION_STARTED", new Dictionary<string, object?>
-                {
-                    ["terminalGeneration"] = sessionGeneration
-                });
 
                 if (_preferRedirectedTerminalSession)
                 {
@@ -617,12 +607,6 @@ namespace PS7ScriptDesk.PowerShell.Services
             bool executeInCurrentScope = false,
             CancellationToken cancellationToken = default)
         {
-            AdmissionForensicLog.Write("EXECUTE_SCRIPT_ENTER", new Dictionary<string, object?>
-            {
-                ["isSessionRunning"] = IsSessionRunning,
-                ["currentGeneration"] = _terminalSessionGeneration,
-                ["executeInCurrentScope"] = executeInCurrentScope
-            });
             if (!IsSessionRunning)
             {
                 throw new InvalidOperationException("The PowerShell terminal session is not running.");
@@ -673,11 +657,6 @@ namespace PS7ScriptDesk.PowerShell.Services
                     out var sessionGeneration,
                     out var dispatchFailure))
             {
-                AdmissionForensicLog.Write("EXECUTE_SCRIPT_DISPATCH_REJECTED", new Dictionary<string, object?>
-                {
-                    ["reason"] = dispatchFailure ?? "(none)",
-                    ["currentGeneration"] = _terminalSessionGeneration
-                });
                 if (executionTarget.DeleteAfterRun)
                 {
                     TryDeleteSnapshot(scriptSnapshotPath);
@@ -730,13 +709,6 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             try
             {
-                AdmissionForensicLog.Write("INTERNAL_DISPATCH_REQUEST", new Dictionary<string, object?>
-                {
-                    ["generation"] = sessionGeneration,
-                    ["origin"] = TerminalInputOrigin.InternalDispatch,
-                    ["dispatchGeneration"] = dispatchGeneration,
-                    ["payloadLength"] = scriptCommand.Length
-                });
                 AppLogger.Debug("LiveConsole", $"Sending helper dispatch command to terminal stdin. ScriptSnapshotPath={scriptSnapshotPath}, InstructionSnapshotPath={instructionSnapshotPath}");
                 await WriteTerminalInputAsync(
                     scriptCommand,
@@ -864,38 +836,15 @@ namespace PS7ScriptDesk.PowerShell.Services
             // that same session, but carries an explicit comment marker so the
             // handler can distinguish internal transport from user text without
             // filtering merely because a path contains TerminalSnapshots.
-            var forensicLogPath = QuotePowerShellSingleQuotedString(StartupEnablementForensicLog.LogPath);
-            var forensicInstallLogging = AdmissionForensicLog.IsEnabled
-                ? $"$__pssdForensicLogPath = {forensicLogPath}; [System.IO.File]::AppendAllText($__pssdForensicLogPath, ('event=PSREADLINE_HANDLER_INSTALL_BEGIN processId={Environment.ProcessId} applicationInstanceId={AdmissionForensicLog.ApplicationInstanceId} terminalGeneration={AdmissionForensicLog.TerminalGeneration} requestId=(none) timestamp=' + [DateTimeOffset]::UtcNow.ToString('O') + [Environment]::NewLine)); "
-                : string.Empty;
-            var recallSubmissionForensic = AdmissionForensicLog.IsEnabled
-                ? BuildRecallSubmissionForensicCommand()
-                : string.Empty;
             return LegacyHistoryMigration.BuildStartupCommand() + " try { " +
-                recallSubmissionForensic +
-                forensicInstallLogging +
                 "$__pssdPreviousAddToHistoryHandler = (Get-PSReadLineOption).AddToHistoryHandler; " +
                 "$__pssdInternalDispatchHistoryPattern = \"^\\s*(?:\\.|&)\\s+'$([regex]::Escape($env:LOCALAPPDATA))\\\\PS7ScriptDesk\\\\Temp\\\\TerminalSnapshots\\\\(?:psd|psh|psi)-[0-9a-f]{32}\\.ps1'(?:\\s+'$([regex]::Escape($env:LOCALAPPDATA))\\\\PS7ScriptDesk\\\\Temp\\\\TerminalSnapshots\\\\(?:psh|psi)-[0-9a-f]{32}\\.ps1')?\\s+#PS7SDi\\s*$\"; " +
                 "Set-PSReadLineOption -AddToHistoryHandler { param($line) " +
                     "if ($line -match $__pssdInternalDispatchHistoryPattern) { return 'SkipAdding' }; " +
                     "if ($null -ne $__pssdPreviousAddToHistoryHandler) { return (& $__pssdPreviousAddToHistoryHandler $line) }; " +
                     "return 'MemoryAndFile' }; " +
-                (AdmissionForensicLog.IsEnabled ? "[System.IO.File]::AppendAllText($__pssdForensicLogPath, ('event=PSREADLINE_HANDLER_INSTALL_SUCCESS processId=" + Environment.ProcessId + " applicationInstanceId=" + AdmissionForensicLog.ApplicationInstanceId + " terminalGeneration=" + AdmissionForensicLog.TerminalGeneration + " requestId=(none) timestamp=' + [DateTimeOffset]::UtcNow.ToString('O') + [Environment]::NewLine)); " : string.Empty) +
                 "Set-PSReadLineOption -PredictionSource None -ErrorAction SilentlyContinue " +
-                (AdmissionForensicLog.IsEnabled ? "} catch { try { [System.IO.File]::AppendAllText($__pssdForensicLogPath, ('event=PSREADLINE_HANDLER_INSTALL_FAILURE processId=" + Environment.ProcessId + " applicationInstanceId=" + AdmissionForensicLog.ApplicationInstanceId + " terminalGeneration=" + AdmissionForensicLog.TerminalGeneration + " requestId=(none) ExceptionType=' + $_.Exception.GetType().Name + ' timestamp=' + [DateTimeOffset]::UtcNow.ToString('O') + [Environment]::NewLine)) } catch { } }" : "} catch { }");
-        }
-
-        private static string BuildRecallSubmissionForensicCommand()
-        {
-            var logPath = QuotePowerShellSingleQuotedString(TerminalRecallEnterForensicLog.LogPath);
-            return "$__pssdRecallForensicLogPath = " + logPath + "; " +
-                "$__pssdRecallForensicOriginalReadLine = (Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction SilentlyContinue).ScriptBlock; " +
-                "if ($null -ne $__pssdRecallForensicOriginalReadLine) { function global:PSConsoleHostReadLine { " +
-                    "$line = & $__pssdRecallForensicOriginalReadLine; " +
-                    "$class = if ($null -eq $line) { 'Unknown' } elseif ($line.Trim() -ceq 'Get-Date') { 'ExactGetDate' } elseif ($line -match \"^\\s*(?:&|\\.)\\s+'$([regex]::Escape($env:LOCALAPPDATA))\\\\PS7ScriptDesk\\\\Temp\\\\TerminalSnapshots\\\\psd-[0-9a-f]{32}\\.ps1'(?:\\s+#PS7SDi)?\\s*$\") { 'ManagedPsdWrapper' } elseif ($line -match \"^\\s*(?:&|\\.)\\s+'$([regex]::Escape($env:LOCALAPPDATA))\\\\PS7ScriptDesk\\\\Temp\\\\TerminalSnapshots\\\\psh-[0-9a-f]{32}\\.ps1'\\s+'$([regex]::Escape($env:LOCALAPPDATA))\\\\PS7ScriptDesk\\\\Temp\\\\TerminalSnapshots\\\\psi-[0-9a-f]{32}\\.ps1'\\s*$\") { 'ManagedPshPsiWrapper' } elseif ([string]::IsNullOrWhiteSpace($line)) { 'Unknown' } else { 'OtherUserCommand' }; " +
-                    "$algorithm = [Security.Cryptography.SHA256]::Create(); try { $hash = [Convert]::ToHexString($algorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($line))) } finally { $algorithm.Dispose() }; " +
-                    "[IO.File]::AppendAllText($__pssdRecallForensicLogPath, ('event=PSREADLINE_ACCEPTED bufferClassification=' + $class + ' bufferLength=' + $line.Length + ' bufferHash=' + $hash + ' cursorPosition=unsupported-by-public-api timestamp=' + [DateTimeOffset]::UtcNow.ToString('O') + [Environment]::NewLine)); " +
-                    "return $line } }; ";
+                "} catch { }";
         }
 
         private static string CreateStartToken()
@@ -3990,19 +3939,6 @@ namespace PS7ScriptDesk.PowerShell.Services
                 return;
             }
 
-            AdmissionForensicLog.Write("PROMPT_READY_CANDIDATE", new Dictionary<string, object?>
-            {
-                ["candidateGeneration"] = observedSessionGeneration ?? _terminalSessionGeneration,
-                ["currentGeneration"] = _terminalSessionGeneration,
-                ["candidateCount"] = matches.Count
-            });
-            StartupEnablementForensicLog.Write("PROMPT_READY_CANDIDATE", new Dictionary<string, object?>
-            {
-                ["candidateGeneration"] = observedSessionGeneration ?? _terminalSessionGeneration,
-                ["currentGeneration"] = _terminalSessionGeneration,
-                ["candidateCount"] = matches.Count
-            });
-
             var lastMatch = matches[matches.Count - 1];
             var path = lastMatch.Groups["path"].Value.Trim();
             if (string.IsNullOrWhiteSpace(path))
@@ -4020,18 +3956,6 @@ namespace PS7ScriptDesk.PowerShell.Services
                         observedSessionGeneration.Value,
                         _terminalSessionTeardownInProgress))
                 {
-                    AdmissionForensicLog.Write("PROMPT_READY_REJECTED", new Dictionary<string, object?>
-                    {
-                        ["candidateGeneration"] = observedSessionGeneration.Value,
-                        ["currentGeneration"] = currentGeneration,
-                        ["reason"] = "StaleGenerationOrTeardown"
-                    });
-                    StartupEnablementForensicLog.Write("PROMPT_READY_REJECTED", new Dictionary<string, object?>
-                    {
-                        ["candidateGeneration"] = observedSessionGeneration.Value,
-                        ["currentGeneration"] = currentGeneration,
-                        ["reason"] = "StaleGenerationOrTeardown"
-                    });
                     return;
                 }
 
@@ -4053,16 +3977,6 @@ namespace PS7ScriptDesk.PowerShell.Services
                 });
             NotifyPromptReadyObserved(promptSessionGeneration, path);
             _terminalInputCoordinator.ObservePromptReady(promptSessionGeneration);
-            AdmissionForensicLog.Write("PROMPT_READY_ACCEPTED", new Dictionary<string, object?>
-            {
-                ["candidateGeneration"] = promptSessionGeneration,
-                ["currentGeneration"] = _terminalSessionGeneration
-            });
-            StartupEnablementForensicLog.Write("PROMPT_READY_ACCEPTED", new Dictionary<string, object?>
-            {
-                ["candidateGeneration"] = promptSessionGeneration,
-                ["currentGeneration"] = _terminalSessionGeneration
-            });
         }
 
         private void NotifyPromptReadyObserved(int sessionGeneration, string path)
@@ -4095,15 +4009,6 @@ namespace PS7ScriptDesk.PowerShell.Services
             cancellationToken.ThrowIfCancellationRequested();
             AppLogger.Debug("LiveConsole", $"Queueing terminal input. Origin={origin}, SessionGeneration={sessionGeneration}, Length={text.Length}, ContentOmitted=True.");
             var payload = NormalizeTerminalInputForActiveTransport(text);
-            var forensicState = _terminalInputCoordinator.GetForensicState();
-            TerminalRecallEnterForensicLog.LogRouterWrite(
-                origin.ToString(),
-                sessionGeneration,
-                payload,
-                forensicState.InternalSubmissionActive,
-                forensicState.UserEditOwnershipActive,
-                DeveloperDiagnostics.CurrentOperationId);
-
             try
             {
                 await _terminalInputCoordinator.WriteAsync(

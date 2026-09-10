@@ -9,7 +9,6 @@ namespace PS7ScriptDesk.PowerShell.Services;
 /// </summary>
 internal static class LegacyHistoryMigration
 {
-    internal const string LogPath = @"C:\Users\rbarn\source\repos\PowerShellStudio\docs\LocalOnly_NotForGitHub\Codex_Work\PSREADLINE_LEGACY_HISTORY_MIGRATION_FORENSIC.log";
     internal static bool IsLegacyManagedLine(string line, string managedRoot)
     {
         ArgumentNullException.ThrowIfNull(line);
@@ -19,17 +18,14 @@ internal static class LegacyHistoryMigration
                Regex.IsMatch(line, $@"^\s*(?:&|\.)\s+'{root}\\psh-[0-9a-f]{{32}}\.ps1'\s+'{root}\\psi-[0-9a-f]{{32}}\.ps1'\s*$", RegexOptions.IgnoreCase);
     }
 
-    internal static string BuildStartupCommand() =>
-        "try { " + Script.Replace("__PS7SD_MIGRATION_LOG_PATH__", LogPath.Replace("'", "''", StringComparison.Ordinal)) + " } catch { }";
+    internal static string BuildStartupCommand() => "try { " + Script + " } catch { }";
 
     private static readonly string Script = """
         $__pssdMigrateLegacyHistory = {
             try {
-                $__pssdMigrationLogPath = '__PS7SD_MIGRATION_LOG_PATH__'
                 function Write-Ps7SdMigrationEvent([string] $event, [hashtable] $fields) {
-                    # Investigation-only migration tracing is disabled in normal
-                    # operation. Keep the event hook so migration behavior remains
-                    # unchanged without creating a placeholder or forensic file.
+                    # Retained as a no-op compatibility hook so history migration
+                    # behavior remains unchanged without producing diagnostic output.
                     return
                 }
                 function Write-Ps7SdMigrationStageException([string] $stage, [string] $api, $errorRecord) {

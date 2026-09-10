@@ -1,0 +1,44 @@
+<UserControl x:Class="PS7ScriptDesk.Shell.HistoryDocumentView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:models="clr-namespace:PS7ScriptDesk.Domain.Models;assembly=PS7ScriptDesk.Domain">
+    <Grid Margin="12">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <DockPanel Grid.Row="0" Margin="0,0,0,8">
+            <Button DockPanel.Dock="Right" Content="Refresh" Click="Refresh_Click" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Refresh repository history."/>
+            <Button DockPanel.Dock="Right" Content="Load More" Click="LoadMore_Click" Margin="6,0,6,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Load the next history page."/>
+            <ComboBox DockPanel.Dock="Right" Width="150" SelectedValue="{Binding Scope, Mode=TwoWay}" SelectedValuePath="Tag" ToolTip="Choose the history scope.">
+                <ComboBoxItem Content="Current Branch" Tag="{x:Static models:GitHistoryScope.CurrentBranch}"/>
+                <ComboBoxItem Content="All Local Branches" Tag="{x:Static models:GitHistoryScope.AllLocalBranches}"/>
+            </ComboBox>
+            <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}" MinWidth="220" Padding="6" ToolTip="Filter commit subjects and messages; press Enter or Refresh to search."/>
+        </DockPanel>
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="3*"/></Grid.ColumnDefinitions>
+            <ListBox Grid.Column="0" ItemsSource="{Binding Commits}" SelectedItem="{Binding SelectedCommit, Mode=TwoWay}" SelectionChanged="Commit_SelectionChanged" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
+                <ListBox.ItemTemplate><DataTemplate>
+                    <Border Padding="6" BorderBrush="{DynamicResource Theme.Border.Subtle}" BorderThickness="0,0,0,1">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="64"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding ShortHash}" Foreground="{DynamicResource Theme.Accent.Primary}" FontFamily="Consolas"/>
+                            <StackPanel Grid.Column="1"><TextBlock Text="{Binding Subject}" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding AuthorName}" Foreground="{DynamicResource Theme.Text.Secondary}" FontSize="11"/><TextBlock Text="{Binding Decoration}" Foreground="{DynamicResource Theme.Accent.Primary}" FontSize="11"/></StackPanel>
+                        </Grid>
+                    </Border>
+                </DataTemplate></ListBox.ItemTemplate>
+            </ListBox>
+            <ScrollViewer Grid.Column="1" Margin="12,0,0,0" VerticalScrollBarVisibility="Auto">
+                <StackPanel DataContext="{Binding SelectedDetails}">
+                    <TextBlock Text="{Binding Commit.Hash}" FontFamily="Consolas" Foreground="{DynamicResource Theme.Accent.Primary}"/>
+                    <TextBlock Text="{Binding Commit.Subject}" FontSize="16" FontWeight="SemiBold" Margin="0,6,0,2" TextWrapping="Wrap"/>
+                    <TextBlock Text="{Binding Commit.Body}" Foreground="{DynamicResource Theme.Text.Secondary}" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                    <TextBlock Text="{Binding Commit.AuthorName}"/><TextBlock Text="{Binding Commit.AuthorDate}" Foreground="{DynamicResource Theme.Text.Secondary}"/>
+                    <Button Content="Copy Hash" Click="CopyHash_Click" HorizontalAlignment="Left" Margin="0,8" Style="{StaticResource IdeSecondaryButtonStyle}"/>
+                    <TextBlock Text="Changed files" FontWeight="SemiBold" Margin="0,8,0,4"/>
+                    <ListBox ItemsSource="{Binding Files}" MouseDoubleClick="File_MouseDoubleClick" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True">
+                        <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding DisplayName}" ToolTip="Double-click to open the historical diff."/></DataTemplate></ListBox.ItemTemplate>
+                    </ListBox>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+        <TextBlock Grid.Row="2" Text="{Binding StatusText}" Foreground="{DynamicResource Theme.Text.Secondary}" Margin="0,8,0,0"/>
+    </Grid>
+</UserControl>

@@ -1,0 +1,42 @@
+<Window x:Class="PS7ScriptDesk.Shell.SourceControlToolWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
+        xmlns:local="clr-namespace:PS7ScriptDesk.Shell"
+        Title="Source Control"
+        Width="720"
+        Height="480"
+        MinWidth="420"
+        MinHeight="280"
+        WindowStartupLocation="Manual"
+        ShowInTaskbar="False"
+        Background="{DynamicResource Theme.App.Background}"
+        Foreground="{DynamicResource Theme.Text.Primary}"
+        Style="{DynamicResource IdeToolWindowStyle}"
+        AutomationProperties.Name="Source Control"
+        help:ContextHelp.Key="Git.ViewSourceControl"
+        Loaded="Window_Loaded"
+        PreviewKeyDown="Window_PreviewKeyDown">
+    <Grid Margin="{DynamicResource Padding.SubtleCard}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" Style="{DynamicResource IdeToolWindowHeaderStyle}">
+            <DockPanel LastChildFill="False">
+                <TextBlock Text="Source Control"
+                           Style="{DynamicResource IdeToolWindowHeaderTextStyle}"
+                           AutomationProperties.Name="Source Control floating window title" />
+                <Button DockPanel.Dock="Right"
+                        Content="Dock to ScriptDesk"
+                        Style="{StaticResource IdeSecondaryButtonStyle}"
+                        Margin="8,0,0,0"
+                        ToolTip="Dock Source Control into the ScriptDesk bottom tool area."
+                        Click="DockButton_Click" />
+            </DockPanel>
+        </Border>
+        <Border Grid.Row="1" Style="{DynamicResource IdeToolWindowContentBorderStyle}">
+            <local:SourceControlView x:Name="SourceControlContent" />
+        </Border>
+    </Grid>
+</Window>

@@ -383,6 +383,7 @@ internal sealed class FakeUserPromptService : IUserPromptService
     public string? ShowOpenFolderDialog() => null;
     public string? ShowOpenPowerShellExecutableDialog() => null;
     public void ShowWarningMessage(string title, string message) { }
+    public bool ShowConfirmation(string title, string message, string primaryText, string secondaryText) => false;
 }
 
 internal sealed class FakeWorkspaceService : IWorkspaceService

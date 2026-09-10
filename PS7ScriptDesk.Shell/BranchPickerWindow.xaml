@@ -1,0 +1,24 @@
+<Window x:Class="PS7ScriptDesk.Shell.BranchPickerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Switch Branch" Width="420" Height="480" MinWidth="320" MinHeight="320"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <Grid Margin="12">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <TextBox x:Name="SearchBox" TextChanged="SearchBox_TextChanged" Margin="0,0,0,8" Padding="6" AutomationProperties.Name="Search branches" ToolTip="Filter local and remote branches." />
+        <ListBox x:Name="BranchList" Grid.Row="1" SelectionChanged="BranchList_SelectionChanged" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" AutomationProperties.Name="Branches">
+            <ListBox.ItemTemplate><DataTemplate><StackPanel Orientation="Horizontal"><TextBlock Text="{Binding Name}" /><TextBlock Text="{Binding TrackingText}" Margin="12,0,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" /></StackPanel></DataTemplate></ListBox.ItemTemplate>
+        </ListBox>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
+            <Button Content="Create &amp; Switch" Click="CreateSwitch_Click" Margin="0,0,6,0" ToolTip="Create a local branch from the current HEAD and switch to it." />
+            <Button Content="Create Only" Click="CreateOnly_Click" Margin="0,0,6,0" ToolTip="Create a local branch without switching." />
+            <Button Content="Rename" Click="Rename_Click" Margin="0,0,6,0" ToolTip="Rename the selected local branch." />
+            <Button Content="Delete" Click="Delete_Click" Style="{StaticResource IdeDestructiveButtonStyle}" ToolTip="Safely delete the selected merged local branch." />
+            <Button Content="Publish" Click="Publish_Click" Margin="6,0,0,0" ToolTip="Publish the current branch to the explicitly selected single remote." />
+        </StackPanel>
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+            <Button Content="Switch" Click="Switch_Click" IsDefault="True" Margin="0,0,6,0" ToolTip="Switch to the selected local branch." />
+            <Button Content="Close" Click="Close_Click" IsCancel="True" />
+        </StackPanel>
+    </Grid>
+</Window>

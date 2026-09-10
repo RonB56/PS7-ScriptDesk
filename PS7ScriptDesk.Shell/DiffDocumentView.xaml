@@ -1,0 +1,65 @@
+<UserControl x:Class="PS7ScriptDesk.Shell.DiffDocumentView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:models="clr-namespace:PS7ScriptDesk.Domain.Models;assembly=PS7ScriptDesk.Domain">
+    <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+        <DockPanel Grid.Row="0" Margin="0,0,0,6" LastChildFill="False">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="{Binding Diff.DisplayName}" FontWeight="SemiBold" ToolTip="{Binding Diff.DisplayName}" />
+                <TextBlock Text="{Binding ScopeText}" Margin="12,0,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" />
+                <TextBlock Text="{Binding Diff.RenameText}" Margin="12,0,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" />
+                <TextBlock Text="{Binding StatusText}" Margin="12,0,0,0" Foreground="{DynamicResource Theme.Text.Secondary}" />
+                <TextBlock Text="{Binding StaleText}" Margin="12,0,0,0" Foreground="{DynamicResource Theme.Warning.Foreground}" />
+            </StackPanel>
+            <Button DockPanel.Dock="Right" Content="Refresh" Click="Refresh_Click" ToolTip="Refresh this diff without changing Git state." Style="{StaticResource IdeSecondaryButtonStyle}" Margin="6,0,0,0" />
+            <Button DockPanel.Dock="Right" Content="Next" Click="Next_Click" IsEnabled="{Binding CanNextChange}" ToolTip="Go to the next change hunk." Style="{StaticResource IdeSecondaryButtonStyle}" Margin="6,0,0,0" />
+            <Button DockPanel.Dock="Right" Content="Previous" Click="Previous_Click" IsEnabled="{Binding CanPreviousChange}" ToolTip="Go to the previous change hunk." Style="{StaticResource IdeSecondaryButtonStyle}" />
+            <Button DockPanel.Dock="Right" Content="Inline" Click="Inline_Click" ToolTip="Show the diff inline." Style="{StaticResource IdeSecondaryButtonStyle}" Margin="6,0,0,0" />
+            <Button DockPanel.Dock="Right" Content="Side-by-Side" Click="SideBySide_Click" ToolTip="Show aligned old and new content." Style="{StaticResource IdeSecondaryButtonStyle}" />
+            <Button DockPanel.Dock="Right" Content="Load Anyway" Click="LoadAnyway_Click" ToolTip="Load this large diff despite the performance warning." Margin="6,0,0,0">
+                <Button.Style><Style TargetType="Button" BasedOn="{StaticResource IdeSecondaryButtonStyle}"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding Diff.IsLarge}" Value="True"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></Button.Style>
+            </Button>
+        </DockPanel>
+        <Border Grid.Row="1" BorderBrush="{DynamicResource Theme.Border.Subtle}" BorderThickness="1" Padding="4">
+            <ScrollViewer x:Name="DiffScrollViewer" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                <Grid>
+                <ItemsControl ItemsSource="{Binding Diff.Hunks}">
+                    <ItemsControl.Style><Style TargetType="ItemsControl"><Setter Property="Visibility" Value="Visible" /><Style.Triggers><DataTrigger Binding="{Binding IsInline}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger></Style.Triggers></Style></ItemsControl.Style>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel>
+                                <TextBlock Text="{Binding Header}" Background="{DynamicResource Theme.Surface.Secondary}" Foreground="{DynamicResource Theme.Editor.Foreground}" FontFamily="Consolas" Padding="2" />
+                                <ItemsControl ItemsSource="{Binding AlignedRows}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid MinHeight="18">
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="34" /><ColumnDefinition Width="*" /><ColumnDefinition Width="34" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding LeftLineNumber}" Foreground="{DynamicResource Theme.Editor.LineNumber}" FontFamily="Consolas" />
+                                                <TextBlock Grid.Column="1" Text="{Binding LeftText}" Foreground="{DynamicResource Theme.Editor.Foreground}" FontFamily="Consolas" Background="{DynamicResource Theme.Diff.RemovedBackground}" />
+                                                <TextBlock Grid.Column="2" Text="{Binding RightLineNumber}" Foreground="{DynamicResource Theme.Editor.LineNumber}" FontFamily="Consolas" />
+                                                <TextBlock Grid.Column="3" Text="{Binding RightText}" Foreground="{DynamicResource Theme.Editor.Foreground}" FontFamily="Consolas" Background="{DynamicResource Theme.Diff.AddedBackground}" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <ItemsControl ItemsSource="{Binding Diff.Lines}">
+                    <ItemsControl.Style><Style TargetType="ItemsControl"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding IsInline}" Value="True"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></ItemsControl.Style>
+                    <ItemsControl.ItemTemplate><DataTemplate>
+                        <Grid MinHeight="18">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="34" /><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding OldLineNumber}" Foreground="{DynamicResource Theme.Editor.LineNumber}" FontFamily="Consolas" />
+                            <TextBlock Grid.Column="1" Text="{Binding Kind}" Foreground="{DynamicResource Theme.Editor.LineNumber}" FontFamily="Consolas" />
+                            <TextBlock Grid.Column="2" Text="{Binding Text}" Foreground="{DynamicResource Theme.Editor.Foreground}" FontFamily="Consolas" />
+                        </Grid>
+                    </DataTemplate></ItemsControl.ItemTemplate>
+                </ItemsControl>
+                </Grid>
+            </ScrollViewer>
+        </Border>
+    </Grid>
+</UserControl>

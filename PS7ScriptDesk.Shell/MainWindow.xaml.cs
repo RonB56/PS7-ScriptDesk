@@ -47,7 +47,6 @@ using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.PowerShell.Services;
 using PS7ScriptDesk.Shell.Dialogs;
 using PS7ScriptDesk.Shell.Debug;
-using PS7ScriptDesk.Shell.Diagnostics;
 using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.Shell.Help;
 using PS7ScriptDesk.Shell.Services;
@@ -98,9 +97,6 @@ namespace PS7ScriptDesk.Shell
         private readonly ConcurrentQueue<TerminalOutputEnvelope> _terminalOutputEnvelopeQueue = new();
         private readonly Dispatcher _terminalOutputDispatcher;
         private MainWindowViewModel? _viewModel;
-        private DependencyPropertyDescriptor? _isEnabledDescriptor;
-        private bool _lastRunControlIsEnabled;
-        private bool _lastRunSelectionControlIsEnabled;
         private CommandPaletteWindow? _commandPaletteWindow;
         private int _terminalOutputDrainScheduled;
         private int _terminalOutputQueuedEnvelopeCount;
@@ -195,6 +191,8 @@ namespace PS7ScriptDesk.Shell
         private readonly UserPromptService _userPromptService = new();
         private readonly HashSet<TextEditor> _configuredEditors = new();
         private readonly Dictionary<EditorTabViewModel, TextEditor> _editorByTab = new();
+        private readonly Dictionary<EditorTabViewModel, TextDocument> _documentByTab = new();
+        private long _editorFocusRequestVersion;
         // _pendingScrollToEnd removed: no longer needed (xterm.js handles scroll).
         private readonly Dictionary<TextEditor, EditorTabViewModel> _tabByEditor = new();
         private readonly Dictionary<TextEditor, BreakpointLineBackgroundRenderer> _breakpointRenderers = new();
@@ -263,6 +261,7 @@ namespace PS7ScriptDesk.Shell
         private string? _activeDebugSnapshotPath;
         private int _debugPanelRefreshVersion;
         private BottomToolWindow? _bottomToolWindow;
+        private GitWorkspaceWindow? _gitWorkspaceWindow;
         private DebugPaneWindow? _debugPaneWindow;
         private ExportProgressWindow? _exportProgressWindow;
         private IReadOnlyList<DebugVariableInfo>? _currentDebugVariables;
@@ -416,8 +415,8 @@ namespace PS7ScriptDesk.Shell
                     _loadedSettings.BottomToolWindowHeight!.Value);
             }
 
+
             InitializeComponent();
-            DisabledToolbarTooltipForensicLogger.Attach(this);
             UpdateAnalyzerSettingsMenu();
             InitializeUiScaleMenu();
             _uiScaleService.ScaleChanged += UiScaleService_ScaleChanged;
@@ -463,18 +462,6 @@ namespace PS7ScriptDesk.Shell
             Dispatcher.VerifyAccess();
             Volatile.Write(ref _viewModel, viewModel);
             DataContext = viewModel;
-            _isEnabledDescriptor = DependencyPropertyDescriptor.FromProperty(UIElement.IsEnabledProperty, typeof(UIElement));
-            _lastRunControlIsEnabled = RunButton.IsEnabled;
-            _lastRunSelectionControlIsEnabled = RunSelectionButton.IsEnabled;
-            _isEnabledDescriptor?.AddValueChanged(RunButton, RunButton_IsEnabledChanged);
-            _isEnabledDescriptor?.AddValueChanged(RunSelectionButton, RunSelectionButton_IsEnabledChanged);
-            StartupEnablementForensicLog.Write("VIEWMODEL_ATTACHED", new Dictionary<string, object?>
-            {
-                ["viewModelCoordinatorInstanceId"] = viewModel.InteractiveTerminalCoordinatorInstanceId,
-                ["runIsAvailable"] = viewModel.IsRunAvailable,
-                ["runCommandCanExecute"] = viewModel.RunCommand.CanExecute(null)
-            });
-            DisabledToolbarTooltipForensicLogger.CaptureStage(this, "AFTER_DATACONTEXT_ASSIGNMENT");
             DeveloperDiagnostics.LogInfo(
                 "Startup",
                 "MainWindow attached its view model reference before DataContext exposure.",
@@ -848,8 +835,6 @@ namespace PS7ScriptDesk.Shell
                 // Forward xterm.js keystrokes to ConPTY stdin.
                 TerminalConsole.UserInput += async data =>
                 {
-                    var coordinatorStateBefore = ViewModel?.InteractiveTerminalCoordinatorState;
-                    var inputClass = TerminalInputClassifier.Classify(data);
                     AppLogger.Debug("Terminal", $"MainWindow received terminal input for forwarding. Length={data.Length}, ContentOmitted=True.");
                     DeveloperDiagnostics.LogUserAction(
                         "Terminal",
@@ -864,15 +849,6 @@ namespace PS7ScriptDesk.Shell
                         try
                         {
                             await ViewModel.WriteRawInputAsync(data).ConfigureAwait(false);
-                            StartupEnablementForensicLog.InputClassification(
-                                data.Length,
-                                inputClass,
-                                ViewModel.InteractiveTerminalCoordinatorGeneration,
-                                coordinatorStateBefore,
-                                ViewModel.InteractiveTerminalCoordinatorState,
-                                coordinatorStateBefore == InteractiveTerminalState.InteractiveInputEditing ? "UserInteractiveEditing" : "NoUserEditOwned",
-                                ViewModel.InteractiveTerminalCoordinatorState == InteractiveTerminalState.InteractiveInputEditing ? "UserInteractiveEditing" : "NoUserEditOwned",
-                                "TerminalControl.UserInput -> MainWindow -> MainWindowViewModel.WriteRawInputAsync");
                             AppLogger.Debug("Terminal", "MainWindow forwarded terminal input to the view model.");
                             DeveloperDiagnostics.LogInfo("Terminal", "Terminal input forwarded to view model.");
                         }
@@ -910,7 +886,6 @@ namespace PS7ScriptDesk.Shell
                 TerminalConsole.TerminalReady += () =>
                 {
                     _terminalIsReady = true;
-                    StartupEnablementForensicLog.Write("RENDERER_READY");
                     AppLogger.Debug("Terminal", "MainWindow received terminal-ready signal.");
                     DeveloperDiagnostics.LogStateTransition("Terminal", "TerminalReady", "Initializing", "Ready", "Terminal ready signal received.");
                     // Apply the current app theme to the terminal colour scheme.
@@ -1434,16 +1409,38 @@ namespace PS7ScriptDesk.Shell
 
         private void FocusActiveEditorSoon()
         {
+            var targetTab = ViewModel?.SelectedTab;
+            var focusRequestVersion = Interlocked.Increment(ref _editorFocusRequestVersion);
             Dispatcher.BeginInvoke(new Action(() =>
             {
+                if (focusRequestVersion != Volatile.Read(ref _editorFocusRequestVersion) ||
+                    targetTab is null ||
+                    ViewModel is null ||
+                    !ReferenceEquals(ViewModel.SelectedTab, targetTab))
+                {
+                    return;
+                }
+
                 var editorTextEditor = FindActiveEditor();
-                if (editorTextEditor is null)
+                if (editorTextEditor is null ||
+                    !editorTextEditor.IsLoaded ||
+                    !ReferenceEquals(editorTextEditor.DataContext, targetTab) ||
+                    editorTextEditor.Document is null ||
+                    !_documentByTab.TryGetValue(targetTab, out var targetDocument) ||
+                    !ReferenceEquals(editorTextEditor.Document, targetDocument) ||
+                    !_tabByEditor.TryGetValue(editorTextEditor, out var registeredTab) ||
+                    !ReferenceEquals(registeredTab, targetTab) ||
+                    !_foldingManagers.ContainsKey(editorTextEditor))
                 {
                     return;
                 }
 
                 SetTerminalActive(false, "FocusActiveEditorSoon");
                 editorTextEditor.Focus();
+                if (!editorTextEditor.TextArea.TextView.VisualLinesValid)
+                {
+                    editorTextEditor.TextArea.TextView.EnsureVisualLines();
+                }
                 editorTextEditor.TextArea?.Caret.BringCaretToView();
             }), System.Windows.Threading.DispatcherPriority.Input);
         }
@@ -2384,6 +2381,11 @@ namespace PS7ScriptDesk.Shell
 
         private void ContextHelp_Click(object sender, RoutedEventArgs e)
         {
+            if (FindActiveEditor()?.DataContext is EditorTabViewModel tab && !tab.IsPowerShellDocument)
+            {
+                if (ViewModel is not null) ViewModel.StatusText = "Context Help is unavailable for non-PowerShell text documents.";
+                return;
+            }
             ContextHelp.OpenForFocusedElement(this);
         }
 
@@ -2412,6 +2414,111 @@ namespace PS7ScriptDesk.Shell
         private void BottomActivityToolTab_Click(object sender, RoutedEventArgs e)
         {
             SelectBottomToolTab(BottomToolTab.Activity, "UserSelected");
+        }
+
+        private void OpenGitWorkspace_Click(object sender, RoutedEventArgs e)
+            => OpenGitWorkspace("GitMenu");
+
+        private void OpenGitWorkspace(string reason)
+        {
+            var viewModel = ViewModel;
+            var coordinator = viewModel?.GitWorkspaceCoordinator;
+            if (viewModel is null || coordinator is null)
+                return;
+
+            if (_gitWorkspaceWindow is { IsLoaded: true } existing)
+            {
+                if (existing.WindowState == WindowState.Minimized) existing.WindowState = WindowState.Normal;
+                existing.Activate();
+                DeveloperDiagnostics.LogUserAction("Git", "GitWorkspaceActivated", "The existing Git Workspace window was activated.", new Dictionary<string, object?> { ["reason"] = reason });
+                return;
+            }
+
+            var window = new GitWorkspaceWindow(new GitWorkspaceViewModel(coordinator, viewModel)) { Owner = this };
+            _gitWorkspaceWindow = window;
+            window.Closed += GitWorkspaceWindow_Closed;
+            window.Show();
+            window.Activate();
+            DeveloperDiagnostics.LogUserAction("Git", "GitWorkspaceOpened", "Git Workspace opened with the shared Git state coordinator.", new Dictionary<string, object?> { ["reason"] = reason });
+        }
+
+        private void GitWorkspaceWindow_Closed(object? sender, EventArgs e)
+        {
+            if (sender is GitWorkspaceWindow window)
+                window.Closed -= GitWorkspaceWindow_Closed;
+            if (ReferenceEquals(_gitWorkspaceWindow, sender)) _gitWorkspaceWindow = null;
+            DeveloperDiagnostics.LogInfo("Git", "Git Workspace window closed; shared Git services remain active.");
+        }
+
+        private void SourceControlFile_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (e.OriginalSource is FrameworkElement { DataContext: GitFileStatus status } && ViewModel is not null)
+            {
+                if (ViewModel.TryOpenFileFromPath(status.FullPath, out var failureReason))
+                {
+                    DeveloperDiagnostics.LogUserAction("Git", "SourceControlFileOpened", "A changed repository file was opened explicitly from Source Control.", new Dictionary<string, object?>
+                    {
+                        ["relativePath"] = status.RelativePath,
+                        ["isUntracked"] = status.IsUntracked
+                    });
+                }
+                else
+                {
+                    ViewModel.StatusText = failureReason ?? "Unable to open the selected repository file.";
+                }
+            }
+        }
+
+        private void SourceControlOpen_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement { DataContext: GitFileStatus status } && ViewModel is not null)
+            {
+                if (!ViewModel.TryOpenFileFromPath(status.FullPath, out var failureReason))
+                {
+                    ViewModel.StatusText = failureReason ?? "Unable to open the selected repository file.";
+                }
+            }
+        }
+
+        private void SourceControlStage_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement { DataContext: GitFileStatus status } && ViewModel is not null)
+            {
+                _ = ViewModel.StageFileAsync(status);
+            }
+        }
+
+        private void SourceControlUnstage_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement { DataContext: GitFileStatus status } && ViewModel is not null)
+            {
+                _ = ViewModel.UnstageFileAsync(status);
+            }
+        }
+
+        private void SourceControlDiscard_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement { DataContext: GitFileStatus status } && ViewModel is not null)
+            {
+                _ = ViewModel.DiscardFileAsync(status);
+            }
+        }
+
+        private void SourceControlGroupAction_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement { Tag: string title } || ViewModel is null)
+            {
+                return;
+            }
+
+            if (title == "STAGED CHANGES")
+            {
+                _ = ViewModel.UnstageAllAsync();
+            }
+            else if (title is "CHANGES" or "UNTRACKED")
+            {
+                _ = ViewModel.StageAllAsync();
+            }
         }
 
         private void ShowBottomToolWindow_Click(object sender, RoutedEventArgs e)
@@ -3055,6 +3162,64 @@ namespace PS7ScriptDesk.Shell
 
             var commands = new List<EditorCommandDefinition>
             {
+                new("git.openWorkspace", "Git: Open Git Workspace", "Git", "", new[] { "git", "workspace", "source control" },
+                    () => ViewModel?.GitWorkspaceCoordinator is not null,
+                    () => OpenGitWorkspace("CommandPalette")),
+                new("git.viewSourceControl", "Git: View Source Control", "Git", "", new[] { "git", "source control", "changes", "repository" },
+                    () => ViewModel is not null,
+                    () => OpenGitWorkspace("CommandPalette")),
+                new("git.refreshStatus", "Git: Refresh Git Status", "Git", "", new[] { "git", "refresh", "status" },
+                    () => ViewModel?.RefreshGitStatusCommand.CanExecute(null) == true,
+                    () => ViewModel?.RefreshGitStatusCommand.Execute(null)),
+                new("git.openRepositoryFolder", "Git: Open Repository Folder", "Git", "", new[] { "git", "repository", "folder" },
+                    () => ViewModel?.OpenRepositoryFolderCommand.CanExecute(null) == true,
+                    () => ViewModel?.OpenRepositoryFolderCommand.Execute(null)),
+                new("git.showHistory", "Git: Show History", "Git", "", new[] { "git", "history", "log", "commits" },
+                    () => ViewModel is not null, () => _ = ViewModel?.OpenHistoryAsync()),
+                new("git.cloneRepository", "Git: Clone Repository", "Git", "", new[] { "git", "clone", "repository" },
+                    () => ViewModel?.CloneRepositoryCommand.CanExecute(null) == true, () => ViewModel?.CloneRepositoryCommand.Execute(null)),
+                new("git.initializeRepository", "Git: Initialize Repository", "Git", "", new[] { "git", "initialize", "init", "repository" },
+                    () => ViewModel?.InitializeRepositoryCommand.CanExecute(null) == true, () => ViewModel?.InitializeRepositoryCommand.Execute(null)),
+                new("git.diagnostics", "Git: Git Diagnostics", "Git", "", new[] { "git", "diagnostics" },
+                    () => ViewModel is not null,
+                    () => ViewModel?.GitDiagnosticsCommand.Execute(null)),
+                new("git.stageFile", "Git: Stage File", "Git", "", new[] { "git", "stage", "file", "index" },
+                    () => ViewModel?.StageFileCommand.CanExecute(null) == true,
+                    () => ViewModel?.StageFileCommand.Execute(null)),
+                new("git.stageAll", "Git: Stage All", "Git", "", new[] { "git", "stage", "all" },
+                    () => ViewModel?.StageAllCommand.CanExecute(null) == true,
+                    () => ViewModel?.StageAllCommand.Execute(null)),
+                new("git.unstageFile", "Git: Unstage File", "Git", "", new[] { "git", "unstage", "file", "index" },
+                    () => ViewModel?.UnstageFileCommand.CanExecute(null) == true,
+                    () => ViewModel?.UnstageFileCommand.Execute(null)),
+                new("git.unstageAll", "Git: Unstage All", "Git", "", new[] { "git", "unstage", "all" },
+                    () => ViewModel?.UnstageAllCommand.CanExecute(null) == true,
+                    () => ViewModel?.UnstageAllCommand.Execute(null)),
+                new("git.commit", "Git: Commit", "Git", "", new[] { "git", "commit", "staged", "source control" },
+                    () => ViewModel is not null,
+                    () =>
+                    {
+                        if (ViewModel?.CommitCommand.CanExecute(null) == true)
+                            ViewModel.CommitCommand.Execute(null);
+                        else
+                            OpenGitWorkspace("CommandPalette");
+                    }),
+                new("git.switchBranch", "Git: Switch Branch", "Git", "", new[] { "git", "branch", "switch" },
+                    () => ViewModel is not null, () => OpenGitWorkspace("CommandPalette")),
+                new("git.createBranch", "Git: Create Branch", "Git", "", new[] { "git", "branch", "create", "new" },
+                    () => ViewModel is not null, () => OpenGitWorkspace("CommandPalette")),
+                new("git.renameBranch", "Git: Rename Branch", "Git", "", new[] { "git", "branch", "rename" },
+                    () => ViewModel is not null, () => OpenGitWorkspace("CommandPalette")),
+                new("git.deleteBranch", "Git: Delete Branch", "Git", "", new[] { "git", "branch", "delete" },
+                    () => ViewModel is not null, () => OpenGitWorkspace("CommandPalette")),
+                new("git.fetch", "Git: Fetch", "Git", "", new[] { "git", "fetch", "remote" },
+                    () => ViewModel?.FetchCommand.CanExecute(null) == true, () => ViewModel?.FetchCommand.Execute(null)),
+                new("git.pull", "Git: Pull", "Git", "", new[] { "git", "pull", "remote" },
+                    () => ViewModel?.PullCommand.CanExecute(null) == true, () => ViewModel?.PullCommand.Execute(null)),
+                new("git.push", "Git: Push", "Git", "", new[] { "git", "push", "remote" },
+                    () => ViewModel?.PushCommand.CanExecute(null) == true, () => ViewModel?.PushCommand.Execute(null)),
+                new("git.sync", "Git: Sync", "Git", "", new[] { "git", "sync", "fetch", "pull", "push" },
+                    () => ViewModel?.SyncCommand.CanExecute(null) == true, () => ViewModel?.SyncCommand.Execute(null)),
                 new("diagnostics.analyzeCurrentDocument", "Analyze Current Document", "Diagnostics", "", new[] { "analyze", "script analyzer", "psscriptanalyzer", "diagnostics" },
                     () => ViewModel?.SelectedTab is not null,
                     () => _ = AnalyzeCurrentDocumentAsync()),
@@ -3116,7 +3281,9 @@ namespace PS7ScriptDesk.Shell
             // Future registry entries can opt out by retaining the default palette-only surface.
             return new EditorCommandRegistry(commands.Select((command, index) => command with
             {
-                ContextGroup = command.Id.StartsWith("transform.", StringComparison.OrdinalIgnoreCase)
+                ContextGroup = command.Id.StartsWith("git.", StringComparison.OrdinalIgnoreCase)
+                    ? "Git"
+                    : command.Id.StartsWith("transform.", StringComparison.OrdinalIgnoreCase)
                     ? "Transform"
                     : command.Id.StartsWith("diagnostics.", StringComparison.OrdinalIgnoreCase) ? "More" : "Selection",
                 ContextSubgroup = GetEditorContextSubgroup(command.Id),
@@ -3693,6 +3860,7 @@ namespace PS7ScriptDesk.Shell
             editorTextEditor.TextChanged += EditorTextEditor_TextChanged;
             editorTextEditor.TextArea.Caret.PositionChanged += EditorTextEditor_CaretPositionChanged;
             editorTextEditor.TextArea.SelectionChanged += EditorTextEditor_SelectionChanged;
+            editorTextEditor.TextArea.TextView.ScrollOffsetChanged += EditorTextView_ScrollOffsetChanged;
             editorTextEditor.TextArea.TextEntered += EditorTextArea_TextEntered;
             editorTextEditor.TextArea.TextEntering += EditorTextArea_TextEntering;
             editorTextEditor.PreviewKeyDown += EditorTextEditor_PreviewKeyDown;
@@ -3745,8 +3913,41 @@ namespace PS7ScriptDesk.Shell
             tab.PropertyChanged -= EditorTab_PropertyChanged;
             tab.PropertyChanged += EditorTab_PropertyChanged;
 
+            if (!_documentByTab.TryGetValue(tab, out var document))
+            {
+                document = new TextDocument(tab.Content ?? string.Empty);
+                _documentByTab[tab] = document;
+            }
+
+            try
+            {
+                _editorTextSynchronizationInProgress.Add(editorTextEditor);
+                editorTextEditor.Document = document;
+            }
+            finally
+            {
+                _editorTextSynchronizationInProgress.Remove(editorTextEditor);
+            }
+
             SynchronizeEditorTextFromViewModel(editorTextEditor, tab.Content);
+            RestoreEditorViewState(editorTextEditor, tab);
             ClearParserTokensForEditor(editorTextEditor);
+
+            if (!tab.IsPowerShellDocument)
+            {
+                CloseEditorCompletion("Non-PowerShell document selected");
+                CancelPendingDiagnostics(editorTextEditor);
+                DisposeLiveSyntaxPump(editorTextEditor);
+                ClearDiagnosticLayers(editorTextEditor);
+                _scriptDiagnosticStore.ClearDocument(tab.DiagnosticDocument.DocumentId);
+                tab.SetSyntaxDiagnosticsStatus("Diagnostics are disabled for non-PowerShell text documents", clearErrors: true);
+                editorTextEditor.TextArea.IndentationStrategy = null;
+            }
+            else
+            {
+                editorTextEditor.TextArea.IndentationStrategy = new PowerShellIndentationStrategy();
+                ActivatePowerShellEditorServices(editorTextEditor, tab);
+            }
 
             if (_breakpointRenderers.TryGetValue(editorTextEditor, out var existingBreakpointRenderer))
             {
@@ -3789,6 +3990,22 @@ namespace PS7ScriptDesk.Shell
                 : 1;
             _editorRegistrationVersions[editorTextEditor] = nextVersion;
             return nextVersion;
+        }
+
+        private void ActivatePowerShellEditorServices(TextEditor editorTextEditor, EditorTabViewModel tab)
+        {
+            if (!tab.IsPowerShellDocument)
+            {
+                return;
+            }
+
+            var runtimeInfo = ViewModel?.EffectiveRuntimeInfo;
+            if (runtimeInfo is not null)
+            {
+                _intelliSenseService.StartCompletionEngineWarmup(runtimeInfo);
+            }
+
+            editorTextEditor.TextArea.IndentationStrategy = new PowerShellIndentationStrategy();
         }
 
         private int IncrementDiagnosticsRequestVersion(TextEditor editorTextEditor)
@@ -4030,13 +4247,18 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            var caretOffset = editorTextEditor.CaretOffset;
-
             try
             {
                 _editorTextSynchronizationInProgress.Add(editorTextEditor);
-                editorTextEditor.Text = targetText;
-                editorTextEditor.CaretOffset = Math.Min(caretOffset, editorTextEditor.Text.Length);
+                if (editorTextEditor.Document is null)
+                {
+                    editorTextEditor.Document = new TextDocument(targetText);
+                }
+                else
+                {
+                    editorTextEditor.Document.Text = targetText;
+                    editorTextEditor.Document.UndoStack = new UndoStack();
+                }
             }
             finally
             {
@@ -4051,14 +4273,20 @@ namespace PS7ScriptDesk.Shell
             DisposeLiveSyntaxPump(editorTextEditor);
             ClearDiagnosticLayers(editorTextEditor);
             CancelPendingFolding(editorTextEditor);
+            UninstallFoldingManager(editorTextEditor);
 
             if (_tabByEditor.TryGetValue(editorTextEditor, out var tab))
             {
+                CaptureEditorViewState(editorTextEditor, tab);
                 _liveAnalyzerEligibleRevisions.RemoveWhere(item => item.DocumentId == tab.DiagnosticDocument.DocumentId);
                 _scriptDiagnosticStore.ClearDocument(tab.DiagnosticDocument.DocumentId);
                 tab.PropertyChanged -= EditorTab_PropertyChanged;
                 _editorByTab.Remove(tab);
                 _tabByEditor.Remove(editorTextEditor);
+                if (ViewModel is null || !ViewModel.OpenTabs.Contains(tab))
+                {
+                    _documentByTab.Remove(tab);
+                }
             }
 
             if (_breakpointRenderers.TryGetValue(editorTextEditor, out var renderer))
@@ -4077,7 +4305,18 @@ namespace PS7ScriptDesk.Shell
             editorTextEditor.TextArea.TextView.MouseLeave -= OnTextViewMouseLeave;
             editorTextEditor.TextArea.TextView.MouseHover -= OnTextViewMouseHover;
             editorTextEditor.TextArea.TextView.MouseHoverStopped -= OnTextViewMouseHoverStopped;
+            editorTextEditor.TextArea.TextView.ScrollOffsetChanged -= EditorTextView_ScrollOffsetChanged;
             _editorTextSynchronizationInProgress.Remove(editorTextEditor);
+        }
+
+        private void UninstallFoldingManager(TextEditor editorTextEditor)
+        {
+            if (!_foldingManagers.Remove(editorTextEditor, out var foldingManager))
+            {
+                return;
+            }
+
+            FoldingManager.Uninstall(foldingManager);
         }
 
         private void EditorTab_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -4132,6 +4371,27 @@ namespace PS7ScriptDesk.Shell
             {
                 RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
             }
+
+            if (e.PropertyName is nameof(EditorTabViewModel.Language) or nameof(EditorTabViewModel.IsPowerShellDocument))
+            {
+                if (!tab.IsPowerShellDocument)
+                {
+                    CloseEditorCompletion("Document changed to non-PowerShell text");
+                    CancelPendingDiagnostics(editorTextEditor);
+                    DisposeLiveSyntaxPump(editorTextEditor);
+                    ClearDiagnosticLayers(editorTextEditor);
+                    _scriptDiagnosticStore.ClearDocument(tab.DiagnosticDocument.DocumentId);
+                    editorTextEditor.TextArea.IndentationStrategy = null;
+                    tab.SetSyntaxDiagnosticsStatus("Diagnostics are disabled for non-PowerShell text documents", clearErrors: true);
+                }
+                else
+                {
+                    ActivatePowerShellEditorServices(editorTextEditor, tab);
+                }
+
+                ScheduleDiagnostics(editorTextEditor);
+                RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
+            }
         }
 
         private void UpdateEditorCaretMetrics(TextEditor editorTextEditor)
@@ -4145,7 +4405,14 @@ namespace PS7ScriptDesk.Shell
             var line = editorTextEditor.Document.GetLineByOffset(caretOffset);
             var lineNumber = line.LineNumber;
             var column = (caretOffset - line.Offset) + 1;
-            tab.UpdateCaretPosition(lineNumber, column, editorTextEditor.SelectionLength);
+            tab.UpdateEditorViewState(
+                lineNumber,
+                column,
+                caretOffset,
+                Math.Clamp(editorTextEditor.SelectionStart, 0, editorTextEditor.Document.TextLength),
+                editorTextEditor.SelectionLength,
+                editorTextEditor.TextArea.TextView.ScrollOffset.X,
+                editorTextEditor.TextArea.TextView.ScrollOffset.Y);
 
             if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
             {
@@ -4289,6 +4556,11 @@ namespace PS7ScriptDesk.Shell
 
         private bool ShouldSuppressEditorInputFeatures(TextEditor editorTextEditor, string source)
         {
+            if (editorTextEditor.DataContext is EditorTabViewModel tab && !tab.IsPowerShellDocument)
+            {
+                return true;
+            }
+
             if (!_terminalIsActive)
             {
                 return false;
@@ -4459,6 +4731,49 @@ namespace PS7ScriptDesk.Shell
                 });
         }
 
+        private void EditorTextView_ScrollOffsetChanged(object? sender, EventArgs e)
+        {
+            if (sender is not TextView textView || ResolveEditorFromTextView(textView) is not TextEditor editor)
+            {
+                return;
+            }
+
+            UpdateEditorCaretMetrics(editor);
+        }
+
+        private void CaptureEditorViewState(TextEditor editorTextEditor, EditorTabViewModel tab)
+        {
+            UpdateEditorCaretMetrics(editorTextEditor);
+        }
+
+        private static void RestoreEditorViewState(TextEditor editorTextEditor, EditorTabViewModel tab)
+        {
+            var documentLength = editorTextEditor.Document?.TextLength ?? 0;
+            var selectionStart = Math.Clamp(tab.SelectionStart, 0, documentLength);
+            var selectionLength = Math.Clamp(tab.SelectionLength, 0, documentLength - selectionStart);
+            editorTextEditor.Select(selectionStart, selectionLength);
+            editorTextEditor.CaretOffset = Math.Clamp(tab.CaretOffset, 0, documentLength);
+            editorTextEditor.ScrollToHorizontalOffset(tab.HorizontalScrollOffset);
+            editorTextEditor.ScrollToVerticalOffset(tab.VerticalScrollOffset);
+
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Editor",
+                    "Restored tab-local editor view state.",
+                    new Dictionary<string, object?>
+                    {
+                        ["tabTitle"] = tab.Title,
+                        ["filePath"] = tab.FilePath,
+                        ["caretOffset"] = tab.CaretOffset,
+                        ["selectionStart"] = selectionStart,
+                        ["selectionLength"] = selectionLength,
+                        ["horizontalScrollOffset"] = tab.HorizontalScrollOffset,
+                        ["verticalScrollOffset"] = tab.VerticalScrollOffset
+                    });
+            }
+        }
+
         private static bool ShouldAutoInsertClosingDelimiter(TextEditor editor)
         {
             if (editor.Document is null)
@@ -4511,7 +4826,9 @@ namespace PS7ScriptDesk.Shell
 
         private async Task<bool> ShowEditorQuickInfoAtCaretAsync(TextEditor editorTextEditor, bool updateStatusOnly)
         {
-            if (editorTextEditor.Document is null)
+            if (editorTextEditor.Document is null ||
+                editorTextEditor.DataContext is not EditorTabViewModel tab ||
+                !tab.IsPowerShellDocument)
             {
                 return false;
             }
@@ -4755,19 +5072,11 @@ namespace PS7ScriptDesk.Shell
 
         private async System.Threading.Tasks.Task RunSelectionFromEditorAsync(TextEditor editorTextEditor)
         {
-            using var forensicRequest = AdmissionForensicLog.BeginRequest("RUN_SELECTION_CLICK");
             if (ViewModel?.IsRunAvailable != true)
             {
-                AdmissionForensicLog.Write("RUN_SELECTION_REJECT_APPLICATION", new Dictionary<string, object?>
-                {
-                    ["reason"] = "IsRunAvailable=false",
-                    ["viewModelPresent"] = ViewModel is not null
-                });
                 DeveloperDiagnostics.LogDecision("Execution", "RunSelection", "Run Selection requested while execution was unavailable.", "Rejected");
                 return;
             }
-
-            AdmissionForensicLog.Write("RUN_SELECTION_ADMIT_APPLICATION");
 
             var selectedText = editorTextEditor.SelectedText;
 
@@ -4797,14 +5106,8 @@ namespace PS7ScriptDesk.Shell
 
         private async Task RunScriptWithBreakpointAwarenessAsync()
         {
-            using var forensicRequest = AdmissionForensicLog.BeginRequest("RUN_CLICK");
             if (ViewModel?.SelectedTab is null)
             {
-                AdmissionForensicLog.Write("RUN_REJECT_APPLICATION", new Dictionary<string, object?>
-                {
-                    ["reason"] = "NoSelectedTab",
-                    ["viewModelPresent"] = ViewModel is not null
-                });
                 DeveloperDiagnostics.LogDecision("Execution", "RunScript", "Run requested without a selected tab.", "Rejected");
                 return;
             }
@@ -4830,17 +5133,8 @@ namespace PS7ScriptDesk.Shell
 
             if (ViewModel.RunCommand.CanExecute(null))
             {
-                AdmissionForensicLog.Write("RUN_ADMIT_APPLICATION");
                 ViewModel.RunCommand.Execute(null);
                 DeveloperDiagnostics.LogInfo("Execution", "Run command executed.");
-            }
-            else
-            {
-                AdmissionForensicLog.Write("RUN_REJECT_APPLICATION", new Dictionary<string, object?>
-                {
-                    ["reason"] = "RunCommand.CanExecute=false",
-                    ["isRunAvailable"] = ViewModel.IsRunAvailable
-                });
             }
 
             await Task.CompletedTask;
@@ -5569,6 +5863,14 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            if (!ViewModel.SelectedTab.IsPowerShellDocument)
+            {
+                ViewModel.StatusText = "PowerShell Debug is unavailable for non-PowerShell text documents";
+                RefreshDebugCommandAvailability(false);
+                DeveloperDiagnostics.LogDecision("Debugger", "StartDebug_Click", "Start Debug rejected because the selected document is not PowerShell.", "Rejected");
+                return;
+            }
+
             var runtime = ViewModel.EffectiveRuntimeInfo;
             if (runtime is null)
             {
@@ -5933,7 +6235,7 @@ namespace PS7ScriptDesk.Shell
 
         private bool CanStartDebugSession()
         {
-            if (_debugSession is not null || ViewModel?.SelectedTab is null)
+            if (_debugSession is not null || ViewModel?.SelectedTab is null || !ViewModel.SelectedTab.IsPowerShellDocument)
             {
                 return false;
             }
@@ -6708,6 +7010,13 @@ namespace PS7ScriptDesk.Shell
         {
             var viewModel = ViewModel;
             var tab = viewModel?.SelectedTab;
+            if (tab is not null && !tab.IsPowerShellDocument)
+            {
+                _scriptDiagnosticStore.ClearDocument(tab.DiagnosticDocument.DocumentId);
+                tab.SetSyntaxDiagnosticsStatus("PSScriptAnalyzer is disabled for non-PowerShell text documents", clearErrors: true);
+                if (viewModel is not null) viewModel.StatusText = "PSScriptAnalyzer is disabled for non-PowerShell text documents";
+                return;
+            }
             if (tab is null || viewModel is null) { if (viewModel is not null) viewModel.StatusText = "No current document"; return; }
             if (!_loadedSettings.PSScriptAnalyzerEnabled) { viewModel.StatusText = "PSScriptAnalyzer is disabled"; return; }
             var runtimePath = viewModel.EffectiveRuntimeExecutablePath;
@@ -6747,7 +7056,7 @@ namespace PS7ScriptDesk.Shell
 
         private void ScheduleLiveAnalyzer(TextEditor editorTextEditor, string scriptSnapshot, bool parserHasErrors)
         {
-            if (!_loadedSettings.PSScriptAnalyzerEnabled || !_loadedSettings.PSScriptAnalyzerAnalyzeWhileEditing || parserHasErrors || editorTextEditor.DataContext is not EditorTabViewModel tab) return;
+            if (!_loadedSettings.PSScriptAnalyzerEnabled || !_loadedSettings.PSScriptAnalyzerAnalyzeWhileEditing || parserHasErrors || editorTextEditor.DataContext is not EditorTabViewModel tab || !tab.IsPowerShellDocument) return;
             var snapshot = tab.DiagnosticDocument.Capture();
             if (!_liveAnalyzerEligibleRevisions.Contains((snapshot.DocumentId, snapshot.DocumentRevision))) return;
             if (scriptSnapshot.Length >= AuthoringDiagnosticsVeryLargeCharacterThreshold || CountLines(scriptSnapshot) >= AuthoringDiagnosticsVeryLargeLineThreshold)
@@ -6827,6 +7136,7 @@ namespace PS7ScriptDesk.Shell
                 _intelliSenseService.CompletionEngineStatusChanged -= IntelliSenseService_CompletionEngineStatusChanged;
                 _scriptDiagnosticStore.Changed -= ScriptDiagnosticStore_Changed;
                 _bottomToolWindow?.CloseForOwnerShutdown();
+                _gitWorkspaceWindow?.Close();
                 _debugPaneWindow?.CloseForOwnerShutdown();
                 _exportProgressWindow?.CloseForOwnerShutdown();
                 DisposeLiveSyntaxPumps();
@@ -7055,6 +7365,10 @@ namespace PS7ScriptDesk.Shell
 
                 if (FindActiveEditor() is TextEditor activeEditor)
                 {
+                    if (activeEditor.DataContext is EditorTabViewModel selectedTab && selectedTab.IsPowerShellDocument)
+                    {
+                        ActivatePowerShellEditorServices(activeEditor, selectedTab);
+                    }
                     ScheduleDiagnostics(activeEditor);
                 }
 
@@ -7156,37 +7470,7 @@ namespace PS7ScriptDesk.Shell
 
         private void Window_Closed(object? sender, EventArgs e)
         {
-            _isEnabledDescriptor?.RemoveValueChanged(RunButton, RunButton_IsEnabledChanged);
-            _isEnabledDescriptor?.RemoveValueChanged(RunSelectionButton, RunSelectionButton_IsEnabledChanged);
             _uiScaleService.ScaleChanged -= UiScaleService_ScaleChanged;
-        }
-
-        private void RunButton_IsEnabledChanged(object? sender, EventArgs e)
-        {
-            DisabledToolbarTooltipForensicLogger.CaptureStage(this, "RUN_ISENABLED_CHANGED");
-            var current = RunButton.IsEnabled;
-            StartupEnablementForensicLog.ControlEdge(
-                "RUN_CONTROL_ISENABLED_EDGE",
-                _lastRunControlIsEnabled,
-                current,
-                ViewModel?.IsRunAvailable ?? false,
-                ViewModel?.RunCommand.CanExecute(null) ?? false,
-                BindingOperations.GetBindingExpressionBase(RunButton, UIElement.IsEnabledProperty) is not null);
-            _lastRunControlIsEnabled = current;
-        }
-
-        private void RunSelectionButton_IsEnabledChanged(object? sender, EventArgs e)
-        {
-            DisabledToolbarTooltipForensicLogger.CaptureStage(this, "RUN_SELECTION_ISENABLED_CHANGED");
-            var current = RunSelectionButton.IsEnabled;
-            StartupEnablementForensicLog.ControlEdge(
-                "RUN_SELECTION_CONTROL_ISENABLED_EDGE",
-                _lastRunSelectionControlIsEnabled,
-                current,
-                ViewModel?.IsRunAvailable ?? false,
-                ViewModel?.RunCommand.CanExecute(null) ?? false,
-                BindingOperations.GetBindingExpressionBase(RunSelectionButton, UIElement.IsEnabledProperty) is not null);
-            _lastRunSelectionControlIsEnabled = current;
         }
 
         private void ViewModel_ExeExportProgressChanged(object? sender, ExeExportProgressUpdate update)
@@ -8293,6 +8577,7 @@ namespace PS7ScriptDesk.Shell
                     });
             }
 
+
             _applicationSettingsService.SaveSettings(settings);
             DeveloperDiagnostics.LogInfo(
                 "Settings",
@@ -8684,6 +8969,16 @@ namespace PS7ScriptDesk.Shell
 
             if (!_tabByEditor.TryGetValue(editorTextEditor, out var currentTab) || !ReferenceEquals(currentTab, tab))
             {
+                return;
+            }
+
+            if (!tab.IsPowerShellDocument)
+            {
+                CancelPendingDiagnostics(editorTextEditor);
+                DisposeLiveSyntaxPump(editorTextEditor);
+                ClearDiagnosticLayers(editorTextEditor);
+                _scriptDiagnosticStore.ClearDocument(tab.DiagnosticDocument.DocumentId);
+                tab.SetSyntaxDiagnosticsStatus("Diagnostics are disabled for non-PowerShell text documents", clearErrors: true);
                 return;
             }
 
@@ -9681,6 +9976,11 @@ namespace PS7ScriptDesk.Shell
 
             var ownerEditor = ResolveEditorFromTextView(textView);
             if (ownerEditor is null)
+            {
+                return;
+            }
+
+            if (ownerEditor.DataContext is EditorTabViewModel ownerTab && !ownerTab.IsPowerShellDocument)
             {
                 return;
             }

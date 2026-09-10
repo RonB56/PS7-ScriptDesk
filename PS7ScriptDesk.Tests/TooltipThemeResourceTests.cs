@@ -36,6 +36,11 @@ public sealed class TooltipThemeResourceTests
         Assert.Contains("Property=\"Foreground\" Value=\"{DynamicResource Theme.ToolTip.Foreground}\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("Property=\"TextElement.Foreground\" Value=\"{DynamicResource Theme.ToolTip.Foreground}\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("Property=\"BorderBrush\" Value=\"{DynamicResource Theme.ToolTip.Border}\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Key=\"WrappedTooltipContentTemplate\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("MaxWidth=\"520\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("TextWrapping=\"Wrap\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("TextTrimming=\"None\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("Property=\"ContentTemplate\" Value=\"{StaticResource WrappedTooltipContentTemplate}\"", appXaml, StringComparison.Ordinal);
 
         Assert.Contains("<Style x:Key=\"ContextHelpToolTipStyle\" TargetType=\"ToolTip\">", appXaml, StringComparison.Ordinal);
         Assert.Contains("Theme.ToolTip.Background", appXaml, StringComparison.Ordinal);
@@ -53,10 +58,14 @@ public sealed class TooltipThemeResourceTests
         Assert.Contains("SetResourceReference(System.Windows.Controls.Control.ForegroundProperty, \"Theme.ToolTip.Foreground\")", mainWindowCode, StringComparison.Ordinal);
         Assert.Contains("SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, \"Theme.ToolTip.Foreground\")", mainWindowCode, StringComparison.Ordinal);
         Assert.Contains("SetResourceReference(System.Windows.Controls.Control.BorderBrushProperty, \"Theme.ToolTip.Border\")", mainWindowCode, StringComparison.Ordinal);
+        Assert.Contains("MaxWidth = 760", mainWindowCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("TextTrimming = TextTrimming.CharacterEllipsis", mainWindowCode, StringComparison.Ordinal);
 
         Assert.DoesNotContain("Foreground = Brushes.Gray", completionDataCode, StringComparison.Ordinal);
         Assert.Contains("SetResourceReference(TextBlock.ForegroundProperty, \"Theme.ToolTip.SecondaryForeground\")", completionDataCode, StringComparison.Ordinal);
         Assert.Contains("SetResourceReference(TextBlock.ForegroundProperty, \"Theme.ToolTip.Foreground\")", completionDataCode, StringComparison.Ordinal);
+        Assert.Contains("TextWrapping = TextWrapping.Wrap", completionDataCode, StringComparison.Ordinal);
+        Assert.Contains("MaxWidth = 500", completionDataCode, StringComparison.Ordinal);
     }
 
     private static Dictionary<string, Rgb> LoadBrushColors(string relativePath)

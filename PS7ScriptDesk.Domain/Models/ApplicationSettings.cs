@@ -40,6 +40,18 @@ namespace PS7ScriptDesk.Domain.Models
 
         public double? BottomToolWindowTop { get; set; }
 
+        public bool? IsSourceControlVisible { get; set; }
+
+        public bool? IsSourceControlFloating { get; set; }
+
+        public double? SourceControlWindowWidth { get; set; }
+
+        public double? SourceControlWindowHeight { get; set; }
+
+        public double? SourceControlWindowLeft { get; set; }
+
+        public double? SourceControlWindowTop { get; set; }
+
         public double? WorkspaceSectionHeight { get; set; }
 
         public double? OpenTabsSectionHeight { get; set; }

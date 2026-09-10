@@ -51,7 +51,7 @@
                         Click="RecoveryAction_Click" />
                 <Button Content="Discard"
                         Margin="6,0,0,0"
-                        Style="{StaticResource IdeDialogSecondaryButtonStyle}"
+                        Style="{StaticResource IdeDestructiveButtonStyle}"
                         AutomationProperties.Name="Discard recovery snapshot"
                         ToolTip="Delete this recovery snapshot and leave the original file untouched."
                         Tag="Discard"

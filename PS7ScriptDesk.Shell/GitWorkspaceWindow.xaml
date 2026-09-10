@@ -1,0 +1,108 @@
+<Window x:Class="PS7ScriptDesk.Shell.GitWorkspaceWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Git Workspace" Width="1180" Height="760" MinWidth="820" MinHeight="560"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="True"
+        Background="{DynamicResource Theme.App.Background}" Foreground="{DynamicResource Theme.Text.Primary}"
+        Style="{DynamicResource IdeToolWindowStyle}" AutomationProperties.Name="Git Workspace">
+    <Grid Margin="{DynamicResource Padding.SubtleCard}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" Style="{DynamicResource IdeToolWindowHeaderStyle}" Padding="16">
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="Git Workspace" Style="{DynamicResource IdeToolWindowHeaderTextStyle}" AutomationProperties.Name="Git Workspace heading" />
+                    <TextBlock Text="{Binding RepositoryText}" Margin="0,4,0,0" Style="{StaticResource IdeToolWindowMetaTextStyle}" TextTrimming="CharacterEllipsis" ToolTip="{Binding RepositoryText}" AutomationProperties.Name="Active Git repository" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" HorizontalAlignment="Right">
+                    <TextBlock Text="{Binding BranchText}" HorizontalAlignment="Right" FontWeight="SemiBold" AutomationProperties.Name="Current Git branch" />
+                    <TextBlock Text="{Binding StatusText}" Margin="0,4,0,0" HorizontalAlignment="Right" Style="{StaticResource IdeToolWindowMetaTextStyle}" AutomationProperties.Name="Git repository status" />
+                </StackPanel>
+            </Grid>
+        </Border>
+        <WrapPanel Grid.Row="1" Margin="0,10,0,0" Orientation="Horizontal">
+            <Button Content="{Binding RepositoryActionText}" Command="{Binding OpenRepositoryCommand}" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Choose a repository folder with the folder picker and switch the Git workspace context." AutomationProperties.Name="Open or switch Git repository" />
+            <Button Content="Clone" Command="{Binding CloneRepositoryCommand}" Margin="8,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Clone a repository into a new local folder." AutomationProperties.Name="Clone Git repository" />
+            <Button Content="Initialize" Command="{Binding InitializeRepositoryCommand}" Margin="8,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Initialize Git metadata in an existing folder." AutomationProperties.Name="Initialize Git repository" />
+            <Button Content="Refresh" Command="{Binding RefreshCommand}" Margin="8,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Refresh repository, branch, remote, and change state." AutomationProperties.Name="Refresh Git workspace" />
+            <Button Content="Diagnostics" Command="{Binding GitDiagnosticsCommand}" Margin="8,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Show Git availability and repository diagnostics in ScriptDesk." AutomationProperties.Name="Show Git diagnostics" />
+        </WrapPanel>
+        <WrapPanel Grid.Row="2" Margin="0,8,0,10" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button Content="Changes" Command="{Binding ShowChangesCommand}" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Review working-tree changes and staged files." AutomationProperties.Name="Git Workspace Changes" />
+            <Button Content="History" Command="{Binding ShowHistoryCommand}" Margin="8,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Review repository commits and historical diffs." AutomationProperties.Name="Git Workspace History" />
+            <TextBlock Text="Branch" VerticalAlignment="Center" Margin="18,0,6,0" FontWeight="SemiBold" />
+            <ComboBox ItemsSource="{Binding Branches.Branches}" SelectedItem="{Binding Branches.SelectedBranch}" DisplayMemberPath="Name" Width="180" ToolTip="Select a local branch to switch to." AutomationProperties.Name="Git branch selector" />
+            <Button Content="Switch" Command="{Binding Branches.SwitchCommand}" CommandParameter="{Binding Branches.SelectedBranch}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Switch branches; unsaved documents are protected." AutomationProperties.Name="Switch Git branch" />
+            <TextBlock Text="Remote" VerticalAlignment="Center" Margin="18,0,6,0" FontWeight="SemiBold" />
+            <ComboBox ItemsSource="{Binding Remotes.Remotes}" SelectedItem="{Binding Remotes.SelectedRemote}" DisplayMemberPath="Name" Width="130" ToolTip="Remote used when publishing the current branch." AutomationProperties.Name="Git remote selector" />
+            <Button Content="Fetch" Command="{Binding Remotes.FetchCommand}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Fetch remote updates." AutomationProperties.Name="Fetch Git remotes" />
+            <Button Content="Pull" Command="{Binding Remotes.PullCommand}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Pull updates using document-safety rules." AutomationProperties.Name="Pull Git changes" />
+            <Button Content="Push" Command="{Binding Remotes.PushCommand}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Push the current branch." AutomationProperties.Name="Push Git changes" />
+            <Button Content="Sync" Command="{Binding Remotes.SyncCommand}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Fetch, pull, and push using ScriptDesk's sync policy." AutomationProperties.Name="Sync Git repository" />
+            <TextBlock Text="{Binding ConflictText}" Foreground="{DynamicResource Theme.Status.Warning.Foreground}" VerticalAlignment="Center" Margin="16,0,0,0" AutomationProperties.Name="Git conflict status" />
+        </WrapPanel>
+        <Grid Grid.Row="3">
+            <Grid x:Name="ChangesContent">
+                <Grid.Style><Style TargetType="Grid"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding Mode}" Value="Changes"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></Grid.Style>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="1.1*" MinWidth="320" /><ColumnDefinition Width="6" /><ColumnDefinition Width="2*" MinWidth="400" /></Grid.ColumnDefinitions>
+                <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" ShowsPreview="False" Style="{StaticResource IdeColumnSplitterStyle}" AutomationProperties.Name="Resize Git changes and diff panes" />
+                <Border Grid.Column="0" Style="{DynamicResource IdeToolWindowContentBorderStyle}" Padding="10" Margin="0,0,8,0">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" MinHeight="120" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <StackPanel Grid.Row="0">
+                            <TextBlock Text="Working tree" FontWeight="SemiBold" />
+                            <TextBox Text="{Binding Changes.FilterText, UpdateSourceTrigger=PropertyChanged}" Padding="6" Margin="0,8,0,0" ToolTip="Filter changed files by path." AutomationProperties.Name="Filter Git changes" />
+                            <ComboBox ItemsSource="{Binding Changes.StatusFilters}" SelectedItem="{Binding Changes.StatusFilter, UpdateSourceTrigger=PropertyChanged}" Margin="0,6,0,10" ToolTip="Filter changed files by status." AutomationProperties.Name="Git change status filter" />
+                        </StackPanel>
+                        <Grid Grid.Row="1">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <ItemsControl ItemsSource="{Binding Changes.Groups}"><ItemsControl.ItemTemplate><DataTemplate><Expander Header="{Binding HeaderText}" IsExpanded="True" Margin="0,0,0,5"><ListBox ItemsSource="{Binding Items}" SelectionChanged="ChangeSelectionChanged" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" ItemContainerStyle="{StaticResource IdeToolWindowListBoxItemStyle}"><ListBox.ItemTemplate><DataTemplate><Grid ToolTip="{Binding FullPath}"><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><TextBlock Text="{Binding StatusGlyph}" Foreground="{DynamicResource Theme.Accent.Primary}" FontWeight="SemiBold" /><TextBlock Grid.Column="1" Text="{Binding RelativePath}" TextTrimming="CharacterEllipsis" /></Grid></DataTemplate></ListBox.ItemTemplate></ListBox></Expander></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
+                            </ScrollViewer>
+                            <TextBlock Text="No working-tree changes." TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="220" TextAlignment="Center"><TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource IdeToolWindowMetaTextStyle}"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding Changes.Groups.Count}" Value="0"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
+                        </Grid>
+                        <Border Grid.Row="2" Margin="0,10,0,0" Padding="8" BorderBrush="{DynamicResource Theme.Border.Subtle}" BorderThickness="1">
+                            <StackPanel>
+                                <TextBlock Text="Commit staged changes" FontWeight="SemiBold" />
+                                <TextBox Text="{Binding Changes.CommitMessage, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" MinHeight="58" MaxHeight="110" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="0,6,0,0" AutomationProperties.Name="Commit message" ToolTip="Enter a commit message for staged changes." />
+                                <Button Content="Commit" Command="{Binding Changes.CommitCommand}" Margin="0,6,0,0" HorizontalAlignment="Stretch" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="{Binding Changes.CommitDisabledReason}" AutomationProperties.Name="Commit staged Git changes" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
+                <Border Grid.Column="2" Style="{DynamicResource IdeToolWindowContentBorderStyle}" Padding="12">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                        <TextBlock Text="{Binding Changes.SelectedPathText}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding Changes.SelectedPathText}" />
+                        <StackPanel Grid.Row="1" Margin="0,5,0,10"><TextBlock Text="{Binding Changes.SelectedStatusText}" Style="{StaticResource IdeToolWindowMetaTextStyle}" TextWrapping="Wrap" /><WrapPanel Margin="0,8,0,0"><Button Content="Open File" Command="{Binding Changes.OpenFileCommand}" CommandParameter="{Binding Changes.SelectedStatus}" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Open the selected file in the ScriptDesk editor." AutomationProperties.Name="Open selected Git file" /><Button Content="Stage" Command="{Binding Changes.StageCommand}" CommandParameter="{Binding Changes.SelectedStatus}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Stage the selected file." AutomationProperties.Name="Stage selected Git file" /><Button Content="Unstage" Command="{Binding Changes.UnstageCommand}" CommandParameter="{Binding Changes.SelectedStatus}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Unstage the selected file." AutomationProperties.Name="Unstage selected Git file" /><Button Content="Discard" Command="{Binding Changes.DiscardCommand}" CommandParameter="{Binding Changes.SelectedStatus}" Margin="6,0,0,0" Style="{StaticResource IdeDestructiveButtonStyle}" ToolTip="Discard the selected saved working-tree change after confirmation." AutomationProperties.Name="Discard selected Git file" /></WrapPanel></StackPanel>
+                        <Grid Grid.Row="2">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"><ItemsControl ItemsSource="{Binding Changes.DiffLines}"><ItemsControl.ItemTemplate><DataTemplate><Border Padding="4,1"><Border.Style><Style TargetType="Border"><Setter Property="Background" Value="Transparent" /><Style.Triggers><DataTrigger Binding="{Binding Kind}" Value="Added"><Setter Property="Background" Value="{DynamicResource Theme.Status.Success.Background}" /></DataTrigger><DataTrigger Binding="{Binding Kind}" Value="Removed"><Setter Property="Background" Value="{DynamicResource Theme.Status.Error.Background}" /></DataTrigger></Style.Triggers></Style></Border.Style><TextBlock Text="{Binding Text}" FontFamily="Consolas" TextWrapping="NoWrap" /></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer>
+                            <TextBlock Text="Select a changed file to review its diff." TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="280" TextAlignment="Center"><TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource IdeToolWindowMetaTextStyle}"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding Changes.SelectedPathText}" Value=""><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Grid>
+            <Grid x:Name="HistoryContent">
+                <Grid.Style><Style TargetType="Grid"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding Mode}" Value="History"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></Grid.Style>
+                <Border Style="{DynamicResource IdeToolWindowContentBorderStyle}" Padding="10">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                        <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBox Text="{Binding History.SearchText, UpdateSourceTrigger=PropertyChanged}" Padding="6" ToolTip="Filter commits by hash, author, or message." AutomationProperties.Name="Search Git history" /><ComboBox Grid.Column="1" SelectedValue="{Binding History.Scope}" SelectedValuePath="Tag" Margin="8,0,0,0" Width="160" ToolTip="Choose the history scope." AutomationProperties.Name="Git history scope"><ComboBoxItem Content="Current Branch" Tag="CurrentBranch" /><ComboBoxItem Content="All Local Branches" Tag="AllLocalBranches" /></ComboBox><Button Grid.Column="2" Content="Refresh" Command="{Binding History.RefreshCommand}" Margin="8,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Reload repository history." AutomationProperties.Name="Refresh Git history" /></Grid>
+                        <Grid Grid.Row="1">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="1.1*" MinWidth="220" /><ColumnDefinition Width="6" /><ColumnDefinition Width="1.2*" MinWidth="240" /><ColumnDefinition Width="6" /><ColumnDefinition Width="2*" MinWidth="400" /></Grid.ColumnDefinitions>
+                            <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" ShowsPreview="False" Style="{StaticResource IdeColumnSplitterStyle}" AutomationProperties.Name="Resize Git history list and details" />
+                            <GridSplitter Grid.Column="3" Width="6" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" ShowsPreview="False" Style="{StaticResource IdeColumnSplitterStyle}" AutomationProperties.Name="Resize Git history details and diff" />
+                            <Border Grid.Column="0" Style="{DynamicResource IdeToolWindowContentBorderStyle}" Padding="8" Margin="0,0,8,0"><DockPanel><Button DockPanel.Dock="Bottom" Content="Load More" Command="{Binding History.LoadMoreCommand}" Margin="0,8,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Load the next page of commits." AutomationProperties.Name="Load more Git history" /><Grid><ListBox ItemsSource="{Binding History.Commits}" SelectionChanged="HistoryCommitSelectionChanged" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" ItemContainerStyle="{StaticResource IdeToolWindowListBoxItemStyle}"><ListBox.ItemTemplate><DataTemplate><StackPanel Margin="2"><TextBlock Text="{Binding Subject}" TextTrimming="CharacterEllipsis" /><TextBlock Text="{Binding ShortHash}" Style="{StaticResource IdeToolWindowMetaTextStyle}" /></StackPanel></DataTemplate></ListBox.ItemTemplate></ListBox><TextBlock Text="No commits match the current filter." TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="180" TextAlignment="Center"><TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource IdeToolWindowMetaTextStyle}"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding History.Commits.Count}" Value="0"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock></Grid></DockPanel></Border>
+                            <Border Grid.Column="2" Style="{DynamicResource IdeToolWindowContentBorderStyle}" Padding="8" Margin="0,0,8,0"><DockPanel><StackPanel DockPanel.Dock="Top"><TextBlock Text="{Binding History.SelectedCommitText}" TextWrapping="Wrap" ToolTip="Selected commit details." /><Button Content="Copy Hash" Command="{Binding History.CopyHashCommand}" Margin="0,8,0,8" HorizontalAlignment="Left" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Copy the full commit hash." AutomationProperties.Name="Copy selected commit hash" /></StackPanel><ListBox ItemsSource="{Binding History.Files}" SelectionChanged="HistoryFileSelectionChanged" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" ItemContainerStyle="{StaticResource IdeToolWindowListBoxItemStyle}"><ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" ToolTip="{Binding DisplayName}" /></DataTemplate></ListBox.ItemTemplate></ListBox></DockPanel></Border>
+                            <Border Grid.Column="4" Style="{DynamicResource IdeToolWindowContentBorderStyle}" Padding="12"><DockPanel><TextBlock DockPanel.Dock="Top" Text="{Binding History.SelectedFileText}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding History.SelectedFileText}" Margin="0,0,0,8" /><Grid><ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"><ItemsControl ItemsSource="{Binding History.DiffLines}"><ItemsControl.ItemTemplate><DataTemplate><Border Padding="4,1"><Border.Style><Style TargetType="Border"><Setter Property="Background" Value="Transparent" /><Style.Triggers><DataTrigger Binding="{Binding Kind}" Value="Added"><Setter Property="Background" Value="{DynamicResource Theme.Status.Success.Background}" /></DataTrigger><DataTrigger Binding="{Binding Kind}" Value="Removed"><Setter Property="Background" Value="{DynamicResource Theme.Status.Error.Background}" /></DataTrigger></Style.Triggers></Style></Border.Style><TextBlock Text="{Binding Text}" FontFamily="Consolas" TextWrapping="NoWrap" /></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer><TextBlock Text="Select a history file to review its diff." TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="260" TextAlignment="Center"><TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource IdeToolWindowMetaTextStyle}"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding History.SelectedFileText}" Value=""><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock></Grid></DockPanel></Border>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

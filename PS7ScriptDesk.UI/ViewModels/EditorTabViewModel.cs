@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using PS7ScriptDesk.Application.Diagnostics;
+using PS7ScriptDesk.Domain.Models;
 
 namespace PS7ScriptDesk.UI.ViewModels
 {
@@ -20,6 +21,10 @@ namespace PS7ScriptDesk.UI.ViewModels
         private int _caretLine;
         private int _caretColumn;
         private int _selectionLength;
+        private int _selectionStart;
+        private int _caretOffset;
+        private double _horizontalScrollOffset;
+        private double _verticalScrollOffset;
         private readonly SortedDictionary<int, bool> _breakpoints = new();
         private int _enabledBreakpointCount;
         private readonly ObservableCollection<SyntaxErrorViewModel> _syntaxErrors = new();
@@ -31,6 +36,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private string _recoveryId;
         private bool _isRecoveredContent;
         private string _recoveryNoticeText = string.Empty;
+        private DocumentLanguage _language;
 
         public ScriptDocumentIdentity DiagnosticDocument { get; } = new();
 
@@ -39,6 +45,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _title = title;
             _content = content;
             _filePath = filePath;
+            _language = DocumentLanguageClassifier.ClassifyPath(filePath ?? title);
             _isDirty = false;
             _recoveryId = string.IsNullOrWhiteSpace(recoveryId) ? Guid.NewGuid().ToString("N") : recoveryId;
             _lineNumbersText = "1";
@@ -46,6 +53,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             _caretLine = 1;
             _caretColumn = 1;
             _selectionLength = 0;
+            _selectionStart = 0;
+            _caretOffset = 0;
             SyntaxErrors = new ReadOnlyObservableCollection<SyntaxErrorViewModel>(_syntaxErrors);
             SyntaxDiagnosticSpans = new ReadOnlyObservableCollection<EditorDiagnosticSpanViewModel>(_syntaxDiagnosticSpans);
 
@@ -76,10 +85,25 @@ namespace PS7ScriptDesk.UI.ViewModels
                 if (_filePath != value)
                 {
                     _filePath = value;
+                    Language = DocumentLanguageClassifier.ClassifyPath(value ?? Title);
                     OnPropertyChanged();
                 }
             }
         }
+
+        public DocumentLanguage Language
+        {
+            get => _language;
+            private set
+            {
+                if (_language == value) return;
+                _language = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(IsPowerShellDocument));
+            }
+        }
+
+        public bool IsPowerShellDocument => Language == DocumentLanguage.PowerShell;
 
         public string Content
         {
@@ -151,6 +175,14 @@ namespace PS7ScriptDesk.UI.ViewModels
         public int CaretColumn => _caretColumn;
 
         public int SelectionLength => _selectionLength;
+
+        public int SelectionStart => _selectionStart;
+
+        public int CaretOffset => _caretOffset;
+
+        public double HorizontalScrollOffset => _horizontalScrollOffset;
+
+        public double VerticalScrollOffset => _verticalScrollOffset;
 
         public string CaretDisplayText => $"Ln {_caretLine}, Col {_caretColumn}";
 
@@ -567,9 +599,14 @@ namespace PS7ScriptDesk.UI.ViewModels
         }
 
         public void UpdateCaretPosition(int line, int column, int selectionLength)
+            => UpdateEditorViewState(line, column, _caretOffset, _selectionStart, selectionLength, _horizontalScrollOffset, _verticalScrollOffset);
+
+        public void UpdateEditorViewState(int line, int column, int caretOffset, int selectionStart, int selectionLength, double horizontalScrollOffset, double verticalScrollOffset)
         {
             var normalizedLine = Math.Max(1, line);
             var normalizedColumn = Math.Max(1, column);
+            var normalizedCaretOffset = Math.Max(0, caretOffset);
+            var normalizedSelectionStart = Math.Max(0, selectionStart);
             var normalizedSelectionLength = Math.Max(0, selectionLength);
             var hasChanged = false;
 
@@ -593,6 +630,11 @@ namespace PS7ScriptDesk.UI.ViewModels
                 OnPropertyChanged(nameof(SelectionLength));
                 OnPropertyChanged(nameof(SelectionDisplayText));
             }
+
+            _caretOffset = normalizedCaretOffset;
+            _selectionStart = normalizedSelectionStart;
+            _horizontalScrollOffset = Math.Max(0, horizontalScrollOffset);
+            _verticalScrollOffset = Math.Max(0, verticalScrollOffset);
 
             if (hasChanged)
             {
@@ -661,7 +703,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             OnPropertyChanged(nameof(BreakpointVersion));
         }
 
-        private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+        protected virtual void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
