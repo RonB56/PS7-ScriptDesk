@@ -128,7 +128,7 @@ public sealed class GitHistoryViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void CopyHash() { if (SelectedCommit is not null) CopyHashRequested?.Invoke(this, SelectedCommit.Hash); }
-    private void Coordinator_StateChanged(object? sender, GitRepositoryState? state) { if (state?.Repository.RepositoryRoot is null) { Commits.Clear(); Files.Clear(); SelectedDiff = null; } }
+    private void Coordinator_StateChanged(object? sender, GitRepositoryState? state) { if (state?.Repository.IsRepository != true) { _loadCancellation?.Cancel(); Interlocked.Increment(ref _generation); Commits.Clear(); Files.Clear(); SelectedCommit = null; Details = null; SelectedFile = null; SelectedDiff = null; HasMore = false; StatusText = "History is unavailable because no Git repository is open."; } }
     private void RaiseCommands() { (LoadMoreCommand as RelayCommand)?.RaiseCanExecuteChanged(); (CopyHashCommand as RelayCommand)?.RaiseCanExecuteChanged(); }
     public void Dispose() { _coordinator.StateChanged -= Coordinator_StateChanged; _loadCancellation?.Cancel(); _loadCancellation?.Dispose(); }
     private void OnPropertyChanged([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));

@@ -96,6 +96,7 @@ namespace PS7ScriptDesk.Shell
         private const string ThemeIconAccentResourceKey = "Theme.Icon.Accent";
         private readonly ConcurrentQueue<TerminalOutputEnvelope> _terminalOutputEnvelopeQueue = new();
         private readonly Dispatcher _terminalOutputDispatcher;
+        private DispatcherOperation? _terminalOutputDrainOperation;
         private MainWindowViewModel? _viewModel;
         private CommandPaletteWindow? _commandPaletteWindow;
         private int _terminalOutputDrainScheduled;
@@ -354,6 +355,8 @@ namespace PS7ScriptDesk.Shell
 
         public MainWindow(IApplicationSettingsService applicationSettingsService, ApplicationSettings loadedSettings, IUiScaleService? uiScaleService = null)
         {
+            TerminalStartupTrace.Write("MAINWINDOW_CONSTRUCTOR_ENTER", $"windowId={GetHashCode():X8}");
+            StartupLifecycleTrace.Write("MainWindow.Constructor", "ENTER");
             DeveloperDiagnostics.LogMethodEntry("UI", "MainWindow constructor entry.");
             _terminalOutputDispatcher = Dispatcher;
             _applicationSettingsService = applicationSettingsService;
@@ -417,6 +420,14 @@ namespace PS7ScriptDesk.Shell
 
 
             InitializeComponent();
+            StartupLifecycleTrace.Write("MainWindow.InitializeComponent", "EXIT");
+            GitMenuItem.Visibility = GitFeatureAvailability.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
+            DeveloperDiagnostics.LogDecision(
+                "Git",
+                "GitFeatureAvailability",
+                "Git user-facing entry points are controlled by the reversible production feature switch.",
+                GitFeatureAvailability.IsEnabled ? "Enabled" : "Disabled",
+                new Dictionary<string, object?> { ["menuVisibility"] = GitMenuItem.Visibility.ToString() });
             UpdateAnalyzerSettingsMenu();
             InitializeUiScaleMenu();
             _uiScaleService.ScaleChanged += UiScaleService_ScaleChanged;
@@ -454,6 +465,7 @@ namespace PS7ScriptDesk.Shell
                     ["developerDiagnosticsEnabled"] = _loadedSettings.IsDeveloperDiagnosticsEnabled,
                     ["settingsPath"] = _applicationSettingsService.SettingsFilePath
                 });
+            StartupLifecycleTrace.Write("MainWindow.Constructor", "EXIT", "handlers initialized.");
         }
 
         internal void AttachViewModel(MainWindowViewModel viewModel)
@@ -462,6 +474,8 @@ namespace PS7ScriptDesk.Shell
             Dispatcher.VerifyAccess();
             Volatile.Write(ref _viewModel, viewModel);
             DataContext = viewModel;
+            StartupLifecycleTrace.Write("MainWindow.AttachViewModel", "DATACONTEXT", $"windowId={GetHashCode():X8}; dataContextId={viewModel.GetHashCode():X8}; gitText={viewModel.GitStatusText}; consoleText={viewModel.ConsoleSessionText}");
+            StartupLifecycleTrace.Write("MainWindow.AttachViewModel", "EXIT", $"viewModelId={viewModel.GetHashCode():X8}");
             DeveloperDiagnostics.LogInfo(
                 "Startup",
                 "MainWindow attached its view model reference before DataContext exposure.",
@@ -473,6 +487,16 @@ namespace PS7ScriptDesk.Shell
 
         private MainWindowViewModel? ViewModel => Volatile.Read(ref _viewModel);
 
+        private void GitStatusTextBlock_TargetUpdated(object? sender, DataTransferEventArgs e)
+        {
+            StartupLifecycleTrace.Write("MainWindow.GitStatusTextBlock", "TARGET_UPDATED", $"dataContextId={(GitStatusTextBlock.DataContext?.GetHashCode() ?? 0):X8}; targetText={GitStatusTextBlock.Text}");
+        }
+
+        private void ConsoleSessionStatusTextBlock_TargetUpdated(object? sender, DataTransferEventArgs e)
+        {
+            StartupLifecycleTrace.Write("MainWindow.ConsoleSessionStatusTextBlock", "TARGET_UPDATED", $"dataContextId={(ConsoleSessionStatusTextBlock.DataContext?.GetHashCode() ?? 0):X8}; targetText={ConsoleSessionStatusTextBlock.Text}");
+        }
+
         private void OnRawTerminalOutputReceived(int generation, string raw)
         {
             var rawOutput = raw ?? string.Empty;
@@ -480,6 +504,8 @@ namespace PS7ScriptDesk.Shell
             {
                 return;
             }
+
+            TerminalStartupTrace.Write("BACKEND_OUTPUT_RECEIVED", $"generation={generation}; chars={rawOutput.Length}; contentOmitted=true");
 
             TerminalCriticalTrace.LogStage(
                 "MainWindow.RawOutputReceivedSubscriber.Begin",
@@ -506,6 +532,7 @@ namespace PS7ScriptDesk.Shell
             }
 
             viewModel.PublishInteractiveTerminalOutput(generation, rawOutput);
+            TerminalStartupTrace.FirstRendererOutput($"generation={generation}; chars={rawOutput.Length}; contentOmitted=true");
             TerminalCriticalTrace.LogStage(
                 "MainWindow.RawOutputReceivedSubscriber.End",
                 new Dictionary<string, object?>
@@ -519,6 +546,7 @@ namespace PS7ScriptDesk.Shell
 
         private void EnqueueTerminalOutputForRenderer(TerminalOutputEnvelope envelope)
         {
+            TerminalStartupTrace.Write("OUTPUT_SINK_ATTACHED", $"sequence={envelope.Sequence}; source={envelope.Source}; chars={envelope.Payload.Length}; contentOmitted=true");
             TerminalCriticalTrace.LogStage(
                 "MainWindow.EnqueueTerminalOutputForRenderer.Begin",
                 CreateTerminalEnvelopeMetadata(envelope));
@@ -589,16 +617,32 @@ namespace PS7ScriptDesk.Shell
 
             try
             {
-                _terminalOutputDispatcher.BeginInvoke(
+                TerminalCriticalTrace.LogStage(
+                    "DISPATCHER_CALLBACK_SCHEDULED",
+                    CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
+                    {
+                        ["callbackIdentity"] = "MainWindow.DrainTerminalOutputForRenderer",
+                        ["dispatcherPriority"] = DispatcherPriority.Background.ToString()
+                    }));
+                var operation = _terminalOutputDispatcher.BeginInvoke(
                     new Action(DrainTerminalOutputForRenderer),
                     DispatcherPriority.Background);
+                Volatile.Write(ref _terminalOutputDrainOperation, operation);
+                operation.Aborted += TerminalOutputDrainOperation_Aborted;
                 TerminalCriticalTrace.LogStage(
                     "MainWindow.DispatcherBeginInvoke.Scheduled",
                     CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
                     {
                         ["queuedEnvelopeCount"] = queuedCount,
-                        ["dispatcherPriority"] = DispatcherPriority.Background.ToString()
+                        ["dispatcherPriority"] = DispatcherPriority.Background.ToString(),
+                        ["dispatcherThreadId"] = _terminalOutputDispatcher.Thread.ManagedThreadId,
+                        ["dispatcherCheckAccess"] = _terminalOutputDispatcher.CheckAccess(),
+                        ["operationStatus"] = operation.Status.ToString()
                     }));
+                if (operation.Status == DispatcherOperationStatus.Aborted)
+                {
+                    TerminalOutputDrainOperation_Aborted(operation, EventArgs.Empty);
+                }
             }
             catch (Exception ex)
             {
@@ -622,6 +666,14 @@ namespace PS7ScriptDesk.Shell
 
         private void DrainTerminalOutputForRenderer()
         {
+            TerminalCriticalTrace.LogStage(
+                "DISPATCHER_CALLBACK_ENTER",
+                new Dictionary<string, object?>
+                {
+                    ["callbackIdentity"] = "MainWindow.DrainTerminalOutputForRenderer",
+                    ["dispatcherPriority"] = DispatcherPriority.Background.ToString(),
+                    ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount)
+                });
             TerminalCriticalTrace.LogStage(
                 "MainWindow.DrainTerminalOutputForRenderer.Begin",
                 new Dictionary<string, object?>
@@ -690,6 +742,14 @@ namespace PS7ScriptDesk.Shell
                         ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
                         ["queueIsEmpty"] = _terminalOutputEnvelopeQueue.IsEmpty
                     });
+                TerminalCriticalTrace.LogStage(
+                    "DISPATCHER_CALLBACK_EXIT",
+                    new Dictionary<string, object?>
+                    {
+                        ["callbackIdentity"] = "MainWindow.DrainTerminalOutputForRenderer",
+                        ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount)
+                    });
+                Interlocked.Exchange(ref _terminalOutputDrainOperation, null);
                 Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
                 if (!_terminalOutputEnvelopeQueue.IsEmpty &&
                     Interlocked.Exchange(ref _terminalOutputDrainScheduled, 1) == 0)
@@ -699,16 +759,25 @@ namespace PS7ScriptDesk.Shell
                         if (!_terminalOutputDispatcher.HasShutdownStarted &&
                             !_terminalOutputDispatcher.HasShutdownFinished)
                         {
-                            _terminalOutputDispatcher.BeginInvoke(
+                            var operation = _terminalOutputDispatcher.BeginInvoke(
                                 new Action(DrainTerminalOutputForRenderer),
                                 DispatcherPriority.Background);
+                            Volatile.Write(ref _terminalOutputDrainOperation, operation);
+                            operation.Aborted += TerminalOutputDrainOperation_Aborted;
                             TerminalCriticalTrace.LogStage(
                                 "MainWindow.DispatcherBeginInvoke.Rescheduled",
                                 new Dictionary<string, object?>
                                 {
                                     ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
-                                    ["dispatcherPriority"] = DispatcherPriority.Background.ToString()
+                                    ["dispatcherPriority"] = DispatcherPriority.Background.ToString(),
+                                    ["dispatcherThreadId"] = _terminalOutputDispatcher.Thread.ManagedThreadId,
+                                    ["dispatcherCheckAccess"] = _terminalOutputDispatcher.CheckAccess(),
+                                    ["operationStatus"] = operation.Status.ToString()
                                 });
+                            if (operation.Status == DispatcherOperationStatus.Aborted)
+                            {
+                                TerminalOutputDrainOperation_Aborted(operation, EventArgs.Empty);
+                            }
                         }
                         else
                         {
@@ -767,6 +836,8 @@ namespace PS7ScriptDesk.Shell
 
         private async void Window_Loaded(object sender, RoutedEventArgs e)
         {
+            TerminalStartupTrace.Write("WINDOW_LOADED_ENTER", $"windowId={GetHashCode():X8}");
+            StartupLifecycleTrace.Write("MainWindow.Window_Loaded", "ENTER");
             using var startupScope = DeveloperDiagnostics.BeginTimedOperation(
                 "Startup",
                 "WindowLoaded",
@@ -796,6 +867,7 @@ namespace PS7ScriptDesk.Shell
                 }
 
                 ViewModel.BindToCurrentSynchronizationContext();
+                TerminalStartupTrace.Write("UI_SYNCHRONIZATION_CONTEXT_BOUND", $"viewModelId={ViewModel.GetHashCode():X8}");
                 ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
                 ViewModel.PropertyChanged += ViewModel_PropertyChanged;
                 ViewModel.ExeExportProgressChanged -= ViewModel_ExeExportProgressChanged;
@@ -824,13 +896,15 @@ namespace PS7ScriptDesk.Shell
                     isTerminalFocused: () => TerminalConsole.IsKeyboardFocusWithin,
                     terminalFocusRestoreReadiness: GetTerminalFocusRestoreReadiness,
                     restoreTerminalFocus: (generation, cancellationToken) =>
-                        TerminalConsole.RestoreTerminalFocusAsync(generation, cancellationToken));
+                        TerminalConsole.RestoreTerminalFocusAsync(generation, cancellationToken),
+                    requestTerminalWarmStart: reason => RequestConsoleWarmStart(reason));
 
                 // Forward raw (ANSI-intact) ConPTY output to xterm.js.
                 // TerminalControl applies its own bounded dispatcher/WebView flow control,
                 // so the reader callback does not queue one dispatcher operation per chunk.
                 ViewModel.SubscribeRawOutput(OnRawTerminalOutputReceived);
                 ViewModel.TerminalOutputPublished += EnqueueTerminalOutputForRenderer;
+                TerminalStartupTrace.Write("TERMINAL_EVENT_SINKS_WIRED", $"windowId={GetHashCode():X8}; viewModelId={ViewModel.GetHashCode():X8}");
 
                 // Forward xterm.js keystrokes to ConPTY stdin.
                 TerminalConsole.UserInput += async data =>
@@ -886,6 +960,7 @@ namespace PS7ScriptDesk.Shell
                 TerminalConsole.TerminalReady += () =>
                 {
                     _terminalIsReady = true;
+                    TerminalStartupTrace.Write("XTERM_READY", $"windowId={GetHashCode():X8}; uiThread={Dispatcher.CheckAccess()}");
                     AppLogger.Debug("Terminal", "MainWindow received terminal-ready signal.");
                     DeveloperDiagnostics.LogStateTransition("Terminal", "TerminalReady", "Initializing", "Ready", "Terminal ready signal received.");
                     // Apply the current app theme to the terminal colour scheme.
@@ -915,8 +990,12 @@ namespace PS7ScriptDesk.Shell
                         ["heightPixels"] = terminalHostHeight,
                         ["usedFallbackBounds"] = TerminalConsole.ActualWidth <= 0 || TerminalConsole.ActualHeight <= 0
                     });
+                TerminalStartupTrace.Write("TERMINAL_HOST_INIT_ENTER", $"width={terminalHostWidth}; height={terminalHostHeight}");
                 await ViewModel.InitializeTerminalHostAsync(IntPtr.Zero, terminalHostWidth, terminalHostHeight);
+                TerminalStartupTrace.Write("TERMINAL_HOST_INIT_EXIT");
+                StartupLifecycleTrace.Write("MainWindow.TerminalHost", "ATTACHED", $"width={terminalHostWidth}; height={terminalHostHeight}");
                 _terminalHostAttached = true;
+                TerminalStartupTrace.Write("TERMINAL_HOST_ATTACHED_TRUE", $"windowId={GetHashCode():X8}");
                 DeveloperDiagnostics.LogOperationStop(
                     "Startup",
                     "InitializeTerminalHost",
@@ -926,16 +1005,20 @@ namespace PS7ScriptDesk.Shell
                 RequestConsoleWarmStart("TerminalHostAttached");
 
                 StartDeferredInitialization(ViewModel);
+                StartupLifecycleTrace.Write("MainWindow.DeferredStartup", "SCHEDULED");
                 DeveloperDiagnostics.LogAsyncBoundary("Startup", "InitializeAsync", "Deferred ViewModel initialization launched.", "AsyncStart");
                 StartupTimingLogger.Log("MainWindow", $"Deferred initialization launched at {startupStopwatch.ElapsedMilliseconds} ms");
 
                 TerminalConsole.FocusTerminal();
                 StartupTimingLogger.Log("MainWindow", $"Window_Loaded completed in {startupStopwatch.ElapsedMilliseconds} ms");
+                StartupLifecycleTrace.Write("MainWindow.Window_Loaded", "EXIT", $"elapsedMs={startupStopwatch.ElapsedMilliseconds}");
+                TerminalStartupTrace.Write("WINDOW_LOADED_EXIT", $"elapsedMs={startupStopwatch.ElapsedMilliseconds}");
                 DeveloperDiagnostics.LogEventHandlerExit("UI", "Window_Loaded", "Window_Loaded completed successfully.");
             }
             catch (Exception ex)
             {
                 StartupTimingLogger.Log("MainWindow", $"Startup exception: {ex}");
+                TerminalStartupTrace.Write("STARTUP_TERMINAL_FAILURE", $"stage=Window_Loaded; exception={ex.GetType().Name}; message={ex.Message}; stack={ex.StackTrace}");
                 DeveloperDiagnostics.LogException("Startup", ex, "MainWindow.Window_Loaded failed.");
                 ShowIdeMessage("Startup Error", $"PS7 ScriptDesk failed during startup.\n\n{ex}");
             }
@@ -967,8 +1050,10 @@ namespace PS7ScriptDesk.Shell
 
         private void RequestConsoleWarmStart(string reason)
         {
+            TerminalStartupTrace.Write("WARM_START_REQUEST", $"reason={reason}; hostAttached={_terminalHostAttached}; task={DescribeWarmStartTask()}; runtime={(ViewModel?.EffectiveRuntimeInfo is null ? "null" : "non-null")}");
             if (!_terminalHostAttached)
             {
+                TerminalStartupTrace.Write("WARM_START_SUPPRESSED", $"reason={reason}; cause=host-not-attached");
                 DeveloperDiagnostics.LogInfo(
                     "Startup",
                     "Console warm-start request deferred because the terminal host has not been attached yet.",
@@ -979,6 +1064,7 @@ namespace PS7ScriptDesk.Shell
             var viewModel = ViewModel;
             if (viewModel is null)
             {
+                TerminalStartupTrace.Write("WARM_START_SUPPRESSED", $"reason={reason}; cause=view-model-null");
                 DeveloperDiagnostics.LogInfo(
                     "Startup",
                     "Console warm-start request skipped because no view model is available.",
@@ -990,6 +1076,7 @@ namespace PS7ScriptDesk.Shell
             {
                 if (_consoleWarmStartTask is { IsCompleted: false })
                 {
+                    TerminalStartupTrace.Write("WARM_START_SUPPRESSED", $"reason={reason}; cause=task-in-progress; task={DescribeWarmStartTask()}");
                     DeveloperDiagnostics.LogInfo(
                         "Startup",
                         "Console warm-start request skipped because a console start is already in progress.",
@@ -997,46 +1084,77 @@ namespace PS7ScriptDesk.Shell
                     return;
                 }
 
-                _consoleWarmStartTask = Task.Run(async () =>
-                {
-                    var stopwatch = Stopwatch.StartNew();
-                    var runtime = viewModel.EffectiveRuntimeInfo;
-                    DeveloperDiagnostics.LogAsyncBoundary(
-                        "Startup",
-                        "ConsoleWarmStart",
-                        "Console warm-start launched.",
-                        "AsyncStart",
-                        new Dictionary<string, object?>
-                        {
-                            ["reason"] = reason,
-                            ["runtimeDisplayName"] = runtime?.DisplayName,
-                            ["runtimePath"] = runtime?.ExecutablePath,
-                            ["terminalIsReady"] = _terminalIsReady
-                        });
-                    StartupTimingLogger.Log("MainWindow", $"Console warm-start requested. Reason={reason}; Runtime={runtime?.DisplayName ?? "(none)"}; TerminalReady={_terminalIsReady}.");
+                _consoleWarmStartTask = RunConsoleWarmStartAsync(viewModel, reason);
+            }
+        }
 
-                    try
-                    {
-                        await viewModel.EnsureConsoleRestoredAsync().ConfigureAwait(false);
-                        DeveloperDiagnostics.LogOperationStop(
-                            "Startup",
-                            "ConsoleWarmStart",
-                            "Console warm-start completed.",
-                            stopwatch.ElapsedMilliseconds,
-                            new Dictionary<string, object?>
-                            {
-                                ["reason"] = reason,
-                                ["runtimeDisplayName"] = viewModel.EffectiveRuntimeInfo?.DisplayName,
-                                ["terminalIsReady"] = _terminalIsReady
-                            });
-                        StartupTimingLogger.Log("MainWindow", $"Console warm-start completed in {stopwatch.ElapsedMilliseconds} ms. Reason={reason}.");
-                    }
-                    catch (Exception ex)
-                    {
-                        DeveloperDiagnostics.LogException("Startup", ex, $"Console warm-start failed. Reason={reason}.");
-                        StartupTimingLogger.Log("MainWindow", $"Console warm-start failed after {stopwatch.ElapsedMilliseconds} ms. Reason={reason}; Error={ex}");
-                    }
+        private async Task RunConsoleWarmStartAsync(MainWindowViewModel viewModel, string reason)
+        {
+            TerminalStartupTrace.Write("WARM_START_ENTER", $"reason={reason}; viewModelId={viewModel.GetHashCode():X8}");
+            var stopwatch = Stopwatch.StartNew();
+            var runtime = viewModel.EffectiveRuntimeInfo;
+            TerminalStartupTrace.Write("EFFECTIVE_RUNTIME_RESOLVED", $"runtime={(runtime is null ? "null" : "non-null")}; path={runtime?.LaunchExecutablePath ?? "(none)"}");
+            DeveloperDiagnostics.LogAsyncBoundary(
+                "Startup",
+                "ConsoleWarmStart",
+                "Console warm-start entered.",
+                "AsyncStart",
+                new Dictionary<string, object?>
+                {
+                    ["stage"] = runtime is null ? "requested-before-runtime-selection" : "runtime-selected",
+                    ["reason"] = reason,
+                    ["runtimeDisplayName"] = runtime?.DisplayName,
+                    ["runtimePath"] = runtime?.ExecutablePath,
+                    ["terminalIsReady"] = _terminalIsReady,
+                    ["managedThreadId"] = Environment.CurrentManagedThreadId,
+                    ["dispatcherCheckAccess"] = Dispatcher.CheckAccess()
                 });
+            StartupTimingLogger.Log("MainWindow", $"Console warm-start entered. Reason={reason}; Runtime={runtime?.DisplayName ?? "(none)"}; TerminalReady={_terminalIsReady}.");
+
+            try
+            {
+                if (runtime is null)
+                {
+                    TerminalStartupTrace.Write("ENSURE_CONSOLE_RESTORED_EARLY_EXIT", $"reason=runtime-null; warmStartReason={reason}");
+                    DeveloperDiagnostics.LogInfo("Startup", "Console warm-start deferred because runtime discovery has not selected a runtime yet.", new Dictionary<string, object?>
+                    {
+                        ["stage"] = "waiting-for-runtime-discovery",
+                        ["reason"] = reason,
+                        ["managedThreadId"] = Environment.CurrentManagedThreadId,
+                        ["dispatcherCheckAccess"] = Dispatcher.CheckAccess()
+                    });
+                    return;
+                }
+
+                await viewModel.EnsureConsoleRestoredAsync().ConfigureAwait(false);
+                TerminalStartupTrace.Write("STARTUP_TERMINAL_COMPLETE", $"result=RUNNING_OR_EXISTING; elapsedMs={stopwatch.ElapsedMilliseconds}");
+                DeveloperDiagnostics.LogOperationStop(
+                    "Startup",
+                    "ConsoleWarmStart",
+                    "Console warm-start completed.",
+                    stopwatch.ElapsedMilliseconds,
+                    new Dictionary<string, object?>
+                    {
+                        ["stage"] = "completed",
+                        ["reason"] = reason,
+                        ["runtimeDisplayName"] = viewModel.EffectiveRuntimeInfo?.DisplayName,
+                        ["terminalIsReady"] = _terminalIsReady,
+                        ["managedThreadId"] = Environment.CurrentManagedThreadId
+                    });
+                StartupTimingLogger.Log("MainWindow", $"Console warm-start completed in {stopwatch.ElapsedMilliseconds} ms. Reason={reason}.");
+            }
+            catch (Exception ex)
+            {
+                TerminalStartupTrace.Write("STARTUP_TERMINAL_FAILURE", $"stage=WarmStart; exception={ex.GetType().Name}; message={ex.Message}; stack={ex.StackTrace}");
+                DeveloperDiagnostics.LogException("Startup", ex, $"Console warm-start failed. Reason={reason}.", new Dictionary<string, object?>
+                {
+                    ["stage"] = "failed",
+                    ["reason"] = reason,
+                    ["managedThreadId"] = Environment.CurrentManagedThreadId,
+                    ["dispatcherCheckAccess"] = Dispatcher.CheckAccess(),
+                    ["elapsedMs"] = stopwatch.ElapsedMilliseconds
+                });
+                StartupTimingLogger.Log("MainWindow", $"Console warm-start failed after {stopwatch.ElapsedMilliseconds} ms. Reason={reason}; Error={ex}");
             }
         }
 
@@ -1902,17 +2020,12 @@ namespace PS7ScriptDesk.Shell
                     return;
                 }
 
-                if (_activeCompletionWindow is not null && ShouldDismissActivePathCompletionForTextInput(ch))
+                // Popup completion is advisory. Whitespace dismisses it and then
+                // continues through AvalonEdit so the literal character is inserted.
+                if (_activeCompletionWindow is not null && ShouldDismissCompletionForTextInput(ch))
                 {
-                    CloseEditorCompletion("Whitespace typed while path completion selected");
+                    CloseEditorCompletion("Whitespace typed while completion was selected");
                     return;
-                }
-
-                // Let the active completion window commit when the user types a non-identifier character.
-                if (_activeCompletionWindow is not null &&
-                    ShouldCommitCompletionForTextInput(ch))
-                {
-                    _activeCompletionWindow.CompletionList.RequestInsertion(e);
                 }
             }
         }
@@ -1931,22 +2044,14 @@ namespace PS7ScriptDesk.Shell
             return closer != '\0';
         }
 
-        private bool ShouldDismissActivePathCompletionForTextInput(char ch)
-        {
-            return _activeCompletionWindow?.CompletionList.SelectedItem is PowerShellCompletionData completionData &&
-                   ShouldDismissPathCompletionForTextInput(completionData.Kind, ch);
-        }
+        internal static bool ShouldDismissCompletionForTextInput(char ch) => char.IsWhiteSpace(ch);
 
         internal static bool ShouldDismissPathCompletionForTextInput(CompletionItemKind completionKind, char ch)
-        {
-            return char.IsWhiteSpace(ch) &&
-                   completionKind is CompletionItemKind.ProviderItem or CompletionItemKind.ProviderContainer;
-        }
+            => ShouldDismissCompletionForTextInput(ch) &&
+               completionKind is CompletionItemKind.ProviderItem or CompletionItemKind.ProviderContainer;
 
         internal static bool ShouldCommitCompletionForTextInput(char ch)
-        {
-            return !char.IsLetterOrDigit(ch) && ch != '_' && ch != '-' && ch != '?' && ch != '$';
-        }
+            => false;
 
         private async void EditorTextEditor_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
@@ -1966,10 +2071,21 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            if (_activeCompletionWindow is not null && key == Key.Tab)
+            if (_activeCompletionWindow is not null && modifiers == ModifierKeys.None && key is Key.Tab or Key.Enter)
+            {
+                if (_activeCompletionWindow.CompletionList.SelectedItem is not null)
+                {
+                    e.Handled = true;
+                    AppLogger.Debug("EditorCompletion", $"Completion commit requested by key. Key={key}, SelectionActive=true.");
+                    _activeCompletionWindow.CompletionList.RequestInsertion(e);
+                }
+                return;
+            }
+
+            if (_activeCompletionWindow is not null && modifiers == ModifierKeys.None && key == Key.Escape)
             {
                 e.Handled = true;
-                _activeCompletionWindow.CompletionList.RequestInsertion(e);
+                CloseEditorCompletion("Escape pressed");
                 return;
             }
 
@@ -2421,6 +2537,12 @@ namespace PS7ScriptDesk.Shell
 
         private void OpenGitWorkspace(string reason)
         {
+            if (!GitFeatureAvailability.IsEnabled)
+            {
+                DeveloperDiagnostics.LogUserAction("Git", "GitWorkspaceRejected", "Git Workspace launch was rejected because the production Git feature switch is disabled.", new Dictionary<string, object?> { ["reason"] = reason });
+                return;
+            }
+
             var viewModel = ViewModel;
             var coordinator = viewModel?.GitWorkspaceCoordinator;
             if (viewModel is null || coordinator is null)
@@ -2465,6 +2587,61 @@ namespace PS7ScriptDesk.Shell
                 else
                 {
                     ViewModel.StatusText = failureReason ?? "Unable to open the selected repository file.";
+                }
+            }
+        }
+
+        private void TerminalOutputDrainOperation_Aborted(object? sender, EventArgs e)
+        {
+            if (sender is not DispatcherOperation operation)
+            {
+                return;
+            }
+
+            Interlocked.CompareExchange(ref _terminalOutputDrainOperation, null, operation);
+            Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
+            TerminalCriticalTrace.LogStage(
+                "MainWindow.DispatcherDrain.Aborted",
+                new Dictionary<string, object?>
+                {
+                    ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
+                    ["queueIsEmpty"] = _terminalOutputEnvelopeQueue.IsEmpty,
+                    ["dispatcherThreadId"] = _terminalOutputDispatcher.Thread.ManagedThreadId,
+                    ["dispatcherCheckAccess"] = _terminalOutputDispatcher.CheckAccess(),
+                    ["scheduledFlag"] = Volatile.Read(ref _terminalOutputDrainScheduled)
+                });
+
+            if (!_terminalOutputEnvelopeQueue.IsEmpty &&
+                !_terminalOutputDispatcher.HasShutdownStarted &&
+                !_terminalOutputDispatcher.HasShutdownFinished &&
+                Interlocked.Exchange(ref _terminalOutputDrainScheduled, 1) == 0)
+            {
+                try
+                {
+                    var replacement = _terminalOutputDispatcher.BeginInvoke(
+                        new Action(DrainTerminalOutputForRenderer),
+                        DispatcherPriority.Background);
+                    Volatile.Write(ref _terminalOutputDrainOperation, replacement);
+                    replacement.Aborted += TerminalOutputDrainOperation_Aborted;
+                    TerminalCriticalTrace.LogStage(
+                        "MainWindow.DispatcherBeginInvoke.RecoveredAfterAbort",
+                        new Dictionary<string, object?>
+                        {
+                            ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
+                            ["operationStatus"] = replacement.Status.ToString()
+                        });
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
+                    TerminalCriticalTrace.LogException(
+                        "MainWindow.DispatcherBeginInvoke.RecoveryException",
+                        ex,
+                        new Dictionary<string, object?>
+                        {
+                            ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
+                            ["queueIsEmpty"] = _terminalOutputEnvelopeQueue.IsEmpty
+                        });
                 }
             }
         }
@@ -3277,6 +3454,12 @@ namespace PS7ScriptDesk.Shell
                 new("transform.addComma", "Add Trailing Comma to Each Line", "Transform", "", new[] { "comma", "append" }, CanEdit, () => ApplyTransform("AddTrailingComma", EditorTransformCommands.AddTrailingComma)),
                 new("transform.removeComma", "Remove Trailing Comma from Each Line", "Transform", "", new[] { "comma", "remove" }, CanEdit, () => ApplyTransform("RemoveTrailingComma", EditorTransformCommands.RemoveTrailingComma))
             };
+            if (!GitFeatureAvailability.IsEnabled)
+            {
+                var removedGitCommandCount = commands.RemoveAll(command => command.Id.StartsWith("git.", StringComparison.OrdinalIgnoreCase));
+                DeveloperDiagnostics.LogInfo("Git", "Git commands were omitted from the command registry because the production Git feature switch is disabled.", new Dictionary<string, object?> { ["removedCommandCount"] = removedGitCommandCount });
+            }
+
             // All current editor productivity commands are valid on both command surfaces.
             // Future registry entries can opt out by retaining the default palette-only surface.
             return new EditorCommandRegistry(commands.Select((command, index) => command with
@@ -4689,6 +4872,7 @@ namespace PS7ScriptDesk.Shell
                 }
 
                 _activeCompletionWindow = window;
+                window.CompletionList.ListBox.PreviewMouseLeftButtonUp += CompletionList_PreviewMouseLeftButtonUp;
                 _activeCompletionWindow.Closed += (_, _) => _activeCompletionWindow = null;
                 _activeCompletionWindow.Show();
                 AppLogger.Debug(
@@ -6990,6 +7174,7 @@ namespace PS7ScriptDesk.Shell
             try { _applicationSettingsService.SaveSettings(_loadedSettings); }
             catch (Exception ex)
             {
+                StartupLifecycleTrace.Write("MainWindow.Window_Loaded", "FAULT", $"exception={ex.GetType().Name}: {ex.Message}");
                 DeveloperDiagnostics.LogOperationFailure("Settings", "SaveAnalyzerSettings", "Analyzer settings could not be persisted.", ex);
                 if (ViewModel is not null) ViewModel.StatusText = "Analyzer settings could not be saved";
             }
@@ -10811,6 +10996,26 @@ namespace PS7ScriptDesk.Shell
                     }
                 });
             }
+        }
+
+        private void CompletionList_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            if (sender is not ListBox listBox ||
+                ItemsControl.ContainerFromElement(listBox, e.OriginalSource as DependencyObject) is not ListBoxItem ||
+                _activeCompletionWindow?.CompletionList.SelectedItem is null)
+            {
+                return;
+            }
+
+            e.Handled = true;
+            AppLogger.Debug("EditorCompletion", "Completion commit requested by single mouse click. SelectionActive=true.");
+            _activeCompletionWindow.CompletionList.RequestInsertion(e);
+        }
+
+        private string DescribeWarmStartTask()
+        {
+            var task = _consoleWarmStartTask;
+            return task is null ? "null" : $"completed={task.IsCompleted};faulted={task.IsFaulted};canceled={task.IsCanceled}";
         }
 
         private bool CanRefreshDebugPanels(DebugPanelRefreshSnapshot snapshot, int refreshVersion, out string reason)

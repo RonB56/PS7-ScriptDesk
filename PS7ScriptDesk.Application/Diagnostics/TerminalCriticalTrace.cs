@@ -152,6 +152,7 @@ public static class TerminalCriticalTrace
             var uiSnapshot = CaptureUiThreadSnapshot();
             builder.Append('[').Append(DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz")).Append("] ");
             builder.Append("stage=").Append(SanitizeScalar(stage)).Append("; ");
+            builder.Append("startupAttemptId=").Append(TerminalStartupTrace.StartupAttemptId).Append("; ");
             builder.Append("pid=").Append(Environment.ProcessId).Append("; ");
             builder.Append("managedThreadId=").Append(Environment.CurrentManagedThreadId).Append("; ");
             builder.Append("apartmentState=").Append(CaptureApartmentState()).Append("; ");

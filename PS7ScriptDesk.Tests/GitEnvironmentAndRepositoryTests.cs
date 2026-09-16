@@ -34,6 +34,19 @@ public sealed class GitEnvironmentAndRepositoryTests
     }
 
     [Fact]
+    public async Task GitCommandRunnerScopesSafeDirectoryToTheSelectedWorkingDirectory()
+    {
+        var runner = new GitCommandRunner();
+        using var workspace = TemporaryGitWorkspace.Create();
+
+        var init = await runner.RunAsync(workspace.Root, new[] { "init", "-q" });
+        Assert.True(init.Success, init.StandardError);
+        var result = await runner.RunAsync(workspace.Root, new[] { "rev-parse", "--show-toplevel" });
+
+        Assert.True(result.Success, result.StandardError);
+    }
+
+    [Fact]
     public async Task GitCommandRunner_CapturesStderrAndExitCode()
     {
         var runner = new GitCommandRunner();
@@ -114,7 +127,7 @@ public sealed class GitEnvironmentAndRepositoryTests
         Assert.True(gitIndex > toolsIndex);
         Assert.True(helpIndex > gitIndex);
         Assert.Contains("Command=\"{Binding RefreshGitStatusCommand}\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Command=\"{Binding OpenRepositoryFolderCommand}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"OpenGitWorkspace_Click\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Style=\"{StaticResource IdeStatusBarSeparatorStyle}\"", xaml, StringComparison.Ordinal);
     }
 

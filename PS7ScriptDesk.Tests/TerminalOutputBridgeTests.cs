@@ -97,6 +97,27 @@ public sealed class TerminalOutputBridgeTests
     }
 
     [Fact]
+    public void FlowController_ReplaysPreXtermOutputOnceAndDropsPriorGenerationOnReplacement()
+    {
+        var controller = new TerminalOutputFlowController(maximumPendingCharacters: 64, maximumBatchCharacters: 64);
+
+        controller.ActivateGeneration(4);
+        Assert.Equal(5, controller.Enqueue(4, "warm\n").AcceptedCharacters);
+        Assert.Null(controller.TryBeginDelivery());
+
+        Assert.True(controller.SetRendererReady());
+        var replay = Assert.IsType<TerminalOutputBatch>(controller.TryBeginDelivery());
+        Assert.Equal(4, replay.Generation);
+        Assert.Equal("warm\n", replay.Data);
+        Assert.False(controller.Acknowledge(4, replay.Sequence));
+        Assert.Null(controller.TryBeginDelivery());
+
+        controller.ActivateGeneration(5);
+        Assert.Equal(4, controller.Enqueue(5, "new\n").AcceptedCharacters);
+        Assert.True(controller.TryBeginDelivery() is { Generation: 5, Data: "new\n" });
+    }
+
+    [Fact]
     public void TerminalOutputControlClassifier_ClassifiesRepresentativeControls()
     {
         const string terminalData =

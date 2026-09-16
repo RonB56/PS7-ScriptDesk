@@ -249,6 +249,20 @@ public sealed class LiveConsoleRealSessionHardeningTests
     }
 
     [Fact]
+    public async Task RealSession_StartupReadinessCommandCompletes()
+    {
+        var runtime = TryFindPwshRuntime();
+        if (runtime is null)
+        {
+            return;
+        }
+
+        await using var harness = await RealConsoleHarness.StartAsync(runtime);
+        Assert.True(harness.Service.IsSessionRunning);
+        Assert.False(harness.Service.IsCommandInProgress);
+    }
+
+    [Fact]
     public async Task RealSession_InterruptExitRestartAndSnapshotCleanupRemainUsable()
     {
         var runtime = TryFindPwshRuntime();

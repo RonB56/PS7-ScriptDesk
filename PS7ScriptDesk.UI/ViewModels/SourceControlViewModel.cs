@@ -12,7 +12,7 @@ public enum SourceControlScope
     CurrentFile
 }
 
-public sealed class SourceControlGroupViewModel
+public sealed class SourceControlGroupViewModel : INotifyPropertyChanged
 {
     public SourceControlGroupViewModel(string title, IEnumerable<GitFileStatus> items)
     {
@@ -22,7 +22,22 @@ public sealed class SourceControlGroupViewModel
 
     public string Title { get; }
 
+    private GitFileStatus? _selectedItem;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
     public ObservableCollection<GitFileStatus> Items { get; }
+
+    public GitFileStatus? SelectedItem
+    {
+        get => _selectedItem;
+        set
+        {
+            if (ReferenceEquals(_selectedItem, value)) return;
+            _selectedItem = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedItem)));
+        }
+    }
 
     public int Count => Items.Count;
 
@@ -178,7 +193,7 @@ public sealed class SourceControlViewModel : INotifyPropertyChanged
         {
             RepositoryText = "No Git repository is open.";
             BranchText = "Branch: unavailable";
-            StatusText = state?.Repository.Error ?? "The current workspace is not inside a Git repository.";
+            StatusText = "No Git repository detected.";
         }
 
         OnPropertyChanged(nameof(HasChanges));

@@ -5,6 +5,9 @@
         WindowStartupLocation="CenterOwner" ShowInTaskbar="True"
         Background="{DynamicResource Theme.App.Background}" Foreground="{DynamicResource Theme.Text.Primary}"
         Style="{DynamicResource IdeToolWindowStyle}" AutomationProperties.Name="Git Workspace">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+    </Window.Resources>
     <Grid Margin="{DynamicResource Padding.SubtleCard}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -22,6 +25,11 @@
                 <StackPanel Grid.Column="1" HorizontalAlignment="Right">
                     <TextBlock Text="{Binding BranchText}" HorizontalAlignment="Right" FontWeight="SemiBold" AutomationProperties.Name="Current Git branch" />
                     <TextBlock Text="{Binding StatusText}" Margin="0,4,0,0" HorizontalAlignment="Right" Style="{StaticResource IdeToolWindowMetaTextStyle}" AutomationProperties.Name="Git repository status" />
+                    <TextBlock Text="{Binding ActionStatusText}" Margin="0,4,0,0" HorizontalAlignment="Right" Style="{StaticResource IdeToolWindowMetaTextStyle}" TextWrapping="Wrap" MaxWidth="520" AutomationProperties.Name="Git Workspace action status" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,0,0" Visibility="{Binding IsGitMutationInProgress, Converter={StaticResource BooleanToVisibilityConverter}}" AutomationProperties.Name="Git operation in progress">
+                        <ProgressBar Width="110" Height="8" IsIndeterminate="True" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding GitOperationText}" Margin="8,0,0,0" Style="{StaticResource IdeToolWindowMetaTextStyle}" />
+                    </StackPanel>
                 </StackPanel>
             </Grid>
         </Border>
@@ -36,14 +44,43 @@
             <Button Content="Changes" Command="{Binding ShowChangesCommand}" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Review working-tree changes and staged files." AutomationProperties.Name="Git Workspace Changes" />
             <Button Content="History" Command="{Binding ShowHistoryCommand}" Margin="8,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Review repository commits and historical diffs." AutomationProperties.Name="Git Workspace History" />
             <TextBlock Text="Branch" VerticalAlignment="Center" Margin="18,0,6,0" FontWeight="SemiBold" />
-            <ComboBox ItemsSource="{Binding Branches.Branches}" SelectedItem="{Binding Branches.SelectedBranch}" DisplayMemberPath="Name" Width="180" ToolTip="Select a local branch to switch to." AutomationProperties.Name="Git branch selector" />
-            <Button Content="Switch" Command="{Binding Branches.SwitchCommand}" CommandParameter="{Binding Branches.SelectedBranch}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Switch branches; unsaved documents are protected." AutomationProperties.Name="Switch Git branch" />
+            <ComboBox x:Name="BranchSelector" ItemsSource="{Binding Branches.Branches}" IsEnabled="{Binding Branches.HasRepository}" SelectedValue="{Binding Branches.SelectedBranchName, Mode=OneWay}" SelectedValuePath="OperationName" SelectionChanged="BranchSelectionChanged" TextSearch.TextPath="DisplayName" Width="180" ToolTip="Select a local branch to switch to." AutomationProperties.Name="Git branch selector">
+                <ComboBox.ItemContainerStyle>
+                    <Style TargetType="ComboBoxItem">
+                        <Setter Property="Padding" Value="6,3" />
+                    </Style>
+                </ComboBox.ItemContainerStyle>
+                <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding DisplayName}" />
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
+            </ComboBox>
+            <Button x:Name="SwitchBranchButton" Content="Switch" Click="SwitchBranch_Click" IsEnabled="{Binding Branches.CanSwitchSelected}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Switch to the selected different local branch." ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Switch Git branch" />
+            <Button x:Name="BranchActionsButton" Content="Branch actions" Click="BranchActionsButton_Click" IsEnabled="{Binding Branches.HasRepository}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Create, rename, or safely delete the selected branch." AutomationProperties.Name="Branch actions">
+                <Button.ContextMenu>
+                    <ContextMenu Opened="BranchActionsMenu_Opened" Closed="BranchActionsMenu_Closed" Placement="Bottom" StaysOpen="False" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                        <MenuItem Header="Create &amp; Switch" Click="CreateSwitchBranch_Click" AutomationProperties.Name="Create and switch Git branch" />
+                        <MenuItem Header="Create Only" Click="CreateOnlyBranch_Click" AutomationProperties.Name="Create Git branch without switching" />
+                        <Separator />
+                        <MenuItem x:Name="RenameBranchMenuItem" Header="Rename" Click="RenameBranch_Click" IsEnabled="{Binding Branches.CanRenameSelected}" AutomationProperties.Name="Rename selected Git branch" />
+                        <MenuItem x:Name="DeleteBranchMenuItem" Header="Delete" Click="DeleteBranch_Click" IsEnabled="{Binding Branches.CanDeleteSelected}" AutomationProperties.Name="Delete selected Git branch" />
+                    </ContextMenu>
+                </Button.ContextMenu>
+            </Button>
             <TextBlock Text="Remote" VerticalAlignment="Center" Margin="18,0,6,0" FontWeight="SemiBold" />
-            <ComboBox ItemsSource="{Binding Remotes.Remotes}" SelectedItem="{Binding Remotes.SelectedRemote}" DisplayMemberPath="Name" Width="130" ToolTip="Remote used when publishing the current branch." AutomationProperties.Name="Git remote selector" />
+            <ComboBox x:Name="RemoteSelector" ItemsSource="{Binding Remotes.Remotes}" IsEnabled="{Binding Remotes.HasRepository}" SelectedItem="{Binding Remotes.SelectedRemote}" TextSearch.TextPath="Name" Width="130" ToolTip="Remote used when publishing the current branch." AutomationProperties.Name="Git remote selector">
+                <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
+            </ComboBox>
             <Button Content="Fetch" Command="{Binding Remotes.FetchCommand}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Fetch remote updates." AutomationProperties.Name="Fetch Git remotes" />
             <Button Content="Pull" Command="{Binding Remotes.PullCommand}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Pull updates using document-safety rules." AutomationProperties.Name="Pull Git changes" />
             <Button Content="Push" Command="{Binding Remotes.PushCommand}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Push the current branch." AutomationProperties.Name="Push Git changes" />
             <Button Content="Sync" Command="{Binding Remotes.SyncCommand}" Margin="6,0,0,0" Style="{StaticResource IdeSecondaryButtonStyle}" ToolTip="Fetch, pull, and push using ScriptDesk's sync policy." AutomationProperties.Name="Sync Git repository" />
+            <TextBlock Text="{Binding Remotes.SummaryText}" Foreground="{DynamicResource Theme.Status.Warning.Foreground}" VerticalAlignment="Center" Margin="16,0,0,0" AutomationProperties.Name="Git remote status" />
             <TextBlock Text="{Binding ConflictText}" Foreground="{DynamicResource Theme.Status.Warning.Foreground}" VerticalAlignment="Center" Margin="16,0,0,0" AutomationProperties.Name="Git conflict status" />
         </WrapPanel>
         <Grid Grid.Row="3">
@@ -61,7 +98,7 @@
                         </StackPanel>
                         <Grid Grid.Row="1">
                             <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                <ItemsControl ItemsSource="{Binding Changes.Groups}"><ItemsControl.ItemTemplate><DataTemplate><Expander Header="{Binding HeaderText}" IsExpanded="True" Margin="0,0,0,5"><ListBox ItemsSource="{Binding Items}" SelectionChanged="ChangeSelectionChanged" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" ItemContainerStyle="{StaticResource IdeToolWindowListBoxItemStyle}"><ListBox.ItemTemplate><DataTemplate><Grid ToolTip="{Binding FullPath}"><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><TextBlock Text="{Binding StatusGlyph}" Foreground="{DynamicResource Theme.Accent.Primary}" FontWeight="SemiBold" /><TextBlock Grid.Column="1" Text="{Binding RelativePath}" TextTrimming="CharacterEllipsis" /></Grid></DataTemplate></ListBox.ItemTemplate></ListBox></Expander></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
+                                <ItemsControl ItemsSource="{Binding Changes.Groups}"><ItemsControl.ItemTemplate><DataTemplate><Expander Header="{Binding HeaderText}" IsExpanded="True" Margin="0,0,0,5"><ListBox ItemsSource="{Binding Items}" SelectedItem="{Binding SelectedItem, Mode=OneWay}" SelectionChanged="ChangeSelectionChanged" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" ItemContainerStyle="{StaticResource IdeToolWindowListBoxItemStyle}"><ListBox.ItemTemplate><DataTemplate><Grid ToolTip="{Binding FullPath}"><Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><TextBlock Text="{Binding StatusGlyph}" Foreground="{DynamicResource Theme.Accent.Primary}" FontWeight="SemiBold" /><TextBlock Grid.Column="1" Text="{Binding RelativePath}" TextTrimming="CharacterEllipsis" /></Grid></DataTemplate></ListBox.ItemTemplate></ListBox></Expander></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
                             </ScrollViewer>
                             <TextBlock Text="No working-tree changes." TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="220" TextAlignment="Center"><TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource IdeToolWindowMetaTextStyle}"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding Changes.Groups.Count}" Value="0"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
                         </Grid>

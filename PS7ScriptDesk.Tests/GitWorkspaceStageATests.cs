@@ -81,6 +81,7 @@ public sealed class GitWorkspaceStageATests
 
         Assert.Equal(new[] { "CHANGES", "STAGED CHANGES", "UNTRACKED", "CONFLICTS" }, changes.Groups.Select(group => group.Title));
         Assert.Equal("conflict.ps1", changes.SelectedPathText);
+        Assert.True(changes.StageCommand.CanExecute(statuses[0]));
         Assert.Contains("manual resolution", changes.DiffStatusText, StringComparison.OrdinalIgnoreCase);
     }
 

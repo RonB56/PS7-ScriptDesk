@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Text;
 using PS7ScriptDesk.Domain.Models;
 
 namespace PS7ScriptDesk.Infrastructure.Services;
@@ -24,7 +25,7 @@ public static partial class GitDiffParser
         {
             if (line.StartsWith("rename from ", StringComparison.Ordinal))
             {
-                oldPath = line[12..];
+                oldPath = DecodeGitPath(line[12..]);
                 renamed = true;
             }
             else if (line.StartsWith("similarity index ", StringComparison.Ordinal) && int.TryParse(line[17..].TrimEnd('%'), out var parsedSimilarity))
@@ -33,19 +34,19 @@ public static partial class GitDiffParser
             }
             else if (line.StartsWith("rename to ", StringComparison.Ordinal))
             {
-                newPath = line[10..];
+                newPath = DecodeGitPath(line[10..]);
                 renamed = true;
             }
             else if (line.StartsWith("--- ", StringComparison.Ordinal))
             {
                 oldPath = NormalizePath(line[4..]);
-                lines.Add(new(GitDiffLineKind.FileHeader, line, null, null));
+                lines.Add(new(GitDiffLineKind.FileHeader, $"--- {oldPath}", null, null));
             }
             else if (line.StartsWith("+++ ", StringComparison.Ordinal))
             {
                 newPath = NormalizePath(line[4..]);
                 deleted = newPath == "/dev/null";
-                lines.Add(new(GitDiffLineKind.FileHeader, line, null, null));
+                lines.Add(new(GitDiffLineKind.FileHeader, $"+++ {newPath}", null, null));
             }
             else if (line.StartsWith("@@ ", StringComparison.Ordinal))
             {
@@ -80,10 +81,47 @@ public static partial class GitDiffParser
 
     private static string NormalizePath(string path)
     {
-        var value = path.Split('\t')[0].Trim();
-        if (value.Length >= 2 && value[0] == '"' && value[^1] == '"') value = value[1..^1];
+        var value = DecodeGitPath(path.Split('\t')[0].Trim());
         return value.StartsWith("a/", StringComparison.Ordinal) || value.StartsWith("b/", StringComparison.Ordinal)
             ? value[2..]
             : value;
     }
+
+    private static string DecodeGitPath(string value)
+    {
+        if (value.Length < 2 || value[0] != '"' || value[^1] != '"') return value;
+
+        var bytes = new List<byte>(value.Length);
+        var text = new StringBuilder();
+        for (var i = 1; i < value.Length - 1; i++)
+        {
+            if (value[i] != '\\')
+            {
+                text.Append(value[i]);
+                continue;
+            }
+
+            if (i + 3 < value.Length - 1 && IsOctal(value[i + 1]) && IsOctal(value[i + 2]) && IsOctal(value[i + 3]))
+            {
+                FlushText();
+                bytes.Add(Convert.ToByte(value.Substring(i + 1, 3), 8));
+                i += 3;
+                continue;
+            }
+
+            var escaped = i + 1 < value.Length - 1 ? value[++i] : '\\';
+            text.Append(escaped switch { 'n' => '\n', 't' => '\t', 'b' => '\b', 'r' => '\r', _ => escaped });
+        }
+        FlushText();
+        return Encoding.UTF8.GetString(bytes.ToArray());
+
+        void FlushText()
+        {
+            if (text.Length == 0) return;
+            bytes.AddRange(Encoding.UTF8.GetBytes(text.ToString()));
+            text.Clear();
+        }
+    }
+
+    private static bool IsOctal(char value) => value is >= '0' and <= '7';
 }

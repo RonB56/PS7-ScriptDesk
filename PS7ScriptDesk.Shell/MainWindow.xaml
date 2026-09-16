@@ -509,7 +509,7 @@
                           help:ContextHelp.Key="Help.Logs" />
             </MenuItem>
 
-            <MenuItem Header="_Git" help:ContextHelp.Key="Git.Menu">
+            <MenuItem x:Name="GitMenuItem" Header="_Git" help:ContextHelp.Key="Git.Menu">
                 <MenuItem Header="Open Git _Workspace"
                           Click="OpenGitWorkspace_Click"
                           ToolTip="Open the dedicated Git Workspace for repository changes, history, branches, remotes, and setup." />
@@ -886,7 +886,9 @@
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Git">
-                <TextBlock Text="{Binding GitStatusText}"
+                <TextBlock x:Name="GitStatusTextBlock"
+                           Text="{Binding GitStatusText, NotifyOnTargetUpdated=True}"
+                           TargetUpdated="GitStatusTextBlock_TargetUpdated"
                            ToolTip="{Binding GitRepositoryRootText}" />
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
@@ -1645,7 +1647,9 @@
 
                             <!-- Console header: session status, Reset Console button -->
                             <DockPanel Grid.Row="0" Margin="0,0,0,4">
-                                <TextBlock Text="{Binding ConsoleSessionText}"
+                                <TextBlock x:Name="ConsoleSessionStatusTextBlock"
+                                           Text="{Binding ConsoleSessionText, NotifyOnTargetUpdated=True}"
+                                           TargetUpdated="ConsoleSessionStatusTextBlock_TargetUpdated"
                                            VerticalAlignment="Center"
                                            Foreground="{DynamicResource Theme.Text.Secondary}"
                                            help:ContextHelp.Key="Console.Area" />

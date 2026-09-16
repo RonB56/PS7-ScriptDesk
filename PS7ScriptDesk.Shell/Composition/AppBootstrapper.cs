@@ -14,6 +14,8 @@ namespace PS7ScriptDesk.Shell.Composition
     {
         public static MainWindow CreateMainWindow(ApplicationSettingsService applicationSettingsService, ApplicationSettings applicationSettings, PowerShellRuntimeInfo? startupRuntimeInfo, IUiScaleService? uiScaleService = null)
         {
+            TerminalStartupTrace.Write("BOOTSTRAPPER_CREATE_MAINWINDOW_ENTER", $"runtime={startupRuntimeInfo?.LaunchExecutablePath ?? "(none)"}");
+            StartupLifecycleTrace.Write("AppBootstrapper.CreateMainWindow", "ENTER", $"runtime={startupRuntimeInfo?.LaunchExecutablePath ?? "(none)"}; structuredExecution={Environment.GetEnvironmentVariable(EditorExecutionFeatureGate.EnvironmentVariableName) ?? "(unset)"}");
             uiScaleService ??= new UiScaleService(applicationSettings.UiScalePercent);
             UiScaleServiceHost.SetCurrent(uiScaleService);
             var workspaceService = new WorkspaceService();
@@ -26,6 +28,7 @@ namespace PS7ScriptDesk.Shell.Composition
             var gitWorkspaceCoordinator = new GitWorkspaceCoordinator(gitService);
             var userPromptService = new UserPromptService();
             var liveConsoleService = new LiveConsoleService();
+            TerminalStartupTrace.Write("LIVE_CONSOLE_SERVICE_CONSTRUCTED", $"serviceId={liveConsoleService.GetHashCode():X8}");
             var exeExportService = new ExeExportService();
             var exeExportWizardService = new ExportWizardService(applicationSettings);
             var restApiPublishWizardService = new RestApiPublishWizardService(new ApiPublishConfigurationStore());
@@ -71,9 +74,12 @@ namespace PS7ScriptDesk.Shell.Composition
                 gitService,
                 userPromptService,
                 gitWorkspaceCoordinator);
+            StartupLifecycleTrace.Write("MainWindowViewModel", "CONSTRUCTED", $"terminalServiceId={liveConsoleService.GetHashCode():X8}; gitServiceId={gitService.GetHashCode():X8}");
 
             var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService);
             window.AttachViewModel(viewModel);
+            TerminalStartupTrace.Write("BOOTSTRAPPER_CREATE_MAINWINDOW_EXIT", $"windowId={window.GetHashCode():X8}; viewModelId={viewModel.GetHashCode():X8}; serviceId={liveConsoleService.GetHashCode():X8}");
+            StartupLifecycleTrace.Write("AppBootstrapper.CreateMainWindow", "EXIT", "ViewModel attached.");
 
             DeveloperDiagnostics.LogInfo("Startup", "MainWindow instance created and view model attached.");
             return window;

@@ -75,4 +75,24 @@ public sealed class GitDiffParserTests
         Assert.Equal("old file.ps1 → new file.ps1", diff.RenameText);
         Assert.Empty(diff.Hunks);
     }
+
+    [Fact]
+    public void DecodesGitQuotedUtf8OctalPathsInDiffHeaders()
+    {
+        var diff = GitDiffParser.Parse("--- \"a/Unicode/Test-\\303\\234berpr\\303\\274fung.txt\"\n+++ \"b/Unicode/Test-\\303\\234berpr\\303\\274fung.txt\"\n@@ -1 +1 @@\n-old\n+new\n", "Unicode/Test-Überprüfung.txt", GitDiffScope.Unstaged);
+
+        Assert.Equal("Unicode/Test-Überprüfung.txt", diff.OldPath);
+        Assert.Equal("Unicode/Test-Überprüfung.txt", diff.NewPath);
+        Assert.Contains(diff.Lines, line => line.Text == "--- Unicode/Test-Überprüfung.txt");
+        Assert.Contains(diff.Lines, line => line.Text == "+++ Unicode/Test-Überprüfung.txt");
+    }
+
+    [Fact]
+    public void KeepsQuotedPathsWithSpacesReadable()
+    {
+        var diff = GitDiffParser.Parse("--- \"a/File With Spaces.txt\"\n+++ \"b/File With Spaces.txt\"\n", "File With Spaces.txt", GitDiffScope.Unstaged);
+
+        Assert.Equal("File With Spaces.txt", diff.DisplayName);
+        Assert.Contains(diff.Lines, line => line.Text == "--- File With Spaces.txt");
+    }
 }

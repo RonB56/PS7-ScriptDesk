@@ -25,6 +25,8 @@ public static class AppLogger
     private static readonly string LogDirectory = Path.Combine(RootDirectory, "Logs");
     private static readonly string LogPath = Path.Combine(LogDirectory, ApplicationBranding.LogFileName);
     private static readonly string EmergencyLogPath = Path.Combine(RootDirectory, "startup-error.log");
+    private static readonly object EmergencyFileGate = new();
+    private static readonly SemaphoreSlim EmergencyFileSemaphore = new(1, 1);
     private static readonly string DebugFlagPath = Path.Combine(RootDirectory, "logging.debug.enabled");
     // Private, production-default delegates provide deterministic per-class file-failure injection through reflection tests.
     private static Action<string> _primaryDirectoryCreate = static path => Directory.CreateDirectory(path);
@@ -68,6 +70,11 @@ public static class AppLogger
     public static string CurrentLogDirectory => LogDirectory;
     public static string CurrentLogPath => LogPath;
     public static bool IsDebugEnabled => MinimumLevel <= AppLogLevel.Debug;
+    public static void WriteEmergencyFallback(string entry)
+    {
+        try { PersistEmergencyEntry(entry); }
+        catch (Exception exception) { System.Diagnostics.Debug.WriteLine($"[AppLogger] Emergency fallback failed: {exception}"); }
+    }
     public static void Debug(string component, string message) => Log(AppLogLevel.Debug, component, message);
     public static void Info(string component, string message) => Log(AppLogLevel.Info, component, message);
     public static void Warning(string component, string message) => Log(AppLogLevel.Warning, component, message);
@@ -179,7 +186,7 @@ public static class AppLogger
             try
             {
                 _emergencyDirectoryCreate(RootDirectory);
-                await _emergencyAppend(EmergencyLogPath, entry + Environment.NewLine, Encoding.UTF8).ConfigureAwait(false);
+                await PersistEmergencyEntryAsync(entry).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -210,8 +217,7 @@ public static class AppLogger
                 catch { failedCount++; }
             }
 
-            var startupErrorPath = Path.Combine(RootDirectory, "startup-error.log");
-            if (File.Exists(startupErrorPath))
+            foreach (var startupErrorPath in Directory.EnumerateFiles(RootDirectory, "startup-error*.log", SearchOption.TopDirectoryOnly))
             {
                 try
                 {
@@ -220,6 +226,7 @@ public static class AppLogger
                 }
                 catch { failedCount++; }
             }
+            EnforceEmergencyArchiveCount();
             return deletedCount == 0 && failedCount == 0
                 ? string.Empty
                 : $"Startup log retention cleanup completed. Deleted={deletedCount}, Failed={failedCount}, RetentionDays={LogRetentionWindow.TotalDays:0}.";
@@ -256,6 +263,65 @@ public static class AppLogger
             if (File.Exists(LogPath)) File.Move(LogPath, firstArchivePath);
         }
         catch { }
+    }
+
+    private static void PersistEmergencyEntry(string entry)
+    {
+        PersistEmergencyEntryAsync(entry).GetAwaiter().GetResult();
+    }
+
+    private static async Task PersistEmergencyEntryAsync(string entry)
+    {
+        var text = (entry ?? string.Empty) + Environment.NewLine;
+        var bytes = Encoding.UTF8.GetByteCount(text);
+        await EmergencyFileSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            lock (EmergencyFileGate)
+            {
+                _emergencyDirectoryCreate(RootDirectory);
+                var currentLength = File.Exists(EmergencyLogPath) ? new FileInfo(EmergencyLogPath).Length : 0;
+                if (currentLength > MaxLogFileBytes || currentLength + bytes > MaxLogFileBytes)
+                    RotateEmergencyLog();
+            }
+            await _emergencyAppend(EmergencyLogPath, text, Encoding.UTF8).ConfigureAwait(false);
+            lock (EmergencyFileGate) EnforceEmergencyArchiveCount();
+        }
+        finally
+        {
+            EmergencyFileSemaphore.Release();
+        }
+    }
+
+    private static void RotateEmergencyLog()
+    {
+        for (var index = MaxArchiveFiles - 1; index >= 1; index--)
+        {
+            var sourcePath = EmergencyLogPath + "." + index + ".log";
+            var destinationPath = EmergencyLogPath + "." + (index + 1) + ".log";
+            if (File.Exists(destinationPath)) File.Delete(destinationPath);
+            if (File.Exists(sourcePath)) File.Move(sourcePath, destinationPath);
+        }
+
+        var firstArchivePath = EmergencyLogPath + ".1.log";
+        if (File.Exists(firstArchivePath)) File.Delete(firstArchivePath);
+        if (File.Exists(EmergencyLogPath)) File.Move(EmergencyLogPath, firstArchivePath);
+    }
+
+    private static void EnforceEmergencyArchiveCount()
+    {
+        var archives = Directory.EnumerateFiles(RootDirectory, "startup-error.*.log", SearchOption.TopDirectoryOnly)
+            .Where(path => int.TryParse(Path.GetFileNameWithoutExtension(path).Split('.').LastOrDefault(), out _))
+            .OrderBy(path =>
+            {
+                var value = Path.GetFileNameWithoutExtension(path).Split('.').LastOrDefault();
+                return int.TryParse(value, out var index) ? index : int.MaxValue;
+            })
+            .ToArray();
+        foreach (var archive in archives.Skip(MaxArchiveFiles))
+        {
+            try { File.Delete(archive); } catch { }
+        }
     }
 
     private sealed record LogEntry(AppLogLevel Level, string Text);

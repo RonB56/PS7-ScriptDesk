@@ -854,6 +854,7 @@ namespace PS7ScriptDesk.Shell.Controls
         private bool                   _firstInputReceivedLogged;
         private bool                   _firstInputObservedForDiagnostics;
         private bool                   _firstOutputAfterInputLogged;
+        private bool                   _rendererReadyReplayPending;
         private int                    _inputInfoLogCount;
         private bool                   _clipboardCopyFailureEpisodeActive;
         private bool                   _clipboardPasteReadFailureEpisodeActive;
@@ -908,6 +909,7 @@ namespace PS7ScriptDesk.Shell.Controls
         public TerminalControl()
         {
             InitializeComponent();
+            TerminalStartupTrace.Write("TERMINAL_CONTROL_CONSTRUCTED", $"controlId={GetHashCode():X8}");
             _resizeOutputBarrierTimer = new DispatcherTimer(DispatcherPriority.Background)
             {
                 Interval = TimeSpan.FromMilliseconds(100)
@@ -921,12 +923,17 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private async void OnLoaded(object sender, RoutedEventArgs e)
         {
+            TerminalStartupTrace.Write("RENDERER_INIT_START", $"controlId={GetHashCode():X8}; uiThread={Dispatcher.CheckAccess()}");
+            StartupLifecycleTrace.Write("TerminalControl.OnLoaded", "ENTER");
             if (!TryCreateRenderer(out var renderer, out var lifecycle))
             {
+                TerminalStartupTrace.Write("RENDERER_INIT_SKIPPED", "reason=renderer-already-active-or-creation-failed");
+                StartupLifecycleTrace.Write("TerminalControl.OnLoaded", "SKIP", "renderer already active or creation failed");
                 return;
             }
 
             await InitializeRendererAsync(renderer, lifecycle).ConfigureAwait(true);
+            StartupLifecycleTrace.Write("TerminalControl.OnLoaded", "EXIT");
         }
 
         public void ResetRendererForRetry()
@@ -981,6 +988,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 _fallbackState = TerminalWebView2FallbackState.None;
                 _rendererInstanceGeneration++;
                 _terminalResizePolicy.Reset(_rendererInstanceGeneration);
+                StartupLifecycleTrace.Write("TerminalControl.Renderer", "CREATED", $"generation={_rendererInstanceGeneration}");
                 AppLogger.Info("Terminal", $"Created fresh dynamic WebView2 terminal renderer. RendererInstanceGeneration={_rendererInstanceGeneration}.");
                 DeveloperDiagnostics.LogStateTransition(
                     "Terminal",
@@ -1018,8 +1026,12 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             try
             {
+                TerminalStartupTrace.Write("WEBVIEW2_INIT_START", $"controlId={GetHashCode():X8}");
                 AppLogger.Debug("Terminal", "Initializing WebView2 terminal host.");
+                StartupLifecycleTrace.Write("TerminalControl.WebView2", "INITIALIZE_ENTER");
                 await renderer.EnsureCoreWebView2Async().ConfigureAwait(true);
+                TerminalStartupTrace.Write("WEBVIEW2_INIT_SUCCESS");
+                StartupLifecycleTrace.Write("TerminalControl.WebView2", "CORE_READY");
                 if (!IsCurrentRenderer(renderer, lifecycle) ||
                     !lifecycle.CanAcceptRendererCallback ||
                     Dispatcher.HasShutdownStarted ||
@@ -1092,11 +1104,15 @@ namespace PS7ScriptDesk.Shell.Controls
 
                 coreWebView2.NavigateToString(TerminalHtml);
                 lifecycle.MarkReady();
+                TerminalStartupTrace.Write("XTERM_INIT_START", "NavigateToString completed; waiting for xterm ready signal");
+                StartupLifecycleTrace.Write("TerminalControl.WebView2", "NAVIGATION_STARTED");
                 System.Diagnostics.Debug.WriteLine("[TerminalControl] WebView2 initialized — navigating to terminal page");
                 AppLogger.Debug("Terminal", "WebView2 terminal page navigation started.");
             }
             catch (Exception ex)
             {
+                TerminalStartupTrace.Write("WEBVIEW2_INIT_FAILURE", $"exception={ex.GetType().Name}; message={ex.Message}; stack={ex.StackTrace}");
+                StartupLifecycleTrace.Write("TerminalControl.WebView2", "FAULT", $"exception={ex.GetType().Name}: {ex.Message}");
                 RetireWebView2Renderer(
                     IsWebView2RuntimeAvailable()
                         ? "InitializationFailed"
@@ -1770,6 +1786,11 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
+            if (!_isReady)
+            {
+                TerminalStartupTrace.Write("BUFFERED_FOR_RENDERER", $"generation={generation}; chars={data.Length}; pendingCharacters={enqueueResult.PendingCharacters}; contentOmitted=true");
+            }
+
             if (_isReady && !_firstOutputPostedLogged)
             {
                 _firstOutputPostedLogged = true;
@@ -2073,6 +2094,12 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
+            if (_rendererReadyReplayPending)
+            {
+                _rendererReadyReplayPending = false;
+                TerminalStartupTrace.Write("REPLAY_OUTPUT", $"sequence={outputBatch.Sequence}; chars={outputBatch.Data.Length}; contentOmitted=true");
+            }
+
             TerminalCriticalTrace.LogStage(
                 "TerminalOutputFlowController.TryBeginDelivery.Batch",
                 new Dictionary<string, object?>
@@ -2116,6 +2143,7 @@ namespace PS7ScriptDesk.Shell.Controls
                         outputDiagnostics.ResizeGeneration,
                         outputDiagnostics.ResizeElapsedMilliseconds,
                         outputDiagnostics.ControlSummary));
+                TerminalStartupTrace.Write("JS_WRITE_INVOKED", $"sequence={outputBatch.Sequence}; submissionId={submissionId}; chars={outputBatch.Data.Length}; contentOmitted=true");
                 TerminalCriticalTrace.LogStage(
                     "TerminalControl.WebView2.PostOutput",
                     new Dictionary<string, object?>
@@ -2887,9 +2915,11 @@ namespace PS7ScriptDesk.Shell.Controls
                 switch (type)
                 {
                     case "ready":
+                        StartupLifecycleTrace.Write("TerminalControl.Xterm", "READY");
                         var readySource = root.TryGetProperty("source", out var readySourceProp)
                             ? readySourceProp.GetString()
                             : "unknown";
+                        TerminalStartupTrace.Write("XTERM_READY", $"source={readySource}; uiThread={Dispatcher.CheckAccess()}");
                         var readyCols = root.TryGetProperty("cols", out var readyColsProp) ? readyColsProp.GetInt32() : 0;
                         var readyRows = root.TryGetProperty("rows", out var readyRowsProp) ? readyRowsProp.GetInt32() : 0;
                         var readyClientWidth = root.TryGetProperty("clientWidth", out var readyClientWidthProp) ? readyClientWidthProp.GetInt32() : 0;
@@ -2920,6 +2950,7 @@ namespace PS7ScriptDesk.Shell.Controls
                             sequenceProp.TryGetInt64(out var sequence))
                         {
                             var scheduleFlush = _outputFlowController.Acknowledge(generation, sequence);
+                            TerminalStartupTrace.Write("JS_WRITE_COMPLETED", $"sequence={sequence}; generation={generation}; replayScheduled={scheduleFlush}");
                             TerminalCriticalTrace.LogStage(
                                 "TerminalControl.RendererAcknowledgement",
                                 new Dictionary<string, object?>
@@ -3300,11 +3331,15 @@ namespace PS7ScriptDesk.Shell.Controls
         private void FlushOutputQueue()
         {
             _isReady = true;
+            TerminalStartupTrace.Write("RENDERER_READY", $"controlId={GetHashCode():X8}; uiThread={Dispatcher.CheckAccess()}");
             var scheduleFlush = _outputFlowController.SetRendererReady();
+            _rendererReadyReplayPending = scheduleFlush;
+            TerminalStartupTrace.Write("RENDERER_READY_REPLAY_START", $"controlId={GetHashCode():X8}; replayScheduled={scheduleFlush}; outstandingOutput={_outputFlowController.HasOutstandingOutput}");
 
             AppLogger.Info("Terminal", "xterm.js renderer is ready; bounded terminal output delivery is enabled.");
             DeveloperDiagnostics.LogInfo("Terminal", "xterm.js renderer is ready; bounded terminal output delivery is enabled.");
             RequestOutputFlush(scheduleFlush);
+            TerminalStartupTrace.Write("RENDERER_READY_REPLAY_END", $"controlId={GetHashCode():X8}; replayScheduled={scheduleFlush}");
 
             // Auto-focus so the user can type immediately.
             ActivateTerminalHost("FlushOutputQueue");

@@ -23,9 +23,10 @@ using PS7ScriptDesk.UI.Commands;
 
 namespace PS7ScriptDesk.UI.ViewModels
 {
-public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
+    public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
     {
         private const int MaximumRecentFiles = 10;
+        private const string GitDiagnosticsDocumentTitle = "Git Diagnostics.txt";
         private readonly IFileDocumentService _fileDocumentService;
         private readonly IRuntimeService _runtimeService;
         private readonly ILiveConsoleService _liveConsoleService;
@@ -43,6 +44,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         private readonly IInteractiveTerminalCoordinator _interactiveTerminalCoordinator;
         private readonly TerminalOutputMultiplexer _terminalOutputMultiplexer;
         private SynchronizationContext? _uiSynchronizationContext;
+        private int _uiThreadId;
         private readonly SemaphoreSlim _consoleSessionGate = new(1, 1);
         private readonly SemaphoreSlim _consoleRecoveryGate = new(1, 1);
         private readonly TerminalFocusRestorePolicy _terminalFocusRestorePolicy = new();
@@ -84,7 +86,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         private readonly RelayCommand _pushCommand;
         private readonly RelayCommand _showHistoryCommand;
         private readonly RelayCommand _cloneRepositoryCommand;
-        private readonly RelayCommand _initializeRepositoryCommand;
+        private readonly AsyncRelayCommand _initializeRepositoryCommand;
         private readonly IUiScaleService _uiScaleService;
         private readonly SemaphoreSlim _gitMutationGate = new(1, 1);
         private readonly Dictionary<DiffTabViewModel, CancellationTokenSource> _diffRefreshCancellations = new();
@@ -104,6 +106,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         private string _debuggerOutputText = string.Empty;
         private Action?         _clearTerminalSink;
         private Action?         _focusTerminalSink;
+        private Action<string>?  _terminalWarmStartRequestSink;
         private Action?         _normalizeTerminalInteractiveStateSink;
         private Func<int, CancellationToken, Task<TerminalFocusRestoreResult>>? _restoreTerminalFocusSink;
         private Func<bool>?     _isTerminalFocusedSink;
@@ -178,6 +181,9 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         private string _gitStatusText = "Git: checking availability...";
         private string _commitMessage = string.Empty;
         private bool _isRemoteOperationInProgress;
+        private bool _syncStatusOwner;
+        private bool _syncChildFailed;
+        private GitOperationKind _currentGitOperation;
         public SourceControlViewModel SourceControl { get; }
         public GitBranchState? GitBranchState => _gitBranchState;
         public IGitWorkspaceCoordinator? GitWorkspaceCoordinator => _gitWorkspaceCoordinator;
@@ -205,6 +211,8 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             IGitWorkspaceCoordinator? gitWorkspaceCoordinator = null)
 
         {
+            TerminalStartupTrace.Write("MAINWINDOW_VIEWMODEL_CONSTRUCTOR_ENTER", $"viewModelId={GetHashCode():X8}; liveConsoleServiceId={liveConsoleService.GetHashCode():X8}");
+            StartupLifecycleTrace.Write("MainWindowViewModel.Constructor", "ENTER", $"terminalServiceId={liveConsoleService.GetHashCode():X8}; gitServiceId={gitService?.GetHashCode().ToString("X8") ?? "(none)"}");
             _fileDocumentService = fileDocumentService;
             _runtimeService = runtimeService;
             _workspaceFolderService = workspaceFolderService;
@@ -238,6 +246,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             }
             _uiScaleService.ScaleChanged += UiScaleService_ScaleChanged;
             _uiSynchronizationContext = SynchronizationContext.Current;
+            _uiThreadId = Environment.CurrentManagedThreadId;
             _startupRuntimeInfo = startupRuntimeInfo;
             _applicationVersionText = GetApplicationVersionText();
 
@@ -287,19 +296,19 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             DiscardFileCommand = _discardFileCommand;
             _commitCommand = new RelayCommand(() => _ = CommitAsync(), CanCommit);
             CommitCommand = _commitCommand;
-            _syncCommand = new RelayCommand(() => _ = SyncAsync(), CanSync);
+            _syncCommand = new RelayCommand(() => _ = ExecuteGitCommandSafelyAsync(SyncAsync, "Sync"), CanSync);
             SyncCommand = _syncCommand;
-            _fetchCommand = new RelayCommand(() => _ = FetchAsync(), CanGitMutation);
+            _fetchCommand = new RelayCommand(() => _ = ExecuteGitCommandSafelyAsync(FetchAsync, "Fetch"), CanGitMutation);
             FetchCommand = _fetchCommand;
-            _pullCommand = new RelayCommand(() => _ = PullAsync(), () => CanGitMutation() && CanSwitchBranches);
+            _pullCommand = new RelayCommand(() => _ = ExecuteGitCommandSafelyAsync(PullAsync, "Pull"), CanGitMutation);
             PullCommand = _pullCommand;
-            _pushCommand = new RelayCommand(() => _ = PushAsync(), CanGitMutation);
+            _pushCommand = new RelayCommand(() => _ = ExecuteGitCommandSafelyAsync(PushAsync, "Push"), CanGitMutation);
             PushCommand = _pushCommand;
             _showHistoryCommand = new RelayCommand(() => _ = OpenHistoryAsync(), () => _gitService is not null && !string.IsNullOrWhiteSpace(GitRepositoryRoot));
             HistoryCommand = _showHistoryCommand;
-            _cloneRepositoryCommand = new RelayCommand(() => _ = CloneRepositoryAsync(), () => _gitService is not null && _gitSetupPromptService is not null);
+            _cloneRepositoryCommand = new RelayCommand(() => _ = CloneRepositoryAsync(), CanCloneRepository);
             CloneRepositoryCommand = _cloneRepositoryCommand;
-            _initializeRepositoryCommand = new RelayCommand(() => _ = InitializeRepositoryAsync(), () => _gitService is not null && _gitSetupPromptService is not null && !IsGitMutationInProgress);
+            _initializeRepositoryCommand = new AsyncRelayCommand(() => InitializeRepositoryAsync(), () => _gitService is not null && _gitSetupPromptService is not null && !IsGitMutationInProgress);
             InitializeRepositoryCommand = _initializeRepositoryCommand;
             _sendConsoleCommand = new RelayCommand(async () => await OnExecuteConsoleCommandAsync(), CanExecuteConsoleCommand);
             SendConsoleCommand = _sendConsoleCommand;
@@ -349,6 +358,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             {
                 CreateInitialTab();
             }
+            StartupLifecycleTrace.Write("MainWindowViewModel.Constructor", "EXIT", $"startupRuntimeSeeded={_startupRuntimeSeeded}; gitService={( _gitService is null ? "none" : "present")}");
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -478,40 +488,151 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         {
             var request = _gitSetupPromptService?.ShowCloneDialog();
             if (request is null || _gitService is null) return;
+            if (GitCloneValidation.ValidateSource(request.Source) is { Length: > 0 } sourceError)
+            {
+                _userPromptService.ShowWarningMessage("Clone Repository", sourceError);
+                return;
+            }
             if (!Directory.Exists(request.DestinationParent)) { _userPromptService.ShowWarningMessage("Clone Repository", "The destination parent folder does not exist."); return; }
-            if (string.IsNullOrWhiteSpace(request.FolderName) || request.FolderName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) { _userPromptService.ShowWarningMessage("Clone Repository", "Choose a valid repository folder name."); return; }
+            if (GitCloneValidation.ValidateFolderName(request.FolderName) is { Length: > 0 } folderError) { _userPromptService.ShowWarningMessage("Clone Repository", folderError); return; }
             var destination = Path.GetFullPath(Path.Combine(request.DestinationParent, request.FolderName));
             if (Directory.Exists(destination) && Directory.EnumerateFileSystemEntries(destination).Any()) { _userPromptService.ShowWarningMessage("Clone Repository", "The destination folder exists and is not empty. No files were changed."); return; }
             if (File.Exists(destination)) { _userPromptService.ShowWarningMessage("Clone Repository", "The destination path is a file. No files were changed."); return; }
             var started = Stopwatch.StartNew();
             try
             {
-                _isGitMutationInProgress = true; RefreshGitCommands(); StatusText = "Cloning repository...";
+                IsGitMutationInProgress = true;
+                CurrentGitOperation = GitOperationKind.Clone;
+                StatusText = "Cloning repository...";
                 var result = await _gitService.CloneAsync(request.Source, destination, cancellationToken).ConfigureAwait(false);
-                if (!result.Success) { StatusText = DescribeGitFailure("Clone", request.Source, result); return; }
+                if (!result.Success)
+                {
+                    StatusText = SummarizeGitFailure("Clone", result);
+                    DeveloperDiagnostics.LogOperationStop("Git", "Clone", "Repository clone returned a failure result.", (long)result.Duration.TotalMilliseconds, new Dictionary<string, object?>
+                    {
+                        ["source"] = SanitizeGitSource(request.Source),
+                        ["destination"] = destination,
+                        ["exitCode"] = result.ExitCode,
+                        ["failureKind"] = result.FailureKind,
+                        ["stderrPreview"] = DeveloperDiagnostics.SanitizePreview(result.StandardError)
+                    });
+                    return;
+                }
                 DeveloperDiagnostics.LogInfo("Git", "Repository clone completed.", new Dictionary<string, object?> { ["source"] = SanitizeGitSource(request.Source), ["destination"] = destination, ["durationMs"] = started.ElapsedMilliseconds });
                 await LoadWorkspaceFolderAsync(destination).ConfigureAwait(false);
             }
-            finally { _isGitMutationInProgress = false; PostToUi(RefreshGitCommands); }
+            finally
+            {
+                IsGitMutationInProgress = false;
+                CurrentGitOperation = GitOperationKind.None;
+            }
         }
 
         public async Task InitializeRepositoryAsync(CancellationToken cancellationToken = default)
         {
-            if (_gitSetupPromptService is null || _gitService is null) return;
+            if (_gitSetupPromptService is null || _gitService is null)
+            {
+                DeveloperDiagnostics.LogInfo("Git", "Initialize request rejected because Git setup dependencies are unavailable.");
+                return;
+            }
+
+            DeveloperDiagnostics.LogOperationStart("Git", "Initialize", "Repository initialization requested.", additionalProperties: new Dictionary<string, object?>
+            {
+                ["workspacePath"] = _currentWorkspaceFolderPath
+            });
+
             var selected = _gitSetupPromptService.ShowInitializeDialog(_currentWorkspaceFolderPath ?? string.Empty);
-            if (string.IsNullOrWhiteSpace(selected) || !Directory.Exists(selected)) return;
+            if (string.IsNullOrWhiteSpace(selected))
+            {
+                DeveloperDiagnostics.LogInfo("Git", "Repository initialization canceled before confirmation.");
+                return;
+            }
+
+            if (!Directory.Exists(selected))
+            {
+                await PostToUiAsync(() => StatusText = "Initialize failed — selected folder is unavailable.").ConfigureAwait(false);
+                DeveloperDiagnostics.LogInfo("Git", "Repository initialization rejected because the selected folder is unavailable.", new Dictionary<string, object?> { ["folder"] = selected });
+                return;
+            }
+
             var detected = await _gitService.DetectRepositoryAsync(selected, cancellationToken).ConfigureAwait(false);
-            if (detected.IsRepository) { _userPromptService.ShowWarningMessage("Initialize Git Repository", $"This folder is already inside the repository at {detected.RepositoryRoot}."); return; }
+            if (detected.IsRepository)
+            {
+                await PostToUiAsync(() => _userPromptService.ShowWarningMessage("Initialize Git Repository", $"This folder is already inside the repository at {detected.RepositoryRoot}.")).ConfigureAwait(false);
+                DeveloperDiagnostics.LogInfo("Git", "Repository initialization rejected because the selected folder is already inside a repository.", new Dictionary<string, object?> { ["folder"] = selected, ["repositoryRoot"] = detected.RepositoryRoot });
+                return;
+            }
+
             var started = Stopwatch.StartNew();
-            _isGitMutationInProgress = true; RefreshGitCommands();
+            await PostToUiAsync(() =>
+            {
+                CurrentGitOperation = GitOperationKind.Initialize;
+                IsGitMutationInProgress = true;
+                StatusText = "Initializing repository...";
+            }).ConfigureAwait(false);
+            LogInitializeStage("busy-state-set", selected);
+            DeveloperDiagnostics.LogInfo("Git", "Repository initialization entered the shared mutation lifecycle.", new Dictionary<string, object?> { ["folder"] = selected });
             try
             {
+                LogInitializeStage("service-call-started", selected);
+                DeveloperDiagnostics.LogInfo("Git", "Repository initialization service call started.", new Dictionary<string, object?> { ["folder"] = selected });
                 var result = await _gitService.InitializeAsync(selected, cancellationToken).ConfigureAwait(false);
-                if (!result.Success) { StatusText = DescribeGitFailure("Initialize", selected, result); return; }
-                DeveloperDiagnostics.LogInfo("Git", "Repository initialization completed.", new Dictionary<string, object?> { ["folder"] = selected, ["durationMs"] = started.ElapsedMilliseconds });
+                if (!result.Success)
+                {
+                    await PostToUiAsync(() => StatusText = SummarizeGitFailure("Initialize", result)).ConfigureAwait(false);
+                    DeveloperDiagnostics.LogOperationStop("Git", "Initialize", "Repository initialization returned a failure result.", (long)result.Duration.TotalMilliseconds, new Dictionary<string, object?>
+                    {
+                        ["folder"] = selected,
+                        ["exitCode"] = result.ExitCode,
+                        ["failureKind"] = result.FailureKind,
+                        ["stderrPreview"] = DeveloperDiagnostics.SanitizePreview(result.StandardError)
+                    });
+                    return;
+                }
+
+                LogInitializeStage("service-call-completed", selected);
+                DeveloperDiagnostics.LogInfo("Git", "Repository initialization service call completed successfully.", new Dictionary<string, object?> { ["folder"] = selected, ["durationMs"] = started.ElapsedMilliseconds });
+                LogInitializeStage("repository-refresh-started", selected);
+                DeveloperDiagnostics.LogInfo("Git", "Authoritative repository refresh started after initialization.", new Dictionary<string, object?> { ["folder"] = selected });
                 await LoadWorkspaceFolderAsync(selected).ConfigureAwait(false);
+                LogInitializeStage("repository-refresh-completed", selected);
+                DeveloperDiagnostics.LogOperationStop("Git", "Initialize", "Repository initialization and authoritative refresh completed.", started.ElapsedMilliseconds, new Dictionary<string, object?> { ["folder"] = selected });
             }
-            finally { _isGitMutationInProgress = false; PostToUi(RefreshGitCommands); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await PostToUiAsync(() => StatusText = "Initialize canceled.").ConfigureAwait(false);
+                DeveloperDiagnostics.LogInfo("Git", "Repository initialization canceled after entering the mutation lifecycle.", new Dictionary<string, object?> { ["folder"] = selected, ["durationMs"] = started.ElapsedMilliseconds });
+            }
+            catch (Exception ex)
+            {
+                await PostToUiAsync(() => StatusText = "Initialize failed — unable to create repository.").ConfigureAwait(false);
+                DeveloperDiagnostics.LogException("Git", ex, "Repository initialization failed unexpectedly.", new Dictionary<string, object?> { ["folder"] = selected, ["durationMs"] = started.ElapsedMilliseconds });
+            }
+            finally
+            {
+                LogInitializeStage("cleanup-entered", selected);
+                await PostToUiAsync(() =>
+                {
+                    IsGitMutationInProgress = false;
+                    CurrentGitOperation = GitOperationKind.None;
+                    RefreshGitCommands();
+                }).ConfigureAwait(false);
+                LogInitializeStage("command-requery-raised", selected);
+                DeveloperDiagnostics.LogInfo("Git", "Repository initialization mutation lifecycle cleaned up.", new Dictionary<string, object?> { ["folder"] = selected, ["durationMs"] = started.ElapsedMilliseconds });
+            }
+        }
+
+        private void LogInitializeStage(string stage, string folder)
+        {
+            DeveloperDiagnostics.LogInfo("Git", "Initialize lifecycle stage.", new Dictionary<string, object?>
+            {
+                ["stage"] = stage,
+                ["folder"] = folder,
+                ["managedThreadId"] = Environment.CurrentManagedThreadId,
+                ["uiSynchronizationContextAccess"] = _uiSynchronizationContext is not null && ReferenceEquals(SynchronizationContext.Current, _uiSynchronizationContext),
+                ["operation"] = CurrentGitOperation.ToString(),
+                ["isGitMutationInProgress"] = IsGitMutationInProgress
+            });
         }
 
         private static string SanitizeGitSource(string source)
@@ -622,25 +743,67 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                 OnPropertyChanged(nameof(BranchPickerStatusText));
                 GitWorkspaceCoordinator?.PublishBranchState(state);
             }).ConfigureAwait(false);
+            foreach (var branch in state.Branches.Take(50))
+            {
+                DeveloperDiagnostics.LogInfo("Git", "Branch snapshot item received by the Workspace.", new Dictionary<string, object?>
+                {
+                    ["name"] = branch.Name,
+                    ["fullName"] = branch.FullName,
+                    ["isLocal"] = !branch.IsRemote,
+                    ["isCurrent"] = branch.IsCurrent,
+                    ["runtimeType"] = branch.GetType().FullName,
+                    ["branchCount"] = state.Branches.Count
+                });
+            }
         }
 
         public bool CanSwitchBranches => !OpenTabs.Any(tab => tab is not DiffTabViewModel && tab.IsDirty && !string.IsNullOrWhiteSpace(tab.FilePath));
 
-        public string BranchSwitchDisabledReason => CanSwitchBranches ? string.Empty : "Cannot switch branches while an open document has unsaved changes. Save or close it first.";
+        public string BranchSwitchDisabledReason => CanSwitchBranches ? string.Empty : "One or more open documents have unsaved changes. Save or close them before switching branches.";
 
         public bool IsRemoteOperationInProgress => _isRemoteOperationInProgress;
         public string SyncDisabledReason => !IsGitAvailable || string.IsNullOrWhiteSpace(GitRepositoryRoot) ? "No active Git repository." :
             IsGitMutationInProgress ? "A Git operation is already in progress." :
+            GitWorkspaceCoordinator?.CurrentRemoteState?.Remotes.Count == 0 ? "No remote is configured. Add a remote before syncing." :
             _gitBranchState?.Branches.FirstOrDefault(branch => branch.IsCurrent && !branch.IsRemote)?.UpstreamName is null ? "This branch has no upstream. Use Publish Branch." : string.Empty;
         private bool CanSync() => string.IsNullOrEmpty(SyncDisabledReason);
 
-        public Task FetchAsync() => RunRemoteMutationAsync("Fetch", token => _gitService!.FetchAsync(GitRepositoryRoot!, cancellationToken: token), markDiffsStale: false);
-        public Task PullAsync()
+        public async Task ExecuteGitCommandSafelyAsync(Func<Task> operation, string operationName)
         {
-            if (!CanSwitchBranches) { StatusText = "Cannot pull while open documents contain unsaved changes. Save or close them first."; return Task.CompletedTask; }
-            return RunRemoteMutationAsync("Pull", token => _gitService!.PullAsync(GitRepositoryRoot!, token), markDiffsStale: true);
+            try
+            {
+                await operation().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("Git", ex, $"{operationName} command failed unexpectedly.");
+                await PostToUiAsync(() => StatusText = $"{operationName} failed: The operation could not be completed.").ConfigureAwait(false);
+            }
         }
-        public Task PushAsync() => RunRemoteMutationAsync("Push", token => _gitService!.PushAsync(GitRepositoryRoot!, token), markDiffsStale: false);
+
+        public async Task FetchAsync()
+        {
+            if (!await EnsureRemoteAvailableAsync("Fetch", requireUpstream: false).ConfigureAwait(false)) return;
+            await RunRemoteMutationAsync("Fetch", token => _gitService!.FetchAsync(GitRepositoryRoot!, cancellationToken: token), markDiffsStale: false).ConfigureAwait(false);
+        }
+        public async Task PullAsync()
+        {
+            if (!CanSwitchBranches)
+            {
+                const string message = "One or more open documents have unsaved changes. Save or close them before pulling.";
+                StatusText = "Pull blocked";
+                _userPromptService.ShowWarningMessage("Cannot pull", message);
+                DeveloperDiagnostics.LogUserAction("Git", "PullRejectedDirtyDocument", "Pull was blocked to protect unsaved editor content.");
+                return;
+            }
+            if (!await EnsureRemoteAvailableAsync("Pull", requireUpstream: true).ConfigureAwait(false)) return;
+            await RunRemoteMutationAsync("Pull", token => _gitService!.PullAsync(GitRepositoryRoot!, token), markDiffsStale: true).ConfigureAwait(false);
+        }
+        public async Task PushAsync()
+        {
+            if (!await EnsureRemoteAvailableAsync("Push", requireUpstream: false).ConfigureAwait(false)) return;
+            await RunRemoteMutationAsync("Push", token => _gitService!.PushAsync(GitRepositoryRoot!, token), markDiffsStale: false).ConfigureAwait(false);
+        }
 
         public async Task PublishBranchAsync(string remote)
         {
@@ -656,19 +819,80 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
         public async Task SyncAsync()
         {
-            if (!CanSync()) { StatusText = SyncDisabledReason; return; }
-            await FetchAsync().ConfigureAwait(false);
-            var branch = _gitBranchState?.Branches.FirstOrDefault(item => item.IsCurrent && !item.IsRemote);
-            if (branch is null || branch.UpstreamName is null) return;
-            if (branch.BehindCount > 0)
+            if (!CanSwitchBranches)
             {
-                if (!CanSwitchBranches) { StatusText = "Cannot sync while open documents contain unsaved changes."; return; }
-                await PullAsync().ConfigureAwait(false);
-                if (_gitRepositoryState?.Changes.Any(change => change.IsConflicted) == true) { StatusText = "Resolve conflicts before continuing Sync."; return; }
+                const string message = "One or more open documents have unsaved changes. Save or close them before syncing.";
+                StatusText = "Sync blocked";
+                _userPromptService.ShowWarningMessage("Cannot sync", message);
+                DeveloperDiagnostics.LogUserAction("Git", "SyncRejectedDirtyDocument", "Sync was blocked to protect unsaved editor content.");
+                return;
             }
-            await RefreshBranchesAsync().ConfigureAwait(false);
-            branch = _gitBranchState?.Branches.FirstOrDefault(item => item.IsCurrent && !item.IsRemote);
-            if (branch?.AheadCount > 0) await PushAsync().ConfigureAwait(false);
+            if (!await EnsureRemoteAvailableAsync("Sync", requireUpstream: true).ConfigureAwait(false)) return;
+            _syncStatusOwner = true;
+            _syncChildFailed = false;
+            CurrentGitOperation = GitOperationKind.Sync;
+            try
+            {
+                await FetchAsync().ConfigureAwait(false);
+                var branch = _gitBranchState?.Branches.FirstOrDefault(item => item.IsCurrent && !item.IsRemote);
+                if (branch is null || branch.UpstreamName is null) return;
+                if (branch.BehindCount > 0)
+                {
+                    await PullAsync().ConfigureAwait(false);
+                    if (_gitRepositoryState?.Changes.Any(change => change.IsConflicted) == true) { StatusText = "Resolve conflicts before continuing Sync."; return; }
+                }
+                await RefreshBranchesAsync().ConfigureAwait(false);
+                branch = _gitBranchState?.Branches.FirstOrDefault(item => item.IsCurrent && !item.IsRemote);
+                if (branch?.AheadCount > 0) await PushAsync().ConfigureAwait(false);
+                await PostToUiAsync(() => StatusText = _syncChildFailed
+                    ? "Sync failed. Review the Git operation details."
+                    : branch?.AheadCount > 0 || branch?.BehindCount > 0
+                        ? "Sync completed."
+                        : "Sync completed — repository is up to date.").ConfigureAwait(false);
+            }
+            finally
+            {
+                _syncStatusOwner = false;
+                CurrentGitOperation = GitOperationKind.None;
+            }
+        }
+
+        private async Task<bool> EnsureRemoteAvailableAsync(string operation, bool requireUpstream)
+        {
+            if (!CanGitMutation()) { StatusText = "Git operation unavailable in the current repository state"; return false; }
+            var remoteState = GitWorkspaceCoordinator?.CurrentRemoteState;
+            if (remoteState is null)
+            {
+                remoteState = await GetRemotesAsync().ConfigureAwait(false);
+                GitWorkspaceCoordinator?.PublishRemoteState(remoteState);
+            }
+            if (remoteState.Remotes.Count == 0)
+            {
+                DeveloperDiagnostics.LogInfo("Git", $"{operation} rejected because no remote is configured; persistent remote summary remains the user-facing explanation.");
+                return false;
+            }
+            if (requireUpstream)
+            {
+                var branch = _gitBranchState?.Branches.FirstOrDefault(item => item.IsCurrent && !item.IsRemote);
+                if (branch is null || string.IsNullOrWhiteSpace(branch.UpstreamName))
+                {
+                    var currentBranch = _gitBranchState?.CurrentBranch ?? "current";
+                    var message = $"{operation} unavailable: branch '{currentBranch}' has no upstream. Configure an upstream branch before using {operation}.";
+                    await PostToUiAsync(() =>
+                    {
+                        StatusText = $"{operation} failed";
+                        _userPromptService.ShowWarningMessage($"{operation} failed", message);
+                    }).ConfigureAwait(false);
+                    DeveloperDiagnostics.LogUserAction("Git", $"{operation}RejectedNoUpstream", "A remote operation was blocked because the current branch has no upstream.", new Dictionary<string, object?>
+                    {
+                        ["operation"] = operation,
+                        ["branch"] = currentBranch,
+                        ["userNotificationDestination"] = "StatusTextAndWarningDialog"
+                    });
+                    return false;
+                }
+            }
+            return true;
         }
 
         private async Task RunRemoteMutationAsync(string operation, Func<CancellationToken, Task<GitCommandResult>> action, bool markDiffsStale)
@@ -684,9 +908,63 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
         public async Task<GitCommandResult?> SwitchBranchAsync(string branchName)
         {
-            if (!CanSwitchBranches || _gitService is null || string.IsNullOrWhiteSpace(GitRepositoryRoot))
+            var attemptId = Guid.NewGuid().ToString("N");
+            var safetySnapshot = OpenTabs
+                .Where(tab => tab is not DiffTabViewModel && !string.IsNullOrWhiteSpace(tab.FilePath))
+                .Select(tab => new
+                {
+                    Tab = tab,
+                    InRepository = IsPathInsideRepository(tab.FilePath, GitRepositoryRoot),
+                    Affected = IsPathInsideRepository(tab.FilePath, GitRepositoryRoot)
+                })
+                .ToArray();
+            var blockingTabs = safetySnapshot.Where(item => item.Tab.IsDirty).ToArray();
+
+            DeveloperDiagnostics.LogInfo("Git", "Branch switch safety snapshot captured.", new Dictionary<string, object?>
             {
-                StatusText = BranchSwitchDisabledReason;
+                ["attemptId"] = attemptId,
+                ["sourceBranch"] = _gitBranchState?.CurrentBranch,
+                ["targetBranch"] = branchName,
+                ["repositoryRoot"] = GitRepositoryRoot,
+                ["openEditorTabCount"] = safetySnapshot.Length,
+                ["blockingTabCount"] = blockingTabs.Length,
+                ["policy"] = "AnyDirtyOrdinaryOpenDocument"
+            });
+            foreach (var item in safetySnapshot)
+            {
+                DeveloperDiagnostics.LogInfo("Git", "Branch switch safety tab evaluated.", new Dictionary<string, object?>
+                {
+                    ["attemptId"] = attemptId,
+                    ["title"] = item.Tab.Title,
+                    ["filePath"] = item.Tab.FilePath,
+                    ["isDirty"] = item.Tab.IsDirty,
+                    ["language"] = item.Tab.Language.ToString(),
+                    ["inRepository"] = item.InRepository,
+                    ["affectedBySwitch"] = item.Affected,
+                    ["guardIncluded"] = item.Tab.IsDirty,
+                    ["contentOmitted"] = true
+                });
+            }
+
+            if (blockingTabs.Length > 0)
+            {
+                var message = "One or more open documents have unsaved changes. Save or close them before switching branches.";
+                StatusText = "Branch switch blocked";
+                _userPromptService.ShowWarningMessage("Cannot switch branch", message);
+                DeveloperDiagnostics.LogUserAction("Git", "BranchSwitchRejectedDirtyDocument", "Branch switching was blocked to protect unsaved editor content.", new Dictionary<string, object?>
+                {
+                    ["attemptId"] = attemptId,
+                    ["userNotificationDestination"] = "StatusTextAndWarningDialog",
+                    ["branchNameLength"] = branchName?.Length ?? 0,
+                    ["blockingTabCount"] = blockingTabs.Length,
+                    ["gitSwitchInvoked"] = false
+                });
+                return null;
+            }
+
+            if (_gitService is null || string.IsNullOrWhiteSpace(GitRepositoryRoot))
+            {
+                StatusText = "Branch switch unavailable";
                 return null;
             }
             var result = await RunGitMutationAsync("SwitchBranch", branchName,
@@ -778,6 +1056,20 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                 }
             }
         }
+
+        public GitOperationKind CurrentGitOperation
+        {
+            get => _currentGitOperation;
+            private set
+            {
+                if (_currentGitOperation == value) return;
+                _currentGitOperation = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(GitOperationText));
+            }
+        }
+
+        public string GitOperationText => GitOperationPresentation.GetBusyText(CurrentGitOperation);
 
         public string GitRefreshDisabledReason =>
             _gitService is null
@@ -912,6 +1204,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             {
                 if (_consoleSessionText != value)
                 {
+                    StartupLifecycleTrace.Write("MainWindowViewModel.ConsoleSessionText", "SOURCE_CHANGED", $"viewModelId={GetHashCode():X8}; before={_consoleSessionText}; after={value}");
                     _consoleSessionText = value;
                     OnPropertyChanged();
                 }
@@ -1439,6 +1732,31 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         private void GitWorkspaceCoordinator_RefreshRequested(object? sender, EventArgs e)
             => _ = RefreshGitRepositoryAsync(logOperation: true);
 
+        /// <summary>
+        /// Runs the quiet refresh used by the Git Workspace filesystem monitor. The
+        /// refresh is queued through the established UI synchronization path so the
+        /// generation/cancellation state is entered consistently with user actions.
+        /// </summary>
+        public async Task RefreshGitRepositoryForExternalChangeAsync()
+        {
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await PostToUiAsync(() => _ = RunExternalGitRefreshAsync(completion)).ConfigureAwait(false);
+            await completion.Task.ConfigureAwait(false);
+        }
+
+        private async Task RunExternalGitRefreshAsync(TaskCompletionSource completion)
+        {
+            try
+            {
+                await RefreshGitRepositoryAsync(logOperation: false).ConfigureAwait(true);
+                completion.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+            }
+        }
+
         public ICommand ZoomInCommand    { get; }
         public ICommand ZoomOutCommand   { get; }
         public ICommand ResetZoomCommand { get; }
@@ -1455,6 +1773,8 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
         public async Task InitializeAsync()
         {
+            TerminalStartupTrace.Write("RUNTIME_DISCOVERY_START", $"viewModelId={GetHashCode():X8}");
+            StartupLifecycleTrace.Write("MainWindowViewModel.InitializeAsync", "ENTER", $"workspace={_currentWorkspaceFolderPath ?? "(none)"}");
             BindToCurrentSynchronizationContext();
             var startupStopwatch = Stopwatch.StartNew();
 
@@ -1489,9 +1809,11 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                 ScheduleDeferredRuntimeLaunchVerification("deferred startup verification");
 
                 StartupTimingLogger.Log("MainWindowViewModel", $"Deferred initialization completed in {startupStopwatch.ElapsedMilliseconds} ms.");
+                StartupLifecycleTrace.Write("MainWindowViewModel.InitializeAsync", "EXIT", $"elapsedMs={startupStopwatch.ElapsedMilliseconds}");
             }
             catch (Exception ex)
             {
+                StartupLifecycleTrace.Write("MainWindowViewModel.InitializeAsync", "FAULT", $"exception={ex.GetType().Name}: {ex.Message}");
                 AppLogger.Error("Startup", "Deferred ViewModel initialization failed; UI recovery is being applied.", ex);
                 DeveloperDiagnostics.LogException("Startup", ex, "Deferred MainWindowViewModel initialization failed.");
                 PostToUi(() =>
@@ -1571,6 +1893,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
         public Task InitializeTerminalHostAsync(IntPtr hostHandle, int width, int height)
         {
+            TerminalStartupTrace.Write("TERMINAL_HOST_ATTACH_REQUEST", $"viewModelId={GetHashCode():X8}; serviceId={_liveConsoleService.GetHashCode():X8}; width={width}; height={height}");
             var stopwatch = Stopwatch.StartNew();
             _liveConsoleService.AttachHost(hostHandle, width, height);
             PostToUi(UpdateConsoleSessionPresentation);
@@ -1687,14 +2010,19 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         /// </summary>
         public async Task EnsureConsoleRestoredAsync()
         {
+            TerminalStartupTrace.Write("ENSURE_CONSOLE_RESTORED_ENTER", $"viewModelId={GetHashCode():X8}; runtime={(EffectiveRuntimeInfo is null ? "null" : "non-null")}");
+            StartupLifecycleTrace.Write("MainWindowViewModel.EnsureConsoleRestoredAsync", "ENTER", $"runtime={EffectiveRuntimeInfo?.LaunchExecutablePath ?? "(none)"}");
             var runtime = EffectiveRuntimeInfo;
             if (runtime is null)
             {
+                TerminalStartupTrace.Write("ENSURE_CONSOLE_RESTORED_EARLY_EXIT", "reason=runtime-null");
                 PostToUi(UpdateConsoleSessionPresentation);
                 return;
             }
 
             await EnsureConsoleSessionAsync(runtime, forceRestart: false, logOperation: false).ConfigureAwait(false);
+            TerminalStartupTrace.Write("ENSURE_CONSOLE_RESTORED_EXIT", $"sessionRunning={_liveConsoleService.IsSessionRunning}");
+            StartupLifecycleTrace.Write("MainWindowViewModel.EnsureConsoleRestoredAsync", "EXIT", $"sessionRunning={_liveConsoleService.IsSessionRunning}");
         }
 
         /// <summary>
@@ -1710,7 +2038,8 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             Func<bool>? isTerminalFocused = null,
             Func<TerminalFocusRestoreReadiness>? terminalFocusRestoreReadiness = null,
             Func<int, CancellationToken, Task<TerminalFocusRestoreResult>>? restoreTerminalFocus = null,
-            Action? normalizeTerminalInteractiveState = null)
+            Action? normalizeTerminalInteractiveState = null,
+            Action<string>? requestTerminalWarmStart = null)
         {
             _clearTerminalSink  = clearTerminal;
             _focusTerminalSink  = focusTerminal;
@@ -1720,6 +2049,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             _isTerminalFocusedSink = isTerminalFocused;
             _terminalFocusRestoreReadinessSink = terminalFocusRestoreReadiness;
             _restoreTerminalFocusSink = restoreTerminalFocus;
+            _terminalWarmStartRequestSink = requestTerminalWarmStart;
         }
 
         /// <summary>
@@ -1767,6 +2097,12 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         /// <summary>Called after xterm/WebView2 renderer readiness is reported by the shell.</summary>
         public void NotifyTerminalRendererReady()
         {
+            // Renderer readiness is a presentation boundary. The backend may have
+            // reached Running before xterm/WebView2 was ready, so refresh the visible
+            // session projection here without restarting or otherwise touching the
+            // already-running PowerShell process.
+            TerminalStartupTrace.Write("PRESENTATION_RENDERER_READY", $"viewModelId={GetHashCode():X8}; backendRunning={_liveConsoleService.IsSessionRunning}; activeRuntime={_liveConsoleService.ActiveRuntime?.LaunchExecutablePath ?? "(none)"}; uiThread={_uiSynchronizationContext is null || SynchronizationContext.Current == _uiSynchronizationContext}");
+            UpdateConsoleSessionPresentation();
             var generation = Volatile.Read(ref _currentTerminalGeneration);
             var coordinatorSnapshot = _interactiveTerminalCoordinator.Snapshot;
             if (coordinatorSnapshot.Generation != generation ||
@@ -2124,6 +2460,13 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                 string.Equals(e.PropertyName, nameof(EditorTabViewModel.FilePath), StringComparison.Ordinal))
             {
                 ScheduleRecoverySnapshot(tab, $"PropertyChanged:{e.PropertyName}");
+            }
+
+            if (string.Equals(e.PropertyName, nameof(EditorTabViewModel.IsDirty), StringComparison.Ordinal))
+            {
+                OnPropertyChanged(nameof(CanSwitchBranches));
+                OnPropertyChanged(nameof(BranchSwitchDisabledReason));
+                RefreshGitCommands();
             }
         }
 
@@ -3043,6 +3386,22 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             {
                 return null;
             }
+        }
+
+        private static bool IsPathInsideRepository(string? filePath, string? repositoryRoot)
+        {
+            var normalizedFilePath = NormalizeStoredPath(filePath);
+            var normalizedRoot = NormalizeStoredPath(repositoryRoot);
+            if (normalizedFilePath is null || normalizedRoot is null)
+            {
+                return false;
+            }
+
+            var rootWithSeparator = normalizedRoot.EndsWith(Path.DirectorySeparatorChar)
+                ? normalizedRoot
+                : normalizedRoot + Path.DirectorySeparatorChar;
+            return string.Equals(normalizedFilePath, normalizedRoot, StringComparison.OrdinalIgnoreCase) ||
+                   normalizedFilePath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase);
         }
 
         private static string? NormalizeStoredRuntimePath(string? path)
@@ -4992,6 +5351,21 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                     }
 
                     UpdateConsoleSessionPresentation();
+
+                    TerminalStartupTrace.Write("RUNTIME_DISCOVERY_RESULT", $"count={discoveryResult.DetectedRuntimes.Count}; selected={(EffectiveRuntimeInfo is null ? "null" : "non-null")}; selectedPath={EffectiveRuntimeInfo?.LaunchExecutablePath ?? "(none)"}; uiThread={_uiSynchronizationContext is not null && ReferenceEquals(SynchronizationContext.Current, _uiSynchronizationContext)}");
+
+                    if (_terminalWarmStartRequestSink is not null && EffectiveRuntimeInfo is not null && !_liveConsoleService.IsSessionRunning)
+                    {
+                        StartupLifecycleTrace.Write("MainWindowViewModel.RefreshRuntimeDiscoveryAsync", "TERMINAL_WARM_START_REQUESTED", $"runtime={EffectiveRuntimeInfo.LaunchExecutablePath}");
+                        DeveloperDiagnostics.LogInfo("Startup", "Runtime discovery completed with a selected runtime; requesting the pending terminal warm-start.", new Dictionary<string, object?>
+                        {
+                            ["stage"] = "runtime-selected-terminal-start-requested",
+                            ["runtimePath"] = EffectiveRuntimeInfo.LaunchExecutablePath,
+                            ["managedThreadId"] = Environment.CurrentManagedThreadId,
+                            ["uiSynchronizationContextAccess"] = _uiSynchronizationContext is not null && ReferenceEquals(SynchronizationContext.Current, _uiSynchronizationContext)
+                        });
+                        _terminalWarmStartRequestSink?.Invoke("RuntimeDiscoveryCompleted");
+                    }
                 });
             }
             catch (Exception ex)
@@ -5021,11 +5395,18 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         {
             if (runtime is null)
             {
+                TerminalStartupTrace.Write("ENSURE_CONSOLE_SESSION_EARLY_EXIT", "reason=runtime-null");
+                StartupLifecycleTrace.Write("MainWindowViewModel.EnsureConsoleSessionAsync", "SKIP", "runtime=null");
                 return;
             }
 
+            StartupLifecycleTrace.Write("MainWindowViewModel.EnsureConsoleSessionAsync", "ENTER", $"runtime={runtime.LaunchExecutablePath}; sessionRunning={_liveConsoleService.IsSessionRunning}");
+            TerminalStartupTrace.Write("ENSURE_CONSOLE_SESSION_ENTER", $"runtime={runtime.LaunchExecutablePath}; sessionRunning={_liveConsoleService.IsSessionRunning}; forceRestart={forceRestart}");
             var startupAttempted = false;
+            var gateWaitStarted = Stopwatch.StartNew();
+            TerminalStartupTrace.Write("CONSOLE_SESSION_GATE_WAIT", $"viewModelId={GetHashCode():X8}");
             await _consoleSessionGate.WaitAsync().ConfigureAwait(false);
+            TerminalStartupTrace.Write("CONSOLE_SESSION_GATE_ACQUIRED", $"waitMs={gateWaitStarted.ElapsedMilliseconds}");
             try
             {
                 var sessionIsCurrent = _liveConsoleService.IsSessionRunning &&
@@ -5049,6 +5430,8 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                     AppLogger.Info("Console", $"Starting PowerShell terminal using {runtime.DisplayName}; StartupDirectory={startupDirectory}; ForceRestart={forceRestart}; LogOperation={logOperation}");
                     startupAttempted = true;
                     await _liveConsoleService.StartSessionAsync(runtime, AppendExecutionOutput, startupDirectory).ConfigureAwait(false);
+                    TerminalStartupTrace.Write("SESSION_RUNNING_PUBLISHED", $"serviceId={_liveConsoleService.GetHashCode():X8}; sessionRunning={_liveConsoleService.IsSessionRunning}");
+                    StartupLifecycleTrace.Write("MainWindowViewModel.EnsureConsoleSessionAsync", "StartSessionCompleted", $"sessionRunning={_liveConsoleService.IsSessionRunning}");
 
                     PostToUi(() =>
                     {
@@ -5105,6 +5488,8 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             finally
             {
                 _consoleSessionGate.Release();
+                TerminalStartupTrace.Write("CONSOLE_SESSION_GATE_RELEASED", $"sessionRunning={_liveConsoleService.IsSessionRunning}");
+                StartupLifecycleTrace.Write("MainWindowViewModel.EnsureConsoleSessionAsync", "EXIT", $"sessionRunning={_liveConsoleService.IsSessionRunning}");
             }
         }
 
@@ -5570,10 +5955,20 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                !IsGitRefreshInProgress;
 
         private bool CanOpenRepositoryFolder()
-            => _gitService is not null;
+            => _gitService is not null && !IsGitMutationInProgress;
+
+        private bool CanCloneRepository()
+            => _gitService is not null && _gitSetupPromptService is not null && !IsGitMutationInProgress;
 
         private void RefreshGitCommands()
         {
+            if (_uiSynchronizationContext is not null &&
+                Environment.CurrentManagedThreadId != _uiThreadId)
+            {
+                _uiSynchronizationContext.Post(_ => RefreshGitCommands(), null);
+                return;
+            }
+
             _refreshGitStatusCommand.RaiseCanExecuteChanged();
             _openRepositoryFolderCommand.RaiseCanExecuteChanged();
             _stageFileCommand.RaiseCanExecuteChanged();
@@ -5615,11 +6010,19 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         private bool CanCommit()
             => IsGitAvailable && !string.IsNullOrWhiteSpace(GitRepositoryRoot) &&
                (_gitRepositoryState?.Changes?.Any(change => change.IsStaged) ?? false) &&
-               !(_gitRepositoryState?.HasUnresolvedConflicts ?? false) &&
                !string.IsNullOrWhiteSpace(CommitMessage) && !IsGitRefreshInProgress && !IsGitMutationInProgress;
 
         public async Task CommitAsync()
         {
+            if (_gitRepositoryState?.HasUnresolvedConflicts == true)
+            {
+                const string conflictMessage = "Commit is blocked because unresolved conflicts remain. Resolve the conflicts and mark them resolved before committing.";
+                StatusText = "Commit blocked";
+                _userPromptService.ShowWarningMessage("Commit blocked", conflictMessage);
+                DeveloperDiagnostics.LogUserAction("Git", "CommitRejectedUnresolvedConflicts", "Commit was blocked because unresolved conflicts remain.");
+                return;
+            }
+
             if (!CanCommit())
             {
                 StatusText = CommitDisabledReason;
@@ -5630,7 +6033,11 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             if (await RunGitMutationAsync("Commit", "staged changes",
                     token => _gitService!.CommitAsync(GitRepositoryRoot!, message, token), "Commit completed"))
             {
-                CommitMessage = string.Empty;
+                await PostToUiAsync(() => CommitMessage = string.Empty).ConfigureAwait(false);
+                DeveloperDiagnostics.LogInfo("Git", "Commit message cleared after confirmed commit success.", new Dictionary<string, object?>
+                {
+                    ["messageLength"] = message.Length
+                });
                 MarkDiffsStale();
             }
         }
@@ -5644,8 +6051,26 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                 return;
             }
 
-            await RunGitMutationAsync("StageFile", status!.RelativePath,
-                token => _gitService!.StageFileAsync(GitRepositoryRoot!, status.RelativePath, token),
+            var selectedStatus = status!;
+            var dirtyTab = OpenTabs.FirstOrDefault(tab =>
+                tab is not DiffTabViewModel && tab.IsDirty && !string.IsNullOrWhiteSpace(tab.FilePath) &&
+                string.Equals(Path.GetFullPath(tab.FilePath!), Path.GetFullPath(selectedStatus.FullPath), StringComparison.OrdinalIgnoreCase));
+            if (dirtyTab is not null)
+            {
+                const string message = "This file has unsaved editor changes. Save the file before staging it.";
+                StatusText = "Stage blocked";
+                _userPromptService.ShowWarningMessage("Cannot stage", message);
+                DeveloperDiagnostics.LogUserAction("Git", "StageRejectedDirtyDocument", "Stage was blocked to prevent staging stale on-disk content.", new Dictionary<string, object?>
+                {
+                    ["relativePath"] = selectedStatus.RelativePath,
+                    ["filePath"] = selectedStatus.FullPath,
+                    ["isDirty"] = dirtyTab.IsDirty
+                });
+                return;
+            }
+
+            await RunGitMutationAsync("StageFile", selectedStatus.RelativePath,
+                token => _gitService!.StageFileAsync(GitRepositoryRoot!, selectedStatus.RelativePath, token),
                 "File staged");
         }
 
@@ -5700,7 +6125,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             if (openTab?.IsDirty == true)
             {
                 const string message = "Discard is blocked because this file is open with unsaved editor changes. Save or close the dirty document before discarding the working-tree change.";
-                StatusText = "Discard blocked: unsaved editor changes";
+                StatusText = "Discard blocked";
                 _userPromptService.ShowWarningMessage("Discard blocked", message);
                 DeveloperDiagnostics.LogDecision("Git", "DiscardDirtyDocument", "Discard was blocked to protect unsaved editor content.", "Blocked", new Dictionary<string, object?>
                 {
@@ -5713,7 +6138,8 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                     "Discard Working-Tree Changes",
                     $"Discard saved working-tree changes for '{status.RelativePath}'? This cannot be undone from ScriptDesk.",
                     "Discard",
-                    "Cancel"))
+                    "Cancel",
+                    destructive: true))
             {
                 StatusText = "Discard canceled";
                 return;
@@ -5740,6 +6166,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             try
             {
                 IsGitMutationInProgress = true;
+                if (!_syncStatusOwner) CurrentGitOperation = MapGitOperation(operationName);
                 var operationId = Guid.NewGuid().ToString("N");
                 DeveloperDiagnostics.LogOperationStart("Git", operationName, "Git mutation requested.", additionalProperties: new Dictionary<string, object?>
                 {
@@ -5749,10 +6176,15 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                 var result = await operation(CancellationToken.None).ConfigureAwait(false);
                 if (!result.Success)
                 {
+                    if (_syncStatusOwner) _syncChildFailed = true;
+                    var displayOperation = GetGitOperationDisplayName(operationName);
                     PostToUi(() =>
                     {
-                        StatusText = $"{operationName} failed";
-                        _userPromptService.ShowWarningMessage($"{operationName} failed", DescribeGitFailure(operationName, pathDescription, result));
+                        if (!_syncStatusOwner) StatusText = $"{displayOperation} failed";
+                        if (displayOperation == operationName)
+                            _userPromptService.ShowWarningMessage($"{operationName} failed", DescribeGitFailure(operationName, pathDescription, result));
+                        else
+                            _userPromptService.ShowWarningMessage($"{displayOperation} failed", DescribeGitFailure(operationName, pathDescription, result));
                     });
                     DeveloperDiagnostics.LogOperationStop("Git", operationName, "Git mutation returned a failure result.", (long)result.Duration.TotalMilliseconds, new Dictionary<string, object?>
                     {
@@ -5768,7 +6200,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
                 await RefreshGitRepositoryAsync(logOperation: false).ConfigureAwait(false);
                 if (markDiffsStale) PostToUi(() => MarkDiffsStale(pathDescription == "." ? null : pathDescription));
-                PostToUi(() => StatusText = successText);
+                if (!_syncStatusOwner) PostToUi(() => StatusText = successText);
                 DeveloperDiagnostics.LogOperationStop("Git", operationName, "Git mutation completed.", (long)result.Duration.TotalMilliseconds, new Dictionary<string, object?>
                 {
                     ["operationId"] = operationId,
@@ -5780,32 +6212,116 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             catch (Exception ex) when (ex is IOException or InvalidOperationException)
             {
                 DeveloperDiagnostics.LogException("Git", ex, $"{operationName} failed.");
-                PostToUi(() =>
+                var displayOperation = GetGitOperationDisplayName(operationName);
+                await PostToUiAsync(() =>
                 {
-                    StatusText = $"{operationName} failed";
-                    _userPromptService.ShowWarningMessage($"{operationName} failed", "The Git operation could not be completed.");
+                    if (!_syncStatusOwner) StatusText = $"{displayOperation} failed";
+                    _userPromptService.ShowWarningMessage($"{displayOperation} failed", "The Git operation could not be completed.");
                 });
                 return false;
             }
             finally
             {
-                PostToUi(() => IsGitMutationInProgress = false);
+                PostToUi(() =>
+                {
+                    IsGitMutationInProgress = false;
+                    if (!_syncStatusOwner) CurrentGitOperation = GitOperationKind.None;
+                });
                 _gitMutationGate.Release();
             }
         }
 
         private static string DescribeGitFailure(string operationName, string pathDescription, GitCommandResult result)
         {
+            var displayOperation = GetGitOperationDisplayName(operationName);
+            var raw = result.StandardError?.Trim() ?? string.Empty;
+            var normalized = raw.ToLowerInvariant();
+            if (normalized.Contains("invalid branch name") || normalized.Contains("check-ref-format"))
+                return $"{displayOperation} failed: The selected branch name is invalid.";
+            if (normalized.Contains("already exists"))
+                return $"{displayOperation} failed: A branch with that name already exists.";
+            if (normalized.Contains("not fully merged"))
+                return "Delete branch failed: The branch is not fully merged.";
+            if (normalized.Contains("local changes") || normalized.Contains("would be overwritten"))
+                return $"{displayOperation} failed: Working-tree changes prevent this branch operation. Save or stash the changes first.";
+            if (normalized.Contains("no configured push destination") || normalized.Contains("has no upstream branch") || normalized.Contains("no upstream branch"))
+                return $"{displayOperation} unavailable: the current branch has no upstream push destination. Configure an upstream branch, then try again.";
+            if (normalized.Contains("does not appear to be a git repository") || normalized.Contains("no such remote") || normalized.Contains("no configured remote"))
+                return $"{displayOperation} unavailable: no configured remote was found. Add a remote, then try again.";
             var detail = result.WasCancelled
                 ? "The Git operation was canceled."
                 : result.TimedOut
                     ? "Git did not finish before the operation timeout."
                     : string.IsNullOrWhiteSpace(result.StandardError)
                         ? "Git rejected the operation."
-                        : result.StandardError.Trim();
+                        : raw;
 
             var target = pathDescription == "." ? string.Empty : $" '{pathDescription}'";
-            return $"Unable to {operationName switch { "StageFile" => "stage", "UnstageFile" => "unstage", "DiscardFile" => "discard", _ => operationName }}{target}.\nGit returned: {detail}";
+            return $"Unable to {GetGitOperationVerb(operationName)}{target}.\nGit returned: {detail}";
+        }
+
+        private static string GetGitOperationDisplayName(string operationName)
+            => operationName switch
+            {
+                "SwitchBranch" => "Switch",
+                "CreateBranch" => "Create branch",
+                "DeleteBranch" => "Delete branch",
+                "StageFile" => "Stage",
+                "UnstageFile" => "Unstage",
+                "DiscardFile" => "Discard",
+                _ => operationName
+            };
+
+        private static string GetGitOperationVerb(string operationName)
+            => operationName switch
+            {
+                "StageFile" => "stage",
+                "UnstageFile" => "unstage",
+                "DiscardFile" => "discard",
+                "SwitchBranch" => "switch",
+                "CreateBranch" => "create branch",
+                "DeleteBranch" => "delete branch",
+                _ => operationName
+            };
+
+        private static GitOperationKind MapGitOperation(string operationName)
+            => operationName switch
+            {
+                "Fetch" => GitOperationKind.Fetch,
+                "Pull" => GitOperationKind.Pull,
+            "Push" => GitOperationKind.Push,
+            "Sync" => GitOperationKind.Sync,
+            "Initialize" => GitOperationKind.Initialize,
+            "SwitchBranch" => GitOperationKind.SwitchBranch,
+                "Commit" => GitOperationKind.Commit,
+                "StageFile" or "StageAll" => GitOperationKind.Stage,
+                "UnstageFile" or "UnstageAll" => GitOperationKind.Unstage,
+                "DiscardFile" => GitOperationKind.Discard,
+                "CreateBranch" or "RenameBranch" or "DeleteBranch" => GitOperationKind.Branch,
+                _ => GitOperationKind.None
+            };
+
+        private static string SummarizeGitFailure(string operationName, GitCommandResult result)
+        {
+            var normalized = (result.StandardError ?? string.Empty).ToLowerInvariant();
+            var operation = operationName switch
+            {
+                "Clone" => "Clone",
+                "Fetch" => "Fetch",
+                "Pull" => "Pull",
+                "Push" => "Push",
+                "Sync" => "Sync",
+                "Initialize" => "Initialize",
+                _ => "Git operation"
+            };
+            var reason = result.WasCancelled ? "operation canceled."
+                : result.TimedOut ? "operation timed out."
+                : normalized.Contains("authentication") || normalized.Contains("permission denied") || normalized.Contains("could not read username") ? "authentication required."
+                : normalized.Contains("repository not found") || normalized.Contains("does not exist") || normalized.Contains("not a git repository") ? "repository not found."
+                : normalized.Contains("local changes") || normalized.Contains("would be overwritten") ? "local changes require attention."
+                : normalized.Contains("rejected") ? "remote rejected the update."
+                : "Git could not complete the operation.";
+            return $"{operation} failed — {reason}";
         }
 
         private GitFileStatus? GetSelectedGitStatus()
@@ -5830,6 +6346,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             }
             catch (Exception ex)
             {
+                StartupLifecycleTrace.Write("MainWindowViewModel.ReloadTabAfterGitDiscard", "FAULT", $"exception={ex.GetType().Name}: {ex.Message}");
                 DeveloperDiagnostics.LogException("Git", ex, "Open document could not be reloaded after discard.", new Dictionary<string, object?> { ["filePath"] = filePath });
                 StatusText = "Discard completed, but the open document could not be reloaded";
             }
@@ -5837,6 +6354,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
         private async Task RefreshGitRepositoryAsync(bool logOperation)
         {
+            StartupLifecycleTrace.Write("MainWindowViewModel.RefreshGitRepositoryAsync", "ENTER", $"workspace={_currentWorkspaceFolderPath ?? "(none)"}; gitService={(_gitService is null ? "none" : "present")}");
             if (_gitService is null)
             {
                 _gitStatusText = "Git: unavailable";
@@ -5870,18 +6388,20 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                 var state = await _gitService.RefreshRepositoryStateAsync(
                     _currentWorkspaceFolderPath,
                     cancellationSource.Token).ConfigureAwait(false);
+                StartupLifecycleTrace.Write("MainWindowViewModel.RefreshGitRepositoryAsync", "StateReturned", $"generation={generation}; available={state.Environment.IsAvailable}; repository={state.Repository.IsRepository}");
 
                 if (generation != _gitRefreshGeneration || cancellationSource.IsCancellationRequested)
                 {
                     return;
                 }
 
-                PostToUi(() =>
+                await PostToUiAsync(() =>
                 {
                     _gitRepositoryState = state;
                     _gitWorkspaceCoordinator?.PublishState(state);
                     SourceControl.ApplyState(state, _currentWorkspaceFolderPath, SelectedTab?.FilePath);
                     _gitStatusText = BuildGitStatusText(state);
+                    StartupLifecycleTrace.Write("MainWindowViewModel.GitStatusText", "SOURCE_CHANGED", $"viewModelId={GetHashCode():X8}; value={_gitStatusText}");
                     OnPropertyChanged(nameof(GitStatusText));
                     OnPropertyChanged(nameof(GitRepositoryRoot));
                     OnPropertyChanged(nameof(IsGitAvailable));
@@ -5894,8 +6414,69 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                                 ? "No Git repository detected"
                                 : "Git is unavailable";
                     }
+                }).ConfigureAwait(false);
+
+                if (!state.Repository.IsRepository || string.IsNullOrWhiteSpace(state.Repository.WorkingTreeRoot))
+                {
+                    _gitWorkspaceCoordinator?.PublishRemoteState(new GitRemoteState(Array.Empty<GitRemote>(), "No Git repository detected."));
+                    _gitWorkspaceCoordinator?.PublishBranchState(null);
+                    DeveloperDiagnostics.LogInfo("Git", "Non-repository snapshot projected to Git Workspace consumers.", new Dictionary<string, object?>
+                    {
+                        ["workspacePath"] = _currentWorkspaceFolderPath,
+                        ["repositoryErrorPreview"] = DeveloperDiagnostics.SanitizePreview(state.Repository.Error),
+                        ["remoteCount"] = 0,
+                        ["branchCount"] = 0
+                    });
+                    await PostToUiAsync(() =>
+                    {
+                        _gitBranchState = null;
+                        OnPropertyChanged(nameof(GitBranchState));
+                        OnPropertyChanged(nameof(BranchPickerStatusText));
+                    }).ConfigureAwait(false);
+                    return;
+                }
+
+                try
+                {
+                    var remoteState = await _gitService.GetRemotesAsync(
+                        state.Repository.WorkingTreeRoot,
+                        cancellationSource.Token).ConfigureAwait(false);
+                    if (generation == _gitRefreshGeneration && !cancellationSource.IsCancellationRequested)
+                        _gitWorkspaceCoordinator?.PublishRemoteState(remoteState);
+                }
+                catch (OperationCanceledException) when (cancellationSource.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    DeveloperDiagnostics.LogException("Git", ex, "Optional Git remote refresh failed while core repository status was valid.", new Dictionary<string, object?>
+                    {
+                        ["generation"] = generation,
+                        ["required"] = false,
+                        ["component"] = "remotes"
+                    });
+                    await PostToUiAsync(() => StatusText = "Git remotes could not be refreshed; repository status is available.").ConfigureAwait(false);
+                }
+                DeveloperDiagnostics.LogInfo("Git", "Git repository state was published to the UI.", new Dictionary<string, object?>
+                {
+                    ["generation"] = generation,
+                    ["isAvailable"] = state.Environment.IsAvailable,
+                    ["isRepository"] = state.Repository.IsRepository,
+                    ["gitStatusText"] = BuildGitStatusText(state)
                 });
-                await RefreshBranchesAsync(cancellationSource.Token).ConfigureAwait(false);
+                try
+                {
+                    await RefreshBranchesAsync(cancellationSource.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationSource.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    DeveloperDiagnostics.LogException("Git", ex, "Optional Git branch refresh failed while core repository status was valid.", new Dictionary<string, object?>
+                    {
+                        ["generation"] = generation,
+                        ["required"] = false,
+                        ["component"] = "branches"
+                    });
+                    await PostToUiAsync(() => StatusText = "Git branches could not be refreshed; repository status is available.").ConfigureAwait(false);
+                }
                 foreach (var historyTab in OpenTabs.OfType<GitHistoryTabViewModel>().Where(tab => string.Equals(tab.RepositoryRoot, state.Repository.RepositoryRoot, StringComparison.OrdinalIgnoreCase)))
                     _ = RefreshHistoryAsync(historyTab, true, cancellationSource.Token);
             }
@@ -5909,6 +6490,7 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
             }
             catch (Exception ex)
             {
+                StartupLifecycleTrace.Write("MainWindowViewModel.RefreshGitRepositoryAsync", "FAULT", $"exception={ex.GetType().Name}: {ex.Message}");
                 DeveloperDiagnostics.LogException("Git", ex, "Git repository refresh failed.", new Dictionary<string, object?>
                 {
                     ["generation"] = generation,
@@ -5916,12 +6498,12 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                 });
                 if (generation == _gitRefreshGeneration)
                 {
-                    PostToUi(() =>
-                    {
-                        _gitStatusText = "Git: unavailable";
-                        OnPropertyChanged(nameof(GitStatusText));
-                        StatusText = "Git repository refresh failed";
-                    });
+                        await PostToUiAsync(() =>
+                        {
+                            _gitStatusText = "Git: unavailable";
+                            OnPropertyChanged(nameof(GitStatusText));
+                            StatusText = "Git repository refresh failed";
+                        }).ConfigureAwait(false);
                 }
             }
             finally
@@ -5932,9 +6514,16 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
                     cancellationSource.Dispose();
                     if (generation == _gitRefreshGeneration)
                     {
-                        PostToUi(() => IsGitRefreshInProgress = false);
+                        await PostToUiAsync(() => IsGitRefreshInProgress = false).ConfigureAwait(false);
+                        DeveloperDiagnostics.LogInfo("Git", "Git availability refresh completed.", new Dictionary<string, object?>
+                        {
+                            ["generation"] = generation,
+                            ["isCurrentGeneration"] = generation == _gitRefreshGeneration,
+                            ["gitStatusText"] = GitStatusText
+                        });
                     }
                 }
+                StartupLifecycleTrace.Write("MainWindowViewModel.RefreshGitRepositoryAsync", "EXIT", $"status={GitStatusText}");
             }
         }
 
@@ -5959,26 +6548,87 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
         private void OnGitDiagnostics()
         {
+            var existing = OpenTabs.FirstOrDefault(tab =>
+                tab.FilePath is null &&
+                string.Equals(tab.Title, GitDiagnosticsDocumentTitle, StringComparison.Ordinal));
+            if (existing is not null)
+            {
+                SelectedTab = existing;
+                StatusText = "Git Diagnostics opened";
+                DeveloperDiagnostics.LogUserAction("Git", "GitDiagnosticsOpened", "The existing Git diagnostics document was activated.", new Dictionary<string, object?>
+                {
+                    ["reusedExistingDocument"] = true,
+                    ["repositoryRoot"] = GitRepositoryRoot
+                });
+                return;
+            }
+
             var environment = _gitRepositoryState?.Environment;
             var repository = _gitRepositoryState?.Repository;
-            var summary = environment?.IsAvailable == true
-                ? $"Git {environment.Version ?? "(version unavailable)"} at {environment.ExecutablePath}; " +
-                  (repository?.IsRepository == true
-                      ? $"repository {repository.RepositoryRoot}; branch {repository.CurrentBranch ?? "(detached)"}"
-                      : "no repository detected")
-                : "Git is unavailable.";
-
-            StatusText = summary;
-            AppendOutputLine($"Git diagnostics: {summary}");
-            DeveloperDiagnostics.LogInfo("Git", "Git diagnostics requested from the menu.", new Dictionary<string, object?>
+            var remoteState = _gitWorkspaceCoordinator?.CurrentRemoteState;
+            var content = BuildGitDiagnosticsDocument(environment, repository, remoteState, _gitRepositoryState);
+            var tab = new EditorTabViewModel(GitDiagnosticsDocumentTitle, content);
+            tab.MarkSaved();
+            OpenTabs.Add(tab);
+            SelectedTab = tab;
+            OnPropertyChanged(nameof(OpenTabCountText));
+            OnPropertyChanged(nameof(ActiveDocumentText));
+            StatusText = "Git Diagnostics opened";
+            DeveloperDiagnostics.LogUserAction("Git", "GitDiagnosticsOpened", "A Git diagnostics document was opened in the normal general-text editor path.", new Dictionary<string, object?>
             {
+                ["reusedExistingDocument"] = false,
                 ["isAvailable"] = environment?.IsAvailable,
                 ["executablePath"] = environment?.ExecutablePath,
                 ["version"] = environment?.Version,
                 ["repositoryRoot"] = repository?.RepositoryRoot,
                 ["currentBranch"] = repository?.CurrentBranch,
-                ["isDetachedHead"] = repository?.IsDetachedHead
+                ["isDetachedHead"] = repository?.IsDetachedHead,
+                ["contentLength"] = content.Length
             });
+        }
+
+        private static string BuildGitDiagnosticsDocument(
+            GitEnvironmentInfo? environment,
+            GitRepositoryInfo? repository,
+            GitRemoteState? remoteState,
+            GitRepositoryState? state)
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("PS7 ScriptDesk — Git Diagnostics");
+            builder.AppendLine($"Generated: {DateTimeOffset.Now:O}");
+            builder.AppendLine();
+            builder.AppendLine("Git environment");
+            builder.AppendLine($"Available: {environment?.IsAvailable == true}");
+            builder.AppendLine($"Executable: {environment?.ExecutablePath ?? "(unavailable)"}");
+            builder.AppendLine($"Version: {environment?.Version ?? "(unavailable)"}");
+            builder.AppendLine($"Environment error: {environment?.Error ?? "(none)"}");
+            builder.AppendLine();
+            builder.AppendLine("Repository");
+            builder.AppendLine($"Detected: {repository?.IsRepository == true}");
+            builder.AppendLine($"Repository root: {repository?.RepositoryRoot ?? "(none)"}");
+            builder.AppendLine($"Working tree root: {repository?.WorkingTreeRoot ?? "(none)"}");
+            builder.AppendLine($"Branch: {repository?.CurrentBranch ?? "(detached or unavailable)"}");
+            builder.AppendLine($"Detached HEAD: {repository?.IsDetachedHead == true}");
+            builder.AppendLine($"HEAD commit: {repository?.HeadCommit ?? "(unavailable)"}");
+            builder.AppendLine($"Working tree: {(state is null ? "(unavailable)" : state.Changes.Count == 0 ? "clean" : $"{state.Changes.Count} change(s)")}");
+            builder.AppendLine($"Operation: {state?.OperationState.ToString() ?? "(none)"}");
+            builder.AppendLine($"Repository error: {repository?.Error ?? "(none)"}");
+            builder.AppendLine();
+            builder.AppendLine("Remotes");
+            if (remoteState?.Remotes.Count > 0)
+            {
+                foreach (var remote in remoteState.Remotes)
+                {
+                    // Names are useful for diagnostics; URLs are intentionally omitted to avoid exposing credentials.
+                    builder.AppendLine($"- {remote.Name}");
+                }
+            }
+            else
+            {
+                builder.AppendLine(remoteState?.Error ?? "(none detected)");
+            }
+
+            return builder.ToString();
         }
 
         private static string BuildGitStatusText(GitRepositoryState state)
@@ -7641,6 +8291,20 @@ public class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
         private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
+            if (_uiSynchronizationContext is not null &&
+                Environment.CurrentManagedThreadId != _uiThreadId)
+            {
+                StartupLifecycleTrace.Write("MainWindowViewModel.PropertyChanged", "MARSHAL", $"viewModelId={GetHashCode():X8}; property={propertyName}; currentContext={SynchronizationContext.Current?.GetType().Name ?? "(null)"}; targetContext={_uiSynchronizationContext.GetType().Name}");
+                var args = new PropertyChangedEventArgs(propertyName);
+                _uiSynchronizationContext.Post(_ =>
+                {
+                    StartupLifecycleTrace.Write("MainWindowViewModel.PropertyChanged", "RAISE", $"viewModelId={GetHashCode():X8}; property={propertyName}");
+                    PropertyChanged?.Invoke(this, args);
+                }, null);
+                return;
+            }
+
+            StartupLifecycleTrace.Write("MainWindowViewModel.PropertyChanged", "RAISE", $"viewModelId={GetHashCode():X8}; property={propertyName}");
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
     }

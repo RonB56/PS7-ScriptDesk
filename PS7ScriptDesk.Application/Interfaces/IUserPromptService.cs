@@ -12,6 +12,6 @@ namespace PS7ScriptDesk.Application.Interfaces
         string? ShowOpenFolderDialog();
         string? ShowOpenPowerShellExecutableDialog();
         void ShowWarningMessage(string title, string message);
-        bool ShowConfirmation(string title, string message, string primaryText, string secondaryText);
+        bool ShowConfirmation(string title, string message, string primaryText, string secondaryText, bool destructive = false);
     }
 }

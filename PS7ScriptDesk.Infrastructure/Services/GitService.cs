@@ -88,11 +88,11 @@ public sealed class GitService : IGitService
         var branches = new List<GitBranch>();
         for (var i = 0; i + 3 < fields.Length; i += 4)
         {
-            var fullName = fields[i];
+            var fullName = fields[i].Trim();
             if (fullName.EndsWith("/HEAD", StringComparison.Ordinal)) continue;
             var remote = fullName.StartsWith("refs/remotes/", StringComparison.Ordinal);
-            var name = remote ? fullName[13..] : fullName[11..];
-            branches.Add(new(name, fullName, fields[i + 3] == "*", remote, string.IsNullOrWhiteSpace(fields[i + 1]) ? null : fields[i + 1], null, null, fields[i + 2]));
+            var name = GitBranchName.Normalize(fullName, remote);
+            branches.Add(new(name, fullName, fields[i + 3].Trim() == "*", remote, string.IsNullOrWhiteSpace(fields[i + 1]) ? null : fields[i + 1].Trim(), null, null, fields[i + 2].Trim()));
         }
         for (var i = 0; i < branches.Count; i++)
         {
@@ -105,6 +105,7 @@ public sealed class GitService : IGitService
         }
         return new(branches, current, detached, head);
     }
+
 
     public Task<GitCommandResult> CreateBranchAsync(string repositoryRoot, string branchName, bool switchTo, CancellationToken cancellationToken = default)
         => RunOperationAsync(repositoryRoot, switchTo ? new[] { "switch", "-c", branchName } : new[] { "branch", branchName }, cancellationToken, TimeSpan.FromSeconds(60));

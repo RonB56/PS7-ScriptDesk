@@ -217,10 +217,11 @@ public sealed class PowerShellIntelliSenseStartupReadinessTests
     [Theory]
     [InlineData(CompletionItemKind.ProviderItem)]
     [InlineData(CompletionItemKind.ProviderContainer)]
-    public void PathCompletion_WhitespaceDismissesInsteadOfCommitting(CompletionItemKind completionKind)
+    public void Completion_WhitespaceDismissesInsteadOfCommitting(CompletionItemKind completionKind)
     {
         Assert.True(MainWindow.ShouldDismissPathCompletionForTextInput(completionKind, ' '));
         Assert.True(MainWindow.ShouldDismissPathCompletionForTextInput(completionKind, '\t'));
+        Assert.True(MainWindow.ShouldDismissCompletionForTextInput(' '));
         Assert.False(MainWindow.ShouldCommitCompletionForTextInput('A'));
     }
 
@@ -228,11 +229,13 @@ public sealed class PowerShellIntelliSenseStartupReadinessTests
     [InlineData(CompletionItemKind.Command)]
     [InlineData(CompletionItemKind.ParameterName)]
     [InlineData(CompletionItemKind.Variable)]
-    public void NonPathCompletion_PreservesExistingWhitespaceCommitBehavior(CompletionItemKind completionKind)
+    public void NonPathCompletion_AlsoDismissesWhitespaceWithoutCommitting(CompletionItemKind completionKind)
     {
         Assert.False(MainWindow.ShouldDismissPathCompletionForTextInput(completionKind, ' '));
-        Assert.True(MainWindow.ShouldCommitCompletionForTextInput(' '));
-        Assert.True(MainWindow.ShouldCommitCompletionForTextInput('('));
+        Assert.True(MainWindow.ShouldDismissCompletionForTextInput(' '));
+        Assert.False(MainWindow.ShouldCommitCompletionForTextInput(' '));
+        Assert.False(MainWindow.ShouldCommitCompletionForTextInput('('));
+        Assert.False(MainWindow.ShouldCommitCompletionForTextInput('.'));
     }
 
     [Fact]

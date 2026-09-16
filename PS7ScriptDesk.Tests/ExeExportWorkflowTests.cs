@@ -255,7 +255,7 @@ public sealed class ExeExportWorkflowTests : IDisposable
         public string? ShowOpenFolderDialog() => null;
         public string? ShowOpenPowerShellExecutableDialog() => null;
     public void ShowWarningMessage(string title, string message) { }
-        public bool ShowConfirmation(string title, string message, string primaryText, string secondaryText) => false;
+        public bool ShowConfirmation(string title, string message, string primaryText, string secondaryText, bool destructive = false) => false;
     }
 
     private sealed class RecordingWizardService : IExeExportWizardService

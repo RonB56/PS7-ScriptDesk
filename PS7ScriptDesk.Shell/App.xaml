@@ -575,6 +575,13 @@
             <Setter Property="Foreground" Value="{DynamicResource Theme.Button.PrimaryForeground}" />
         </Style>
 
+        <Style x:Key="IdeDialogDestructiveButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeDialogButtonBaseStyle}">
+            <Setter Property="Background" Value="{DynamicResource Theme.Button.DestructiveBackground}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Button.DestructiveForeground}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
         <Style x:Key="IdeDialogTertiaryButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeDialogButtonBaseStyle}">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
@@ -801,7 +808,7 @@
                                                       HorizontalAlignment="Left"
                                                       VerticalAlignment="Center"
                                                       Content="{TemplateBinding SelectionBoxItem}"
-                                                      ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                                      ContentTemplate="{TemplateBinding ItemTemplate}"
                                                       ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
                                                       IsHitTestVisible="False" />
                                     <Path x:Name="DropDownGlyph"

@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -32,6 +34,10 @@ namespace PS7ScriptDesk.Shell
         protected override void OnStartup(StartupEventArgs e)
         {
             var startupArgs = e.Args ?? Array.Empty<string>();
+            StartupLifecycleTrace.ConfigureUiThreadSnapshotProvider(() => (Dispatcher.CheckAccess(), Dispatcher.Thread.ManagedThreadId));
+            TerminalStartupTrace.ConfigureUiThreadSnapshotProvider(() => (Dispatcher.CheckAccess(), Dispatcher.Thread.ManagedThreadId));
+            TerminalStartupTrace.Start($"argCount={startupArgs.Length}");
+            StartupLifecycleTrace.Write("App.OnStartup", "ENTER", $"pid={Environment.ProcessId}; processPath={Environment.ProcessPath}; structuredExecution={Environment.GetEnvironmentVariable(EditorExecutionFeatureGate.EnvironmentVariableName) ?? "(unset)"}");
             TerminalCriticalTrace.ConfigureUiThreadSnapshotProvider(() =>
                 new TerminalCriticalUiThreadSnapshot(
                     Dispatcher.CheckAccess(),
@@ -63,6 +69,7 @@ namespace PS7ScriptDesk.Shell
                     ["args"] = Array.ConvertAll(startupArgs, arg => DeveloperDiagnostics.SanitizePreview(arg))
                 });
             AppLogger.Info("App", "Startup requested.");
+            LogStartupBinaryIdentity();
             if (Editor.EditorMetadataBuilderHost.IsMetadataBuilderInvocation(startupArgs))
             {
                 AppLogger.Info("App", "Launching metadata builder helper mode.");
@@ -142,10 +149,12 @@ namespace PS7ScriptDesk.Shell
             SafeSaveSettings(applicationSettingsService, applicationSettings, startupRuntime);
 
             var shellWindow = AppBootstrapper.CreateMainWindow(applicationSettingsService, applicationSettings, startupRuntime, uiScaleService);
+            StartupLifecycleTrace.Write("AppBootstrapper.CreateMainWindow", "EXIT", "MainWindow returned.");
             MainWindow = shellWindow;
             AppLogger.Info("App", "Main window created.");
             DeveloperDiagnostics.LogInfo("Startup", "Main window created by AppBootstrapper.");
             shellWindow.Show();
+            StartupLifecycleTrace.Write("App.OnStartup", "MainWindowShown");
             AppLogger.Info("App", "Main window shown.");
             _ = CheckForStoreUpdatesAfterStartupAsync(shellWindow);
             DeveloperDiagnostics.LogMethodExit("Startup", "Main window shown; OnStartup completed.");
@@ -185,6 +194,44 @@ namespace PS7ScriptDesk.Shell
             catch (Exception ex)
             {
                 AppLogger.Warning("App", $"Startup environment logging failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        private static void LogStartupBinaryIdentity()
+        {
+            try
+            {
+                var assembly = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
+                var assemblyPath = assembly.Location;
+                var fileInfo = string.IsNullOrWhiteSpace(assemblyPath) || !File.Exists(assemblyPath)
+                    ? null
+                    : new FileInfo(assemblyPath);
+                var versionInfo = string.IsNullOrWhiteSpace(assemblyPath) || !File.Exists(assemblyPath)
+                    ? null
+                    : FileVersionInfo.GetVersionInfo(assemblyPath);
+#if DEBUG
+                const string buildConfiguration = "Debug";
+#else
+                const string buildConfiguration = "Release";
+#endif
+                var metadata = new Dictionary<string, object?>
+                {
+                    ["executablePath"] = Environment.ProcessPath,
+                    ["assemblyLocation"] = assemblyPath,
+                    ["processId"] = Environment.ProcessId,
+                    ["buildConfiguration"] = buildConfiguration,
+                    ["assemblyVersion"] = assembly.GetName().Version?.ToString(),
+                    ["fileVersion"] = versionInfo?.FileVersion,
+                    ["informationalVersion"] = versionInfo?.ProductVersion,
+                    ["startupTimestampUtc"] = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+                    ["executableLastWriteUtc"] = fileInfo?.LastWriteTimeUtc.ToString("O", CultureInfo.InvariantCulture)
+                };
+                DeveloperDiagnostics.LogInfo("Startup", "Startup binary identity captured.", metadata);
+                AppLogger.Info("App", $"Startup binary identity: ExecutablePath='{Environment.ProcessPath}', AssemblyLocation='{assemblyPath}', ProcessId={Environment.ProcessId}, BuildConfiguration={buildConfiguration}, AssemblyVersion='{assembly.GetName().Version}', FileVersion='{versionInfo?.FileVersion}', InformationalVersion='{versionInfo?.ProductVersion}', ExecutableLastWriteUtc='{fileInfo?.LastWriteTimeUtc:O}'.");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warning("App", $"Startup binary identity logging failed: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -346,8 +393,7 @@ namespace PS7ScriptDesk.Shell
             var notification = decision.ShouldPresent
                 ? "visible-notification"
                 : "suppressed-notification";
-            File.AppendAllText(
-                logPath,
+            AppLogger.WriteEmergencyFallback(
                 $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {source} ({notification}){Environment.NewLine}" +
                 $"Type: {exception.GetType().FullName}{Environment.NewLine}" +
                 $"Signature: {decision.Signature}{Environment.NewLine}" +

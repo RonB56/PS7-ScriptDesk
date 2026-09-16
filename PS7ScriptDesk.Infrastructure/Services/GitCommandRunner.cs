@@ -108,10 +108,18 @@ public sealed class GitCommandRunner : IGitCommandRunner
             return GitCommandResult.Failed("InvalidWorkingDirectory", "The Git working directory does not exist.", TimeSpan.Zero);
         }
 
+        var normalizedWorkingDirectory = Path.GetFullPath(workingDirectory);
+        var repositoryScopedArguments = new List<string>(arguments.Count + 2)
+        {
+            "-c",
+            $"safe.directory={normalizedWorkingDirectory}"
+        };
+        repositoryScopedArguments.AddRange(arguments);
+
         return await RunProcessAsync(
             environment.ExecutablePath,
-            Path.GetFullPath(workingDirectory),
-            arguments,
+            normalizedWorkingDirectory,
+            repositoryScopedArguments,
             timeout ?? DefaultTimeout,
             cancellationToken,
             logOperation: true).ConfigureAwait(false);
@@ -201,6 +209,8 @@ public sealed class GitCommandRunner : IGitCommandRunner
                         ["exitCode"] = exitCode,
                         ["success"] = success,
                         ["wasCancelled"] = wasCancelled,
+                        ["stdoutLength"] = standardOutput.Length,
+                        ["stdoutLineCount"] = standardOutput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Length,
                         ["timedOut"] = timedOut,
                         ["stderrPreview"] = DeveloperDiagnostics.SanitizePreview(standardError, DiagnosticPreviewLength)
                     });

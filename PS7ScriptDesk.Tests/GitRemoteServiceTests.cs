@@ -33,6 +33,32 @@ public sealed class GitRemoteServiceTests
         Assert.DoesNotContain("--force", runner.Arguments);
     }
 
+    [Fact]
+    public async Task LocalPathRemoteOutputParsesWithoutColonSplitting()
+    {
+        var runner = new RecordingRunner("origin\tZ:\\Test_Git\\Remote.git (fetch)\norigin\tZ:\\Test_Git\\Remote.git (push)\n");
+        var service = new GitService(runner, new FixedLocator());
+
+        var state = await service.GetRemotesAsync(Environment.CurrentDirectory);
+
+        var remote = Assert.Single(state.Remotes);
+        Assert.Equal("origin", remote.Name);
+        Assert.Equal("Z:\\Test_Git\\Remote.git", remote.FetchUrl);
+        Assert.Equal("Z:\\Test_Git\\Remote.git", remote.PushUrl);
+    }
+
+    [Fact]
+    public async Task SshRemoteOutputParsesWithoutBreakingColonSyntax()
+    {
+        var runner = new RecordingRunner("origin\tgit@github.com:owner/repo.git (fetch)\norigin\tgit@github.com:owner/repo.git (push)\n");
+        var service = new GitService(runner, new FixedLocator());
+
+        var remote = Assert.Single((await service.GetRemotesAsync(Environment.CurrentDirectory)).Remotes);
+
+        Assert.Equal("git@github.com:owner/repo.git", remote.FetchUrl);
+        Assert.Equal("git@github.com:owner/repo.git", remote.PushUrl);
+    }
+
     private sealed class RecordingRunner(string output) : IGitCommandRunner
     {
         public IReadOnlyList<string> Arguments { get; private set; } = Array.Empty<string>();

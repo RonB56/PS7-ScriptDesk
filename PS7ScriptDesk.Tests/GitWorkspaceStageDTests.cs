@@ -53,6 +53,33 @@ public sealed class GitWorkspaceStageDTests
     }
 
     [Fact]
+    public void GitDiagnosticsUsesTheNormalGeneralTextEditorDocumentPathAndReusesTheTab()
+    {
+        var viewModel = TestRepositoryPaths.ReadFile("PS7ScriptDesk.UI", "ViewModels", "MainWindowViewModel.cs");
+
+        Assert.Contains("GitDiagnosticsDocumentTitle = \"Git Diagnostics.txt\"", viewModel, StringComparison.Ordinal);
+        Assert.Contains("new EditorTabViewModel(GitDiagnosticsDocumentTitle, content)", viewModel, StringComparison.Ordinal);
+        Assert.Contains("tab.MarkSaved()", viewModel, StringComparison.Ordinal);
+        Assert.Contains("tab.FilePath is null", viewModel, StringComparison.Ordinal);
+        Assert.Contains("SelectedTab = existing", viewModel, StringComparison.Ordinal);
+        Assert.Contains("BuildGitDiagnosticsDocument", viewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("StatusText = summary", viewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("AppendOutputLine($\"Git diagnostics:", viewModel, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GitDiagnosticsDocumentRemainsNonPowerShellAndDoesNotCreateAnotherGitBackend()
+    {
+        var viewModel = TestRepositoryPaths.ReadFile("PS7ScriptDesk.UI", "ViewModels", "MainWindowViewModel.cs");
+        var workspace = TestRepositoryPaths.ReadFile("PS7ScriptDesk.UI", "ViewModels", "GitWorkspaceViewModel.cs");
+
+        Assert.Contains("Git Diagnostics.txt", viewModel, StringComparison.Ordinal);
+        Assert.Contains("legacyActions?.GitDiagnosticsCommand.Execute(null)", workspace, StringComparison.Ordinal);
+        Assert.DoesNotContain("new GitService", viewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("Task.Run", viewModel[viewModel.IndexOf("private void OnGitDiagnostics()", StringComparison.Ordinal)..viewModel.IndexOf("private static string BuildGitStatusText", StringComparison.Ordinal)], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void WorkspaceRefreshUsesSharedCoordinatorAndPreservesRepositoryNeutralState()
     {
         var runner = new GitCommandRunner();

@@ -1,4 +1,5 @@
 using PS7ScriptDesk.Application.Interfaces;
+using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Domain.Models;
 
 namespace PS7ScriptDesk.Application.Services;
@@ -35,6 +36,33 @@ public sealed class GitWorkspaceCoordinator : IGitWorkspaceCoordinator
 
     public void PublishBranchState(GitBranchState? state)
     {
+        if (state is not null)
+        {
+            var branches = state.Branches
+                .Select(branch =>
+                {
+                    var normalizedName = GitBranchName.Normalize(branch.Name, branch.IsRemote);
+                    return string.Equals(normalizedName, branch.Name, StringComparison.Ordinal) ? branch : branch with { Name = normalizedName };
+                })
+                .ToArray();
+            state = state with
+            {
+                Branches = branches,
+                CurrentBranch = state.CurrentBranch is null ? null : GitBranchName.Normalize(state.CurrentBranch, isRemote: false)
+            };
+            foreach (var branch in state.Branches.Take(50))
+            {
+                DeveloperDiagnostics.LogInfo("Git", "Canonical branch snapshot published to Workspace consumers.", new Dictionary<string, object?>
+                {
+                    ["name"] = branch.Name,
+                    ["fullName"] = branch.FullName,
+                    ["isLocal"] = !branch.IsRemote,
+                    ["isCurrent"] = branch.IsCurrent,
+                    ["runtimeType"] = branch.GetType().FullName,
+                    ["branchCount"] = state.Branches.Count
+                });
+            }
+        }
         lock (_gate) _currentBranchState = state;
         BranchStateChanged?.Invoke(this, state);
     }

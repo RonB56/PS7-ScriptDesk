@@ -5,7 +5,7 @@ namespace PS7ScriptDesk.Shell.Dialogs;
 
 public partial class IdeMessageDialog : Window
 {
-    public IdeMessageDialog(Window? owner, string title, string message, string primaryText = "OK", string? secondaryText = null)
+    public IdeMessageDialog(Window? owner, string title, string message, string primaryText = "OK", string? secondaryText = null, bool destructive = false)
     {
         InitializeComponent();
         Owner = owner;
@@ -13,6 +13,11 @@ public partial class IdeMessageDialog : Window
         Message = message;
         PrimaryText = primaryText;
         SecondaryText = secondaryText;
+        IsDestructive = destructive;
+        if (destructive)
+        {
+            PrimaryButton.Style = (Style)FindResource("IdeDialogDestructiveButtonStyle");
+        }
         SecondaryButton.Visibility = secondaryText is null ? Visibility.Collapsed : Visibility.Visible;
         DataContext = this;
     }
@@ -21,6 +26,7 @@ public partial class IdeMessageDialog : Window
     public string Message { get; }
     public string PrimaryText { get; }
     public string? SecondaryText { get; }
+    public bool IsDestructive { get; }
     public bool PrimaryAccepted { get; private set; }
     public bool SecondaryAccepted { get; private set; }
 

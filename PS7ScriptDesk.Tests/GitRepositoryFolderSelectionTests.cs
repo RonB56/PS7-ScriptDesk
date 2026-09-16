@@ -14,8 +14,8 @@ public sealed class GitRepositoryFolderSelectionTests
         Assert.Contains("var folderPath = _userPromptService.ShowOpenFolderDialog();", viewModel, StringComparison.Ordinal);
         Assert.Contains("await LoadWorkspaceFolderAsync(folderPath);", viewModel, StringComparison.Ordinal);
         Assert.Contains("await RefreshGitRepositoryAsync(logOperation: true);", viewModel, StringComparison.Ordinal);
-        Assert.Contains("Command=\"{Binding OpenRepositoryFolderCommand}\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Select a folder to open as the ScriptDesk workspace", xaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"OpenGitWorkspace_Click\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Open Git _Workspace", xaml, StringComparison.Ordinal);
         Assert.Contains("git.openRepositoryFolder", shell, StringComparison.Ordinal);
     }
 

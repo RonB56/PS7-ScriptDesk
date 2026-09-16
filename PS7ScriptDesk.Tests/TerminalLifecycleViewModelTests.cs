@@ -100,6 +100,25 @@ public sealed class TerminalLifecycleViewModelTests
     }
 
     [Fact]
+    public async Task RendererReady_ProjectsAlreadyRunningBackendIntoVisibleSessionStateWithoutRestart()
+    {
+        var console = new RecordingLiveConsoleService();
+        var runtime = CreateRuntime();
+        await console.StartSessionAsync(runtime, _ => { });
+        var viewModel = await CreateViewModelAsync(console, runtime);
+
+        Assert.Equal("ConPTY terminal: not started", viewModel.ConsoleSessionText);
+        var startsBeforeRendererReady = console.Operations.Count(operation => operation == "start");
+
+        viewModel.NotifyTerminalRendererReady();
+
+        Assert.Contains("running", viewModel.ConsoleSessionText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("not started", viewModel.ConsoleSessionText, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(startsBeforeRendererReady, console.Operations.Count(operation => operation == "start"));
+        viewModel.Dispose();
+    }
+
+    [Fact]
     public async Task CoordinatorStateChangesRefreshRunPropertyAndCommandAvailability()
     {
         var coordinator = new InteractiveTerminalCoordinator();
@@ -278,7 +297,7 @@ public sealed class TerminalLifecycleViewModelTests
             sessionRestarted: false,
             ownedProcessId: 42,
             gracefulTimeout: TimeSpan.FromSeconds(2)));
-        await WaitUntilAsync(() => viewModel.StatusText == "Interrupt completed");
+        await WaitUntilAsync(() => viewModel.StatusText == "Interrupt completed" && viewModel.RestartConsoleCommand.CanExecute(null));
 
         Assert.True(viewModel.RestartConsoleCommand.CanExecute(null));
         viewModel.RestartConsoleCommand.Execute(null);

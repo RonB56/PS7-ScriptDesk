@@ -11,6 +11,12 @@ public sealed record GitBranch(
     string? CommitHash,
     bool IsDetached = false)
 {
+    public string OperationName => GitBranchName.Normalize(
+        string.IsNullOrWhiteSpace(FullName) ? Name : FullName,
+        IsRemote);
+
+    public string DisplayName => OperationName;
+
     public string TrackingText => UpstreamName is null ? string.Empty
         : AheadCount is not null && BehindCount is not null ? $"↑{AheadCount} ↓{BehindCount}"
         : $"tracks {UpstreamName}";
