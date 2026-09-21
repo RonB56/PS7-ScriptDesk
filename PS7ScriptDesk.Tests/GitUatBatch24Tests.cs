@@ -56,6 +56,24 @@ public sealed class GitUatBatch24Tests
     }
 
     [Fact]
+    public void GitSubsystemRemainsDormantWithoutRepositoryMetadata()
+    {
+        var viewModel = TestRepositoryPaths.ReadFile("PS7ScriptDesk.UI", "ViewModels", "MainWindowViewModel.cs");
+
+        var gate = viewModel.IndexOf("HasGitMetadataCandidate(gitContextPath)", StringComparison.Ordinal);
+        var dormant = viewModel.IndexOf("Git: dormant", StringComparison.Ordinal);
+        var skipped = viewModel.IndexOf("repositoryDetectionSkipped", StringComparison.Ordinal);
+        var explicitRefresh = viewModel.IndexOf("await RefreshGitRepositoryAsync(logOperation: true)", StringComparison.Ordinal);
+
+        Assert.True(gate >= 0);
+        Assert.True(dormant > gate);
+        Assert.True(skipped > gate);
+        Assert.True(explicitRefresh >= 0);
+        Assert.Contains("Directory.Exists(gitPath) || File.Exists(gitPath)", viewModel, StringComparison.Ordinal);
+        Assert.Contains("gitSubprocessStarted", viewModel, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Batch23GitAsyncCommandOwnershipRemainsPresent()
     {
         var relayCommand = TestRepositoryPaths.ReadFile("PS7ScriptDesk.UI", "Commands", "RelayCommand.cs");

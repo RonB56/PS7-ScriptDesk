@@ -46,6 +46,7 @@ using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.PowerShell.Services;
 using PS7ScriptDesk.Shell.Dialogs;
+using PS7ScriptDesk.Shell.Controls;
 using PS7ScriptDesk.Shell.Debug;
 using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.Shell.Help;
@@ -96,6 +97,8 @@ namespace PS7ScriptDesk.Shell
         private const string ThemeIconAccentResourceKey = "Theme.Icon.Accent";
         private readonly ConcurrentQueue<TerminalOutputEnvelope> _terminalOutputEnvelopeQueue = new();
         private readonly Dispatcher _terminalOutputDispatcher;
+        private readonly ILiveConsoleService? _liveConsoleServiceForObservation;
+        private TerminalObserverLifetime? _terminalObserverLifetime;
         private DispatcherOperation? _terminalOutputDrainOperation;
         private MainWindowViewModel? _viewModel;
         private CommandPaletteWindow? _commandPaletteWindow;
@@ -277,6 +280,22 @@ namespace PS7ScriptDesk.Shell
         }
 
         private WorkspaceLayoutMode _workspaceLayoutMode = WorkspaceLayoutMode.HorizontalSplit;
+
+        private bool IsConsoleHeightRowOwned =>
+            _workspaceLayoutMode is WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit;
+
+        private string ActiveTerminalRectangleHeightOwner => _workspaceLayoutMode switch
+        {
+            WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit => "ConsoleRowDefinition",
+            WorkspaceLayoutMode.ConsoleMaximized => "ConsolePaneBorder spans workspace rows",
+            WorkspaceLayoutMode.SideBySideSplit => "ConsoleSideColumnDefinition",
+            WorkspaceLayoutMode.EditorMaximized => "ConsolePaneCollapsed",
+            _ => "Unknown"
+        };
+
+        private string ActiveTerminalRectangleWidthOwner => _workspaceLayoutMode == WorkspaceLayoutMode.SideBySideSplit
+            ? "ConsoleSideColumnDefinition"
+            : "EditorColumnDefinition plus active debug column state";
         private enum BottomToolTab
         {
             Problems,
@@ -353,13 +372,14 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        public MainWindow(IApplicationSettingsService applicationSettingsService, ApplicationSettings loadedSettings, IUiScaleService? uiScaleService = null)
+        public MainWindow(IApplicationSettingsService applicationSettingsService, ApplicationSettings loadedSettings, IUiScaleService? uiScaleService = null, ILiveConsoleService? liveConsoleServiceForObservation = null)
         {
             TerminalStartupTrace.Write("MAINWINDOW_CONSTRUCTOR_ENTER", $"windowId={GetHashCode():X8}");
             StartupLifecycleTrace.Write("MainWindow.Constructor", "ENTER");
             DeveloperDiagnostics.LogMethodEntry("UI", "MainWindow constructor entry.");
             _terminalOutputDispatcher = Dispatcher;
             _applicationSettingsService = applicationSettingsService;
+            _liveConsoleServiceForObservation = liveConsoleServiceForObservation;
             _loadedSettings = loadedSettings ?? new ApplicationSettings();
             _scriptDiagnosticStore.Changed += ScriptDiagnosticStore_Changed;
             UpdateAnalyzerSettingsMenu();
@@ -420,6 +440,8 @@ namespace PS7ScriptDesk.Shell
 
 
             InitializeComponent();
+            SizeChanged += MainWindow_SizeChanged;
+            TerminalConsole.SizeChanged += TerminalConsole_SizeChanged;
             StartupLifecycleTrace.Write("MainWindow.InitializeComponent", "EXIT");
             GitMenuItem.Visibility = GitFeatureAvailability.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
             DeveloperDiagnostics.LogDecision(
@@ -486,6 +508,93 @@ namespace PS7ScriptDesk.Shell
         }
 
         private MainWindowViewModel? ViewModel => Volatile.Read(ref _viewModel);
+
+        private void MainWindow_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "WPF main-window resize observed; no terminal/session mutation is performed by this observer.",
+                BuildResizeLayoutDiagnostics(
+                    "MainWindowSizeChanged",
+                    new Dictionary<string, object?>
+                    {
+                        ["previousWindowWidth"] = e.PreviousSize.Width,
+                        ["previousWindowHeight"] = e.PreviousSize.Height,
+                        ["newWindowWidth"] = e.NewSize.Width,
+                        ["newWindowHeight"] = e.NewSize.Height
+                    }));
+        }
+
+        private void TerminalConsole_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "WPF terminal-control resize observed; browser xterm measurement remains the canonical live resize source.",
+                BuildResizeLayoutDiagnostics(
+                    "TerminalControlSizeChanged",
+                    new Dictionary<string, object?>
+                    {
+                        ["previousTerminalWidth"] = e.PreviousSize.Width,
+                        ["previousTerminalHeight"] = e.PreviousSize.Height,
+                        ["newTerminalWidth"] = e.NewSize.Width,
+                        ["newTerminalHeight"] = e.NewSize.Height
+                    }));
+        }
+
+        private Dictionary<string, object?> BuildResizeLayoutDiagnostics(
+            string source,
+            Dictionary<string, object?>? additional = null)
+        {
+            var properties = new Dictionary<string, object?>
+            {
+                ["source"] = source,
+                ["windowActualWidth"] = ActualWidth,
+                ["windowActualHeight"] = ActualHeight,
+                ["consoleActualWidth"] = ConsolePaneBorder.ActualWidth,
+                ["consoleActualHeight"] = ConsolePaneBorder.ActualHeight,
+                ["terminalActualWidth"] = TerminalConsole.ActualWidth,
+                ["terminalActualHeight"] = TerminalConsole.ActualHeight,
+                ["rendererGeneration"] = TerminalConsole.RendererGeneration,
+                ["terminalSessionGeneration"] = TerminalConsole.ActiveSessionGeneration,
+                ["resizeGeneration"] = TerminalConsole.ResizeGeneration,
+                ["terminalRectangleSource"] = "TerminalConsole.ActualWidth/ActualHeight",
+                ["terminalRectangleHeightOwner"] = ActiveTerminalRectangleHeightOwner,
+                ["terminalRectangleWidthOwner"] = ActiveTerminalRectangleWidthOwner,
+                ["consoleRowHeight"] = IsConsoleHeightRowOwned ? ConsoleRowDefinition.ActualHeight : null,
+                ["consoleRowHeightMeaningful"] = IsConsoleHeightRowOwned,
+                ["consoleContentRowHeight"] = ConsoleContentRowDefinition.ActualHeight,
+                ["bottomSplitterRowHeight"] = BottomToolWindowSplitterRowDefinition.ActualHeight,
+                ["bottomToolWindowRowHeight"] = BottomToolWindowRowDefinition.ActualHeight,
+                ["bottomToolWindowVisibility"] = BottomToolWindowBorder.Visibility.ToString(),
+                ["bottomToolWindowVisible"] = _isBottomToolWindowVisible,
+                ["bottomToolWindowFloating"] = _isBottomToolWindowFloating,
+                ["workspaceLayoutMode"] = _workspaceLayoutMode.ToString(),
+                ["lastKnownConsoleHeight"] = _lastKnownConsoleHeight,
+                ["lastKnownBottomToolWindowHeight"] = _lastKnownBottomToolWindowHeight,
+                ["executionRunning"] = ViewModel?.IsExecutionRunning,
+                ["contentOmitted"] = true
+            };
+
+            if (additional is not null)
+            {
+                foreach (var property in additional)
+                {
+                    properties[property.Key] = property.Value;
+                }
+            }
+
+            return properties;
+        }
 
         private void GitStatusTextBlock_TargetUpdated(object? sender, DataTransferEventArgs e)
         {
@@ -969,6 +1078,8 @@ namespace PS7ScriptDesk.Shell
                     RequestConsoleWarmStart("TerminalReadyFallback");
                 };
 
+                AttachTerminalObserver();
+
                 // When the app theme changes, update the terminal colour scheme to match.
                 _themeService.ThemeChanged += themeName =>
                     Dispatcher.BeginInvoke(() => TerminalConsole.ApplyAppTheme(themeName));
@@ -1022,6 +1133,51 @@ namespace PS7ScriptDesk.Shell
                 DeveloperDiagnostics.LogException("Startup", ex, "MainWindow.Window_Loaded failed.");
                 ShowIdeMessage("Startup Error", $"PS7 ScriptDesk failed during startup.\n\n{ex}");
             }
+        }
+
+        private void AttachTerminalObserver()
+        {
+            if (_terminalObserverLifetime is not null || _liveConsoleServiceForObservation is null)
+            {
+                return;
+            }
+
+            LiveConsoleTerminalSessionAdapter? sessionAdapter = null;
+            TerminalControlHostAdapter? hostAdapter = null;
+            TerminalObserverLifetime? observerLifetime = null;
+            try
+            {
+                sessionAdapter = new LiveConsoleTerminalSessionAdapter(_liveConsoleServiceForObservation);
+                hostAdapter = new TerminalControlHostAdapter(TerminalConsole);
+                observerLifetime = new TerminalObserverLifetime(
+                    sessionAdapter,
+                    hostAdapter,
+                    TerminalControllerDiagnostics.CreateSink());
+                observerLifetime.Attach();
+                _terminalObserverLifetime = observerLifetime;
+            }
+            catch
+            {
+                observerLifetime?.Dispose();
+                if (observerLifetime is null)
+                {
+                    hostAdapter?.Dispose();
+                    sessionAdapter?.Dispose();
+                }
+
+                throw;
+            }
+            DeveloperDiagnostics.LogInfo(
+                "TerminalController",
+                "Observation-only terminal controller attached to the existing live session and host.",
+                new Dictionary<string, object?>
+                {
+                    ["controllerAttached"] = true,
+                    ["sessionServiceId"] = _liveConsoleServiceForObservation.GetHashCode().ToString("X8"),
+                    ["terminalControlId"] = TerminalConsole.GetHashCode().ToString("X8"),
+                    ["activeOperationsRoutedThroughController"] = false,
+                    ["contentOmitted"] = true
+                });
         }
 
         private void StartDeferredInitialization(MainWindowViewModel viewModel)
@@ -2758,6 +2914,11 @@ namespace PS7ScriptDesk.Shell
 
         private void HideBottomToolWindow(string reason)
         {
+            // Reconcile the outer console row while the docked tool window is still
+            // visible.  The outer row includes the tool-window rows while they are
+            // shown; capturing after those rows are collapsed would preserve the
+            // expanded height and leave a blank region in the console.
+            CaptureWorkspaceLayoutSizes();
             CaptureDockedBottomToolWindowHeight();
             CaptureBottomToolWindowBounds();
 
@@ -3150,6 +3311,21 @@ namespace PS7ScriptDesk.Shell
                 ["dockedHeight"] = _lastKnownBottomToolWindowHeight,
                 ["floatingWindowOpen"] = _bottomToolWindow is not null,
                 ["workspaceLayoutMode"] = _workspaceLayoutMode.ToString(),
+                ["outerConsoleHeight"] = IsConsoleHeightRowOwned ? ConsoleRowDefinition.ActualHeight : null,
+                ["outerConsoleHeightMeaningful"] = IsConsoleHeightRowOwned,
+                ["terminalRectangleSource"] = "TerminalConsole.ActualWidth/ActualHeight",
+                ["terminalRectangleWidth"] = TerminalConsole.ActualWidth,
+                ["terminalRectangleHeight"] = TerminalConsole.ActualHeight,
+                ["rendererGeneration"] = TerminalConsole.RendererGeneration,
+                ["terminalSessionGeneration"] = TerminalConsole.ActiveSessionGeneration,
+                ["resizeGeneration"] = TerminalConsole.ResizeGeneration,
+                ["terminalRectangleHeightOwner"] = ActiveTerminalRectangleHeightOwner,
+                ["terminalRectangleWidthOwner"] = ActiveTerminalRectangleWidthOwner,
+                ["lastKnownConsoleHeight"] = _lastKnownConsoleHeight,
+                ["consoleContentHeight"] = ConsoleContentRowDefinition.ActualHeight,
+                ["bottomSplitterHeight"] = BottomToolWindowSplitterRowDefinition.ActualHeight,
+                ["bottomRowHeight"] = BottomToolWindowRowDefinition.ActualHeight,
+                ["bottomBorderVisibility"] = BottomToolWindowBorder.Visibility.ToString(),
                 ["debugOutputLength"] = ViewModel?.DebuggerOutputText?.Length ?? 0,
                 ["activityLength"] = ViewModel?.ApplicationActivityText?.Length ?? 0,
                 ["errorCount"] = ViewModel?.SelectedTab?.DiagnosticErrorCount ?? 0,
@@ -7317,6 +7493,9 @@ namespace PS7ScriptDesk.Shell
                     ViewModel.Dispose();
                 }
 
+                _terminalObserverLifetime?.Dispose();
+                _terminalObserverLifetime = null;
+
                 _intelliSenseService.MetadataWarmupStatusChanged -= IntelliSenseService_MetadataWarmupStatusChanged;
                 _intelliSenseService.CompletionEngineStatusChanged -= IntelliSenseService_CompletionEngineStatusChanged;
                 _scriptDiagnosticStore.Changed -= ScriptDiagnosticStore_Changed;
@@ -7473,7 +7652,6 @@ namespace PS7ScriptDesk.Shell
             if (IsUsableLength(_loadedSettings.ConsoleHeight, MinimumConsoleHeight))
             {
                 _lastKnownConsoleHeight = _loadedSettings.ConsoleHeight!.Value;
-                ConsoleRowDefinition.Height = new GridLength(_lastKnownConsoleHeight, GridUnitType.Pixel);
             }
 
             if (IsUsableLength(_loadedSettings.ConsoleSideWidth, MinimumConsoleSideWidth))
@@ -7655,6 +7833,8 @@ namespace PS7ScriptDesk.Shell
 
         private void Window_Closed(object? sender, EventArgs e)
         {
+            _terminalObserverLifetime?.Dispose();
+            _terminalObserverLifetime = null;
             _uiScaleService.ScaleChanged -= UiScaleService_ScaleChanged;
         }
 

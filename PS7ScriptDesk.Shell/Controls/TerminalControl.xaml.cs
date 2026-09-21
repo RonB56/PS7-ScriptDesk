@@ -766,7 +766,7 @@ namespace PS7ScriptDesk.Shell.Controls
                           }
                         }
                       } finally {
-                        if (generation !== null && sequence !== null) post({ type: 'output_ack', generation: generation, sequence: sequence });
+                        if (generation !== null && sequence !== null) post({ type: 'output_ack', rendererGeneration: Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : 0, generation: generation, sequence: sequence });
                       }
                     });
                   }
@@ -843,6 +843,8 @@ namespace PS7ScriptDesk.Shell.Controls
         private static readonly TimeSpan ResizeAdjacentOutputTraceWindow = TimeSpan.FromSeconds(1);
 
         private readonly TerminalOutputFlowController _outputFlowController = new();
+        private readonly TerminalRendererRecoveryStateMachine _rendererRecovery = new();
+        private readonly TerminalPersistentOutputHistory _persistentOutputHistory = new();
         private readonly TerminalResizeOutputBarrier _resizeOutputBarrier = new();
         private readonly TerminalProtocolOutputFilter _terminalProtocolOutputFilter = new();
         private readonly TerminalResizePolicy _terminalResizePolicy = new();
@@ -903,6 +905,15 @@ namespace PS7ScriptDesk.Shell.Controls
 
         /// <summary>Fires when xterm.js captures a keyboard gesture that belongs to the host app, such as Ctrl+F or Ctrl+H.</summary>
         public event Action<string>? AppShortcutRequested;
+
+        /// <summary>Current WebView2/xterm renderer identity for diagnostics and UAT correlation.</summary>
+        public int RendererGeneration => Volatile.Read(ref _rendererInstanceGeneration);
+
+        /// <summary>Current PowerShell terminal session generation accepted by the output flow.</summary>
+        public int? ActiveSessionGeneration => _outputFlowController.ActiveGeneration;
+
+        /// <summary>Latest resize generation evaluated by the exact-grid resize policy.</summary>
+        public long ResizeGeneration => _terminalResizePolicy.ResizeGeneration;
 
         // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -988,6 +999,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 _fallbackState = TerminalWebView2FallbackState.None;
                 _rendererInstanceGeneration++;
                 _terminalResizePolicy.Reset(_rendererInstanceGeneration);
+                _rendererRecovery.RendererCreated(_rendererInstanceGeneration);
                 StartupLifecycleTrace.Write("TerminalControl.Renderer", "CREATED", $"generation={_rendererInstanceGeneration}");
                 AppLogger.Info("Terminal", $"Created fresh dynamic WebView2 terminal renderer. RendererInstanceGeneration={_rendererInstanceGeneration}.");
                 DeveloperDiagnostics.LogStateTransition(
@@ -999,7 +1011,9 @@ namespace PS7ScriptDesk.Shell.Controls
                     new Dictionary<string, object?>
                     {
                         ["rendererInstanceGeneration"] = _rendererInstanceGeneration,
-                        ["replacementRequested"] = replacementRequested
+                        ["replacementRequested"] = replacementRequested,
+                        ["replayPersistentHistory"] = _rendererRecovery.ReplacementPending,
+                        ["recoveryCycle"] = _rendererRecovery.Cycle
                     });
             }
 
@@ -1142,6 +1156,7 @@ namespace PS7ScriptDesk.Shell.Controls
 
             if (navigation.IsSuccess)
             {
+                TerminalStartupTrace.Write("WEBVIEW2_NAVIGATION_COMPLETED", "success=true");
                 if (!TryGetCoreWebView2("NavigationCompleted", out var currentCoreWebView2, renderer, lifecycle))
                 {
                     return;
@@ -1326,6 +1341,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 _webViewDetachedFromLayout = true;
                 _webView2Available = false;
                 _isReady = false;
+                _rendererRecovery.RendererRetired(_rendererInstanceGeneration);
                 _fallbackState = reason == "RuntimeUnavailable"
                     ? TerminalWebView2FallbackState.RuntimeUnavailable
                     : reason == "InitializationFailed" || reason == "InitializationCompletedWithoutCore"
@@ -1508,6 +1524,7 @@ namespace PS7ScriptDesk.Shell.Controls
             _firstInputObservedForDiagnostics = false;
             _firstOutputAfterInputLogged = false;
             _terminalProtocolOutputFilter.Reset();
+            _persistentOutputHistory.ActivateGeneration(generation);
             var result = _outputFlowController.ActivateGeneration(generation);
             ReportDiscardedTerminalOutput(result, "session-start");
         }
@@ -1517,6 +1534,7 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             CancelResizeTransaction("session-stop");
             _terminalProtocolOutputFilter.Reset();
+            _persistentOutputHistory.InvalidateGeneration(generation);
             var result = _outputFlowController.InvalidateGeneration(generation);
             ReportDiscardedTerminalOutput(result, "session-stop");
         }
@@ -1654,6 +1672,13 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
+            if (_outputFlowController.ActiveGeneration != generation)
+            {
+                return;
+            }
+
+            _persistentOutputHistory.Append(generation, data);
+
             TerminalCriticalTrace.LogStage(
                 "TerminalControl.WriteVisibleOutput.Begin",
                 new Dictionary<string, object?>
@@ -1719,12 +1744,21 @@ namespace PS7ScriptDesk.Shell.Controls
 
             if (barrierCapture.Status == TerminalResizeBarrierCaptureStatus.BoundedLimitExceeded)
             {
+                TerminalCriticalTrace.LogStage(
+                    "ResizeOutputBarrierLimitExceeded",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = generation,
+                        ["bufferedCharacters"] = barrierCapture.TotalBufferedCharacters,
+                        ["contentOmitted"] = true
+                    });
                 AppLogger.Error(
                     "Terminal",
                     $"Resize output barrier exceeded its bounded policy. SessionGeneration={generation}, Length={data.Length}, BufferedCharacters={barrierCapture.TotalBufferedCharacters}, Source={source}, ContentOmitted=True.");
                 DeveloperDiagnostics.LogError(
                     "Terminal",
-                    "Resize output barrier exceeded its bounded policy; retiring the renderer to avoid releasing bytes under an unknown grid.",
+                    "Resize output barrier exceeded its bounded policy; cancelling the transient resize without retiring the renderer.",
                     new Dictionary<string, object?>
                     {
                         ["rendererGeneration"] = _rendererInstanceGeneration,
@@ -1734,8 +1768,10 @@ namespace PS7ScriptDesk.Shell.Controls
                         ["bufferedCharacters"] = barrierCapture.TotalBufferedCharacters,
                         ["contentOmitted"] = true
                     });
-                CancelResizeTransaction("buffer-limit-exceeded");
-                RetireWebView2Renderer("ResizeOutputBarrierLimitExceeded", null);
+                var cancelled = CancelResizeTransaction("buffer-limit-exceeded");
+                RequeueCancelledResizeOutput(cancelled, generation);
+                EnqueueVisibleOutputAfterResizeCancellation(generation, data);
+                RequestOutputFlush(scheduleFlush: true);
                 return;
             }
 
@@ -1790,6 +1826,8 @@ namespace PS7ScriptDesk.Shell.Controls
             {
                 TerminalStartupTrace.Write("BUFFERED_FOR_RENDERER", $"generation={generation}; chars={data.Length}; pendingCharacters={enqueueResult.PendingCharacters}; contentOmitted=true");
             }
+
+            TerminalStartupTrace.Write("FIRST_TERMINAL_WRITE_REQUESTED", $"generation={generation}; chars={data.Length}; rendererReady={_isReady}; source={source}");
 
             if (_isReady && !_firstOutputPostedLogged)
             {
@@ -2670,6 +2708,16 @@ namespace PS7ScriptDesk.Shell.Controls
             _resizeOutputBarrierTimer.Stop();
             var cancelled = _resizeOutputBarrier.Cancel();
             _pendingResizeDecision = null;
+            TerminalCriticalTrace.LogStage(
+                "ResizeOutputBarrierTimeout",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration,
+                    ["bufferedCharacters"] = cancelled.BufferedCharacters,
+                    ["bufferedChunks"] = cancelled.BufferedChunks,
+                    ["contentOmitted"] = true
+                });
             AppLogger.Error(
                 "Terminal",
                 $"Resize output barrier timed out before xterm.js acknowledged the exact grid. BufferedCharacters={cancelled.BufferedCharacters}, BufferedChunks={cancelled.BufferedChunks}, ContentOmitted=True.");
@@ -2682,10 +2730,11 @@ namespace PS7ScriptDesk.Shell.Controls
                     ["bufferedChunks"] = cancelled.BufferedChunks,
                     ["contentOmitted"] = true
                 });
-            RetireWebView2Renderer("ResizeOutputBarrierTimeout", null);
+            RequeueCancelledResizeOutput(cancelled, _outputFlowController.ActiveGeneration);
+            RequestOutputFlush(scheduleFlush: true);
         }
 
-        private void CancelResizeTransaction(string reason)
+        private TerminalResizeBarrierCancellationResult CancelResizeTransaction(string reason)
         {
             TerminalResizeBarrierCancellationResult cancelled;
             lock (_resizeOutputIntegrationSyncRoot)
@@ -2716,6 +2765,49 @@ namespace PS7ScriptDesk.Shell.Controls
                         ["bufferedChunks"] = cancelled.BufferedChunks,
                         ["contentOmitted"] = true
                     });
+            }
+
+            return cancelled;
+        }
+
+        private void RequeueCancelledResizeOutput(
+            TerminalResizeBarrierCancellationResult cancelled,
+            int? expectedSessionGeneration)
+        {
+            if (expectedSessionGeneration is not { } sessionGeneration ||
+                cancelled.ReleasedOutput.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var bufferedOutput in cancelled.ReleasedOutput)
+            {
+                if (bufferedOutput.TerminalSessionGeneration != sessionGeneration)
+                {
+                    continue;
+                }
+
+                var enqueueResult = _outputFlowController.Enqueue(
+                    bufferedOutput.TerminalSessionGeneration,
+                    bufferedOutput.Data);
+                if (enqueueResult.DroppedCharacters > 0)
+                {
+                    RecordDroppedTerminalOutput(enqueueResult.DroppedCharacters);
+                }
+            }
+        }
+
+        private void EnqueueVisibleOutputAfterResizeCancellation(int generation, string data)
+        {
+            if (string.IsNullOrEmpty(data))
+            {
+                return;
+            }
+
+            var enqueueResult = _outputFlowController.Enqueue(generation, data);
+            if (enqueueResult.DroppedCharacters > 0)
+            {
+                RecordDroppedTerminalOutput(enqueueResult.DroppedCharacters);
             }
         }
 
@@ -2944,7 +3036,10 @@ namespace PS7ScriptDesk.Shell.Controls
                         break;
 
                     case "output_ack":
-                        if (root.TryGetProperty("generation", out var generationProp) &&
+                        if (root.TryGetProperty("rendererGeneration", out var outputAckRendererProp) &&
+                            outputAckRendererProp.TryGetInt32(out var outputAckRendererGeneration) &&
+                            outputAckRendererGeneration == _rendererInstanceGeneration &&
+                            root.TryGetProperty("generation", out var generationProp) &&
                             generationProp.TryGetInt32(out var generation) &&
                             root.TryGetProperty("sequence", out var sequenceProp) &&
                             sequenceProp.TryGetInt64(out var sequence))
@@ -2961,7 +3056,34 @@ namespace PS7ScriptDesk.Shell.Controls
                                     ["scheduleFlush"] = scheduleFlush
                             });
                             RequestOutputFlush(scheduleFlush);
+                            if (!_outputFlowController.HasOutstandingOutput &&
+                                _rendererRecovery.ReplayCompleted(_rendererInstanceGeneration))
+                            {
+                                TerminalCriticalTrace.LogStage(
+                                    "RendererRecovery.ReplayCompleted",
+                                    new Dictionary<string, object?>
+                                    {
+                                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                                        ["terminalSessionGeneration"] = generation,
+                                        ["recoveryCycle"] = _rendererRecovery.Cycle,
+                                        ["recoveryPhase"] = _rendererRecovery.Phase.ToString(),
+                                        ["contentOmitted"] = true
+                                    });
+                            }
                             TryStartPendingResizeIfRendererIdle();
+                        }
+                        else
+                        {
+                            TerminalCriticalTrace.LogStage(
+                                "TerminalControl.RendererAcknowledgement.Rejected",
+                                new Dictionary<string, object?>
+                                {
+                                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                                    ["ackRendererGeneration"] = root.TryGetProperty("rendererGeneration", out var rejectedRendererProp) && rejectedRendererProp.TryGetInt32(out var rejectedRenderer) ? rejectedRenderer : 0,
+                                    ["terminalSessionGeneration"] = root.TryGetProperty("generation", out var rejectedGenerationProp) && rejectedGenerationProp.TryGetInt32(out var rejectedGeneration) ? rejectedGeneration : 0,
+                                    ["reason"] = "stale-or-invalid-renderer-generation",
+                                    ["contentOmitted"] = true
+                                });
                         }
                         break;
 
@@ -3332,12 +3454,43 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             _isReady = true;
             TerminalStartupTrace.Write("RENDERER_READY", $"controlId={GetHashCode():X8}; uiThread={Dispatcher.CheckAccess()}");
+            var activeGeneration = _outputFlowController.ActiveGeneration;
+            var replayedHistoryCharacters = 0;
+            var replacingRenderer = _rendererRecovery.RendererReady(_rendererInstanceGeneration);
+            if (replacingRenderer)
+            {
+                _outputFlowController.RestoreRenderer();
+            }
+
+            if (replacingRenderer && activeGeneration is { } generation)
+            {
+                foreach (var historyChunk in _persistentOutputHistory.Snapshot(generation))
+                {
+                    var replayResult = _outputFlowController.Enqueue(generation, historyChunk);
+                    replayedHistoryCharacters += replayResult.AcceptedCharacters;
+                }
+
+                if (!_outputFlowController.HasOutstandingOutput)
+                {
+                    _rendererRecovery.ReplayCompleted(_rendererInstanceGeneration);
+                }
+            }
+
             var scheduleFlush = _outputFlowController.SetRendererReady();
             _rendererReadyReplayPending = scheduleFlush;
             TerminalStartupTrace.Write("RENDERER_READY_REPLAY_START", $"controlId={GetHashCode():X8}; replayScheduled={scheduleFlush}; outstandingOutput={_outputFlowController.HasOutstandingOutput}");
 
-            AppLogger.Info("Terminal", "xterm.js renderer is ready; bounded terminal output delivery is enabled.");
-            DeveloperDiagnostics.LogInfo("Terminal", "xterm.js renderer is ready; bounded terminal output delivery is enabled.");
+            AppLogger.Info("Terminal", $"xterm.js renderer is ready; bounded terminal output delivery is enabled. ReplayedHistoryCharacters={replayedHistoryCharacters}.");
+            DeveloperDiagnostics.LogInfo("Terminal", "xterm.js renderer is ready; bounded terminal output delivery is enabled.", new Dictionary<string, object?>
+            {
+                ["rendererGeneration"] = _rendererInstanceGeneration,
+                ["sessionGeneration"] = activeGeneration,
+                ["replayedHistoryCharacters"] = replayedHistoryCharacters,
+                ["historyOwnership"] = "terminal-session",
+                ["recoveryPhase"] = _rendererRecovery.Phase.ToString(),
+                ["recoveryCycle"] = _rendererRecovery.Cycle,
+                ["contentOmitted"] = true
+            });
             RequestOutputFlush(scheduleFlush);
             TerminalStartupTrace.Write("RENDERER_READY_REPLAY_END", $"controlId={GetHashCode():X8}; replayScheduled={scheduleFlush}");
 

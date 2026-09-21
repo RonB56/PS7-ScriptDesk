@@ -55,6 +55,7 @@ public static class TerminalStartupTrace
                 .Append(DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture))
                 .Append(" elapsedMs=").Append(Elapsed.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture))
                 .Append(" StartupAttemptId=").Append(AttemptId)
+                .Append(" pid=").Append(Environment.ProcessId)
                 .Append(" ThreadId=").Append(Environment.CurrentManagedThreadId)
                 .Append(" DispatcherCheckAccess=").Append(ui.IsUiThread)
                 .Append(" DispatcherThreadId=").Append(ui.DispatcherThreadId?.ToString(CultureInfo.InvariantCulture) ?? "?")

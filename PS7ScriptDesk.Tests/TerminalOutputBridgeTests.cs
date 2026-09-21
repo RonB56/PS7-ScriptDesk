@@ -7,6 +7,28 @@ namespace PS7ScriptDesk.Tests;
 public sealed class TerminalOutputBridgeTests
 {
     [Fact]
+    public void ResizeBarrier_CancelReturnsBufferedOutputForNonDestructiveRecovery()
+    {
+        var barrier = new TerminalResizeOutputBarrier(
+            maximumBufferedCharacters: 128,
+            maximumBufferedChunks: 8,
+            maximumDuration: TimeSpan.FromSeconds(2));
+
+        Assert.True(barrier.Begin(3, 7, 11, 120, 40).Accepted);
+        Assert.Equal(
+            TerminalResizeBarrierCaptureStatus.Buffered,
+            barrier.Capture(3, 7, "ConPTY", "numbered-output").Status);
+
+        var cancelled = barrier.Cancel();
+
+        Assert.Equal(1, cancelled.BufferedChunks);
+        var output = Assert.Single(cancelled.ReleasedOutput);
+        Assert.Equal(7, output.TerminalSessionGeneration);
+        Assert.Equal("numbered-output", output.Data);
+        Assert.False(barrier.IsActive);
+    }
+
+    [Fact]
     public void FlowController_DefersOutputUntilRendererIsReady_ThenPreservesChunkOrder()
     {
         var controller = new TerminalOutputFlowController(
@@ -115,6 +137,94 @@ public sealed class TerminalOutputBridgeTests
         controller.ActivateGeneration(5);
         Assert.Equal(4, controller.Enqueue(5, "new\n").AcceptedCharacters);
         Assert.True(controller.TryBeginDelivery() is { Generation: 5, Data: "new\n" });
+    }
+
+    [Fact]
+    public void FlowController_RestoresDeliveryAfterRendererReplacement()
+    {
+        var controller = new TerminalOutputFlowController(maximumPendingCharacters: 64, maximumBatchCharacters: 64);
+
+        controller.ActivateGeneration(1);
+        controller.Enqueue(1, "before\n");
+        var unavailable = controller.MarkRendererUnavailable();
+        Assert.Equal(7, unavailable.DiscardedCharacters);
+        Assert.Equal(7, controller.Enqueue(1, "during\n").DroppedCharacters);
+
+        controller.RestoreRenderer();
+        Assert.Equal(6, controller.Enqueue(1, "after\n").AcceptedCharacters);
+        Assert.True(controller.SetRendererReady());
+        var batch = Assert.IsType<TerminalOutputBatch>(controller.TryBeginDelivery());
+        Assert.Equal("after\n", batch.Data);
+    }
+
+    [Fact]
+    public void PersistentOutputHistory_IsSessionOwnedAndBounded()
+    {
+        var history = new TerminalPersistentOutputHistory(maximumCharacters: 5);
+
+        history.ActivateGeneration(3);
+        Assert.True(history.Append(3, "abc"));
+        Assert.True(history.Append(3, "def"));
+        Assert.Equal(5, history.CharacterCount);
+        Assert.Equal(new[] { "bc", "def" }, history.Snapshot(3));
+
+        history.ActivateGeneration(4);
+        Assert.Empty(history.Snapshot(3));
+        Assert.Empty(history.Snapshot(4));
+        Assert.True(history.Append(4, "new"));
+        Assert.Equal(new[] { "new" }, history.Snapshot(4));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(10)]
+    [InlineData(50)]
+    public void RendererRecoveryStateMachine_RemainsReusableAcrossRepeatedCycles(int cycleCount)
+    {
+        var state = new TerminalRendererRecoveryStateMachine();
+
+        for (var cycle = 1; cycle <= cycleCount; cycle++)
+        {
+            var rendererGeneration = cycle;
+            state.RendererCreated(rendererGeneration);
+            if (cycle == 1)
+            {
+                Assert.False(state.RendererReady(rendererGeneration));
+            }
+            else
+            {
+                Assert.True(state.ReplacementPending);
+                Assert.True(state.RendererReady(rendererGeneration));
+                Assert.True(state.ReplayPending);
+                Assert.True(state.ReplayCompleted(rendererGeneration));
+                Assert.False(state.ReplacementPending);
+                Assert.False(state.ReplayPending);
+            }
+
+            state.RendererRetired(rendererGeneration);
+            Assert.True(state.ReplacementPending);
+            Assert.False(state.RendererReady(rendererGeneration - 1));
+        }
+
+        Assert.Equal(cycleCount, state.RendererGeneration);
+        Assert.Equal(Math.Max(0, cycleCount), state.Cycle);
+    }
+
+    [Fact]
+    public void RendererRecoveryStateMachine_RejectsStaleReadyAndAcceptsCurrentRenderer()
+    {
+        var state = new TerminalRendererRecoveryStateMachine();
+        state.RendererCreated(1);
+        Assert.False(state.RendererReady(1));
+        state.RendererRetired(1);
+        state.RendererCreated(2);
+
+        Assert.False(state.RendererReady(1));
+        Assert.True(state.RendererReady(2));
+        Assert.True(state.ReplayCompleted(2));
+        Assert.False(state.ReplayCompleted(1));
     }
 
     [Fact]

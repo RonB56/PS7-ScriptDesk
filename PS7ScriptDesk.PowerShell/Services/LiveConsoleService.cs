@@ -361,6 +361,7 @@ namespace PS7ScriptDesk.PowerShell.Services
             try
             {
                 bool shouldRestart;
+                TerminalStartupTrace.Write("SESSION_DUPLICATE_CHECK_BEGIN", $"serviceId={GetHashCode():X8}");
                 lock (_syncRoot)
                 {
                     shouldRestart = !IsProcessRunningNoThrow(_process) ||
@@ -368,6 +369,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                                     !string.Equals(ActiveRuntime.ExecutablePath, runtime.ExecutablePath, StringComparison.OrdinalIgnoreCase);
                 }
 
+                TerminalStartupTrace.Write("SESSION_DUPLICATE_CHECK_END", $"serviceId={GetHashCode():X8}; shouldRestart={shouldRestart}");
                 if (!shouldRestart)
                 {
                     return;
@@ -389,6 +391,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 cancellationToken.ThrowIfCancellationRequested();
                 CleanupStaleExecutionSnapshots();
                 var workingDirectory = NormalizeWorkingDirectory(startupWorkingDirectory);
+                TerminalStartupTrace.Write("POWERSHELL_RUNTIME_RESOLVED", $"executable={runtime.LaunchExecutablePath}; displayPath={runtime.ExecutablePath}; workingDirectory={workingDirectory}");
                 var sessionGeneration = BeginTerminalSessionGeneration();
                 _terminalInputCoordinator.BeginSession(sessionGeneration);
                 NotifyTerminalSessionStarted(sessionGeneration);
@@ -1677,6 +1680,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 var startupCommand = BuildTerminalStartupCommand();
                 var launchPath = runtime.LaunchExecutablePath;
                 var arguments = BuildInteractivePowerShellArguments(startupCommand);
+                TerminalStartupTrace.Write("PROCESS_LAUNCH_PREPARATION_BEGIN", $"executable={launchPath}; workingDirectory={workingDirectory}; arguments={arguments}; sessionGeneration={sessionGeneration}");
                 AppLogger.Info("LiveConsole", $"ConPTY CreateProcessW launch path: '{launchPath}'. Starting hosted PowerShell with -STA. Arguments='{arguments}'.");
                 DeveloperDiagnostics.LogInfo(
                     "Terminal",
@@ -1716,6 +1720,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                     throw new InvalidOperationException($"CreateProcessW failed with Win32 error {error}.");
                 }
 
+                TerminalStartupTrace.Write("CREATE_PROCESS_RETURNED", $"success=true; pid={processInformation.dwProcessId}; sessionGeneration={sessionGeneration}");
                 TerminalStartupTrace.Write("CREATE_PROCESS_SUCCESS", $"pid={processInformation.dwProcessId}; executable={launchPath}");
                 TerminalStartupTrace.Write("PWSH_PROCESS_OBSERVED_RUNNING", $"pid={processInformation.dwProcessId}");
 
@@ -1759,13 +1764,19 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _terminalInputRouter.Activate(sessionGeneration, _terminalWriter);
 
                 _readerCancellationTokenSource = new CancellationTokenSource();
+                TerminalStartupTrace.Write("CONPTY_READER_TASK_REQUESTED", $"pid={processInformation.dwProcessId}; sessionGeneration={sessionGeneration}");
                 _stdoutReaderTask = Task.Run(
-                    () => ReadPseudoConsoleOutputLoopAsync(
-                        _outputReaderHandle,
-                        onOutput,
-                        sessionGeneration,
-                        _readerCancellationTokenSource.Token));
+                    () =>
+                    {
+                        TerminalStartupTrace.Write("CONPTY_READER_TASK_SCHEDULED", $"pid={processInformation.dwProcessId}; sessionGeneration={sessionGeneration}");
+                        return ReadPseudoConsoleOutputLoopAsync(
+                            _outputReaderHandle,
+                            onOutput,
+                            sessionGeneration,
+                            _readerCancellationTokenSource.Token);
+                    });
                 TerminalStartupTrace.Write("CONPTY_READER_TASK_CREATED", $"taskCreated={_stdoutReaderTask is not null}; pid={processInformation.dwProcessId}");
+                TerminalStartupTrace.Write("PROCESS_LAUNCH_METHOD_EXIT", $"pid={processInformation.dwProcessId}; sessionGeneration={sessionGeneration}");
                 ObserveStartupReaderTask(_stdoutReaderTask!, sessionGeneration);
                 DeveloperDiagnostics.LogInfo("Terminal", "ConPTY reader task started.", new Dictionary<string, object?>
                 {
@@ -2056,6 +2067,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                     4096,
                     isAsync: false);
                 using var reader = new StreamReader(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
+                TerminalStartupTrace.Write("CONPTY_READER_INITIALIZED", $"pid={GetCurrentProcessIdNoThrow()?.ToString() ?? "?"}; sessionGeneration={sessionGeneration}");
 
                 char[] buffer = new char[2048];
                 while (!cancellationToken.IsCancellationRequested)
@@ -2064,7 +2076,9 @@ namespace PS7ScriptDesk.PowerShell.Services
                     // StreamReader.ReadAsync on them can throw "Handle does not support
                     // asynchronous operations". This loop already runs on a background
                     // task, so a blocking read is the correct and stable choice.
+                    TerminalStartupTrace.Write("CONPTY_BLOCKING_READ_BEGIN", $"sessionGeneration={sessionGeneration}; bufferChars={buffer.Length}");
                     int charsRead = reader.Read(buffer, 0, buffer.Length);
+                    TerminalStartupTrace.Write("CONPTY_READ_RETURNED", $"sessionGeneration={sessionGeneration}; chars={charsRead}");
                     if (charsRead <= 0)
                     {
                         TerminalStartupTrace.Write("PWSH_PROCESS_EXIT", $"pid={GetCurrentProcessIdNoThrow()?.ToString() ?? "?"}; reason=reader-ended; sessionGeneration={sessionGeneration}; cancellationRequested={cancellationToken.IsCancellationRequested}");
@@ -2106,11 +2120,13 @@ namespace PS7ScriptDesk.PowerShell.Services
                             ["contentOmitted"] = true
                         });
                     LogConptyOutputDuringResizeIfRecent(sessionGeneration, charsRead);
+                    TerminalStartupTrace.Write("CONPTY_OUTPUT_ROUTING_BEGIN", $"sessionGeneration={sessionGeneration}; chars={charsRead}");
                     PublishTerminalChunkForSession(
                         new string(buffer, 0, charsRead),
                         ExecutionOutputStreamKind.StandardOutput,
                         onOutput,
                         sessionGeneration);
+                    TerminalStartupTrace.Write("CONPTY_OUTPUT_ROUTING_END", $"sessionGeneration={sessionGeneration}; chars={charsRead}");
                 }
 
                 TerminalCriticalTrace.LogStage(
@@ -4139,6 +4155,7 @@ namespace PS7ScriptDesk.PowerShell.Services
 
         private void NotifyPromptReadyObserved(int sessionGeneration, string path)
         {
+            TerminalStartupTrace.Write("PROMPT_OBSERVER_RECEIVED_CONTENT", $"sessionGeneration={sessionGeneration}; pathLength={path.Length}");
             var handlers = PromptReadyObserved;
             if (handlers is null)
             {

@@ -83,6 +83,24 @@ public sealed class FirstRunWorkspaceRefinementTests
     }
 
     [Fact]
+    public void MainWindow_ReconcilesConsoleHeightBeforeHidingDockedBottomToolWindow()
+    {
+        var mainCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+        var hideStart = mainCode.IndexOf("private void HideBottomToolWindow", StringComparison.Ordinal);
+        var hideEnd = mainCode.IndexOf("private void PopOutBottomToolWindow", hideStart, StringComparison.Ordinal);
+
+        Assert.True(hideStart >= 0);
+        Assert.True(hideEnd > hideStart);
+
+        var hideMethod = mainCode.Substring(hideStart, hideEnd - hideStart);
+        Assert.Contains("CaptureWorkspaceLayoutSizes();", hideMethod, StringComparison.Ordinal);
+        Assert.Contains("CaptureDockedBottomToolWindowHeight();", hideMethod, StringComparison.Ordinal);
+        Assert.True(
+            hideMethod.IndexOf("CaptureWorkspaceLayoutSizes();", StringComparison.Ordinal) <
+            hideMethod.IndexOf("_isBottomToolWindowVisible = false;", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void MainWindow_FirstRunWorkspaceKeepsOnlyConsoleBottomPaneVisible()
     {
         var mainXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml");

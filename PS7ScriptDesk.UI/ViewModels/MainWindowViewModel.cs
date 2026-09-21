@@ -6362,6 +6362,29 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
+            var gitContextPath = GetGitContextPath();
+            if (!HasGitMetadataCandidate(gitContextPath))
+            {
+                var dormantCancellation = Interlocked.Exchange(ref _gitRefreshCancellationTokenSource, null);
+                dormantCancellation?.Cancel();
+                dormantCancellation?.Dispose();
+                _gitRepositoryState = null;
+                _gitStatusText = "Git: dormant";
+                SourceControl.ApplyState(null, _currentWorkspaceFolderPath, SelectedTab?.FilePath);
+                OnPropertyChanged(nameof(GitStatusText));
+                OnPropertyChanged(nameof(GitRepositoryRoot));
+                OnPropertyChanged(nameof(IsGitAvailable));
+                RefreshGitCommands();
+                StartupLifecycleTrace.Write("MainWindowViewModel.RefreshGitRepositoryAsync", "DORMANT", $"context={gitContextPath ?? "(none)"}; reason=no-git-metadata");
+                DeveloperDiagnostics.LogDecision("Git", "StartupActivationGate", "Git remained dormant because no repository metadata was found in the active workspace or selected-file context.", "Dormant", new Dictionary<string, object?>
+                {
+                    ["contextPath"] = gitContextPath,
+                    ["repositoryDetectionSkipped"] = true,
+                    ["gitSubprocessStarted"] = false
+                });
+                return;
+            }
+
             var previousCancellation = Interlocked.Exchange(ref _gitRefreshCancellationTokenSource, null);
             previousCancellation?.Cancel();
             previousCancellation?.Dispose();
@@ -6650,6 +6673,62 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             var changeSuffix = state.Changes.Count == 0 ? string.Empty : $" | {state.Changes.Count} changes";
             return $"Git: {state.Repository.CurrentBranch ?? "(unknown branch)"}{changeSuffix}";
+        }
+
+        private string? GetGitContextPath()
+        {
+            if (!string.IsNullOrWhiteSpace(_currentWorkspaceFolderPath))
+            {
+                return _currentWorkspaceFolderPath;
+            }
+
+            return SelectedTab?.FilePath is { Length: > 0 } filePath
+                ? Path.GetDirectoryName(filePath)
+                : null;
+        }
+
+        private static bool HasGitMetadataCandidate(string? contextPath)
+        {
+            if (string.IsNullOrWhiteSpace(contextPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                var current = Path.GetFullPath(contextPath);
+                if (File.Exists(current))
+                {
+                    current = Path.GetDirectoryName(current) ?? current;
+                }
+
+                while (!string.IsNullOrWhiteSpace(current))
+                {
+                    var gitPath = Path.Combine(current, ".git");
+                    if (Directory.Exists(gitPath) || File.Exists(gitPath))
+                    {
+                        return true;
+                    }
+
+                    var parent = Directory.GetParent(current)?.FullName;
+                    if (string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+                    {
+                        break;
+                    }
+
+                    current = parent;
+                }
+            }
+            catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                DeveloperDiagnostics.LogInfo("Git", "Repository metadata candidate check failed closed; Git remains dormant.", new Dictionary<string, object?>
+                {
+                    ["contextPath"] = contextPath,
+                    ["exceptionType"] = ex.GetType().Name
+                });
+            }
+
+            return false;
         }
 
         private async Task OnBrowseWorkspaceFolderAsync()
@@ -7210,6 +7289,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void OnTerminalPromptReadyObserved(int generation, string path)
         {
+            TerminalStartupTrace.Write("BACKEND_PROMPT_READY", $"generation={generation}; pathLength={path?.Length ?? 0}; uiThread={_uiSynchronizationContext is null || SynchronizationContext.Current == _uiSynchronizationContext}");
             var currentGeneration = Volatile.Read(ref _currentTerminalGeneration);
             if (generation < currentGeneration)
             {

@@ -365,6 +365,8 @@ public sealed class TerminalResizePolicyTests
         Assert.Contains("ResizeTransaction.DeferredUntilRendererIdle", source, StringComparison.Ordinal);
         Assert.Contains("ResizeOutputBarrierTimeout", source, StringComparison.Ordinal);
         Assert.Contains("ResizeOutputBarrierLimitExceeded", source, StringComparison.Ordinal);
+        Assert.Contains("type: 'output_ack', rendererGeneration:", source, StringComparison.Ordinal);
+        Assert.Contains("stale-or-invalid-renderer-generation", source, StringComparison.Ordinal);
     }
 
     [Fact]

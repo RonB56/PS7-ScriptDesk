@@ -120,6 +120,47 @@ public sealed class BottomToolWindowLayoutRepairTests
         Assert.Contains("x:Name=\"BottomActivityToolTab\"", toolGroupXaml, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void MainWindow_UsesLiveTerminalControlGeometryAndMarksOuterRowModeScoped()
+    {
+        var mainCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+        var resizeDiagnostics = ExtractBetween(mainCode, "private Dictionary<string, object?> BuildResizeLayoutDiagnostics", "private void GitStatusTextBlock_TargetUpdated");
+        var bottomDiagnostics = ExtractBetween(mainCode, "private Dictionary<string, object?> BuildBottomToolWindowDiagnostics", "private void EditorTextEditor_PreviewDragOver");
+
+        Assert.Contains("terminalRectangleSource\"] = \"TerminalConsole.ActualWidth/ActualHeight\"", resizeDiagnostics, StringComparison.Ordinal);
+        Assert.Contains("terminalRectangleHeightOwner", resizeDiagnostics, StringComparison.Ordinal);
+        Assert.Contains("terminalRectangleWidthOwner", resizeDiagnostics, StringComparison.Ordinal);
+        Assert.Contains("consoleRowHeightMeaningful\"] = IsConsoleHeightRowOwned", resizeDiagnostics, StringComparison.Ordinal);
+        Assert.Contains("outerConsoleHeightMeaningful\"] = IsConsoleHeightRowOwned", bottomDiagnostics, StringComparison.Ordinal);
+        Assert.Contains("WorkspaceLayoutMode.SideBySideSplit => \"ConsoleSideColumnDefinition\"", mainCode, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MainWindow_SettingsRestoreDoesNotApplyRowGeometryBeforeWorkspaceMode()
+    {
+        var mainCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+        var restoreMethod = ExtractBetween(mainCode, "private void ApplyShellLayoutFromSettings", "private void ViewModel_PropertyChanged");
+
+        Assert.Contains("_lastKnownConsoleHeight = _loadedSettings.ConsoleHeight!.Value;", restoreMethod, StringComparison.Ordinal);
+        Assert.DoesNotContain("ConsoleRowDefinition.Height = new GridLength(_lastKnownConsoleHeight, GridUnitType.Pixel);", restoreMethod, StringComparison.Ordinal);
+        Assert.Contains("ApplyWorkspaceLayoutMode(RestoreWorkspaceLayoutMode(_loadedSettings.WorkspaceLayoutMode), \"SettingsRestore\");", restoreMethod, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TerminalControl_ResizeBarrierFailureIsNonDestructive()
+    {
+        var source = ReadRepositoryFile("PS7ScriptDesk.Shell", "Controls", "TerminalControl.xaml.cs");
+        var overflow = ExtractBetween(source, "if (barrierCapture.Status == TerminalResizeBarrierCaptureStatus.BoundedLimitExceeded)", "if (!_isReady");
+        var timeout = ExtractBetween(source, "private void OnResizeOutputBarrierTimerTick", "private TerminalResizeBarrierCancellationResult CancelResizeTransaction");
+
+        Assert.Contains("ResizeOutputBarrierLimitExceeded", overflow, StringComparison.Ordinal);
+        Assert.Contains("CancelResizeTransaction(\"buffer-limit-exceeded\")", overflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("RetireWebView2Renderer", overflow, StringComparison.Ordinal);
+        Assert.Contains("ResizeOutputBarrierTimeout", timeout, StringComparison.Ordinal);
+        Assert.Contains("RequeueCancelledResizeOutput", timeout, StringComparison.Ordinal);
+        Assert.DoesNotContain("RetireWebView2Renderer", timeout, StringComparison.Ordinal);
+    }
+
     private static string ExtractBetween(string text, string startMarker, string endMarker)
     {
         var start = text.IndexOf(startMarker, StringComparison.Ordinal);

@@ -155,6 +155,21 @@ namespace PS7ScriptDesk.Shell.Controls
         }
 
         /// <summary>
+        /// Re-opens delivery after the visual renderer has been replaced. The terminal
+        /// session owns the output stream; a WebView2 instance is only a renderer.
+        /// </summary>
+        public void RestoreRenderer()
+        {
+            lock (_syncRoot)
+            {
+                _rendererUnavailable = false;
+                _rendererReady = false;
+                _flushScheduled = false;
+                _inFlightBatch = null;
+            }
+        }
+
+        /// <summary>
         /// Permanently disables renderer delivery for this controller lifetime and discards
         /// any output that can no longer be rendered after terminal bootstrap failure.
         /// </summary>
@@ -257,6 +272,192 @@ namespace PS7ScriptDesk.Shell.Controls
             _inFlightBatch = null;
             _flushScheduled = false;
             return discardedCharacters;
+        }
+    }
+
+    internal enum TerminalRendererRecoveryPhase
+    {
+        NoRenderer,
+        Ready,
+        ReplacementPending,
+        ReplayingHistory
+    }
+
+    /// <summary>
+    /// Reentrant renderer-recovery state. Renderer generations are disposable; recovery
+    /// cycles are monotonic and replay completion is distinct from replay scheduling.
+    /// </summary>
+    internal sealed class TerminalRendererRecoveryStateMachine
+    {
+        private readonly object _syncRoot = new();
+        private TerminalRendererRecoveryPhase _phase = TerminalRendererRecoveryPhase.NoRenderer;
+        private int _rendererGeneration;
+        private long _cycle;
+
+        public TerminalRendererRecoveryPhase Phase { get { lock (_syncRoot) return _phase; } }
+        public int RendererGeneration { get { lock (_syncRoot) return _rendererGeneration; } }
+        public long Cycle { get { lock (_syncRoot) return _cycle; } }
+        public bool ReplacementPending => Phase is TerminalRendererRecoveryPhase.ReplacementPending or TerminalRendererRecoveryPhase.ReplayingHistory;
+        public bool ReplayPending => Phase == TerminalRendererRecoveryPhase.ReplayingHistory;
+
+        public void RendererCreated(int rendererGeneration)
+        {
+            lock (_syncRoot)
+            {
+                if (rendererGeneration <= _rendererGeneration)
+                    throw new InvalidOperationException("Renderer generations must increase monotonically.");
+                _rendererGeneration = rendererGeneration;
+            }
+        }
+
+        public void RendererRetired(int rendererGeneration)
+        {
+            lock (_syncRoot)
+            {
+                if (rendererGeneration != _rendererGeneration) return;
+                _cycle++;
+                _phase = TerminalRendererRecoveryPhase.ReplacementPending;
+            }
+        }
+
+        public bool RendererReady(int rendererGeneration)
+        {
+            lock (_syncRoot)
+            {
+                if (rendererGeneration != _rendererGeneration) return false;
+                if (_phase == TerminalRendererRecoveryPhase.ReplacementPending)
+                {
+                    _phase = TerminalRendererRecoveryPhase.ReplayingHistory;
+                    return true;
+                }
+                if (_phase == TerminalRendererRecoveryPhase.NoRenderer)
+                    _phase = TerminalRendererRecoveryPhase.Ready;
+                return false;
+            }
+        }
+
+        public bool ReplayCompleted(int rendererGeneration)
+        {
+            lock (_syncRoot)
+            {
+                if (rendererGeneration != _rendererGeneration || _phase != TerminalRendererRecoveryPhase.ReplayingHistory)
+                    return false;
+                _phase = TerminalRendererRecoveryPhase.Ready;
+                return true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Bounded, session-owned VT output history used to hydrate a replacement renderer.
+    /// It deliberately stores the filtered VT stream rather than rendered pixels or a
+    /// renderer-specific buffer, so resize/layout and WebView2 lifetime cannot own it.
+    /// </summary>
+    internal sealed class TerminalPersistentOutputHistory
+    {
+        public const int DefaultMaximumCharacters = 480 * 1024;
+
+        private readonly object _syncRoot = new();
+        private readonly LinkedList<string> _chunks = new();
+        private readonly int _maximumCharacters;
+        private int _characterCount;
+        private int? _generation;
+
+        public TerminalPersistentOutputHistory(int maximumCharacters = DefaultMaximumCharacters)
+        {
+            if (maximumCharacters <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maximumCharacters));
+            }
+
+            _maximumCharacters = maximumCharacters;
+        }
+
+        public int CharacterCount
+        {
+            get
+            {
+                lock (_syncRoot)
+                {
+                    return _characterCount;
+                }
+            }
+        }
+
+        public void ActivateGeneration(int generation)
+        {
+            lock (_syncRoot)
+            {
+                _generation = generation;
+                _chunks.Clear();
+                _characterCount = 0;
+            }
+        }
+
+        public void InvalidateGeneration(int generation)
+        {
+            lock (_syncRoot)
+            {
+                if (_generation != generation)
+                {
+                    return;
+                }
+
+                _generation = null;
+                _chunks.Clear();
+                _characterCount = 0;
+            }
+        }
+
+        public bool Append(int generation, string data)
+        {
+            if (string.IsNullOrEmpty(data))
+            {
+                return false;
+            }
+
+            lock (_syncRoot)
+            {
+                if (_generation != generation)
+                {
+                    return false;
+                }
+
+                if (data.Length > _maximumCharacters)
+                {
+                    data = data[^_maximumCharacters..];
+                }
+
+                _chunks.AddLast(data);
+                _characterCount += data.Length;
+                while (_characterCount > _maximumCharacters && _chunks.First is not null)
+                {
+                    var first = _chunks.First.Value;
+                    var excess = _characterCount - _maximumCharacters;
+                    if (first.Length <= excess)
+                    {
+                        _chunks.RemoveFirst();
+                        _characterCount -= first.Length;
+                    }
+                    else
+                    {
+                        _chunks.First.Value = first[excess..];
+                        _characterCount -= excess;
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        public IReadOnlyList<string> Snapshot(int generation)
+        {
+            lock (_syncRoot)
+            {
+                return _generation == generation
+                    ? _chunks.ToArray()
+                    : Array.Empty<string>();
+            }
         }
     }
 
@@ -453,12 +654,13 @@ namespace PS7ScriptDesk.Shell.Controls
             {
                 if (_active is null)
                 {
-                    return new TerminalResizeBarrierCancellationResult(0, 0);
+                    return new TerminalResizeBarrierCancellationResult(0, 0, Array.Empty<TerminalResizeBufferedOutput>());
                 }
 
                 var result = new TerminalResizeBarrierCancellationResult(
                     _active.BufferedCharacters,
-                    _active.BufferedChunks);
+                    _active.BufferedChunks,
+                    _active.Chunks.ToArray());
                 _active = null;
                 return result;
             }
@@ -532,7 +734,8 @@ namespace PS7ScriptDesk.Shell.Controls
 
     internal readonly record struct TerminalResizeBarrierCancellationResult(
         int BufferedCharacters,
-        int BufferedChunks);
+        int BufferedChunks,
+        IReadOnlyList<TerminalResizeBufferedOutput> ReleasedOutput);
 
     internal sealed class TerminalRendererBridge
     {

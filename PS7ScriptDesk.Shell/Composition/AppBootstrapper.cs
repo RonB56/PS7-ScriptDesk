@@ -76,7 +76,7 @@ namespace PS7ScriptDesk.Shell.Composition
                 gitWorkspaceCoordinator);
             StartupLifecycleTrace.Write("MainWindowViewModel", "CONSTRUCTED", $"terminalServiceId={liveConsoleService.GetHashCode():X8}; gitServiceId={gitService.GetHashCode():X8}");
 
-            var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService);
+            var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService, liveConsoleService);
             window.AttachViewModel(viewModel);
             TerminalStartupTrace.Write("BOOTSTRAPPER_CREATE_MAINWINDOW_EXIT", $"windowId={window.GetHashCode():X8}; viewModelId={viewModel.GetHashCode():X8}; serviceId={liveConsoleService.GetHashCode():X8}");
             StartupLifecycleTrace.Write("AppBootstrapper.CreateMainWindow", "EXIT", "ViewModel attached.");
