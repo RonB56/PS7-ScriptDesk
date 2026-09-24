@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -27,6 +28,8 @@ namespace PS7ScriptDesk.Shell.Controls
     {
         private const string ClipboardCopyOperation = "ClipboardCopy";
         private const string ClipboardPasteReadOperation = "ClipboardPasteRead";
+        private const string XtermVersion = "5.3.0";
+        private const string XtermWindowsPtyBackend = "conpty";
 
         // ── xterm.js HTML page ───────────────────────────────────────────────────
         //
@@ -41,7 +44,15 @@ namespace PS7ScriptDesk.Shell.Controls
         //   xterm-addon-fit.min.js       (xterm-addon-fit@0.8.0)
         //   xterm-addon-web-links.min.js (xterm-addon-web-links@0.9.0)
         // No Unicode-width addon is packaged; xterm's built-in Unicode v6 provider is used.
-        private const string TerminalHtml = """
+        private static string TerminalHtml => TerminalHtmlTemplate.Replace(
+            "__PS7_XTERM_VERSION__",
+            XtermVersion).Replace(
+            "__PS7_WINDOWS_PTY_BACKEND__",
+            XtermWindowsPtyBackend).Replace(
+            "__PS7_WINDOWS_PTY_BUILD_NUMBER__",
+            GetWindowsPtyBuildNumber());
+
+        private const string TerminalHtmlTemplate = """
             <!DOCTYPE html>
             <html>
             <head>
@@ -165,7 +176,11 @@ namespace PS7ScriptDesk.Shell.Controls
                   convertEol:   false,
                   allowTransparency: false,
                   minimumContrastRatio: 4.5,
-                  screenReaderMode: true
+                  screenReaderMode: true,
+                  windowsPty: {
+                    backend: '__PS7_WINDOWS_PTY_BACKEND__',
+                    buildNumber: __PS7_WINDOWS_PTY_BUILD_NUMBER__
+                  }
                 });
 
                 var fitAddon = new FitAddon.FitAddon();
@@ -179,6 +194,7 @@ namespace PS7ScriptDesk.Shell.Controls
 
                 var terminalState = function () {
                   var buffer = term.buffer && term.buffer.active ? term.buffer.active : null;
+                  var canvas = terminalElement.querySelector('canvas');
                   return {
                     cols: term.cols,
                     rows: term.rows,
@@ -187,11 +203,158 @@ namespace PS7ScriptDesk.Shell.Controls
                     baseY: buffer ? buffer.baseY : 0,
                     viewportY: buffer ? buffer.viewportY : 0,
                     absoluteCursorY: buffer ? buffer.baseY + buffer.cursorY : 0,
-                    bufferType: term.buffer && term.buffer.active ? 'active' : 'unknown',
+                    bufferType: buffer && buffer.type ? buffer.type : 'unknown',
+                    bufferLength: buffer && buffer.length ? buffer.length : 0,
                     scrollbackLength: buffer && buffer.length ? buffer.length : 0,
+                    // Preserve the established diagnostic field while also
+                    // exposing the clearer bounded extent name.
+                    scrollback: term.options && Number.isSafeInteger(term.options.scrollback) ? term.options.scrollback : 0,
+                    scrollbackExtent: term.options && Number.isSafeInteger(term.options.scrollback) ? term.options.scrollback : 0,
+                    scrollPosition: buffer ? buffer.viewportY : 0,
+                    atBottom: !!(buffer && buffer.viewportY >= buffer.baseY),
+                    alternateBuffer: !!(buffer && buffer.type === 'alternate'),
+                    selectionPresent: !!(term.hasSelection && term.hasSelection()),
+                    rendererDisposed: false,
                     clientWidth: terminalElement.clientWidth,
-                    clientHeight: terminalElement.clientHeight
+                    clientHeight: terminalElement.clientHeight,
+                    canvasWidth: canvas ? canvas.width : 0,
+                    canvasHeight: canvas ? canvas.height : 0
                   };
+                };
+
+                // These helpers are referenced by the WebView message handler below
+                // the initialization try/catch. Use function-scoped variables so
+                // strict-mode block scoping cannot hide them from that handler.
+                var scanMarkerRows = function () {
+                  var buffer = term.buffer && term.buffer.active ? term.buffer.active : null;
+                  if (!buffer || typeof buffer.getLine !== 'function') return [];
+                  var viewportStart = Math.max(0, Number.isFinite(buffer.viewportY) ? buffer.viewportY : 0);
+                  // Inspect only a bounded window around the active viewport. This
+                  // captures completed fixture rows that moved just above/below the
+                  // viewport during reflow without scanning the entire scrollback on
+                  // every diagnostic snapshot.
+                  var start = Math.max(0, viewportStart - 96);
+                  var limit = Math.min(buffer.length || 0, viewportStart + Math.min((term.rows || 0) + 96, 192));
+                  var rows = [];
+                  for (var row = start; row < limit && rows.length < 32; row++) {
+                    var line = buffer.getLine(row);
+                    if (!line || typeof line.translateToString !== 'function') continue;
+                    var text = line.translateToString(true) || '';
+                    var match = null;
+                    var markerDefinitions = [
+                      { text: 'PHASEB_INTERRUPT_TICK', identity: 'e04d332b01f42572' },
+                      { text: 'COMPLETION_TEST_START', identity: 'completion-start-7b3e' },
+                      { text: 'COMPLETION_TEST_END', identity: 'completion-end-4a91' }
+                    ];
+                    for (var definitionIndex = 0; definitionIndex < markerDefinitions.length; definitionIndex++) {
+                      var definition = markerDefinitions[definitionIndex];
+                      var definitionIndexInRow = text.indexOf(definition.text);
+                      if (definitionIndexInRow >= 0) {
+                        match = {
+                          markerText: definition.text,
+                          markerIdentity: definition.identity,
+                          markerStartColumn: definitionIndexInRow,
+                          numberedSequence: null
+                        };
+                        break;
+                      }
+                    }
+                    if (!match) {
+                      var numberedMatch = text.match(/COMPLETION_TEST\s+(\d{1,3})/);
+                      if (numberedMatch) {
+                        match = {
+                          markerText: 'COMPLETION_TEST',
+                          markerIdentity: 'completion-numbered-c2c',
+                          markerStartColumn: numberedMatch.index,
+                          numberedSequence: Number(numberedMatch[1])
+                        };
+                      }
+                    }
+                    if (!match) {
+                      var legacyMarker = 'PHASEB_INTERRUPT_TICK';
+                      for (var partialLength = Math.min(legacyMarker.length - 1, text.length); partialLength >= 4; partialLength--) {
+                        if (text.endsWith(legacyMarker.substring(0, partialLength)) || text.startsWith(legacyMarker.substring(legacyMarker.length - partialLength))) {
+                          match = {
+                            markerText: legacyMarker.substring(0, partialLength),
+                            markerIdentity: 'e04d332b01f42572',
+                            markerStartColumn: -1,
+                            numberedSequence: null,
+                            markerMatchKind: 'partial'
+                          };
+                          break;
+                        }
+                      }
+                    }
+                    if (match) {
+                      rows.push({
+                        markerIdentity: match.markerIdentity,
+                        markerMatchKind: match.markerMatchKind || 'exact',
+                        markerPrefixLength: match.markerText.length,
+                        markerStartColumn: match.markerStartColumn,
+                        markerEndColumn: match.markerStartColumn + match.markerText.length,
+                        numberedSequence: Number.isSafeInteger(match.numberedSequence) ? match.numberedSequence : null,
+                        absoluteRow: row,
+                        viewportRelativeRow: row - viewportStart,
+                        isWrapped: !!line.isWrapped,
+                        contentOmitted: true
+                      });
+                    }
+                  }
+                  return rows;
+                };
+
+                var postScreenStateSnapshot = function (reason, msg, promptBoundary) {
+                  try {
+                    var state = terminalState();
+                    state.type = 'xterm_screen_state_snapshot';
+                    state.reason = reason || 'unknown';
+                    state.rendererGeneration = msg && Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : 0;
+                    state.terminalSessionGeneration = msg && Number.isSafeInteger(msg.generation) ? msg.generation : 0;
+                    state.outputSequence = msg && Number.isSafeInteger(msg.sequence) ? msg.sequence : 0;
+                    state.submissionId = msg && Number.isSafeInteger(msg.submissionId) ? msg.submissionId : 0;
+                    state.promptBoundary = promptBoundary === true;
+                    state.markerRows = scanMarkerRows();
+                    // DeveloperDiagnostics flattens nested objects through ToString;
+                    // retain a JSON form so marker identities and row coordinates
+                    // survive the host boundary without retaining terminal text.
+                    state.markerRowsJson = JSON.stringify(state.markerRows);
+                    state.rendererIdentity = 'xterm-webview-active';
+                    state.contentOmitted = true;
+                    post(state);
+                  } catch (snapshotErr) {
+                    post({ type: 'xterm_screen_state_snapshot_error', reason: reason || 'unknown', message: String(snapshotErr), contentOmitted: true });
+                  }
+                };
+
+                var captureViewportAnchor = function () {
+                  var buffer = term.buffer && term.buffer.active ? term.buffer.active : null;
+                  if (!buffer) return null;
+                  var baseY = Number.isFinite(buffer.baseY) ? buffer.baseY : 0;
+                  var viewportY = Number.isFinite(buffer.viewportY) ? buffer.viewportY : baseY;
+                  return {
+                    atBottom: viewportY >= baseY,
+                    distanceFromBottom: Math.max(0, baseY - viewportY),
+                    viewportY: viewportY,
+                    baseY: baseY
+                  };
+                };
+
+                var restoreViewportAnchor = function (anchor, source) {
+                  if (!anchor || !term.buffer || !term.buffer.active) return;
+                  var buffer = term.buffer.active;
+                  var targetViewportY = anchor.atBottom
+                    ? buffer.baseY
+                    : Math.max(0, buffer.baseY - anchor.distanceFromBottom);
+                  if (typeof term.scrollToLine === 'function') {
+                    term.scrollToLine(targetViewportY);
+                  } else if (typeof term.scrollLines === 'function') {
+                    term.scrollLines(targetViewportY - buffer.viewportY);
+                  }
+                  postTerminalState('Xterm.ViewportRestored', source, {
+                    viewportAnchorAtBottom: anchor.atBottom,
+                    viewportAnchorDistanceFromBottom: anchor.distanceFromBottom,
+                    viewportRestoreTarget: targetViewportY
+                  });
                 };
 
                 var postTerminalState = function (stage, source, extra) {
@@ -242,7 +405,9 @@ namespace PS7ScriptDesk.Shell.Controls
                     oscCount: 0,
                     otherEscapeCount: 0,
                     otherControlCount: 0,
-                    printableCharacterCount: 0
+                    printableCharacterCount: 0,
+                    csiCommands: [],
+                    cursorDestinations: []
                   };
                 };
 
@@ -297,6 +462,18 @@ namespace PS7ScriptDesk.Shell.Controls
                   return data.length - 1;
                 };
 
+                var parseCsiParameters = function (data, start, end) {
+                  var raw = data.substring(start + 2, end);
+                  var sanitized = raw.replace(/[? >!]/g, '');
+                  var numericParameters = sanitized.length === 0
+                    ? []
+                    : sanitized.split(';').map(function (value) {
+                        var parsed = Number(value);
+                        return Number.isFinite(parsed) ? parsed : null;
+                      });
+                  return { raw: raw.substring(0, 64), numericParameters: numericParameters.slice(0, 8) };
+                };
+
                 var classifyTerminalControls = function (data) {
                   var summary = createControlSummary();
                   if (!data) {
@@ -342,6 +519,14 @@ namespace PS7ScriptDesk.Shell.Controls
                       }
 
                       summary.csiCount++;
+                      var csiParameters = parseCsiParameters(data, index, csiEnd);
+                      if (summary.csiCommands.length < 32) {
+                        summary.csiCommands.push({
+                          command: data.charAt(csiEnd),
+                          parameters: csiParameters.raw,
+                          numericParameters: csiParameters.numericParameters
+                        });
+                      }
                       switch (data.charAt(csiEnd)) {
                         case 'A': summary.csiCursorUpCount++; break;
                         case 'B': summary.csiCursorDownCount++; break;
@@ -390,6 +575,21 @@ namespace PS7ScriptDesk.Shell.Controls
                     index++;
                   }
 
+                  summary.cursorDestinations = summary.csiCommands.map(function (command) {
+                    var parameters = command.numericParameters || [];
+                    var first = parameters.length > 0 && parameters[0] !== null && parameters[0] > 0 ? parameters[0] : 1;
+                    var second = parameters.length > 1 && parameters[1] !== null && parameters[1] > 0 ? parameters[1] : 1;
+                    if (command.command === 'H' || command.command === 'f') {
+                      return { command: command.command, row: first, column: second };
+                    }
+                    if (command.command === 'G') {
+                      return { command: command.command, row: null, column: first };
+                    }
+                    if (command.command === 'd') {
+                      return { command: command.command, row: first, column: null };
+                    }
+                    return { command: command.command, row: null, column: null };
+                  });
                   summary.summaryText = formatControlSummary(summary);
                   return summary;
                 };
@@ -462,6 +662,8 @@ namespace PS7ScriptDesk.Shell.Controls
                     otherEscapeCount: summary.otherEscapeCount,
                     otherControlCount: summary.otherControlCount,
                     printableCharacterCount: summary.printableCharacterCount,
+                    csiCommands: summary.csiCommands,
+                    cursorDestinations: summary.cursorDestinations,
                     cols: state.cols,
                     rows: state.rows,
                     cursorX: state.cursorX,
@@ -532,7 +734,10 @@ namespace PS7ScriptDesk.Shell.Controls
                     unicodeWidthProvider: 'built-in-v6',
                     binaryInputBridge: false,
                     mousePasteGesture: 'shift-right-click',
-                    leaveTerminalShortcut: 'ctrl-shift-f6'
+                    leaveTerminalShortcut: 'ctrl-shift-f6',
+                    xtermVersion: '__PS7_XTERM_VERSION__',
+                    windowsPtyBackend: '__PS7_WINDOWS_PTY_BACKEND__',
+                    windowsPtyBuildNumber: __PS7_WINDOWS_PTY_BUILD_NUMBER__
                   });
                 }
 
@@ -580,6 +785,8 @@ namespace PS7ScriptDesk.Shell.Controls
                 var lastRequestedCols = 0;
                 var lastRequestedRows = 0;
                 var pendingResizeCommit = null;
+                var pendingResizeObserverAnchor = null;
+                var requestedResizeAnchor = null;
                 term.onResize(function (e) {
                   if (!e || e.cols <= 0 || e.rows <= 0) return;
                   var commit = pendingResizeCommit;
@@ -635,6 +842,12 @@ namespace PS7ScriptDesk.Shell.Controls
                 var resizeFramePending = false;
                 var resizeRequested = false;
                 var scheduleResizeFit = function () {
+                  // Capture the user's logical viewport position at the resize
+                  // notification boundary. Browser/xterm layout can transiently
+                  // reflow the active buffer before the host resize commit arrives;
+                  // capturing at commit time can then mistake that transient state
+                  // for an intentional scroll position.
+                  pendingResizeObserverAnchor = captureViewportAnchor();
                   resizeRequested = true;
                   if (resizeFramePending) return;
                   resizeFramePending = true;
@@ -656,6 +869,12 @@ namespace PS7ScriptDesk.Shell.Controls
                       proposedRows: proposed.rows
                     });
                     if (proposed.cols === lastRequestedCols && proposed.rows === lastRequestedRows) return;
+                    requestedResizeAnchor = {
+                      cols: proposed.cols,
+                      rows: proposed.rows,
+                      anchor: pendingResizeObserverAnchor
+                    };
+                    pendingResizeObserverAnchor = null;
                     lastRequestedCols = proposed.cols;
                     lastRequestedRows = proposed.rows;
                     var state = terminalState();
@@ -705,6 +924,9 @@ namespace PS7ScriptDesk.Shell.Controls
                     } catch (normalizeErr) {
                       post({ type: 'xterm_normalize_error', message: String(normalizeErr) });
                     }
+                  },
+                  observePromptBoundary: function (msg) {
+                    postScreenStateSnapshot('prompt-boundary', msg || {}, true);
                   }
                 };
                 window.__ps7ScriptDeskFocusTerminal = function () {
@@ -749,6 +971,12 @@ namespace PS7ScriptDesk.Shell.Controls
                     if (traceOutputCursor) {
                       try {
                         outputControlSummary = classifyTerminalControls(decodedOutput);
+                        tryPostTerminalState('Xterm.RedrawWriteBegin', 'renderer.outputWrite', {
+                          outputSequence: Number.isSafeInteger(msg.sequence) ? msg.sequence : 0,
+                          submissionId: Number.isSafeInteger(msg.submissionId) ? msg.submissionId : 0,
+                          resizeGeneration: Number.isSafeInteger(msg.resizeGeneration) ? msg.resizeGeneration : 0,
+                          outputCharacterLength: decodedOutput.length
+                        });
                         beforeOutputWriteState = postOutputCursorTrace('Xterm.OutputBeforeWrite', msg, null, outputControlSummary);
                       } catch (traceBeforeErr) {
                         tryPostOutputCursorTraceError('Xterm.OutputBeforeWrite', traceBeforeErr);
@@ -761,16 +989,25 @@ namespace PS7ScriptDesk.Shell.Controls
                           try {
                             if (!outputControlSummary) outputControlSummary = classifyTerminalControls(decodedOutput);
                             postOutputCursorTrace('Xterm.OutputAfterWrite', msg, beforeOutputWriteState, outputControlSummary);
+                            tryPostTerminalState('Xterm.RedrawWriteCallbackComplete', 'renderer.outputWrite', {
+                              outputSequence: Number.isSafeInteger(msg.sequence) ? msg.sequence : 0,
+                              submissionId: Number.isSafeInteger(msg.submissionId) ? msg.submissionId : 0,
+                              resizeGeneration: Number.isSafeInteger(msg.resizeGeneration) ? msg.resizeGeneration : 0,
+                              outputCharacterLength: decodedOutput.length
+                            });
                           } catch (traceAfterErr) {
                             tryPostOutputCursorTraceError('Xterm.OutputAfterWrite', traceAfterErr);
                           }
                         }
+                        if (msg.markerCandidate === true) postScreenStateSnapshot('marker-write-after', msg, false);
+                        if (msg.resizeAdjacent === true) postScreenStateSnapshot('resize-adjacent-output-after', msg, false);
                       } finally {
                         if (generation !== null && sequence !== null) post({ type: 'output_ack', rendererGeneration: Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : 0, generation: generation, sequence: sequence });
                       }
                     });
                   }
                   else if (msg.type === 'output') { termApi.write(msg.data || ''); }
+                  else if (msg.type === 'prompt_boundary') { postScreenStateSnapshot('prompt-boundary', msg, true); }
                   else if (msg.type === 'clear')  { termApi.clear(); }
                   else if (msg.type === 'resize_commit') {
                     var commitCols = Number.isSafeInteger(msg.cols) ? msg.cols : 0;
@@ -787,9 +1024,28 @@ namespace PS7ScriptDesk.Shell.Controls
                         committedCols: commitCols,
                         committedRows: commitRows
                       });
+                      tryPostTerminalState('Xterm.ResizeCommitReceived', 'host.resizeCommit', {
+                        committedCols: commitCols,
+                        committedRows: commitRows,
+                        resizeGeneration: commit.resizeGeneration
+                      });
+                      postScreenStateSnapshot('before-host-resize-commit', msg, false);
+                      var viewportAnchor = requestedResizeAnchor &&
+                        requestedResizeAnchor.cols === commitCols &&
+                        requestedResizeAnchor.rows === commitRows
+                        ? requestedResizeAnchor.anchor
+                        : captureViewportAnchor();
+                      requestedResizeAnchor = null;
                       pendingResizeCommit = commit;
                       try {
                         term.resize(commitCols, commitRows);
+                        restoreViewportAnchor(viewportAnchor, 'host.resizeCommit');
+                        tryPostTerminalState('Xterm.AfterTermResize', 'host.resizeCommit', {
+                          committedCols: commitCols,
+                          committedRows: commitRows,
+                          resizeGeneration: commit.resizeGeneration
+                        });
+                        postScreenStateSnapshot('after-host-resize-commit', msg, false);
                         var acknowledgedState = terminalState();
                         post({
                           type: 'resize_commit_ack',
@@ -802,6 +1058,11 @@ namespace PS7ScriptDesk.Shell.Controls
                           cursorY: acknowledgedState.cursorY,
                           baseY: acknowledgedState.baseY,
                           viewportY: acknowledgedState.viewportY
+                        });
+                        tryPostTerminalState('Xterm.ResizeCommitAckPosted', 'host.resizeCommit', {
+                          committedCols: acknowledgedState.cols,
+                          committedRows: acknowledgedState.rows,
+                          resizeGeneration: commit.resizeGeneration
                         });
                       } finally {
                         pendingResizeCommit = null;
@@ -1320,6 +1581,15 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             CancelResizeTransaction(reason);
+            TerminalCriticalTrace.LogStage(
+                "TerminalRendererRecoveryBegin",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["exceptionType"] = exception?.GetType().FullName,
+                    ["contentOmitted"] = true
+                });
 
             WebView2? retiredRenderer;
             TerminalWebView2LifecyclePolicy retiredLifecycle;
@@ -1545,6 +1815,16 @@ namespace PS7ScriptDesk.Shell.Controls
             {
                 return;
             }
+
+            using var performanceScope = PerformanceTrace.Begin(
+                "Terminal",
+                "RendererWriteRaw",
+                generation: generation,
+                properties: new Dictionary<string, object?>
+                {
+                    ["payloadCharacters"] = data.Length
+                });
+            TerminalOutputCorrelationTrace.Record("TerminalControlWriteRaw", generation, data);
 
             TerminalCriticalTrace.LogStage(
                 "TerminalControl.WriteRaw.Begin",
@@ -1791,6 +2071,11 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             var enqueueResult = _outputFlowController.Enqueue(generation, data);
+            TerminalOutputCorrelationTrace.Record(
+                "TerminalBridgeEnqueued",
+                generation,
+                data,
+                pendingCharacters: enqueueResult.PendingCharacters);
             TerminalCriticalTrace.LogStage(
                 "TerminalOutputFlowController.Enqueue.Result",
                 new Dictionary<string, object?>
@@ -1898,6 +2183,48 @@ namespace PS7ScriptDesk.Shell.Controls
             if (!_webView2Available) return;
             DeveloperDiagnostics.LogUserAction("Terminal", "TerminalFocusRequested", "Terminal focus requested.");
             ActivateTerminalHost("FocusTerminal");
+        }
+
+        /// <summary>Requests a bounded renderer snapshot at an authoritative backend prompt boundary.</summary>
+        public void ObservePromptBoundary(int generation)
+        {
+            if (!_webView2Available)
+            {
+                return;
+            }
+
+            void Send()
+            {
+                if (!TryGetCoreWebView2("ObservePromptBoundary", out var coreWebView2))
+                {
+                    return;
+                }
+
+                try
+                {
+                    coreWebView2.PostWebMessageAsString(
+                        TerminalWebMessageSerializer.SerializePromptBoundary(generation));
+                }
+                catch (Exception ex) when (IsWebView2LifecycleException(ex))
+                {
+                    RetireWebView2Renderer("ObservePromptBoundary", ex);
+                }
+                catch (Exception ex)
+                {
+                    DeveloperDiagnostics.LogException(
+                        "Terminal",
+                        ex,
+                        "Posting prompt-boundary screen-state request failed.",
+                        new Dictionary<string, object?>
+                        {
+                            ["generation"] = generation,
+                            ["contentOmitted"] = true
+                        });
+                }
+            }
+
+            if (Dispatcher.CheckAccess()) Send();
+            else Dispatcher.BeginInvoke(Send);
         }
 
         /// <summary>
@@ -2180,8 +2507,14 @@ namespace PS7ScriptDesk.Shell.Controls
                         outputDiagnostics.ResizeAdjacent,
                         outputDiagnostics.ResizeGeneration,
                         outputDiagnostics.ResizeElapsedMilliseconds,
-                        outputDiagnostics.ControlSummary));
+                        outputDiagnostics.ControlSummary,
+                        TerminalScreenStateDiagnostics.ContainsInterruptMarker(outputBatch.Data)));
                 TerminalStartupTrace.Write("JS_WRITE_INVOKED", $"sequence={outputBatch.Sequence}; submissionId={submissionId}; chars={outputBatch.Data.Length}; contentOmitted=true");
+                TerminalOutputCorrelationTrace.Record(
+                    "WebView2OutputSubmitted",
+                    outputBatch.Generation,
+                    outputBatch.Data,
+                    rendererSequence: outputBatch.Sequence);
                 TerminalCriticalTrace.LogStage(
                     "TerminalControl.WebView2.PostOutput",
                     new Dictionary<string, object?>
@@ -2409,6 +2742,18 @@ namespace PS7ScriptDesk.Shell.Controls
                             ["outputSubmissionOccurred"] = false,
                             ["contentOmitted"] = true
                         });
+                    DeveloperDiagnostics.LogInfo(
+                        "Terminal",
+                        "Resize commit posted to the browser renderer.",
+                        new Dictionary<string, object?>
+                        {
+                            ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                            ["rendererGeneration"] = _rendererInstanceGeneration,
+                            ["terminalSessionGeneration"] = terminalSessionGeneration,
+                            ["cols"] = resizeDecision.Columns,
+                            ["rows"] = resizeDecision.Rows,
+                            ["contentOmitted"] = true
+                        });
                 }
                 catch (Exception ex) when (IsWebView2LifecycleException(ex))
                 {
@@ -2451,9 +2796,26 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             var stage = GetStringProperty(root, "stage", "Xterm.ResizeTrace");
             var source = GetStringProperty(root, "source", "unknown");
-            TerminalCriticalTrace.LogStage(
-                stage,
-                CreateResizeTraceMetadata(root, source));
+            var metadata = CreateResizeTraceMetadata(root, source);
+            TerminalCriticalTrace.LogStage(stage, metadata);
+            DeveloperDiagnostics.LogDebug(
+                "Terminal",
+                $"Browser resize stage observed: {stage}.",
+                metadata);
+            var conceptualStage = stage switch
+            {
+                "Xterm.BeforeFit" => "TerminalFitBegin",
+                "Xterm.AfterFit" => "TerminalFitCompleted",
+                "ResizeObserver.Observed" => "TerminalViewportChanged",
+                "Xterm.BeforeHostResizeCommit" => "TerminalResizeRequested",
+                "Xterm.AfterHostResizeCommit" => "TerminalResizeApplied",
+                "Xterm.ViewportRestored" => "TerminalViewportChanged",
+                _ => null
+            };
+            if (conceptualStage is not null)
+            {
+                TerminalCriticalTrace.LogStage(conceptualStage, metadata);
+            }
         }
 
         private void HandleResizeRequest(JsonElement root)
@@ -2480,6 +2842,7 @@ namespace PS7ScriptDesk.Shell.Controls
             metadata["filterFlushOccurred"] = false;
 
             TerminalCriticalTrace.LogStage("ResizeMessage.Received", metadata);
+            TerminalCriticalTrace.LogStage("TerminalResizeRequested", metadata);
             TerminalCriticalTrace.LogStage(
                 resizeDecision.Accepted ? "ResizePolicy.Accepted" : "ResizePolicy.Rejected",
                 metadata);
@@ -2490,6 +2853,10 @@ namespace PS7ScriptDesk.Shell.Controls
             DeveloperDiagnostics.LogInfo(
                 "Terminal",
                 "xterm terminal geometry evaluated.",
+                metadata);
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                resizeDecision.Accepted ? "Resize request accepted for ConPTY transaction." : "Resize request rejected by terminal resize policy.",
                 metadata);
 
             if (!resizeDecision.Accepted)
@@ -2578,6 +2945,17 @@ namespace PS7ScriptDesk.Shell.Controls
                     ["committedRows"] = resizeDecision.Rows,
                     ["contentOmitted"] = true
                 });
+            TerminalCriticalTrace.LogStage(
+                "TerminalResizeBarrierBegin",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["terminalSessionGeneration"] = terminalSessionGeneration,
+                    ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                    ["committedColumns"] = resizeDecision.Columns,
+                    ["committedRows"] = resizeDecision.Rows,
+                    ["contentOmitted"] = true
+                });
 
             try
             {
@@ -2654,6 +3032,35 @@ namespace PS7ScriptDesk.Shell.Controls
                     ["reason"] = acknowledgement.Reason,
                     ["contentOmitted"] = true
                 });
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                acknowledgement.Accepted ? "Resize commit acknowledgement received; output barrier evaluated." : "Resize commit acknowledgement rejected.",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = rendererGeneration,
+                    ["terminalSessionGeneration"] = sessionGeneration,
+                    ["resizeGeneration"] = resizeGeneration,
+                    ["cols"] = columns,
+                    ["rows"] = rows,
+                    ["releasedCharacters"] = acknowledgement.BufferedCharacters,
+                    ["contentOmitted"] = true
+                });
+
+            if (acknowledgement.Accepted)
+            {
+                TerminalCriticalTrace.LogStage(
+                    "TerminalResizeBarrierCompleted",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = rendererGeneration,
+                        ["terminalSessionGeneration"] = sessionGeneration,
+                        ["resizeGeneration"] = resizeGeneration,
+                        ["actualColumns"] = columns,
+                        ["actualRows"] = rows,
+                        ["releasedCharacters"] = acknowledgement.BufferedCharacters,
+                        ["contentOmitted"] = true
+                    });
+            }
 
             if (!acknowledgement.Accepted)
             {
@@ -2710,6 +3117,16 @@ namespace PS7ScriptDesk.Shell.Controls
             _pendingResizeDecision = null;
             TerminalCriticalTrace.LogStage(
                 "ResizeOutputBarrierTimeout",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration,
+                    ["bufferedCharacters"] = cancelled.BufferedCharacters,
+                    ["bufferedChunks"] = cancelled.BufferedChunks,
+                    ["contentOmitted"] = true
+                });
+            TerminalCriticalTrace.LogStage(
+                "TerminalResizeBarrierTimeout",
                 new Dictionary<string, object?>
                 {
                     ["rendererGeneration"] = _rendererInstanceGeneration,
@@ -2840,8 +3257,15 @@ namespace PS7ScriptDesk.Shell.Controls
                 ["viewportY"] = GetIntProperty(root, "viewportY", 0),
                 ["absoluteCursorY"] = GetIntProperty(root, "absoluteCursorY", 0),
                 ["scrollbackLength"] = GetIntProperty(root, "scrollbackLength", 0),
+                ["scrollback"] = GetIntProperty(root, "scrollback", 0),
+                ["alternateBuffer"] = GetBooleanProperty(root, "alternateBuffer"),
                 ["clientWidth"] = GetIntProperty(root, "clientWidth", 0),
                 ["clientHeight"] = GetIntProperty(root, "clientHeight", 0),
+                ["canvasWidth"] = GetIntProperty(root, "canvasWidth", 0),
+                ["canvasHeight"] = GetIntProperty(root, "canvasHeight", 0),
+                ["viewportAnchorAtBottom"] = GetBooleanProperty(root, "viewportAnchorAtBottom"),
+                ["viewportAnchorDistanceFromBottom"] = GetIntProperty(root, "viewportAnchorDistanceFromBottom", 0),
+                ["viewportRestoreTarget"] = GetIntProperty(root, "viewportRestoreTarget", 0),
                 ["proposedColumns"] = GetIntProperty(root, "proposedCols", 0),
                 ["proposedRows"] = GetIntProperty(root, "proposedRows", 0),
                 ["reportedColumns"] = GetIntProperty(root, "reportedCols", 0),
@@ -2896,6 +3320,8 @@ namespace PS7ScriptDesk.Shell.Controls
                 ["otherEscapeCount"] = GetIntProperty(root, "otherEscapeCount", 0),
                 ["otherControlCount"] = GetIntProperty(root, "otherControlCount", 0),
                 ["printableCharacterCount"] = GetIntProperty(root, "printableCharacterCount", 0),
+                ["csiCommandsJson"] = GetBoundedJsonArrayProperty(root, "csiCommands"),
+                ["cursorDestinationsJson"] = GetBoundedJsonArrayProperty(root, "cursorDestinations"),
                 ["cols"] = GetIntProperty(root, "cols", 0),
                 ["rows"] = GetIntProperty(root, "rows", 0),
                 ["cursorX"] = GetIntProperty(root, "cursorX", 0),
@@ -2924,11 +3350,73 @@ namespace PS7ScriptDesk.Shell.Controls
                 metadata);
         }
 
+        private void LogXtermScreenStateSnapshot(JsonElement root)
+        {
+            var metadata = CreateResizeTraceMetadata(root, GetStringProperty(root, "reason", "unknown"));
+            metadata["event"] = "TerminalScreenStateSnapshot";
+            metadata["rendererIdentity"] = GetStringProperty(root, "rendererIdentity", "unknown");
+            metadata["bufferType"] = GetStringProperty(root, "bufferType", "unknown");
+            metadata["bufferLength"] = GetIntProperty(root, "bufferLength", 0);
+            metadata["scrollbackExtent"] = GetIntProperty(root, "scrollbackExtent", 0);
+            metadata["scrollPosition"] = GetIntProperty(root, "scrollPosition", 0);
+            metadata["atBottom"] = GetBooleanProperty(root, "atBottom");
+            metadata["selectionPresent"] = GetBooleanProperty(root, "selectionPresent");
+            metadata["rendererDisposed"] = GetBooleanProperty(root, "rendererDisposed");
+            metadata["promptBoundary"] = GetBooleanProperty(root, "promptBoundary");
+            metadata["outputSequence"] = GetLongProperty(root, "outputSequence", 0);
+            metadata["submissionId"] = GetLongProperty(root, "submissionId", 0);
+
+            var markerRowsJson = root.TryGetProperty("markerRowsJson", out var markerRowsJsonProperty) &&
+                markerRowsJsonProperty.ValueKind == JsonValueKind.String
+                ? markerRowsJsonProperty.GetString()
+                : null;
+            if (string.IsNullOrWhiteSpace(markerRowsJson) &&
+                root.TryGetProperty("markerRows", out var legacyRows) &&
+                legacyRows.ValueKind == JsonValueKind.Array)
+            {
+                markerRowsJson = legacyRows.GetRawText();
+            }
+
+            if (!TerminalMarkerSnapshotDiagnostics.TryNormalize(
+                    markerRowsJson,
+                    out var normalizedMarkerRowsJson,
+                    out var markerSummary))
+            {
+                normalizedMarkerRowsJson = "[]";
+                markerSummary = TerminalMarkerSnapshotDiagnostics.MarkerSnapshotSummary.Empty;
+            }
+
+            // Keep the normalized payload as a string. Passing a nested .NET
+            // collection through diagnostic metadata collapses it to a type name.
+            metadata["markerRowsJson"] = normalizedMarkerRowsJson;
+            metadata["hasStart"] = markerSummary.HasStart;
+            metadata["lowestNumberedMarker"] = markerSummary.LowestNumberedMarker;
+            metadata["highestNumberedMarker"] = markerSummary.HighestNumberedMarker;
+            metadata["numberedMarkerCount"] = markerSummary.NumberedMarkerCount;
+            metadata["numberedSequenceJson"] = markerSummary.NumberedSequenceJson;
+            metadata["hasEnd"] = markerSummary.HasEnd;
+            metadata["markerRowCount"] = markerSummary.MarkerRowCount;
+            metadata["contentOmitted"] = true;
+            TerminalCriticalTrace.LogStage("TerminalScreenStateSnapshot", metadata);
+            DeveloperDiagnostics.LogDebug("Terminal", "Captured bounded xterm screen-state snapshot.", metadata);
+        }
+
         private static string GetStringProperty(JsonElement root, string name, string fallback)
         {
             return root.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
                 ? property.GetString() ?? fallback
                 : fallback;
+        }
+
+        private static string GetBoundedJsonArrayProperty(JsonElement root, string name)
+        {
+            if (!root.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.Array)
+            {
+                return "[]";
+            }
+
+            var raw = property.GetRawText();
+            return raw.Length <= 8_192 ? raw : "[]";
         }
 
         private static int GetIntProperty(JsonElement root, string name, int fallback)
@@ -2971,6 +3459,19 @@ namespace PS7ScriptDesk.Shell.Controls
                 JsonValueKind.False => false,
                 _ => null
             };
+        }
+
+        private static string GetWindowsPtyBuildNumber()
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                return "0";
+            }
+
+            var buildNumber = Environment.OSVersion.Version.Build;
+            return buildNumber > 0
+                ? buildNumber.ToString(CultureInfo.InvariantCulture)
+                : "0";
         }
 
         private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -3045,6 +3546,20 @@ namespace PS7ScriptDesk.Shell.Controls
                             sequenceProp.TryGetInt64(out var sequence))
                         {
                             var scheduleFlush = _outputFlowController.Acknowledge(generation, sequence);
+                            TerminalOutputCorrelationTrace.RecordRendererAcknowledgement(generation, outputAckRendererGeneration, sequence);
+                            PerformanceTrace.Record(
+                                "instant",
+                                "TerminalC2CCorrelation",
+                                "RendererAcknowledged",
+                                generation: generation,
+                                properties: new Dictionary<string, object?>
+                                {
+                                    ["rendererSequence"] = sequence,
+                                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                                    ["scheduleFlush"] = scheduleFlush,
+                                    ["hasOutstandingOutput"] = _outputFlowController.HasOutstandingOutput,
+                                    ["contentOmitted"] = true
+                                });
                             TerminalStartupTrace.Write("JS_WRITE_COMPLETED", $"sequence={sequence}; generation={generation}; replayScheduled={scheduleFlush}");
                             TerminalCriticalTrace.LogStage(
                                 "TerminalControl.RendererAcknowledgement",
@@ -3106,9 +3621,19 @@ namespace PS7ScriptDesk.Shell.Controls
                             var leaveTerminalShortcut = root.TryGetProperty("leaveTerminalShortcut", out var leaveShortcutProp)
                                 ? leaveShortcutProp.GetString()
                                 : "unknown";
+                            var xtermVersion = root.TryGetProperty("xtermVersion", out var xtermVersionProp)
+                                ? xtermVersionProp.GetString()
+                                : "unknown";
+                            var windowsPtyBackend = root.TryGetProperty("windowsPtyBackend", out var windowsPtyBackendProp)
+                                ? windowsPtyBackendProp.GetString()
+                                : "unknown";
+                            var windowsPtyBuildNumber = root.TryGetProperty("windowsPtyBuildNumber", out var windowsPtyBuildProp) &&
+                                windowsPtyBuildProp.TryGetInt32(out var parsedWindowsPtyBuildNumber)
+                                ? parsedWindowsPtyBuildNumber
+                                : 0;
                             AppLogger.Info(
                                 "Terminal",
-                                $"xterm compatibility configured. ScreenReaderMode={screenReaderMode}, UnicodeWidthProvider={unicodeWidthProvider}, BinaryInputBridge={binaryInputBridge}, MousePasteGesture={mousePasteGesture}, LeaveTerminalShortcut={leaveTerminalShortcut}.");
+                                $"xterm compatibility configured. Version={xtermVersion}, WindowsPtyBackend={windowsPtyBackend}, WindowsPtyBuildNumber={windowsPtyBuildNumber}, ScreenReaderMode={screenReaderMode}, UnicodeWidthProvider={unicodeWidthProvider}, BinaryInputBridge={binaryInputBridge}, MousePasteGesture={mousePasteGesture}, LeaveTerminalShortcut={leaveTerminalShortcut}.");
                             DeveloperDiagnostics.LogInfo(
                                 "Terminal",
                                 "xterm compatibility capabilities were configured.",
@@ -3118,7 +3643,10 @@ namespace PS7ScriptDesk.Shell.Controls
                                     ["unicodeWidthProvider"] = unicodeWidthProvider,
                                     ["binaryInputBridge"] = binaryInputBridge,
                                     ["mousePasteGesture"] = mousePasteGesture,
-                                    ["leaveTerminalShortcut"] = leaveTerminalShortcut
+                                    ["leaveTerminalShortcut"] = leaveTerminalShortcut,
+                                    ["xtermVersion"] = xtermVersion,
+                                    ["windowsPtyBackend"] = windowsPtyBackend,
+                                    ["windowsPtyBuildNumber"] = windowsPtyBuildNumber
                                 });
                         }
                         break;
@@ -3197,6 +3725,22 @@ namespace PS7ScriptDesk.Shell.Controls
 
                     case "xterm_output_cursor_trace":
                         LogXtermOutputCursorTrace(root);
+                        break;
+
+                    case "xterm_screen_state_snapshot":
+                        LogXtermScreenStateSnapshot(root);
+                        break;
+
+                    case "xterm_screen_state_snapshot_error":
+                        DeveloperDiagnostics.LogWarning(
+                            "Terminal",
+                            "xterm screen-state snapshot failed; terminal behavior continued.",
+                            new Dictionary<string, object?>
+                            {
+                                ["reason"] = GetStringProperty(root, "reason", "unknown"),
+                                ["exception"] = GetStringProperty(root, "message", "unknown"),
+                                ["contentOmitted"] = true
+                            });
                         break;
 
                     case "xterm_output_cursor_trace_error":
@@ -3304,12 +3848,38 @@ namespace PS7ScriptDesk.Shell.Controls
                         if (root.TryGetProperty("text", out var copyTextProp))
                         {
                             var copyText = copyTextProp.GetString();
-                            if (!string.IsNullOrEmpty(copyText))
+                            var copyLength = copyText?.Length ?? 0;
+                            var copyLineCount = copyText is null ? 0 : copyText.Split('\n').Length;
+                            DeveloperDiagnostics.LogUserAction(
+                                "Terminal",
+                                "TerminalSelectionCopyRequested",
+                                "xterm requested clipboard copy for its current selection.",
+                                new Dictionary<string, object?>
+                                {
+                                    ["selectionLength"] = copyLength,
+                                    ["selectionLineCount"] = copyLineCount,
+                                    ["contentOmitted"] = true
+                                });
+
+                            if (copyText is not null)
                             {
                                 try
                                 {
-                                    System.Windows.Clipboard.SetText(copyText);
+                                    System.Windows.Clipboard.SetText(copyText, System.Windows.TextDataFormat.UnicodeText);
                                     ResetClipboardFailureEpisode(ClipboardCopyOperation);
+                                    AppLogger.Debug("Terminal", $"Terminal selection copied to the Windows clipboard. Length={copyLength}, Lines={copyLineCount}, ContentOmitted=True.");
+                                    DeveloperDiagnostics.LogStateTransition(
+                                        "Terminal",
+                                        "TerminalSelectionClipboard",
+                                        "Requested",
+                                        "Copied",
+                                        "xterm selection was accepted by the host clipboard bridge.",
+                                        new Dictionary<string, object?>
+                                        {
+                                            ["selectionLength"] = copyLength,
+                                            ["selectionLineCount"] = copyLineCount,
+                                            ["contentOmitted"] = true
+                                        });
                                 }
                                 catch (Exception ex)
                                 {
@@ -3459,6 +4029,15 @@ namespace PS7ScriptDesk.Shell.Controls
             var replacingRenderer = _rendererRecovery.RendererReady(_rendererInstanceGeneration);
             if (replacingRenderer)
             {
+                TerminalCriticalTrace.LogStage(
+                    "TerminalReplayBegin",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = activeGeneration,
+                        ["recoveryCycle"] = _rendererRecovery.Cycle,
+                        ["contentOmitted"] = true
+                    });
                 _outputFlowController.RestoreRenderer();
             }
 
@@ -3473,6 +4052,16 @@ namespace PS7ScriptDesk.Shell.Controls
                 if (!_outputFlowController.HasOutstandingOutput)
                 {
                     _rendererRecovery.ReplayCompleted(_rendererInstanceGeneration);
+                    TerminalCriticalTrace.LogStage(
+                        "TerminalReplayEnd",
+                        new Dictionary<string, object?>
+                        {
+                            ["rendererGeneration"] = _rendererInstanceGeneration,
+                            ["terminalSessionGeneration"] = generation,
+                            ["replayedHistoryCharacters"] = replayedHistoryCharacters,
+                            ["rawOutputNotReplayed"] = true,
+                            ["contentOmitted"] = true
+                        });
                 }
             }
 

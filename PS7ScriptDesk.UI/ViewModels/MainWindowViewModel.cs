@@ -40,6 +40,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly IExeExportWizardService? _exeExportWizardService;
         private readonly IRestApiPublishWizardService? _restApiPublishWizardService;
         private readonly IEditorExecutionAdapter? _editorExecutionAdapter;
+        private readonly IEditorExecutionCoordinator? _executionCoordinator;
         private readonly EditorExecutionFeatureGate _editorExecutionFeatureGate;
         private readonly IInteractiveTerminalCoordinator _interactiveTerminalCoordinator;
         private readonly TerminalOutputMultiplexer _terminalOutputMultiplexer;
@@ -208,7 +209,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             TerminalOutputMultiplexer? terminalOutputMultiplexer = null,
             IGitService? gitService = null,
             IGitSetupPromptService? gitSetupPromptService = null,
-            IGitWorkspaceCoordinator? gitWorkspaceCoordinator = null)
+            IGitWorkspaceCoordinator? gitWorkspaceCoordinator = null,
+            IEditorExecutionCoordinator? executionCoordinator = null)
 
         {
             TerminalStartupTrace.Write("MAINWINDOW_VIEWMODEL_CONSTRUCTOR_ENTER", $"viewModelId={GetHashCode():X8}; liveConsoleServiceId={liveConsoleService.GetHashCode():X8}");
@@ -228,12 +230,18 @@ namespace PS7ScriptDesk.UI.ViewModels
             _exeExportWizardService = exeExportWizardService;
             _restApiPublishWizardService = restApiPublishWizardService;
             _editorExecutionAdapter = editorExecutionAdapter;
+            _executionCoordinator = executionCoordinator;
             _editorExecutionFeatureGate = editorExecutionFeatureGate ?? new EditorExecutionFeatureGate();
             _interactiveTerminalCoordinator = interactiveTerminalCoordinator ?? new InteractiveTerminalCoordinator();
             _interactiveTerminalCoordinator.StateChanged += OnInteractiveTerminalStateChanged;
             _terminalOutputMultiplexer = terminalOutputMultiplexer ?? new TerminalOutputMultiplexer();
             _terminalOutputMultiplexer.OutputPublished += OnTerminalOutputEnvelopePublished;
-            if (_editorExecutionAdapter is not null)
+            if (_executionCoordinator is not null)
+            {
+                _executionCoordinator.EventPublished += OnCoordinatorExecutionEvent;
+                _executionCoordinator.ActiveExecutionChanged += OnCoordinatorActiveExecutionChanged;
+            }
+            if (_editorExecutionAdapter is not null && (_executionCoordinator is null || _executionCoordinator.IsRollbackEnabled))
             {
                 _editorExecutionAdapter.EventPublished += OnStructuredEditorExecutionEvent;
             }
@@ -364,9 +372,24 @@ namespace PS7ScriptDesk.UI.ViewModels
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public event Action<TerminalOutputEnvelope>? TerminalOutputPublished;
+        public event Action<int>? PromptReadyForTerminalDiagnostics;
 
         private void OnTerminalOutputEnvelopePublished(TerminalOutputEnvelope envelope)
         {
+            TerminalOutputCorrelationTrace.Record(
+                "OutputEnvelopePublished",
+                envelope.RendererGeneration,
+                envelope.Payload,
+                envelopeSequence: envelope.Sequence);
+            using var performanceScope = PerformanceTrace.Begin(
+                "Terminal",
+                "OutputPublication",
+                generation: envelope.RendererGeneration,
+                properties: new Dictionary<string, object?>
+                {
+                    ["payloadCharacters"] = envelope.Payload?.Length ?? 0,
+                    ["streamKind"] = envelope.StreamKind.ToString()
+                });
             var metadata = new Dictionary<string, object?>
             {
                 ["source"] = envelope.Source.ToString(),
@@ -641,6 +664,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public async Task RefreshHistoryAsync(GitHistoryTabViewModel tab, bool reset = true, CancellationToken cancellationToken = default)
         {
+            using var performanceScope = PerformanceTrace.Begin("Git", "HistoryRefresh", properties: new Dictionary<string, object?> { ["reset"] = reset, ["searchLength"] = tab.SearchText?.Length ?? 0 });
             if (_gitService is null) return;
             if (_historyRefreshCancellations.Remove(tab, out var previous)) { previous.Cancel(); previous.Dispose(); }
             var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -1727,6 +1751,14 @@ namespace PS7ScriptDesk.UI.ViewModels
             _interactiveTerminalCoordinator.StateChanged -= OnInteractiveTerminalStateChanged;
             if (_gitWorkspaceCoordinator is not null)
                 _gitWorkspaceCoordinator.RefreshRequested -= GitWorkspaceCoordinator_RefreshRequested;
+            if (_executionCoordinator is not null)
+            {
+                _executionCoordinator.EventPublished -= OnCoordinatorExecutionEvent;
+                _executionCoordinator.ActiveExecutionChanged -= OnCoordinatorActiveExecutionChanged;
+            }
+            if (_editorExecutionAdapter is not null && (_executionCoordinator is null || _executionCoordinator.IsRollbackEnabled))
+                _editorExecutionAdapter.EventPublished -= OnStructuredEditorExecutionEvent;
+            _executionCoordinator?.Dispose();
         }
 
         private void GitWorkspaceCoordinator_RefreshRequested(object? sender, EventArgs e)
@@ -1857,6 +1889,24 @@ namespace PS7ScriptDesk.UI.ViewModels
                 AppLogger.Info("Console", "Run Selection requested with no selected text.");
                 return;
             }
+
+            if (_executionCoordinator is not null && !_executionCoordinator.IsRollbackEnabled)
+            {
+                await ExecuteEditorThroughCoordinatorAsync(
+                    $"{SelectedTab.Title} (selection)",
+                    selectedScriptText,
+                    EditorExecutionMode.RunSelection,
+                    executeInCurrentScope: true,
+                    sourceFilePath: null).ConfigureAwait(false);
+                return;
+            }
+
+            await ObserveCanonicalExecutionRoutingAsync(
+                $"{SelectedTab.Title} (selection)",
+                selectedScriptText,
+                EditorExecutionMode.RunSelection,
+                executeInCurrentScope: true,
+                sourceFilePath: null).ConfigureAwait(false);
 
             if (_editorExecutionFeatureGate.IsStructuredExecutionEnabled)
             {
@@ -4070,6 +4120,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task OnExportAsExeAsync()
         {
+            using var performanceScope = PerformanceTrace.Begin("Export", "ExeExport");
             if (_isExeExportInProgress)
             {
                 return;
@@ -4294,6 +4345,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task OnPublishRestApiAsync()
         {
+            using var performanceScope = PerformanceTrace.Begin("Export", "ApiPublish");
             if (_isRestApiWizardOpen)
             {
                 return;
@@ -4611,6 +4663,24 @@ namespace PS7ScriptDesk.UI.ViewModels
             // executing different disk content.
             var sourceFilePath = TryPrepareSavedScriptPathForVisibleRun(selectedTab);
 
+            if (_executionCoordinator is not null && !_executionCoordinator.IsRollbackEnabled)
+            {
+                await ExecuteEditorThroughCoordinatorAsync(
+                    selectedTab.Title,
+                    selectedTab.Content,
+                    EditorExecutionMode.ScriptCall,
+                    executeInCurrentScope: false,
+                    sourceFilePath).ConfigureAwait(false);
+                return;
+            }
+
+            await ObserveCanonicalExecutionRoutingAsync(
+                selectedTab.Title,
+                selectedTab.Content,
+                EditorExecutionMode.ScriptCall,
+                executeInCurrentScope: false,
+                sourceFilePath).ConfigureAwait(false);
+
             if (_editorExecutionFeatureGate.IsStructuredExecutionEnabled)
             {
                 await DispatchStructuredEditorExecutionAsync(
@@ -4640,6 +4710,179 @@ namespace PS7ScriptDesk.UI.ViewModels
                 {
                     PostToUi(() => { IsExecutionRunning = false; RefreshCommandStates(); });
                 }
+            }
+        }
+
+        private async Task ObserveCanonicalExecutionRoutingAsync(
+            string displayName,
+            string scriptText,
+            EditorExecutionMode mode,
+            bool executeInCurrentScope,
+            string? sourceFilePath)
+        {
+            using var performanceScope = PerformanceTrace.Begin(
+                "Execution",
+                "ExecuteEditorThroughCoordinator",
+                properties: new Dictionary<string, object?>
+                {
+                    ["mode"] = mode.ToString(),
+                    ["displayNameLength"] = displayName?.Length ?? 0
+                });
+            if (_executionCoordinator is null)
+            {
+                return;
+            }
+
+            var request = new EditorExecutionRequest(
+                Guid.NewGuid(),
+                _editorExecutionAdapter?.Snapshot.SessionGeneration ?? 0,
+                mode,
+                displayName,
+                scriptText ?? string.Empty,
+                sourceFilePath,
+                IsSavedClean: sourceFilePath is not null,
+                WorkingDirectory: _liveConsoleService.CurrentWorkingDirectory,
+                ExecuteInCurrentScope: executeInCurrentScope,
+                CapabilityRequirements: executeInCurrentScope
+                    ? new ExecutionCapabilityRequirements(RequiresCurrentScope: true)
+                    : null);
+            try
+            {
+                await _executionCoordinator.ObserveAsync(request).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Shadow routing is diagnostic-only; never change the established execution path.
+                DeveloperDiagnostics.LogException(
+                    "Execution",
+                    ex,
+                    "Canonical execution routing observation failed; existing dispatch remains authoritative.",
+                    new Dictionary<string, object?> { ["requestId"] = request.RequestId, ["mode"] = mode.ToString() });
+            }
+        }
+
+        private async Task ExecuteEditorThroughCoordinatorAsync(
+            string displayName,
+            string scriptText,
+            EditorExecutionMode mode,
+            bool executeInCurrentScope,
+            string? sourceFilePath)
+        {
+            if (_executionCoordinator is null)
+            {
+                return;
+            }
+
+            var request = new EditorExecutionRequest(
+                Guid.NewGuid(),
+                _editorExecutionAdapter?.Snapshot.SessionGeneration ?? 0,
+                mode,
+                displayName,
+                scriptText ?? string.Empty,
+                sourceFilePath,
+                IsSavedClean: sourceFilePath is not null,
+                WorkingDirectory: _liveConsoleService.CurrentWorkingDirectory,
+                ExecuteInCurrentScope: executeInCurrentScope,
+                CapabilityRequirements: executeInCurrentScope
+                    ? new ExecutionCapabilityRequirements(
+                        RequiresCurrentScope: true,
+                        RequiresWorkingDirectoryContinuity: true)
+                    : null);
+            var decision = _executionCoordinator.Route(request);
+            var structured = decision.Accepted && decision.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId;
+            if (!decision.Accepted)
+            {
+                StatusText = decision.SelectionReason ?? decision.Reason ?? "Editor execution was rejected.";
+                DeveloperDiagnostics.LogDecision(
+                    "Execution",
+                    "EditorExecutionRejected",
+                    "The execution coordinator rejected an editor request before backend dispatch.",
+                    "Rejected",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = request.RequestId,
+                        ["selectionReason"] = decision.SelectionReason,
+                        ["reason"] = decision.Reason,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            if (structured && !_terminalOutputMultiplexer.TryBeginEditorExecution(request.RequestId, out var rejectionReason))
+            {
+                StatusText = rejectionReason;
+                DeveloperDiagnostics.LogDecision(
+                    "Execution",
+                    "StructuredEditorAdmissionRejected",
+                    "Structured execution was selected but terminal output admission rejected the request.",
+                    "Rejected",
+                    new Dictionary<string, object?> { ["requestId"] = request.RequestId, ["reason"] = rejectionReason });
+                return;
+            }
+
+            IsExecutionRunning = true;
+            if (structured)
+            {
+                _activeStructuredExecutionRequestId = request.RequestId;
+                _structuredExecutionCancellation?.Dispose();
+                _structuredExecutionCancellation = new CancellationTokenSource();
+            }
+
+            StatusText = structured
+                ? $"Running {displayName} through structured PowerShell broker..."
+                : $"Sending {displayName} to the live PowerShell console...";
+            AppLogger.Info("Console", $"Coordinator dispatching '{displayName}'. RequestId={request.RequestId:N}; Backend={decision.SelectedBackend}; Reason={decision.SelectionReason}; Downgrade={decision.FallbackOrDowngradeReason ?? "(none)"}.");
+
+            try
+            {
+                var result = await _executionCoordinator.ExecuteAsync(
+                    request,
+                    structured ? _structuredExecutionCancellation!.Token : CancellationToken.None).ConfigureAwait(false);
+                PostToUi(() =>
+                {
+                    StatusText = result.Status switch
+                    {
+                        EditorExecutionStatus.Completed => structured
+                            ? $"{displayName} completed through structured broker"
+                            : $"{displayName} sent to the live PowerShell console",
+                        EditorExecutionStatus.Cancelled => $"{displayName} cancelled",
+                        EditorExecutionStatus.Rejected => result.ErrorMessage ?? "Editor execution was rejected",
+                        _ => result.ErrorMessage ?? "Editor execution failed"
+                    };
+                    UpdateConsoleSessionPresentation();
+                });
+            }
+            catch (OperationCanceledException) when (structured)
+            {
+                PostToUi(() => StatusText = $"{displayName} cancelled");
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException(
+                    "Execution",
+                    ex,
+                    "Coordinator-owned editor execution failed.",
+                    new Dictionary<string, object?> { ["requestId"] = request.RequestId, ["selectedBackend"] = decision.SelectedBackend, ["contentOmitted"] = true });
+                PostToUi(() =>
+                {
+                    StatusText = "Editor execution failed";
+                    AppendOutputLine($"Editor execution failed: {ex.Message}");
+                });
+            }
+            finally
+            {
+                if (structured)
+                {
+                    _terminalOutputMultiplexer.EndEditorExecution(request.RequestId);
+                    _activeStructuredExecutionRequestId = null;
+                    _structuredExecutionCancellation?.Dispose();
+                    _structuredExecutionCancellation = null;
+                }
+                PostToUi(() =>
+                {
+                    IsExecutionRunning = false;
+                    RefreshCommandStates();
+                });
             }
         }
 
@@ -6808,6 +7051,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task ReloadWorkspaceItemsAsync(bool logOperation)
         {
+            using var performanceScope = PerformanceTrace.Begin("Workspace", "ReloadWorkspaceItems", properties: new Dictionary<string, object?> { ["logOperation"] = logOperation });
             var workspacePath = _currentWorkspaceFolderPath;
             if (string.IsNullOrWhiteSpace(workspacePath))
             {
@@ -7305,6 +7549,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 generation,
                 InteractiveTerminalState.InteractiveIdleAtPrompt,
                 "Backend prompt heuristic observed.");
+            PromptReadyForTerminalDiagnostics?.Invoke(generation);
             DeveloperDiagnostics.LogStateTransition(
                 "Terminal",
                 "InteractivePromptReady",
@@ -8033,6 +8278,29 @@ namespace PS7ScriptDesk.UI.ViewModels
             _uiSynchronizationContext.Post(_ => action(), null);
         }
 
+        private void OnCoordinatorExecutionEvent(EditorExecutionEvent executionEvent)
+        {
+            if (executionEvent.BackendId == EditorExecutionCoordinator.StructuredBackendId)
+            {
+                OnStructuredEditorExecutionEvent(executionEvent);
+            }
+
+            if (executionEvent.Kind is EditorExecutionEventKind.Accepted or
+                EditorExecutionEventKind.Started or
+                EditorExecutionEventKind.Completed or
+                EditorExecutionEventKind.Cancelled or
+                EditorExecutionEventKind.Failed or
+                EditorExecutionEventKind.Rejected)
+            {
+                PostToUi(RefreshCommandStates);
+            }
+        }
+
+        private void OnCoordinatorActiveExecutionChanged()
+        {
+            PostToUi(RefreshCommandStates);
+        }
+
         private Task PostToUiAsync(Action action)
         {
             if (_uiSynchronizationContext is null)
@@ -8213,7 +8481,13 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private bool CanStopScript()
         {
-            return ((_activeStructuredExecutionRequestId.HasValue && _structuredExecutionCancellation is not null) ||
+            var activeCoordinatorExecution = _executionCoordinator?.ActiveExecution;
+            var coordinatorCanInterrupt = activeCoordinatorExecution is not null &&
+                                           (activeCoordinatorExecution.Capabilities.SupportsTerminalInterrupt ||
+                                            activeCoordinatorExecution.Capabilities.SupportsCancellation);
+
+            return (coordinatorCanInterrupt ||
+                    (_activeStructuredExecutionRequestId.HasValue && _structuredExecutionCancellation is not null) ||
                     (_liveConsoleService.IsSessionRunning && _liveConsoleService.IsCommandInProgress)) &&
                    !IsStopInProgress &&
                    !IsRuntimeDiscoveryInProgress;

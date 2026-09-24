@@ -267,6 +267,14 @@ public static class AppLogger
 
     private static void PersistEmergencyEntry(string entry)
     {
+        using var performanceScope = PerformanceTrace.Begin(
+            "SynchronousWait",
+            "AppLogger.PersistEmergencyEntry.GetAwaiter.GetResult",
+            properties: new Dictionary<string, object?>
+            {
+                ["reason"] = "emergency-log-persistence",
+                ["entryLength"] = entry?.Length ?? 0
+            });
         PersistEmergencyEntryAsync(entry).GetAwaiter().GetResult();
     }
 

@@ -175,6 +175,54 @@ public sealed class TerminalOutputBridgeTests
         Assert.Equal(new[] { "new" }, history.Snapshot(4));
     }
 
+    [Fact]
+    public void PersistentOutputHistory_PreservesCompletedNumberedRunAcrossGeometryOnlyToggle()
+    {
+        var history = new TerminalPersistentOutputHistory(maximumCharacters: 32 * 1024);
+        const int sessionGeneration = 1;
+        var completedRun = string.Join(
+            "\r\n",
+            new[] { "COMPLETION_TEST_START" }
+                .Concat(Enumerable.Range(1, 50).Select(number => $"COMPLETION_TEST {number:D3}"))
+                .Append("COMPLETION_TEST_END")
+                .Append("PS> "));
+
+        history.ActivateGeneration(sessionGeneration);
+        Assert.True(history.Append(sessionGeneration, completedRun));
+
+        // A Problems open/close and resize are geometry-only from the persistent
+        // history boundary; they must not activate a new session or rewrite bytes.
+        var afterProblemsToggle = string.Concat(history.Snapshot(sessionGeneration));
+
+        Assert.Equal(completedRun, afterProblemsToggle);
+        Assert.Equal(1, CountOccurrences(afterProblemsToggle, "COMPLETION_TEST_START"));
+        Assert.Equal(1, CountOccurrences(afterProblemsToggle, "COMPLETION_TEST_END"));
+        for (var number = 1; number <= 50; number++)
+        {
+            var marker = $"COMPLETION_TEST {number:D3}";
+            Assert.Equal(1, CountOccurrences(afterProblemsToggle, marker));
+            if (number < 50)
+            {
+                Assert.True(
+                    afterProblemsToggle.IndexOf(marker, StringComparison.Ordinal)
+                    < afterProblemsToggle.IndexOf($"COMPLETION_TEST {number + 1:D3}", StringComparison.Ordinal));
+            }
+        }
+    }
+
+    private static int CountOccurrences(string value, string expected)
+    {
+        var count = 0;
+        var offset = 0;
+        while ((offset = value.IndexOf(expected, offset, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            offset += expected.Length;
+        }
+
+        return count;
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(2)]

@@ -33,6 +33,8 @@ namespace PS7ScriptDesk.Shell
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            using var performanceScope = PerformanceTrace.Begin("Startup", "App.OnStartup");
+            PerformanceTrace.Snapshot("Startup", "App", "begin");
             var startupArgs = e.Args ?? Array.Empty<string>();
             StartupLifecycleTrace.ConfigureUiThreadSnapshotProvider(() => (Dispatcher.CheckAccess(), Dispatcher.Thread.ManagedThreadId));
             TerminalStartupTrace.ConfigureUiThreadSnapshotProvider(() => (Dispatcher.CheckAccess(), Dispatcher.Thread.ManagedThreadId));
@@ -155,6 +157,7 @@ namespace PS7ScriptDesk.Shell
             DeveloperDiagnostics.LogInfo("Startup", "Main window created by AppBootstrapper.");
             shellWindow.Show();
             StartupLifecycleTrace.Write("App.OnStartup", "MainWindowShown");
+            PerformanceTrace.Record("milestone", "Startup", "WindowShown", result: "completed");
             AppLogger.Info("App", "Main window shown.");
             _ = CheckForStoreUpdatesAfterStartupAsync(shellWindow);
             DeveloperDiagnostics.LogMethodExit("Startup", "Main window shown; OnStartup completed.");
@@ -163,7 +166,10 @@ namespace PS7ScriptDesk.Shell
         protected override void OnExit(ExitEventArgs e)
         {
             DeveloperDiagnostics.LogInfo("Startup", $"App.OnExit invoked with exit code {e.ApplicationExitCode}.");
+            PerformanceTrace.Snapshot("Startup", "App", "end");
+            EditorInputTrace.Stop();
             DeveloperDiagnostics.Shutdown();
+            PerformanceTrace.Stop();
             base.OnExit(e);
         }
 

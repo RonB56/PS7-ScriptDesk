@@ -269,6 +269,8 @@ namespace PS7ScriptDesk.Application.Diagnostics
 
         public static bool IsVerboseEditorEnabled() => _configuration.IsVerboseEditorEnabled;
 
+        public static bool? IsUiThread => TryResolveUiThread();
+
         public static bool IsVerboseExecutionEnabled() => _configuration.IsVerbosePowerShellExecutionEnabled;
 
         public static int PreviewCharacterLimit => _configuration.PreviewCharacterLimit;

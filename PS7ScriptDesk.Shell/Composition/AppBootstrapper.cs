@@ -34,15 +34,72 @@ namespace PS7ScriptDesk.Shell.Composition
             var restApiPublishWizardService = new RestApiPublishWizardService(new ApiPublishConfigurationStore());
             var runtimeService = new RuntimeService(applicationSettings.SelectedRuntimeExecutablePath);
             var structuredExecutionFeatureGate = EditorExecutionFeatureGate.FromEnvironment();
+            var effectiveExecutionFeatureGate = structuredExecutionFeatureGate;
+            var structuredAvailability = structuredExecutionFeatureGate.IsStructuredExecutionEnabled
+                ? ExecutionBackendAvailability.InitializationFailed
+                : ExecutionBackendAvailability.Unavailable;
             IEditorExecutionAdapter? editorExecutionAdapter = null;
             if (structuredExecutionFeatureGate.IsStructuredExecutionEnabled)
             {
-                var broker = PersistentPowerShellSessionBroker
-                    .CreateAsync("Structured editor PowerShell broker")
-                    .GetAwaiter()
-                    .GetResult();
-                editorExecutionAdapter = new StructuredEditorExecutionAdapter(broker, structuredExecutionFeatureGate);
+                var structuredStartup = TryInitializeStructuredExecution(() =>
+                {
+                    var broker = PersistentPowerShellSessionBroker
+                        .CreateAsync("Structured editor PowerShell broker", startupRuntimeInfo)
+                        .GetAwaiter()
+                        .GetResult();
+                    return new StructuredEditorExecutionAdapter(broker, structuredExecutionFeatureGate);
+                });
+                editorExecutionAdapter = structuredStartup.Adapter;
+                if (structuredStartup.IsAvailable)
+                {
+                    structuredAvailability = ExecutionBackendAvailability.Available;
+                }
+                else
+                {
+                    structuredAvailability = structuredStartup.Failure is PowerShellRuntimeCompatibilityException
+                        ? ExecutionBackendAvailability.RuntimeIncompatible
+                        : ExecutionBackendAvailability.InitializationFailed;
+                    effectiveExecutionFeatureGate = new EditorExecutionFeatureGate(false);
+                    var failure = structuredStartup.Failure ?? new InvalidOperationException("Structured execution initialization returned no adapter and no exception.");
+                    DeveloperDiagnostics.LogException(
+                        "Startup",
+                        failure,
+                        "Structured execution was requested but initialization failed; continuing with the legacy execution backend. Structured execution is unavailable for this application session.",
+                        new Dictionary<string, object?>
+                        {
+                            ["structuredExecutionRequested"] = true,
+                            ["structuredExecutionAvailable"] = false,
+                            ["effectiveBackend"] = "legacy",
+                            ["legacyBackendAvailable"] = true,
+                            ["fallbackScope"] = "startup-composition-only"
+                        });
+                }
             }
+            var executionBackends = new List<IEditorExecutionBackend>
+            {
+                new LegacyLiveConsoleExecutionBackend(liveConsoleService)
+            };
+            if (editorExecutionAdapter is not null)
+            {
+                executionBackends.Add(new StructuredEditorExecutionBackend(editorExecutionAdapter));
+            }
+            var executionCoordinator = new EditorExecutionCoordinator(
+                executionBackends,
+                structuredExecutionFeatureGate,
+                shadowMode: false,
+                structuredAvailability,
+                new PowerShellExecutionRequestClassifier());
+            DeveloperDiagnostics.LogInfo(
+                "Startup",
+                "Canonical execution coordinator composed in shadow mode.",
+                new Dictionary<string, object?>
+                {
+                    ["structuredExecutionEnabled"] = structuredExecutionFeatureGate.IsStructuredExecutionEnabled,
+                    ["structuredExecutionEffective"] = effectiveExecutionFeatureGate.IsStructuredExecutionEnabled,
+                    ["structuredExecutionAvailable"] = editorExecutionAdapter is not null,
+                    ["backendCount"] = executionBackends.Count,
+                    ["shadowMode"] = true
+                });
             DeveloperDiagnostics.ConfigureFromSettings(applicationSettings, "AppBootstrapper loaded settings");
             DeveloperDiagnostics.LogInfo(
                 "Startup",
@@ -68,12 +125,13 @@ namespace PS7ScriptDesk.Shell.Composition
                 uiScaleService,
                 documentRecoveryService,
                 editorExecutionAdapter,
-                structuredExecutionFeatureGate,
+                effectiveExecutionFeatureGate,
                 new InteractiveTerminalCoordinator(),
                 new TerminalOutputMultiplexer(),
                 gitService,
                 userPromptService,
-                gitWorkspaceCoordinator);
+                gitWorkspaceCoordinator,
+                executionCoordinator);
             StartupLifecycleTrace.Write("MainWindowViewModel", "CONSTRUCTED", $"terminalServiceId={liveConsoleService.GetHashCode():X8}; gitServiceId={gitService.GetHashCode():X8}");
 
             var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService, liveConsoleService);
@@ -84,5 +142,24 @@ namespace PS7ScriptDesk.Shell.Composition
             DeveloperDiagnostics.LogInfo("Startup", "MainWindow instance created and view model attached.");
             return window;
         }
+
+        internal static StructuredExecutionStartupResult TryInitializeStructuredExecution(Func<IEditorExecutionAdapter> factory)
+        {
+            ArgumentNullException.ThrowIfNull(factory);
+
+            try
+            {
+                return new StructuredExecutionStartupResult(factory(), null);
+            }
+            catch (Exception ex)
+            {
+                return new StructuredExecutionStartupResult(null, ex);
+            }
+        }
+    }
+
+    internal sealed record StructuredExecutionStartupResult(IEditorExecutionAdapter? Adapter, Exception? Failure)
+    {
+        public bool IsAvailable => Adapter is not null && Failure is null;
     }
 }

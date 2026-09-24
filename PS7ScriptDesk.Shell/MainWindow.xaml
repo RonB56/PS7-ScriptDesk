@@ -17,6 +17,7 @@
         Closing="Window_Closing"
         Closed="Window_Closed"
         PreviewKeyDown="Window_PreviewKeyDown"
+        PreviewLostKeyboardFocus="Window_PreviewLostKeyboardFocus"
         PreviewGotKeyboardFocus="Window_PreviewGotKeyboardFocus"
         AllowDrop="True">
 

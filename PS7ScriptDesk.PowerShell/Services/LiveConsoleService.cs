@@ -118,6 +118,8 @@ namespace PS7ScriptDesk.PowerShell.Services
         private bool _preStartBufferTruncated;
         private string? _lastPromptHeuristicDirectory;
         private int _terminalSessionGeneration;
+        private long _nextConPtyReadId;
+        private long _nextTerminalOutputChunkId;
         private bool _terminalSessionTeardownInProgress = true;
         private bool _redirectedTerminalTransportActive;
         private readonly ResizeFailureEpisode _resizeFailureEpisode = new();
@@ -300,6 +302,8 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             lock (_syncRoot)
             {
+                var previousColumns = _terminalColumns;
+                var previousRows = _terminalRows;
                 UpdateTerminalSize(width, height);
                 resizeSequence = ++_resizeSequence;
                 resizeRequest = new ResizeRequest(
@@ -307,6 +311,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                     _terminalSessionGeneration,
                     _terminalColumns,
                     _terminalRows,
+                    previousColumns,
+                    previousRows,
                     _process,
                     resizeSequence);
                 _lastResizeObservation = ResizeObservation.FromRequest(resizeRequest);
@@ -393,6 +399,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 var workingDirectory = NormalizeWorkingDirectory(startupWorkingDirectory);
                 TerminalStartupTrace.Write("POWERSHELL_RUNTIME_RESOLVED", $"executable={runtime.LaunchExecutablePath}; displayPath={runtime.ExecutablePath}; workingDirectory={workingDirectory}");
                 var sessionGeneration = BeginTerminalSessionGeneration();
+                TerminalOutputCorrelationTrace.ResetForSession(sessionGeneration);
                 _terminalInputCoordinator.BeginSession(sessionGeneration);
                 NotifyTerminalSessionStarted(sessionGeneration);
 
@@ -454,6 +461,7 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                         cancellationToken.ThrowIfCancellationRequested();
                         sessionGeneration = BeginTerminalSessionGeneration();
+                        TerminalOutputCorrelationTrace.ResetForSession(sessionGeneration);
                         NotifyTerminalSessionStarted(sessionGeneration);
                         try
                         {
@@ -941,6 +949,10 @@ namespace PS7ScriptDesk.PowerShell.Services
             CancellationToken cancellationToken = default)
         {
             var operationId = $"ConsoleInterrupt-{Guid.NewGuid():N}";
+            using var performanceScope = PerformanceTrace.Begin(
+                "Terminal",
+                "InterruptOrRestart",
+                correlationId: operationId);
             using var scope = DeveloperDiagnostics.BeginTimedOperation(
                 "Terminal",
                 "InterruptOrRestart",
@@ -967,6 +979,20 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
 
             var ownedProcessId = TryGetProcessId(process);
+            PerformanceTrace.Record(
+                "instant",
+                "TerminalC2CCorrelation",
+                "InterruptRequested",
+                correlationId: operationId,
+                generation: sessionGeneration,
+                properties: new Dictionary<string, object?>
+                {
+                    ["commandInProgress"] = commandInProgress,
+                    ["pseudoConsolePresent"] = hasPseudoConsole,
+                    ["processPresent"] = process is not null,
+                    ["contentOmitted"] = true
+                });
+            TerminalOutputCorrelationTrace.MarkInterruptRequested(sessionGeneration);
             AppLogger.Info(
                 "LiveConsole",
                 $"Interrupt requested. OperationId={operationId}, ProcessId={ownedProcessId?.ToString() ?? "(none)"}, SessionRunning={process is not null && !process.HasExited}, CommandInProgress={commandInProgress}, HasPseudoConsole={hasPseudoConsole}, HostAttached={hostAttached}, Runtime='{runtime?.DisplayName ?? "(none)"}', WorkingDirectory='{workingDirectory ?? "(none)"}'.");
@@ -2102,6 +2128,12 @@ namespace PS7ScriptDesk.PowerShell.Services
                         break;
                     }
 
+                    long? readId = PerformanceTrace.IsEnabled
+                        ? Interlocked.Increment(ref _nextConPtyReadId)
+                        : null;
+                    var readChunk = new string(buffer, 0, charsRead);
+                    TerminalOutputCorrelationTrace.RecordRawRead(sessionGeneration, readChunk, readId!.Value);
+
                     if (!_firstOutputLogged)
                     {
                         _firstOutputLogged = true;
@@ -2121,11 +2153,12 @@ namespace PS7ScriptDesk.PowerShell.Services
                         });
                     LogConptyOutputDuringResizeIfRecent(sessionGeneration, charsRead);
                     TerminalStartupTrace.Write("CONPTY_OUTPUT_ROUTING_BEGIN", $"sessionGeneration={sessionGeneration}; chars={charsRead}");
-                    PublishTerminalChunkForSession(
-                        new string(buffer, 0, charsRead),
+                    PublishTerminalChunkForSessionWithReadId(
+                        readChunk,
                         ExecutionOutputStreamKind.StandardOutput,
                         onOutput,
-                        sessionGeneration);
+                        sessionGeneration,
+                        readId);
                     TerminalStartupTrace.Write("CONPTY_OUTPUT_ROUTING_END", $"sessionGeneration={sessionGeneration}; chars={charsRead}");
                 }
 
@@ -2286,11 +2319,22 @@ namespace PS7ScriptDesk.PowerShell.Services
             PublishTerminalChunkCore(rawChunk, streamKind, onOutput, observedSessionGeneration);
         }
 
+        private void PublishTerminalChunkForSessionWithReadId(
+            string rawChunk,
+            ExecutionOutputStreamKind streamKind,
+            Action<ExecutionOutputRecord> onOutput,
+            int observedSessionGeneration,
+            long? sourceReadId)
+        {
+            PublishTerminalChunkCore(rawChunk, streamKind, onOutput, observedSessionGeneration, sourceReadId);
+        }
+
         private void PublishTerminalChunkCore(
             string rawChunk,
             ExecutionOutputStreamKind streamKind,
             Action<ExecutionOutputRecord> onOutput,
-            int? observedSessionGeneration)
+            int? observedSessionGeneration,
+            long? sourceReadId = null)
         {
             if (string.IsNullOrEmpty(rawChunk))
             {
@@ -2324,6 +2368,9 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
 
             var dispatchGeneration = GetCurrentCommandDispatchGeneration();
+            long? chunkId = PerformanceTrace.IsEnabled
+                ? Interlocked.Increment(ref _nextTerminalOutputChunkId)
+                : null;
 
             // ── Raw path (for xterm.js) ───────────────────────────────────────────
             // Strip only null bytes; preserve all ANSI/VT100 sequences so xterm.js
@@ -2349,6 +2396,16 @@ namespace PS7ScriptDesk.PowerShell.Services
             cleaned = AnsiRegex.Replace(cleaned, string.Empty);
             cleaned = cleaned.Replace("\r\n", "\n", StringComparison.Ordinal);
             cleaned = cleaned.Replace("\r", "\n", StringComparison.Ordinal);
+            var promptHeuristicMatched = PerformanceTrace.IsEnabled &&
+                                         !string.IsNullOrEmpty(cleaned) &&
+                                         PromptRegex.IsMatch(cleaned);
+            TerminalOutputCorrelationTrace.Record(
+                "TerminalChunkFiltered",
+                observedSessionGeneration ?? _terminalSessionGeneration,
+                raw,
+                readId: sourceReadId,
+                chunkId: chunkId,
+                promptHeuristicMatched: promptHeuristicMatched);
 
             if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseTerminalEnabled())
             {
@@ -2370,6 +2427,16 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             if (!string.IsNullOrEmpty(cleaned))
             {
+                if (promptHeuristicMatched)
+                {
+                    TerminalOutputCorrelationTrace.Record(
+                        "PromptDetectedOnChunk",
+                        observedSessionGeneration ?? _terminalSessionGeneration,
+                        raw,
+                        readId: sourceReadId,
+                        chunkId: chunkId,
+                        promptHeuristicMatched: true);
+                }
                 UpdateCurrentDirectoryFromPromptCore(cleaned, observedSessionGeneration);
             }
 
@@ -2418,6 +2485,13 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                 if (rawHandler is not null)
                 {
+                    TerminalOutputCorrelationTrace.Record(
+                        "RawOutputSubscriberDispatch",
+                        generationForRawOutput,
+                        raw,
+                        readId: sourceReadId,
+                        chunkId: chunkId,
+                        promptHeuristicMatched: promptHeuristicMatched);
                     TerminalCriticalTrace.LogStage(
                         "LiveConsole.NotifyRawOutputHandlers.Dispatch",
                         new Dictionary<string, object?>
@@ -4267,10 +4341,20 @@ namespace PS7ScriptDesk.PowerShell.Services
         /// <inheritdoc />
         public void ResizeConsole(int cols, int rows)
         {
+            using var performanceScope = PerformanceTrace.Begin(
+                "TerminalResize",
+                "ConPtyResize",
+                properties: new Dictionary<string, object?>
+                {
+                    ["columns"] = cols,
+                    ["rows"] = rows
+                });
             ResizeRequest resizeRequest;
             long resizeSequence;
             lock (_syncRoot)
             {
+                var previousColumns = _terminalColumns;
+                var previousRows = _terminalRows;
                 _terminalColumns = Math.Max(1, cols);
                 _terminalRows    = Math.Max(1, rows);
                 resizeSequence = ++_resizeSequence;
@@ -4279,6 +4363,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                     _terminalSessionGeneration,
                     _terminalColumns,
                     _terminalRows,
+                    previousColumns,
+                    previousRows,
                     _process,
                     resizeSequence);
                 _lastResizeObservation = ResizeObservation.FromRequest(resizeRequest);
@@ -4301,23 +4387,25 @@ namespace PS7ScriptDesk.PowerShell.Services
             ResizeRequest resizeRequest,
             int? hResult)
         {
-            TerminalCriticalTrace.LogStage(
-                stage,
-                new Dictionary<string, object?>
-                {
-                    ["operation"] = operation,
-                    ["resizeGeneration"] = resizeRequest.ResizeSequence,
-                    ["terminalSessionGeneration"] = resizeRequest.SessionGeneration,
-                    ["requestedColumns"] = resizeRequest.Columns,
-                    ["requestedRows"] = resizeRequest.Rows,
-                    ["coordX"] = resizeRequest.Columns,
-                    ["coordY"] = resizeRequest.Rows,
-                    ["pseudoConsoleHandlePresent"] = resizeRequest.PseudoConsole != IntPtr.Zero,
-                    ["processId"] = TryGetProcessId(resizeRequest.Process),
-                    ["hResult"] = hResult,
-                    ["hResultHex"] = hResult.HasValue ? $"0x{hResult.Value:X8}" : null,
-                    ["contentOmitted"] = true
-                });
+            var metadata = new Dictionary<string, object?>
+            {
+                ["operation"] = operation,
+                ["resizeGeneration"] = resizeRequest.ResizeSequence,
+                ["terminalSessionGeneration"] = resizeRequest.SessionGeneration,
+                ["requestedColumns"] = resizeRequest.Columns,
+                ["requestedRows"] = resizeRequest.Rows,
+                ["previousColumns"] = resizeRequest.PreviousColumns,
+                ["previousRows"] = resizeRequest.PreviousRows,
+                ["coordX"] = resizeRequest.Columns,
+                ["coordY"] = resizeRequest.Rows,
+                ["pseudoConsoleHandlePresent"] = resizeRequest.PseudoConsole != IntPtr.Zero,
+                ["processId"] = TryGetProcessId(resizeRequest.Process),
+                ["hResult"] = hResult,
+                ["hResultHex"] = hResult.HasValue ? $"0x{hResult.Value:X8}" : null,
+                ["contentOmitted"] = true
+            };
+            TerminalCriticalTrace.LogStage(stage, metadata);
+            DeveloperDiagnostics.LogInfo("Terminal", $"{stage} captured.", metadata);
         }
 
         private void LogConptyOutputDuringResizeIfRecent(int sessionGeneration, int characterCount)
@@ -4908,6 +4996,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                 int sessionGeneration,
                 int columns,
                 int rows,
+                int previousColumns,
+                int previousRows,
                 Process? process,
                 long resizeSequence)
             {
@@ -4915,6 +5005,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                 SessionGeneration = sessionGeneration;
                 Columns = columns;
                 Rows = rows;
+                PreviousColumns = previousColumns;
+                PreviousRows = previousRows;
                 Process = process;
                 ResizeSequence = resizeSequence;
             }
@@ -4926,6 +5018,10 @@ namespace PS7ScriptDesk.PowerShell.Services
             public int Columns { get; }
 
             public int Rows { get; }
+
+            public int PreviousColumns { get; }
+
+            public int PreviousRows { get; }
 
             public Process? Process { get; }
 

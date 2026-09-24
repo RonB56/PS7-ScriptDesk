@@ -27,6 +27,7 @@ public static class StartupLifecycleTrace
     {
         try
         {
+            PerformanceTrace.Record("milestone", "Startup", $"{stage}.{phase}");
             var sequence = Interlocked.Increment(ref _sequence);
             var snapshot = default((bool IsUiThread, int? DispatcherThreadId));
             try { snapshot = _uiSnapshotProvider?.Invoke() ?? (false, null); } catch { }

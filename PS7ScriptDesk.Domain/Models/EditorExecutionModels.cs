@@ -23,11 +23,76 @@ public enum EditorExecutionEventKind
     Accepted,
     Started,
     Output,
+    InputRequested,
+    Progress,
     WorkingDirectoryChanged,
     Completed,
     Cancelled,
-    Failed
+    Failed,
+    Rejected,
+    Restarted,
+    Disposed
 }
+
+public enum ExecutionBackendAvailability
+{
+    Available,
+    Unavailable,
+    InitializationFailed,
+    RuntimeIncompatible,
+    Disposed,
+    ShuttingDown
+}
+
+public enum ExecutionCompatibilityState
+{
+    NotRequested,
+    Compatible,
+    RuntimeIncompatible,
+    InitializationFailed,
+    Unknown
+}
+
+public enum ExecutionRequestClassification
+{
+    KnownInteractive,
+    KnownNonInteractive,
+    Unknown
+}
+
+public sealed record ExecutionCapabilityRequirements(
+    bool RequiresInteractiveInput = false,
+    bool RequiresSecureInput = false,
+    bool RequiresCurrentScope = false,
+    bool RequiresTerminalInterrupt = false,
+    bool RequiresScriptCallIsolation = false,
+    bool RequiresWorkingDirectoryContinuity = false,
+    bool RequiresStructuredStreams = false);
+
+public sealed record ExecutionRequestClassificationResult(
+    ExecutionRequestClassification Classification,
+    ExecutionCapabilityRequirements RequiredCapabilities,
+    string Reason);
+
+public sealed record ExecutionBackendCapabilities(
+    bool SupportsInteractiveInput,
+    bool SupportsSecureInput,
+    bool SupportsCurrentScope,
+    bool SupportsScriptCallIsolation,
+    bool SupportsTerminalInterrupt,
+    bool SupportsStructuredStreams,
+    bool SupportsWorkingDirectoryTracking,
+    bool SupportsRestart,
+    bool SupportsShutdown,
+    bool SupportsNativeOutput,
+    bool SupportsCancellation = false);
+
+public sealed record ActiveEditorExecutionSnapshot(
+    Guid RequestId,
+    int SessionGeneration,
+    string BackendId,
+    ExecutionBackendCapabilities Capabilities,
+    DateTimeOffset StartedAt);
 
 public enum EditorOutputStreamKind
 {
@@ -101,7 +166,8 @@ public sealed record EditorExecutionRequest(
     string? SavedScriptPath = null,
     bool IsSavedClean = false,
     string? WorkingDirectory = null,
-    bool ExecuteInCurrentScope = false)
+    bool ExecuteInCurrentScope = false,
+    ExecutionCapabilityRequirements? CapabilityRequirements = null)
 {
     public bool IsRunSelection => Mode == EditorExecutionMode.RunSelection;
 }
@@ -122,7 +188,9 @@ public sealed record EditorExecutionEvent(
     EditorOutputRecord? Output = null,
     string? WorkingDirectory = null,
     string? ErrorMessage = null,
-    DateTimeOffset? Timestamp = null);
+    DateTimeOffset? Timestamp = null,
+    string? BackendId = null,
+    string? Detail = null);
 
 public sealed record PersistentSessionSnapshot(
     int SessionGeneration,
@@ -141,7 +209,9 @@ public sealed record EditorExecutionResult(
     EditorExecutionArtifact? Artifact,
     string? ErrorMessage,
     DateTimeOffset StartedAt,
-    DateTimeOffset EndedAt)
+    DateTimeOffset EndedAt,
+    string BackendId = "unknown",
+    string? RejectionReason = null)
 {
     public bool Succeeded => Status == EditorExecutionStatus.Completed;
 

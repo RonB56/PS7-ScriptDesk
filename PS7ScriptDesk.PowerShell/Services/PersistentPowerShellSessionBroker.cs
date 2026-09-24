@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
 using System.Text;
@@ -15,10 +16,12 @@ namespace PS7ScriptDesk.PowerShell.Services;
 /// </summary>
 public sealed class PersistentPowerShellSessionBroker : IEditorExecutionBroker
 {
+    private static readonly object RuntimeInitializationSync = new();
     private readonly SemaphoreSlim _executionAdmission = new(1, 1);
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly object _syncRoot = new();
     private readonly string _runtimeIdentity;
+    private readonly PowerShellRuntimeInfo? _runtimeInfo;
     private Runspace? _runspace;
     private int _sessionGeneration = 1;
     private long _eventSequence;
@@ -28,10 +31,11 @@ public sealed class PersistentPowerShellSessionBroker : IEditorExecutionBroker
     private bool _disposed;
     private bool _shutdownRequested;
 
-    private PersistentPowerShellSessionBroker(string runtimeIdentity)
+    private PersistentPowerShellSessionBroker(string runtimeIdentity, PowerShellRuntimeInfo? runtimeInfo)
     {
         _runtimeIdentity = string.IsNullOrWhiteSpace(runtimeIdentity) ? "PowerShell runspace" : runtimeIdentity.Trim();
-        _runspace = CreateRunspace();
+        _runtimeInfo = runtimeInfo;
+        _runspace = CreateRunspace(runtimeInfo);
         _lifecycle = PersistentSessionLifecycle.Ready;
     }
 
@@ -54,9 +58,11 @@ public sealed class PersistentPowerShellSessionBroker : IEditorExecutionBroker
         }
     }
 
-    public static Task<PersistentPowerShellSessionBroker> CreateAsync(string runtimeIdentity = "PowerShell runspace")
+    public static Task<PersistentPowerShellSessionBroker> CreateAsync(
+        string runtimeIdentity = "PowerShell runspace",
+        PowerShellRuntimeInfo? runtimeInfo = null)
     {
-        return Task.FromResult(new PersistentPowerShellSessionBroker(runtimeIdentity));
+        return Task.FromResult(new PersistentPowerShellSessionBroker(runtimeIdentity, runtimeInfo));
     }
 
     public async Task<EditorExecutionResult> ExecuteAsync(
@@ -224,7 +230,7 @@ public sealed class PersistentPowerShellSessionBroker : IEditorExecutionBroker
             {
                 ThrowIfDisposed();
                 _runspace?.Dispose();
-                _runspace = CreateRunspace();
+                _runspace = CreateRunspace(_runtimeInfo);
                 lock (_syncRoot)
                 {
                     _sessionGeneration++;
@@ -595,13 +601,141 @@ public sealed class PersistentPowerShellSessionBroker : IEditorExecutionBroker
         }
     }
 
-    private static Runspace CreateRunspace()
+    private static Runspace CreateRunspace(PowerShellRuntimeInfo? runtimeInfo)
     {
-        var initialSessionState = InitialSessionState.CreateDefault2();
-        initialSessionState.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Bypass;
-        var runspace = RunspaceFactory.CreateRunspace(initialSessionState);
-        runspace.Open();
-        return runspace;
+        lock (RuntimeInitializationSync)
+        {
+            var runtimeHome = ResolveRuntimeHome(runtimeInfo);
+            var runtimeModules = string.IsNullOrWhiteSpace(runtimeHome)
+                ? null
+                : Path.Combine(runtimeHome, "Modules");
+            var existingModulePath = Environment.GetEnvironmentVariable("PSModulePath");
+            var modulePath = PrependExistingDirectory(runtimeModules, existingModulePath);
+            using var environmentScope = new RuntimeEnvironmentScope(runtimeHome, modulePath);
+
+            var initialSessionState = InitialSessionState.CreateDefault2();
+            initialSessionState.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Bypass;
+            if (!string.IsNullOrWhiteSpace(runtimeHome))
+            {
+                var utilityManifest = Path.Combine(runtimeHome, "Modules", "Microsoft.PowerShell.Utility", "Microsoft.PowerShell.Utility.psd1");
+                var managementManifest = Path.Combine(runtimeHome, "Modules", "Microsoft.PowerShell.Management", "Microsoft.PowerShell.Management.psd1");
+                if (File.Exists(utilityManifest) && File.Exists(managementManifest))
+                {
+                    PowerShellRuntimeCompatibility.ValidateBuiltInModuleCompatibility(runtimeHome);
+                    initialSessionState.ImportPSModule(new[] { utilityManifest, managementManifest });
+                }
+            }
+            var runspace = RunspaceFactory.CreateRunspace(initialSessionState);
+            try
+            {
+                runspace.Open();
+                if (!string.IsNullOrWhiteSpace(modulePath))
+                {
+                    runspace.SessionStateProxy.SetVariable("env:PSModulePath", modulePath);
+                }
+                BootstrapBuiltInModules(runspace, runtimeHome, modulePath);
+                DeveloperDiagnostics.LogInfo(
+                    "EditorExecutionBroker",
+                    "Structured runspace opened with the selected PowerShell runtime module environment.",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtimeHome"] = runtimeHome,
+                        ["modulePathEntryCount"] = modulePath.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries).Length,
+                        ["smaAssemblyVersion"] = typeof(System.Management.Automation.PowerShell).Assembly.GetName().Version?.ToString(),
+                        ["smaAssemblyLocation"] = typeof(System.Management.Automation.PowerShell).Assembly.Location
+                    });
+                return runspace;
+            }
+            catch
+            {
+                runspace.Dispose();
+                throw;
+            }
+        }
+    }
+
+    private static void BootstrapBuiltInModules(Runspace runspace, string? runtimeHome, string modulePath)
+    {
+        if (string.IsNullOrWhiteSpace(runtimeHome))
+        {
+            return;
+        }
+
+        var utilityManifest = Path.Combine(runtimeHome, "Modules", "Microsoft.PowerShell.Utility", "Microsoft.PowerShell.Utility.psd1");
+        var managementManifest = Path.Combine(runtimeHome, "Modules", "Microsoft.PowerShell.Management", "Microsoft.PowerShell.Management.psd1");
+        if (!File.Exists(utilityManifest) || !File.Exists(managementManifest))
+        {
+            throw new InvalidOperationException($"The selected PowerShell runtime does not contain the required built-in module manifests beneath '{runtimeHome}'.");
+        }
+
+        PowerShellRuntimeCompatibility.ValidateBuiltInModuleCompatibility(runtimeHome);
+
+        using var powerShell = System.Management.Automation.PowerShell.Create();
+        powerShell.Runspace = runspace;
+        powerShell.AddScript(
+            "$env:PSModulePath = " + Quote(modulePath) + "; " +
+            "Import-Module -Name " + Quote(utilityManifest) + " -Force -ErrorAction Stop; " +
+            "Import-Module -Name " + Quote(managementManifest) + " -Force -ErrorAction Stop; " +
+            "if (-not (Get-Command Write-Output -ErrorAction Stop)) { throw 'Microsoft.PowerShell.Utility did not expose Write-Output.' }; " +
+            "if (-not (Get-Command Set-Location -ErrorAction Stop)) { throw 'Microsoft.PowerShell.Management did not expose Set-Location.' }")
+            .Invoke();
+        if (powerShell.HadErrors)
+        {
+            throw new InvalidOperationException(string.Join(Environment.NewLine, powerShell.Streams.Error.Select(error => error.ToString())));
+        }
+    }
+
+    private static string? ResolveRuntimeHome(PowerShellRuntimeInfo? runtimeInfo)
+    {
+        if (runtimeInfo is not null && Directory.Exists(runtimeInfo.PsHome))
+        {
+            return Path.GetFullPath(runtimeInfo.PsHome);
+        }
+
+        var inheritedHome = Environment.GetEnvironmentVariable("PSHOME");
+        return Directory.Exists(inheritedHome) ? Path.GetFullPath(inheritedHome) : null;
+    }
+
+    private static string PrependExistingDirectory(string? runtimeModules, string? existingModulePath)
+    {
+        var entries = new List<string>();
+        if (!string.IsNullOrWhiteSpace(runtimeModules) && Directory.Exists(runtimeModules))
+        {
+            entries.Add(runtimeModules);
+        }
+
+        if (!string.IsNullOrWhiteSpace(existingModulePath))
+        {
+            entries.AddRange(existingModulePath.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        }
+
+        return string.Join(Path.PathSeparator, entries.Distinct(StringComparer.OrdinalIgnoreCase));
+    }
+
+    private sealed class RuntimeEnvironmentScope : IDisposable
+    {
+        private readonly string? _previousPsHome;
+        private readonly string? _previousModulePath;
+
+        public RuntimeEnvironmentScope(string? runtimeHome, string modulePath)
+        {
+            _previousPsHome = Environment.GetEnvironmentVariable("PSHOME");
+            _previousModulePath = Environment.GetEnvironmentVariable("PSModulePath");
+            if (!string.IsNullOrWhiteSpace(runtimeHome))
+            {
+                Environment.SetEnvironmentVariable("PSHOME", runtimeHome);
+            }
+            if (!string.IsNullOrWhiteSpace(modulePath))
+            {
+                Environment.SetEnvironmentVariable("PSModulePath", modulePath);
+            }
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable("PSHOME", _previousPsHome);
+            Environment.SetEnvironmentVariable("PSModulePath", _previousModulePath);
+        }
     }
 
     private static string Quote(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";

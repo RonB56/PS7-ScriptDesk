@@ -122,6 +122,13 @@ namespace PS7ScriptDesk.Shell.Editor
                 }
 
                 TryGetPerformanceLogPath(args, out var performanceLogPath);
+                using var performanceScope = PerformanceTrace.Begin(
+                    "SynchronousWait",
+                    "EditorMetadataBuilderHost.RunAsync.GetAwaiter.GetResult",
+                    properties: new Dictionary<string, object?>
+                    {
+                        ["reason"] = "metadata-builder-helper"
+                    });
                 return RunAsync(runtimePath!, performanceLogPath, CancellationToken.None).GetAwaiter().GetResult();
             }
             catch (Exception ex)

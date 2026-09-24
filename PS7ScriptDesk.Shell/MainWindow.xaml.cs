@@ -98,6 +98,8 @@ namespace PS7ScriptDesk.Shell
         private readonly ConcurrentQueue<TerminalOutputEnvelope> _terminalOutputEnvelopeQueue = new();
         private readonly Dispatcher _terminalOutputDispatcher;
         private readonly ILiveConsoleService? _liveConsoleServiceForObservation;
+        private readonly TerminalOutputObservationHub _terminalOutputObservationHub = new();
+        private readonly IDisposable _terminalOutputObservationSubscription;
         private TerminalObserverLifetime? _terminalObserverLifetime;
         private DispatcherOperation? _terminalOutputDrainOperation;
         private MainWindowViewModel? _viewModel;
@@ -199,6 +201,11 @@ namespace PS7ScriptDesk.Shell
         private long _editorFocusRequestVersion;
         // _pendingScrollToEnd removed: no longer needed (xterm.js handles scroll).
         private readonly Dictionary<TextEditor, EditorTabViewModel> _tabByEditor = new();
+        private readonly Dictionary<KeyEventArgs, EditorInputTraceContext> _editorInputTraceByKeyEvent = new();
+        private readonly Queue<EditorInputTraceContext> _pendingEditorTextInputTraces = new();
+        private readonly Dictionary<TextEditor, string> _lastEditorInputTraceIds = new();
+        private readonly Dictionary<TextEditor, int> _lastEditorTextLengths = new();
+        private EditorInputTraceContext? _activeEditorTextInputTrace;
         private readonly Dictionary<TextEditor, BreakpointLineBackgroundRenderer> _breakpointRenderers = new();
         private readonly Dictionary<TextEditor, BreakpointGlyphMargin> _breakpointGlyphMargins = new();
         private readonly Dictionary<TextEditor, ErrorMarkerRenderer> _errorRenderers = new();
@@ -340,6 +347,23 @@ namespace PS7ScriptDesk.Shell
             ApplicationShutdown
         }
 
+        private sealed class EditorInputTraceContext
+        {
+            public EditorInputTraceContext(string correlationId, Key key, ModifierKeys modifiers)
+            {
+                CorrelationId = correlationId;
+                Key = key;
+                Modifiers = modifiers;
+                StartedTimestamp = Stopwatch.GetTimestamp();
+            }
+
+            public string CorrelationId { get; }
+            public Key Key { get; }
+            public ModifierKeys Modifiers { get; }
+            public long StartedTimestamp { get; }
+            public bool TextInputObserved { get; set; }
+        }
+
         public static readonly DependencyProperty IsContextHelpEnabledProperty = DependencyProperty.Register(
             nameof(IsContextHelpEnabled),
             typeof(bool),
@@ -380,6 +404,7 @@ namespace PS7ScriptDesk.Shell
             _terminalOutputDispatcher = Dispatcher;
             _applicationSettingsService = applicationSettingsService;
             _liveConsoleServiceForObservation = liveConsoleServiceForObservation;
+            _terminalOutputObservationSubscription = _terminalOutputObservationHub.Subscribe(new TerminalOutputCorrelationObserver());
             _loadedSettings = loadedSettings ?? new ApplicationSettings();
             _scriptDiagnosticStore.Changed += ScriptDiagnosticStore_Changed;
             UpdateAnalyzerSettingsMenu();
@@ -440,6 +465,9 @@ namespace PS7ScriptDesk.Shell
 
 
             InitializeComponent();
+            AddHandler(Keyboard.KeyDownEvent, new KeyEventHandler(Window_KeyDownTrace), handledEventsToo: true);
+            AddHandler(TextCompositionManager.PreviewTextInputEvent, new TextCompositionEventHandler(Window_PreviewTextInputTrace), handledEventsToo: true);
+            AddHandler(TextCompositionManager.TextInputEvent, new TextCompositionEventHandler(Window_TextInputTrace), handledEventsToo: true);
             SizeChanged += MainWindow_SizeChanged;
             TerminalConsole.SizeChanged += TerminalConsole_SizeChanged;
             StartupLifecycleTrace.Write("MainWindow.InitializeComponent", "EXIT");
@@ -511,6 +539,14 @@ namespace PS7ScriptDesk.Shell
 
         private void MainWindow_SizeChanged(object sender, SizeChangedEventArgs e)
         {
+            using var performanceScope = PerformanceTrace.Begin(
+                "TerminalResize",
+                "MainWindowSizeChanged",
+                properties: new Dictionary<string, object?>
+                {
+                    ["newWidth"] = e.NewSize.Width,
+                    ["newHeight"] = e.NewSize.Height
+                });
             if (!DeveloperDiagnostics.IsEnabled)
             {
                 return;
@@ -532,6 +568,14 @@ namespace PS7ScriptDesk.Shell
 
         private void TerminalConsole_SizeChanged(object sender, SizeChangedEventArgs e)
         {
+            using var performanceScope = PerformanceTrace.Begin(
+                "TerminalResize",
+                "TerminalControlSizeChanged",
+                properties: new Dictionary<string, object?>
+                {
+                    ["newWidth"] = e.NewSize.Width,
+                    ["newHeight"] = e.NewSize.Height
+                });
             if (!DeveloperDiagnostics.IsEnabled)
             {
                 return;
@@ -615,6 +659,7 @@ namespace PS7ScriptDesk.Shell
             }
 
             TerminalStartupTrace.Write("BACKEND_OUTPUT_RECEIVED", $"generation={generation}; chars={rawOutput.Length}; contentOmitted=true");
+            _terminalOutputObservationHub.Publish(new TerminalOutputObservation(generation, rawOutput, Source: "ConPTY"));
 
             TerminalCriticalTrace.LogStage(
                 "MainWindow.RawOutputReceivedSubscriber.Begin",
@@ -660,6 +705,12 @@ namespace PS7ScriptDesk.Shell
                 "MainWindow.EnqueueTerminalOutputForRenderer.Begin",
                 CreateTerminalEnvelopeMetadata(envelope));
             var queuedCount = Interlocked.Increment(ref _terminalOutputQueuedEnvelopeCount);
+            TerminalOutputCorrelationTrace.Record(
+                "WpfEnvelopeQueued",
+                envelope.RendererGeneration,
+                envelope.Payload,
+                envelopeSequence: envelope.Sequence,
+                queueDepth: queuedCount);
             if (queuedCount > MaximumQueuedTerminalOutputEnvelopes)
             {
                 Interlocked.Decrement(ref _terminalOutputQueuedEnvelopeCount);
@@ -811,6 +862,11 @@ namespace PS7ScriptDesk.Shell
                             continue;
                         }
 
+                        TerminalOutputCorrelationTrace.Record(
+                            "WpfEnvelopeDrainedToTerminalControl",
+                            envelope.RendererGeneration,
+                            envelope.Payload,
+                            envelopeSequence: envelope.Sequence);
                         TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload);
                         TerminalCriticalTrace.LogStage(
                             "MainWindow.DrainTerminalOutputForRenderer.EnvelopeEnd",
@@ -1013,6 +1069,7 @@ namespace PS7ScriptDesk.Shell
                 // so the reader callback does not queue one dispatcher operation per chunk.
                 ViewModel.SubscribeRawOutput(OnRawTerminalOutputReceived);
                 ViewModel.TerminalOutputPublished += EnqueueTerminalOutputForRenderer;
+                ViewModel.PromptReadyForTerminalDiagnostics += generation => TerminalConsole.ObservePromptBoundary(generation);
                 TerminalStartupTrace.Write("TERMINAL_EVENT_SINKS_WIRED", $"windowId={GetHashCode():X8}; viewModelId={ViewModel.GetHashCode():X8}");
 
                 // Forward xterm.js keystrokes to ConPTY stdin.
@@ -1330,12 +1387,163 @@ namespace PS7ScriptDesk.Shell
 
         private void Window_PreviewGotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
         {
+            LogEditorInputFocus("WindowPreviewGotKeyboardFocus", e.OldFocus, e.NewFocus);
             if (ViewModel is null || IsResetConsoleFocusTarget(e.NewFocus))
             {
                 return;
             }
 
             ViewModel.NotifyTerminalFocusOwnershipChanged(IsTerminalFocusTarget(e.NewFocus));
+        }
+
+        private void Window_PreviewLostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+        {
+            LogEditorInputFocus("WindowPreviewLostKeyboardFocus", e.OldFocus, e.NewFocus);
+        }
+
+        private void LogEditorInputFocus(string eventName, IInputElement? oldFocus, IInputElement? newFocus)
+        {
+            if (!EditorInputTrace.IsEnabled)
+            {
+                return;
+            }
+
+            EditorInputTrace.Log(
+                eventName,
+                properties: new Dictionary<string, object?>
+                {
+                    ["oldFocusType"] = oldFocus?.GetType().Name,
+                    ["newFocusType"] = newFocus?.GetType().Name,
+                    ["keyboardFocusedElementType"] = Keyboard.FocusedElement?.GetType().Name,
+                    ["activeEditorIdentity"] = FindActiveEditor() is { } activeEditor ? DescribeEditor(activeEditor) : null
+                });
+        }
+
+        private static string? DescribeInputElement(IInputElement? element)
+        {
+            return element is null ? null : element.GetType().Name;
+        }
+
+        private static string ClassifyEditorInput(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "Empty";
+            var ch = text[0];
+            if (char.IsLetter(ch)) return "Letter";
+            if (char.IsDigit(ch)) return "Digit";
+            if (char.IsWhiteSpace(ch)) return "Whitespace";
+            return ch switch
+            {
+                '$' or '-' or '.' or ':' or '\\' or '/' => "CompletionTrigger",
+                '(' or ')' or '[' or ']' or '{' or '}' or '\'' or '"' => "Delimiter",
+                _ => "Other"
+            };
+        }
+
+        private static bool CanProduceTextInput(Key key, ModifierKeys modifiers)
+        {
+            if ((modifiers & (ModifierKeys.Control | ModifierKeys.Alt)) != ModifierKeys.None)
+            {
+                return false;
+            }
+
+            return (key >= Key.A && key <= Key.Z) ||
+                   (key >= Key.D0 && key <= Key.D9) ||
+                   (key >= Key.NumPad0 && key <= Key.NumPad9) ||
+                   key is Key.Space or Key.OemPlus or Key.OemMinus or Key.OemPeriod or Key.OemComma or
+                       Key.OemQuestion or Key.Oem1 or Key.Oem2 or Key.Oem3 or Key.Oem4 or Key.Oem5 or
+                       Key.Oem6 or Key.Oem7 or Key.Oem8 or Key.Oem102;
+        }
+
+        private string? GetEditorInputDocumentIdentity(TextEditor editor)
+        {
+            return editor.DataContext is EditorTabViewModel tab
+                ? tab.DiagnosticDocument.DocumentId.ToString("N")
+                : null;
+        }
+
+        private static string GetEditorInputIdentity(TextEditor editor) =>
+            $"Editor#{RuntimeHelpers.GetHashCode(editor):x}";
+
+        private EditorInputTraceContext? GetTraceForEditor(TextEditor editor)
+        {
+            if (_activeEditorTextInputTrace is not null)
+            {
+                return _activeEditorTextInputTrace;
+            }
+
+            if (_lastEditorInputTraceIds.TryGetValue(editor, out var traceId))
+            {
+                return new EditorInputTraceContext(traceId, Key.None, ModifierKeys.None);
+            }
+
+            return null;
+        }
+
+        private void Window_PreviewTextInputTrace(object sender, TextCompositionEventArgs e)
+        {
+            if (!EditorInputTrace.IsEnabled)
+            {
+                return;
+            }
+
+            var trace = _pendingEditorTextInputTraces.Count > 0
+                ? _pendingEditorTextInputTraces.Dequeue()
+                : new EditorInputTraceContext(EditorInputTrace.CreateCorrelationId(), Key.None, Keyboard.Modifiers);
+            trace.TextInputObserved = true;
+            _activeEditorTextInputTrace = trace;
+            EditorInputTrace.Log(
+                "WindowPreviewTextInput",
+                trace.CorrelationId,
+                new Dictionary<string, object?>
+                {
+                    ["characterCount"] = e.Text?.Length ?? 0,
+                    ["characterClass"] = ClassifyEditorInput(e.Text ?? string.Empty),
+                    ["handledOnEntry"] = e.Handled,
+                    ["sourceType"] = DescribeInputElement(e.Source as IInputElement),
+                    ["originalSourceType"] = DescribeInputElement(e.OriginalSource as IInputElement),
+                    ["focusedElementType"] = Keyboard.FocusedElement?.GetType().Name
+                });
+        }
+
+        private void Window_TextInputTrace(object sender, TextCompositionEventArgs e)
+        {
+            if (!EditorInputTrace.IsEnabled || _activeEditorTextInputTrace is null)
+            {
+                return;
+            }
+
+            EditorInputTrace.Log(
+                "WindowTextInput",
+                _activeEditorTextInputTrace.CorrelationId,
+                new Dictionary<string, object?>
+                {
+                    ["characterCount"] = e.Text?.Length ?? 0,
+                    ["handledOnExit"] = e.Handled,
+                    ["focusedElementType"] = Keyboard.FocusedElement?.GetType().Name
+                });
+        }
+
+        private void Window_KeyDownTrace(object sender, KeyEventArgs e)
+        {
+            if (!EditorInputTrace.IsEnabled || !_editorInputTraceByKeyEvent.TryGetValue(e, out var trace))
+            {
+                return;
+            }
+
+            EditorInputTrace.Log(
+                "WindowKeyDownAfterRouting",
+                trace.CorrelationId,
+                new Dictionary<string, object?>
+                {
+                    ["key"] = e.Key.ToString(),
+                    ["modifiers"] = trace.Modifiers.ToString(),
+                    ["handledOnExit"] = e.Handled,
+                    ["sourceType"] = DescribeInputElement(e.Source as IInputElement),
+                    ["originalSourceType"] = DescribeInputElement(e.OriginalSource as IInputElement),
+                    ["focusedElementType"] = Keyboard.FocusedElement?.GetType().Name,
+                    ["activeEditorFocused"] = FindActiveEditor()?.IsKeyboardFocusWithin == true
+                });
+            _editorInputTraceByKeyEvent.Remove(e);
         }
 
         private TerminalFocusRestoreReadiness GetTerminalFocusRestoreReadiness()
@@ -1362,6 +1570,34 @@ namespace PS7ScriptDesk.Shell
 
         private async void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
+            if (EditorInputTrace.IsEnabled)
+            {
+                var trace = new EditorInputTraceContext(EditorInputTrace.CreateCorrelationId(), e.Key, Keyboard.Modifiers);
+                _editorInputTraceByKeyEvent[e] = trace;
+                if (CanProduceTextInput(e.Key, Keyboard.Modifiers) && _pendingEditorTextInputTraces.Count >= 64)
+                {
+                    _pendingEditorTextInputTraces.Dequeue();
+                }
+                if (CanProduceTextInput(e.Key, Keyboard.Modifiers))
+                {
+                    _pendingEditorTextInputTraces.Enqueue(trace);
+                }
+                EditorInputTrace.Log(
+                    "WindowPreviewKeyDown",
+                    trace.CorrelationId,
+                    new Dictionary<string, object?>
+                    {
+                        ["key"] = e.Key.ToString(),
+                        ["modifiers"] = Keyboard.Modifiers.ToString(),
+                        ["handledOnEntry"] = e.Handled,
+                        ["sourceType"] = DescribeInputElement(e.Source as IInputElement),
+                        ["originalSourceType"] = DescribeInputElement(e.OriginalSource as IInputElement),
+                        ["focusedElementType"] = Keyboard.FocusedElement?.GetType().Name,
+                        ["activeEditorFocused"] = FindActiveEditor()?.IsKeyboardFocusWithin == true,
+                        ["documentIdentity"] = FindActiveEditor() is { } activeEditor ? GetEditorInputDocumentIdentity(activeEditor) : null
+                    });
+            }
+
             if (ViewModel is null)
             {
                 return;
@@ -1681,12 +1917,36 @@ namespace PS7ScriptDesk.Shell
             FocusActiveEditorSoon();
         }
 
-        private void FocusActiveEditorSoon()
+        private void FocusActiveEditorSoon([CallerMemberName] string? reason = null)
         {
             var targetTab = ViewModel?.SelectedTab;
             var focusRequestVersion = Interlocked.Increment(ref _editorFocusRequestVersion);
+            var scheduledAt = Stopwatch.GetTimestamp();
+            var focusTraceId = EditorInputTrace.IsEnabled ? EditorInputTrace.CreateCorrelationId() : null;
+            if (focusTraceId is not null)
+            {
+                EditorInputTrace.Log("FocusActiveEditorSoonScheduled", focusTraceId, new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["dispatcherPriority"] = DispatcherPriority.Input.ToString(),
+                    ["focusRequestVersion"] = focusRequestVersion,
+                    ["focusedElementBeforeSchedule"] = Keyboard.FocusedElement?.GetType().Name,
+                    ["targetDocumentIdentity"] = FindActiveEditor() is { } currentEditor ? GetEditorInputDocumentIdentity(currentEditor) : null
+                });
+            }
             Dispatcher.BeginInvoke(new Action(() =>
             {
+                if (focusTraceId is not null)
+                {
+                    EditorInputTrace.Log("FocusActiveEditorSoonExecuting", focusTraceId, new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["scheduledToExecuteMicroseconds"] = (Stopwatch.GetTimestamp() - scheduledAt) * 1_000_000d / Stopwatch.Frequency,
+                        ["focusedElementBefore"] = Keyboard.FocusedElement?.GetType().Name,
+                        ["focusRequestVersion"] = focusRequestVersion
+                    });
+                }
+
                 if (focusRequestVersion != Volatile.Read(ref _editorFocusRequestVersion) ||
                     targetTab is null ||
                     ViewModel is null ||
@@ -1710,12 +1970,23 @@ namespace PS7ScriptDesk.Shell
                 }
 
                 SetTerminalActive(false, "FocusActiveEditorSoon");
-                editorTextEditor.Focus();
+                var focusResult = editorTextEditor.Focus();
                 if (!editorTextEditor.TextArea.TextView.VisualLinesValid)
                 {
                     editorTextEditor.TextArea.TextView.EnsureVisualLines();
                 }
                 editorTextEditor.TextArea?.Caret.BringCaretToView();
+                if (focusTraceId is not null)
+                {
+                    EditorInputTrace.Log("FocusActiveEditorSoonCompleted", focusTraceId, new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["focusResult"] = focusResult,
+                        ["focusedElementAfter"] = Keyboard.FocusedElement?.GetType().Name,
+                        ["editorFocusedAfter"] = editorTextEditor.IsKeyboardFocusWithin,
+                        ["focusRequestVersion"] = focusRequestVersion
+                    });
+                }
             }), System.Windows.Threading.DispatcherPriority.Input);
         }
 
@@ -2016,6 +2287,41 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            using var performanceScope = PerformanceTrace.Begin("Editor", "TextChanged");
+
+            var trace = GetTraceForEditor(editorTextEditor);
+            var traceId = trace?.CorrelationId;
+            var textChangedStopwatch = EditorInputTrace.IsEnabled ? Stopwatch.StartNew() : null;
+            var documentLengthBefore = _lastEditorTextLengths.TryGetValue(editorTextEditor, out var previousLength)
+                ? previousLength
+                : editorTextEditor.Document?.TextLength ?? 0;
+            var documentLengthAfter = editorTextEditor.Document?.TextLength ?? 0;
+            _lastEditorTextLengths[editorTextEditor] = documentLengthAfter;
+            var caretBefore = editorTextEditor.CaretOffset;
+            var contentSynchronizationStopwatch = EditorInputTrace.IsEnabled ? Stopwatch.StartNew() : null;
+            var contentSynchronizationExecuted = false;
+
+            if (trace is not null)
+            {
+                EditorInputTrace.Log(
+                    "DocumentMutation",
+                    traceId,
+                    new Dictionary<string, object?>
+                    {
+                        ["documentLengthBefore"] = documentLengthBefore,
+                        ["documentLengthAfter"] = documentLengthAfter,
+                        ["caretOffsetBefore"] = caretBefore,
+                        ["caretOffsetAfter"] = editorTextEditor.CaretOffset,
+                        ["documentIdentity"] = GetEditorInputDocumentIdentity(editorTextEditor),
+                        ["editorIdentity"] = GetEditorInputIdentity(editorTextEditor)
+                    });
+                EditorInputTrace.Log("TextChangedStart", traceId, new Dictionary<string, object?>
+                {
+                    ["documentLength"] = documentLengthAfter,
+                    ["caretOffset"] = editorTextEditor.CaretOffset
+                });
+            }
+
             if (!_editorTextSynchronizationInProgress.Contains(editorTextEditor) &&
                 editorTextEditor.DataContext is EditorTabViewModel tab)
             {
@@ -2023,10 +2329,14 @@ namespace PS7ScriptDesk.Shell
                 var contentChanged = !string.Equals(tab.Content, editorText, StringComparison.Ordinal);
                 var lineCount = editorTextEditor.Document?.LineCount ?? 1;
                 tab.UpdateContentFromEditor(editorText, lineCount);
+                contentSynchronizationExecuted = true;
                 if (contentChanged) _liveAnalyzerEligibleRevisions.Add((tab.DiagnosticDocument.DocumentId, tab.DiagnosticDocument.Revision));
             }
+            contentSynchronizationStopwatch?.Stop();
 
+            var caretStopwatch = EditorInputTrace.IsEnabled ? Stopwatch.StartNew() : null;
             UpdateEditorCaretMetrics(editorTextEditor);
+            caretStopwatch?.Stop();
 
             // Keep the last parser tokens visible until the live syntax pump replaces
             // them. Clearing tokens on every keystroke made the editor appear slower
@@ -2034,8 +2344,60 @@ namespace PS7ScriptDesk.Shell
 
             // Folding is a whole-document operation. Debounce it so regular typing
             // stays smooth and AvalonEdit can repaint only the changed visual lines.
+            var foldingStopwatch = EditorInputTrace.IsEnabled ? Stopwatch.StartNew() : null;
             ScheduleFolding(editorTextEditor);
+            foldingStopwatch?.Stop();
+            var diagnosticsStopwatch = EditorInputTrace.IsEnabled ? Stopwatch.StartNew() : null;
             ScheduleDiagnostics(editorTextEditor);
+            diagnosticsStopwatch?.Stop();
+
+            textChangedStopwatch?.Stop();
+            if (trace is not null)
+            {
+                EditorInputTrace.Log(
+                    "TextChangedEnd",
+                    traceId,
+                    new Dictionary<string, object?>
+                    {
+                        ["durationMicroseconds"] = textChangedStopwatch?.ElapsedTicks * 1_000_000d / Stopwatch.Frequency,
+                        ["contentSynchronizationExecuted"] = contentSynchronizationExecuted,
+                        ["contentSynchronizationMicroseconds"] = contentSynchronizationStopwatch?.ElapsedTicks * 1_000_000d / Stopwatch.Frequency,
+                        ["caretMetricsMicroseconds"] = caretStopwatch?.ElapsedTicks * 1_000_000d / Stopwatch.Frequency,
+                        ["foldingScheduleMicroseconds"] = foldingStopwatch?.ElapsedTicks * 1_000_000d / Stopwatch.Frequency,
+                        ["diagnosticsScheduleMicroseconds"] = diagnosticsStopwatch?.ElapsedTicks * 1_000_000d / Stopwatch.Frequency,
+                        ["documentLength"] = documentLengthAfter,
+                        ["caretOffset"] = editorTextEditor.CaretOffset,
+                        ["documentIdentity"] = GetEditorInputDocumentIdentity(editorTextEditor)
+                    });
+
+                var markerTraceId = traceId;
+                EditorInputTrace.Log("PostInputUiMarkerEnqueued", markerTraceId, new Dictionary<string, object?>
+                {
+                    ["dispatcherPriority"] = DispatcherPriority.ContextIdle.ToString()
+                });
+                var markerEnqueueTimestamp = Stopwatch.GetTimestamp();
+                if (!Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished)
+                {
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        using var performanceScope = PerformanceTrace.BeginDispatcher(
+                            "Editor",
+                            "PostInputUiMarker",
+                            markerEnqueueTimestamp,
+                            markerTraceId,
+                            properties: new Dictionary<string, object?>
+                            {
+                                ["dispatcherPriority"] = DispatcherPriority.ContextIdle.ToString()
+                            });
+                        EditorInputTrace.Log("PostInputUiMarker", markerTraceId, new Dictionary<string, object?>
+                        {
+                            ["dispatcherPriority"] = DispatcherPriority.ContextIdle.ToString(),
+                            ["documentLength"] = editorTextEditor.Document?.TextLength,
+                            ["caretOffset"] = editorTextEditor.CaretOffset
+                        });
+                    }), DispatcherPriority.ContextIdle);
+                }
+            }
         }
 
         private void EditorTextEditor_CaretPositionChanged(object? sender, EventArgs e)
@@ -2074,6 +2436,24 @@ namespace PS7ScriptDesk.Shell
             }
 
             var ch = e.Text[0];
+            var inputTrace = GetTraceForEditor(editorTextEditor);
+            using var inputTraceScope = EditorInputTrace.PushCorrelation(inputTrace?.CorrelationId);
+            if (inputTrace is not null)
+            {
+                _lastEditorInputTraceIds[editorTextEditor] = inputTrace.CorrelationId;
+                EditorInputTrace.Log(
+                    "EditorTextEntered",
+                    inputTrace.CorrelationId,
+                    new Dictionary<string, object?>
+                    {
+                        ["characterCount"] = e.Text.Length,
+                        ["characterClass"] = ClassifyEditorInput(e.Text),
+                        ["handledOnEntry"] = e.Handled,
+                        ["editorIdentity"] = GetEditorInputIdentity(editorTextEditor),
+                        ["documentLength"] = editorTextEditor.Document?.TextLength,
+                        ["caretOffset"] = editorTextEditor.CaretOffset
+                    });
+            }
 
             // Auto-close matching delimiters only when typing in PowerShell code.
             // Legacy ISE does not feel good when braces are blindly inserted inside
@@ -2137,6 +2517,24 @@ namespace PS7ScriptDesk.Shell
             if (ShouldSuppressEditorInputFeatures(editor, "TextEntering"))
             {
                 return;
+            }
+
+            var inputTrace = GetTraceForEditor(editor);
+            using var inputTraceScope = EditorInputTrace.PushCorrelation(inputTrace?.CorrelationId);
+            if (inputTrace is not null)
+            {
+                EditorInputTrace.Log(
+                    "EditorTextEntering",
+                    inputTrace.CorrelationId,
+                    new Dictionary<string, object?>
+                    {
+                        ["characterCount"] = e.Text?.Length ?? 0,
+                        ["characterClass"] = ClassifyEditorInput(e.Text ?? string.Empty),
+                        ["handledOnEntry"] = e.Handled,
+                        ["editorIdentity"] = GetEditorInputIdentity(editor),
+                        ["documentLength"] = editor.Document?.TextLength,
+                        ["caretOffset"] = editor.CaretOffset
+                    });
             }
 
             if (!string.IsNullOrEmpty(e.Text))
@@ -2214,6 +2612,28 @@ namespace PS7ScriptDesk.Shell
             if (sender is not TextEditor editorTextEditor)
             {
                 return;
+            }
+
+            if (EditorInputTrace.IsEnabled)
+            {
+                var traceId = _editorInputTraceByKeyEvent.TryGetValue(e, out var trace)
+                    ? trace.CorrelationId
+                    : EditorInputTrace.CreateCorrelationId();
+                EditorInputTrace.Log(
+                    "EditorPreviewKeyDown",
+                    traceId,
+                    new Dictionary<string, object?>
+                    {
+                        ["key"] = e.Key.ToString(),
+                        ["modifiers"] = Keyboard.Modifiers.ToString(),
+                        ["handledOnEntry"] = e.Handled,
+                        ["sourceType"] = DescribeInputElement(e.Source as IInputElement),
+                        ["originalSourceType"] = DescribeInputElement(e.OriginalSource as IInputElement),
+                        ["focusedElementType"] = Keyboard.FocusedElement?.GetType().Name,
+                        ["editorIdentity"] = GetEditorInputIdentity(editorTextEditor),
+                        ["documentIdentity"] = GetEditorInputDocumentIdentity(editorTextEditor),
+                        ["editorFocused"] = editorTextEditor.IsKeyboardFocusWithin
+                    });
             }
 
             var key = EditorShortcutRouting.ResolveKey(e.Key, e.SystemKey);
@@ -4224,6 +4644,7 @@ namespace PS7ScriptDesk.Shell
             editorTextEditor.TextArea.TextEntering += EditorTextArea_TextEntering;
             editorTextEditor.PreviewKeyDown += EditorTextEditor_PreviewKeyDown;
             editorTextEditor.GotKeyboardFocus += EditorTextEditor_GotKeyboardFocus;
+            editorTextEditor.LostKeyboardFocus += EditorTextEditor_LostKeyboardFocus;
 
             var syntaxColorizer = new PowerShellSyntaxColorizer();
             _syntaxColorizers[editorTextEditor] = syntaxColorizer;
@@ -4984,6 +5405,33 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            var inputTraceId = EditorInputTrace.CurrentCorrelationId;
+            var completionRequestId = $"EC-{Guid.NewGuid():N}";
+            using var performanceScope = PerformanceTrace.Begin(
+                "IntelliSense",
+                "CompletionRequest",
+                inputTraceId,
+                completionRequestId,
+                properties: new Dictionary<string, object?>
+                {
+                    ["autoTriggered"] = autoTriggered,
+                    ["includeEngine"] = includeEngine,
+                    ["forceCompletion"] = forceCompletion
+                });
+            using var completionTraceScope = EditorInputTrace.PushCorrelation(inputTraceId);
+            var completionStarted = Stopwatch.GetTimestamp();
+            EditorInputTrace.Log("CompletionRequestScheduled", inputTraceId, new Dictionary<string, object?>
+            {
+                ["completionRequestId"] = completionRequestId,
+                ["autoTriggered"] = autoTriggered,
+                ["includeEngine"] = includeEngine,
+                ["forceCompletion"] = forceCompletion,
+                ["editorIdentity"] = GetEditorInputIdentity(editorTextEditor),
+                ["documentIdentity"] = GetEditorInputDocumentIdentity(editorTextEditor),
+                ["documentLength"] = editorTextEditor.Document?.TextLength,
+                ["caretOffset"] = editorTextEditor.CaretOffset
+            });
+
             _activeCompletionCts?.Cancel();
             _activeCompletionCts?.Dispose();
             var cts = new CancellationTokenSource();
@@ -4992,7 +5440,19 @@ namespace PS7ScriptDesk.Shell
             try
             {
                 if (autoTriggered && !forceCompletion && !IsCaretInsideParameterToken(editorTextEditor))
+                {
+                    EditorInputTrace.Log("CompletionDebounceStarted", inputTraceId, new Dictionary<string, object?>
+                    {
+                        ["completionRequestId"] = completionRequestId,
+                        ["delayMilliseconds"] = 125
+                    });
                     await Task.Delay(125, cts.Token).ConfigureAwait(true);
+                    EditorInputTrace.Log("CompletionDebounceEnded", inputTraceId, new Dictionary<string, object?>
+                    {
+                        ["completionRequestId"] = completionRequestId,
+                        ["elapsedMicroseconds"] = (Stopwatch.GetTimestamp() - completionStarted) * 1_000_000d / Stopwatch.Frequency
+                    });
+                }
 
                 if (cts.Token.IsCancellationRequested)
                 {
@@ -5031,6 +5491,14 @@ namespace PS7ScriptDesk.Shell
                         cts.Token)
                     .ConfigureAwait(true);
 
+                EditorInputTrace.Log("CompletionResultReturned", inputTraceId, new Dictionary<string, object?>
+                {
+                    ["completionRequestId"] = completionRequestId,
+                    ["resultAvailable"] = window is not null,
+                    ["elapsedMicroseconds"] = (Stopwatch.GetTimestamp() - completionStarted) * 1_000_000d / Stopwatch.Frequency,
+                    ["focusedElementBeforePopup"] = Keyboard.FocusedElement?.GetType().Name
+                });
+
                 if (window is null)
                 {
                     AppLogger.Debug(
@@ -5049,14 +5517,38 @@ namespace PS7ScriptDesk.Shell
 
                 _activeCompletionWindow = window;
                 window.CompletionList.ListBox.PreviewMouseLeftButtonUp += CompletionList_PreviewMouseLeftButtonUp;
-                _activeCompletionWindow.Closed += (_, _) => _activeCompletionWindow = null;
+                _activeCompletionWindow.Closed += (_, _) =>
+                {
+                    EditorInputTrace.Log("CompletionPopupClosed", inputTraceId, new Dictionary<string, object?>
+                    {
+                        ["completionRequestId"] = completionRequestId,
+                        ["focusedElementAfter"] = Keyboard.FocusedElement?.GetType().Name
+                    });
+                    _activeCompletionWindow = null;
+                };
+                EditorInputTrace.Log("CompletionPopupShowRequested", inputTraceId, new Dictionary<string, object?>
+                {
+                    ["completionRequestId"] = completionRequestId,
+                    ["focusedElementBefore"] = Keyboard.FocusedElement?.GetType().Name,
+                    ["itemCount"] = window.CompletionList.CompletionData.Count
+                });
                 _activeCompletionWindow.Show();
+                EditorInputTrace.Log("CompletionPopupShown", inputTraceId, new Dictionary<string, object?>
+                {
+                    ["completionRequestId"] = completionRequestId,
+                    ["focusedElementAfter"] = Keyboard.FocusedElement?.GetType().Name
+                });
                 AppLogger.Debug(
                     "EditorCompletion",
                     $"Completion popup shown. AutoTriggered={autoTriggered}, ForceCompletion={forceCompletion}, Fragment='{fragment}', InsideParameterToken={insideParameterToken}, Items={window.CompletionList.CompletionData.Count}.");
             }
             catch (OperationCanceledException)
             {
+                EditorInputTrace.Log("CompletionRequestCanceled", inputTraceId, new Dictionary<string, object?>
+                {
+                    ["completionRequestId"] = completionRequestId,
+                    ["elapsedMicroseconds"] = (Stopwatch.GetTimestamp() - completionStarted) * 1_000_000d / Stopwatch.Frequency
+                });
                 AppLogger.Debug("EditorCompletion", $"Completion request canceled while waiting for IntelliSense results. AutoTriggered={autoTriggered}, ForceCompletion={forceCompletion}.");
             }
             catch (ObjectDisposedException)
@@ -5195,6 +5687,17 @@ namespace PS7ScriptDesk.Shell
 
             var cts = BeginQuickInfoRequest();
             var cancellationToken = cts.Token;
+            var quickInfoTraceId = EditorInputTrace.CurrentCorrelationId;
+            var quickInfoRequestId = $"QI-{Guid.NewGuid():N}";
+            var quickInfoStarted = Stopwatch.GetTimestamp();
+            EditorInputTrace.Log("QuickInfoRequestStarted", quickInfoTraceId, new Dictionary<string, object?>
+            {
+                ["quickInfoRequestId"] = quickInfoRequestId,
+                ["updateStatusOnly"] = updateStatusOnly,
+                ["editorIdentity"] = GetEditorInputIdentity(editorTextEditor),
+                ["documentIdentity"] = GetEditorInputDocumentIdentity(editorTextEditor),
+                ["caretOffset"] = editorTextEditor.CaretOffset
+            });
 
             try
             {
@@ -5206,6 +5709,13 @@ namespace PS7ScriptDesk.Shell
 
                 if (cancellationToken.IsCancellationRequested || quickInfo is null)
                 {
+                    EditorInputTrace.Log("QuickInfoRequestCompleted", quickInfoTraceId, new Dictionary<string, object?>
+                    {
+                        ["quickInfoRequestId"] = quickInfoRequestId,
+                        ["resultAvailable"] = false,
+                        ["canceled"] = cancellationToken.IsCancellationRequested,
+                        ["elapsedMicroseconds"] = (Stopwatch.GetTimestamp() - quickInfoStarted) * 1_000_000d / Stopwatch.Frequency
+                    });
                     return false;
                 }
 
@@ -5219,10 +5729,22 @@ namespace PS7ScriptDesk.Shell
                     ShowEditorToolTip(editorTextEditor.TextArea.TextView, quickInfo.ToString());
                 }
 
+                EditorInputTrace.Log("QuickInfoRequestCompleted", quickInfoTraceId, new Dictionary<string, object?>
+                {
+                    ["quickInfoRequestId"] = quickInfoRequestId,
+                    ["resultAvailable"] = true,
+                    ["elapsedMicroseconds"] = (Stopwatch.GetTimestamp() - quickInfoStarted) * 1_000_000d / Stopwatch.Frequency
+                });
+
                 return true;
             }
             catch (OperationCanceledException)
             {
+                EditorInputTrace.Log("QuickInfoRequestCanceled", quickInfoTraceId, new Dictionary<string, object?>
+                {
+                    ["quickInfoRequestId"] = quickInfoRequestId,
+                    ["elapsedMicroseconds"] = (Stopwatch.GetTimestamp() - quickInfoStarted) * 1_000_000d / Stopwatch.Frequency
+                });
                 return false;
             }
             catch (ObjectDisposedException)
@@ -5564,10 +6086,28 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            LogEditorInputFocus(
+                "EditorGotKeyboardFocus",
+                e.OldFocus,
+                e.NewFocus);
             SetTerminalActive(false, $"EditorFocus:{DescribeEditor(editorTextEditor)}");
             AppLogger.Debug(
                 "EditorCompletion",
                 $"Editor received keyboard focus. Editor={DescribeEditor(editorTextEditor)}, NewFocus={e.NewFocus?.GetType().Name ?? "(null)"}.");
+        }
+
+        private void EditorTextEditor_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+        {
+            if (sender is TextEditor editorTextEditor)
+            {
+                LogEditorInputFocus("EditorLostKeyboardFocus", e.OldFocus, e.NewFocus);
+                EditorInputTrace.Log("EditorFocusState", properties: new Dictionary<string, object?>
+                {
+                    ["editorIdentity"] = GetEditorInputIdentity(editorTextEditor),
+                    ["editorFocusedAfterEvent"] = editorTextEditor.IsKeyboardFocusWithin,
+                    ["newFocusType"] = e.NewFocus?.GetType().Name
+                });
+            }
         }
 
         // -------------------------------------------------------------------------
@@ -6479,6 +7019,7 @@ namespace PS7ScriptDesk.Shell
 
         private async void StepInto_Click(object sender, RoutedEventArgs e)
         {
+            using var performanceScope = PerformanceTrace.Begin("Debugger", "StepInto");
             using var scope = DeveloperDiagnostics.BeginScope(operationId: $"StepInto-{Guid.NewGuid():N}");
             DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Step Into requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("StepInto_Click", $"Entry; {DescribeDebugUiState()}");
@@ -6495,6 +7036,7 @@ namespace PS7ScriptDesk.Shell
 
         private async void StepOver_Click(object sender, RoutedEventArgs e)
         {
+            using var performanceScope = PerformanceTrace.Begin("Debugger", "StepOver");
             using var scope = DeveloperDiagnostics.BeginScope(operationId: $"StepOver-{Guid.NewGuid():N}");
             DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Step Over requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("StepOver_Click", $"Entry; {DescribeDebugUiState()}");
@@ -7833,6 +8375,8 @@ namespace PS7ScriptDesk.Shell
 
         private void Window_Closed(object? sender, EventArgs e)
         {
+            _terminalOutputObservationSubscription.Dispose();
+            _terminalOutputObservationHub.Dispose();
             _terminalObserverLifetime?.Dispose();
             _terminalObserverLifetime = null;
             _uiScaleService.ScaleChanged -= UiScaleService_ScaleChanged;

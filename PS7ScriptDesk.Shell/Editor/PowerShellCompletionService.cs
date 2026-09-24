@@ -81,8 +81,17 @@ namespace PS7ScriptDesk.Shell.Editor
             if (string.IsNullOrWhiteSpace(pwshExecutablePath))
                 return CompletionServiceResult.Empty;
 
+            var safeScriptText = scriptText ?? string.Empty;
             var effectiveResponseTimeout = responseTimeout ?? TimeSpan.FromSeconds(5);
             var stopwatch = Stopwatch.StartNew();
+            var traceRequestId = $"CT-{Guid.NewGuid():N}";
+            EditorInputTrace.Log("CompletionServiceRequestStarted", properties: new Dictionary<string, object?>
+            {
+                ["transportRequestId"] = traceRequestId,
+                ["documentLength"] = safeScriptText.Length,
+                ["cursorOffset"] = cursorOffset,
+                ["responseTimeoutMilliseconds"] = effectiveResponseTimeout.TotalMilliseconds
+            });
             try
             {
                 AppLogger.Debug(
@@ -90,14 +99,20 @@ namespace PS7ScriptDesk.Shell.Editor
                     $"Completion request waiting for helper readiness before applying response budget. ResponseBudgetMs={effectiveResponseTimeout.TotalMilliseconds:N0}.");
                 var payload = await ExecuteTransportRequestAsync(
                     pwshExecutablePath,
-                    request => BuildCompletionCommand(scriptText, cursorOffset, request.StartMarker, request.EndMarker),
+                    request => BuildCompletionCommand(safeScriptText, cursorOffset, request.StartMarker, request.EndMarker),
                     effectiveResponseTimeout,
                     cancellationToken,
                     isCompletionRequest: true).ConfigureAwait(false);
 
                 AppLogger.Debug("EditorCompletion", $"Completion payload received. ElapsedMs={stopwatch.ElapsedMilliseconds:N0}.");
                 stopwatch.Stop();
-                return ParsePayload(payload, cursorOffset, scriptText);
+                EditorInputTrace.Log("CompletionServiceRequestCompleted", properties: new Dictionary<string, object?>
+                {
+                    ["transportRequestId"] = traceRequestId,
+                    ["elapsedMicroseconds"] = stopwatch.ElapsedTicks * 1_000_000d / Stopwatch.Frequency,
+                    ["resultAvailable"] = payload.Length > 0
+                });
+                return ParsePayload(payload, cursorOffset, safeScriptText);
             }
             catch (OperationCanceledException)
             {
@@ -1703,13 +1718,34 @@ namespace PS7ScriptDesk.Shell.Editor
             bool isCompletionRequest)
         {
             var entered = false;
+            var transportRequestId = $"GT-{Guid.NewGuid():N}";
+            var gateWaitStarted = Stopwatch.GetTimestamp();
+            EditorInputTrace.Log("CompletionGateWaitStarted", properties: new Dictionary<string, object?>
+            {
+                ["transportRequestId"] = transportRequestId,
+                ["isCompletionRequest"] = isCompletionRequest
+            });
             try
             {
                 await _requestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 entered = true;
+                EditorInputTrace.Log("CompletionGateAcquired", properties: new Dictionary<string, object?>
+                {
+                    ["transportRequestId"] = transportRequestId,
+                    ["waitMicroseconds"] = (Stopwatch.GetTimestamp() - gateWaitStarted) * 1_000_000d / Stopwatch.Frequency
+                });
                 AppLogger.Debug("EditorCompletion", "Completion request gate acquired.");
 
+                EditorInputTrace.Log("CompletionHelperReadinessStarted", properties: new Dictionary<string, object?>
+                {
+                    ["transportRequestId"] = transportRequestId
+                });
                 await EnsureProcessReadyAsync(pwshExecutablePath, cancellationToken).ConfigureAwait(false);
+                EditorInputTrace.Log("CompletionHelperReadinessCompleted", properties: new Dictionary<string, object?>
+                {
+                    ["transportRequestId"] = transportRequestId,
+                    ["helperReady"] = true
+                });
                 AppLogger.Debug("EditorCompletion", "Completion helper ready; live response budget now active.");
 
                 var effectiveTimeout = timeout;
@@ -1794,6 +1830,10 @@ namespace PS7ScriptDesk.Shell.Editor
             {
                 if (entered)
                 {
+                    EditorInputTrace.Log("CompletionGateReleased", properties: new Dictionary<string, object?>
+                    {
+                        ["transportRequestId"] = transportRequestId
+                    });
                     try { _requestGate.Release(); } catch { }
                 }
             }

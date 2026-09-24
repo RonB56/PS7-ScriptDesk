@@ -430,6 +430,61 @@ public sealed class TerminalResizePolicyTests
         Assert.DoesNotContain("type = 'input'", liveResizeBlock, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void HostResizeCommit_PreservesLogicalViewportAnchorAcrossReflow()
+    {
+        var source = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalControl.xaml.cs");
+        var start = source.IndexOf("else if (msg.type === 'resize_commit')", StringComparison.Ordinal);
+        var end = source.IndexOf("else if (msg.type === 'focus')", start, StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        Assert.True(end > start);
+
+        var commitBlock = source[start..end];
+        Assert.Contains("captureViewportAnchor()", commitBlock, StringComparison.Ordinal);
+        Assert.Contains("term.resize(commitCols, commitRows)", commitBlock, StringComparison.Ordinal);
+        Assert.Contains("restoreViewportAnchor(viewportAnchor, 'host.resizeCommit')", commitBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("term.clear()", commitBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("term.reset()", commitBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("scrollToBottom", commitBlock, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void XtermDiagnostics_CaptureBufferViewportAndCanvasStateWithoutContent()
+    {
+        var source = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalControl.xaml.cs");
+
+        Assert.Contains("scrollback: term.options", source, StringComparison.Ordinal);
+        Assert.Contains("alternateBuffer", source, StringComparison.Ordinal);
+        Assert.Contains("canvasWidth", source, StringComparison.Ordinal);
+        Assert.Contains("canvasHeight", source, StringComparison.Ordinal);
+        Assert.Contains("viewportAnchorDistanceFromBottom", source, StringComparison.Ordinal);
+        var stateStart = source.IndexOf("var terminalState = function", StringComparison.Ordinal);
+        var stateEnd = source.IndexOf("var createControlSummary = function", stateStart, StringComparison.Ordinal);
+        Assert.True(stateStart >= 0);
+        Assert.True(stateEnd > stateStart);
+        Assert.DoesNotContain("decodedOutput", source[stateStart..stateEnd], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConptyResizeDiagnostics_CapturePreviousAndRequestedDimensions()
+    {
+        var source = ReadRepositoryFile(
+            "PS7ScriptDesk.PowerShell",
+            "Services",
+            "LiveConsoleService.cs");
+
+        Assert.Contains("var previousColumns = _terminalColumns", source, StringComparison.Ordinal);
+        Assert.Contains("var previousRows = _terminalRows", source, StringComparison.Ordinal);
+        Assert.Contains("[\"previousColumns\"] = resizeRequest.PreviousColumns", source, StringComparison.Ordinal);
+        Assert.Contains("[\"previousRows\"] = resizeRequest.PreviousRows", source, StringComparison.Ordinal);
+    }
+
     private static string ReadRepositoryFile(params string[] parts)
         => TestRepositoryPaths.ReadFile(parts);
 }

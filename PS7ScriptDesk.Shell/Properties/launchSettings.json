@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "PS7ScriptDesk.Shell": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "PS7SCRIPTDESK_EDITOR_INPUT_TRACE": "",
+        "PS7SCRIPTDESK_STRUCTURED_EXECUTION": "",
+        "PS7SCRIPTDESK_PERF_TRACE": "1",
+        "PS7SCRIPTDESK_PERF_WORKLOAD": "PhaseC2CNumberedHistory",
+        "PS7SCRIPTDESK_PERF_RUN_ID": "C2C-Numbered-History-04"
+      }
+    }
+  }
+}

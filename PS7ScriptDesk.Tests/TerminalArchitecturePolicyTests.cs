@@ -1,7 +1,56 @@
+using PS7ScriptDesk.Application.Services;
+
 namespace PS7ScriptDesk.Tests;
 
 public sealed class TerminalArchitecturePolicyTests
 {
+    [Theory]
+    [InlineData(true, true, TerminalCtrlCDisposition.CopySelection)]
+    [InlineData(true, false, TerminalCtrlCDisposition.CopySelection)]
+    [InlineData(false, true, TerminalCtrlCDisposition.Interrupt)]
+    [InlineData(false, false, TerminalCtrlCDisposition.PassThrough)]
+    public void CtrlCOwnership_IsSelectionAwareAndDoesNotInterruptCopy(
+        bool selectionPresent,
+        bool terminalSessionRunning,
+        TerminalCtrlCDisposition expected)
+    {
+        Assert.Equal(
+            expected,
+            TerminalKeyboardOwnershipPolicy.ResolveCtrlC(selectionPresent, terminalSessionRunning));
+    }
+
+    [Fact]
+    public void TerminalCopyPath_UsesXtermSelectionAndHostClipboardWithoutWpfTextReconstruction()
+    {
+        var source = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalControl.xaml.cs");
+
+        Assert.Contains("term.hasSelection()", source, StringComparison.Ordinal);
+        Assert.Contains("term.getSelection()", source, StringComparison.Ordinal);
+        Assert.Contains("post({ type: 'copy', text: term.getSelection() })", source, StringComparison.Ordinal);
+        Assert.Contains("System.Windows.Clipboard.SetText(copyText, System.Windows.TextDataFormat.UnicodeText)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TerminalCtrlCJavaScript_SuppressesCopyButPassesInterruptThrough()
+    {
+        var source = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalControl.xaml.cs");
+        var handlerStart = source.IndexOf("term.attachCustomKeyEventHandler", StringComparison.Ordinal);
+        var handlerEnd = source.IndexOf("// Do not turn right-click into paste", handlerStart, StringComparison.Ordinal);
+        Assert.True(handlerStart >= 0 && handlerEnd > handlerStart);
+        var handler = source[handlerStart..handlerEnd];
+
+        Assert.Contains("if (term.hasSelection())", handler, StringComparison.Ordinal);
+        Assert.Contains("return false;", handler, StringComparison.Ordinal);
+        Assert.Contains("return true; // no selection → pass through as \\x03 (SIGINT)", handler, StringComparison.Ordinal);
+        Assert.Contains("term.clearSelection()", handler, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TerminalWiring_HasNoGenericApplicationTextSinkIntoXterm()
     {
@@ -122,6 +171,24 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.DoesNotContain("command: 'replace'", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.Name=\"Interactive PowerShell terminal\"", terminalControlXaml, StringComparison.Ordinal);
         Assert.Contains("KeyboardNavigation.TabNavigation=\"Once\"", terminalControlXaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TerminalCompatibility_DeclaresConPtyHistoryPreservationForXtermResize()
+    {
+        var terminalControlSource = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalControl.xaml.cs");
+
+        Assert.Contains("xtermVersion: '__PS7_XTERM_VERSION__'", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("windowsPty: {", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("backend: '__PS7_WINDOWS_PTY_BACKEND__'", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("buildNumber: __PS7_WINDOWS_PTY_BUILD_NUMBER__", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("private static string GetWindowsPtyBuildNumber()", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("Environment.OSVersion.Version.Build", terminalControlSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("filterEraseLine", terminalControlSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("PreserveVisibleTranscript", terminalControlSource, StringComparison.Ordinal);
     }
 
     [Fact]

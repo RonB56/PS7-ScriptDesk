@@ -73,6 +73,16 @@ public sealed class PSScriptAnalyzerService : IPSScriptAnalyzerService, IAsyncDi
     {
         ArgumentNullException.ThrowIfNull(request);
         ThrowIfDisposed();
+        using var performanceScope = PerformanceTrace.Begin(
+            "Analyzer",
+            "AnalysisRequest",
+            requestId: request.RequestId,
+            documentVersion: request.Revision,
+            properties: new Dictionary<string, object?>
+            {
+                ["documentId"] = request.DocumentId,
+                ["profile"] = request.Profile
+            });
         await _requestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         var stopwatch = Stopwatch.StartNew();
         lock (_sync) { _workerState = PSScriptAnalyzerWorkerState.Busy; _currentRequestId = request.RequestId; }
@@ -121,6 +131,7 @@ public sealed class PSScriptAnalyzerService : IPSScriptAnalyzerService, IAsyncDi
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PerformanceTrace.Record("cancelObserved", "Analyzer", "AnalysisRequest", requestId: request.RequestId, documentVersion: request.Revision, cancelRequested: true, result: "canceled");
             onProgress?.Invoke(new PSScriptAnalyzerProgress(request.RequestId, request.DocumentId, request.Revision, PSScriptAnalyzerProgressState.AnalysisCancelled, 0, 0, null, stopwatch.ElapsedMilliseconds, 0, 0, "Canceled"));
             DeveloperDiagnostics.LogInfo("PSScriptAnalyzer", "Analysis request canceled.", new Dictionary<string, object?> { ["requestId"] = request.RequestId, ["progressMode"] = request.EnableProgress });
             DisposeWorker("Cancellation");

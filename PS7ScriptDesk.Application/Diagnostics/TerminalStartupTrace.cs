@@ -49,6 +49,7 @@ public static class TerminalStartupTrace
     {
         try
         {
+            PerformanceTrace.Record("milestone", "Startup", stage);
             var ui = default((bool IsUiThread, int? DispatcherThreadId));
             try { ui = _uiSnapshotProvider?.Invoke() ?? (false, null); } catch { }
             var line = new StringBuilder(768)

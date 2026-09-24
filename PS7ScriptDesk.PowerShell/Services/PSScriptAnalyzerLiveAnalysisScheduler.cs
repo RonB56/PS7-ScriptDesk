@@ -50,6 +50,7 @@ public sealed class PSScriptAnalyzerLiveAnalysisScheduler : IDisposable
             ScheduledRequestCount++;
             _ = RunAfterDebounceAsync(work, cancellationToken);
         }
+        PerformanceTrace.Record("analysisRequested", "Analyzer", "Schedule", documentVersion: revision, properties: new Dictionary<string, object?> { ["documentId"] = documentId });
         ActivityChanged?.Invoke(this, new PSScriptAnalyzerActivity("Waiting", documentId, revision, null));
     }
 
@@ -59,6 +60,7 @@ public sealed class PSScriptAnalyzerLiveAnalysisScheduler : IDisposable
         {
             if (_pending.Remove(documentId, out var work)) work.Cancel();
         }
+        PerformanceTrace.Record("cancelRequested", "Analyzer", "Cancel", documentVersion: null, cancelRequested: true, properties: new Dictionary<string, object?> { ["documentId"] = documentId });
     }
 
     public void CancelAll()
@@ -88,11 +90,14 @@ public sealed class PSScriptAnalyzerLiveAnalysisScheduler : IDisposable
                 work.ScriptText,
                 work.SeverityFilter);
             lock (_sync) DispatchedRequestCount++;
+            PerformanceTrace.Record("analysisStarted", "Analyzer", "LiveAnalysis", requestId: request.RequestId, documentVersion: work.Revision, properties: new Dictionary<string, object?> { ["documentId"] = work.DocumentId });
             ActivityChanged?.Invoke(this, new PSScriptAnalyzerActivity("Analyzing", work.DocumentId, work.Revision, request.RequestId));
             await _analyze(request, cancellation.Token).ConfigureAwait(false);
+            PerformanceTrace.Record("analysisCompleted", "Analyzer", "LiveAnalysis", requestId: request.RequestId, documentVersion: work.Revision, result: "accepted");
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
+            PerformanceTrace.Record("cancelObserved", "Analyzer", "LiveAnalysis", documentVersion: work.Revision, cancelRequested: true, result: "canceled");
             ActivityChanged?.Invoke(this, new PSScriptAnalyzerActivity("Canceled", work.DocumentId, work.Revision, null));
         }
         catch (Exception ex)

@@ -866,7 +866,8 @@ namespace PS7ScriptDesk.Shell.Controls
             bool resizeAdjacent = false,
             long resizeGeneration = 0,
             double resizeElapsedMilliseconds = 0,
-            string? hostControlSummary = null)
+            string? hostControlSummary = null,
+            bool markerCandidate = false)
         {
             var safeData = data ?? string.Empty;
             var controlSummary = hostControlSummary ??
@@ -883,6 +884,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 resizeElapsedMilliseconds,
                 outputCharacterLength = safeData.Length,
                 hostControlSummary = controlSummary,
+                markerCandidate,
                 contentOmitted = true,
                 data = Convert.ToBase64String(Encoding.UTF8.GetBytes(safeData))
             });
@@ -903,6 +905,16 @@ namespace PS7ScriptDesk.Shell.Controls
                 resizeGeneration,
                 cols = columns,
                 rows
+            });
+        }
+
+        public static string SerializePromptBoundary(int terminalSessionGeneration)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                type = "prompt_boundary",
+                generation = terminalSessionGeneration,
+                contentOmitted = true
             });
         }
 
