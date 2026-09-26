@@ -6,6 +6,7 @@
         xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
         xmlns:controls="clr-namespace:PS7ScriptDesk.Shell.Controls"
         xmlns:local="clr-namespace:PS7ScriptDesk.Shell"
+        xmlns:debugger="clr-namespace:PS7ScriptDesk.Shell.Debug"
                 Title="{Binding Title}"
         Height="700"
         Width="1360"
@@ -21,8 +22,19 @@
         PreviewGotKeyboardFocus="Window_PreviewGotKeyboardFocus"
         AllowDrop="True">
 
+    <Window.CommandBindings>
+        <CommandBinding Command="{x:Static local:MainWindow.StartDebugCommand}" CanExecute="StartDebugCommand_CanExecute" Executed="StartDebugCommand_Executed" />
+        <CommandBinding Command="{x:Static local:MainWindow.ContinueDebugCommand}" CanExecute="ContinueDebugCommand_CanExecute" Executed="ContinueDebugCommand_Executed" />
+        <CommandBinding Command="{x:Static local:MainWindow.StopDebugCommand}" CanExecute="StopDebugCommand_CanExecute" Executed="StopDebugCommand_Executed" />
+        <CommandBinding Command="{x:Static local:MainWindow.StepOverCommand}" CanExecute="StepOverCommand_CanExecute" Executed="StepOverCommand_Executed" />
+        <CommandBinding Command="{x:Static local:MainWindow.StepIntoCommand}" CanExecute="StepIntoCommand_CanExecute" Executed="StepIntoCommand_Executed" />
+        <CommandBinding Command="{x:Static local:MainWindow.StepOutCommand}" CanExecute="StepOutCommand_CanExecute" Executed="StepOutCommand_Executed" />
+        <CommandBinding Command="{x:Static local:MainWindow.ToggleBreakpointCommand}" CanExecute="ToggleBreakpointCommand_CanExecute" Executed="ToggleBreakpointCommand_Executed" />
+    </Window.CommandBindings>
+
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+        <debugger:DebugOutputCategoryBrushConverter x:Key="DebugOutputCategoryBrushConverter" />
 
         <Style x:Key="ExplorerTreeItemTextStyle" TargetType="TextBlock">
             <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
@@ -449,18 +461,18 @@
             </MenuItem>
 
             <MenuItem Header="_Debug" help:ContextHelp.Key="Debug.Area">
-                <MenuItem Header="_Toggle Breakpoint" InputGestureText="F9" Click="ToggleBreakpoint_Click" help:ContextHelp.Key="Command.ToggleBreakpoint" />
+                <MenuItem Header="_Toggle Breakpoint" Command="{x:Static local:MainWindow.ToggleBreakpointCommand}" InputGestureText="F9" help:ContextHelp.Key="Command.ToggleBreakpoint" />
                 <Separator />
                 <MenuItem Header="Open Console Prototype"
                           Click="OpenConsolePrototype_Click"
                           help:ContextHelp.Key="Debug.Area" />
                 <Separator />
-                <MenuItem x:Name="StartDebugMenuItem" Header="Start _Debug"  InputGestureText="F5" Click="StartDebug_Click" IsEnabled="False" help:ContextHelp.Key="Command.StartDebug" />
-                <MenuItem x:Name="StepIntoMenuItem"   Header="Step _Into"    InputGestureText="F11"       Click="StepInto_Click"   IsEnabled="False" help:ContextHelp.Key="Command.StepInto" />
-                <MenuItem x:Name="StepOverMenuItem"   Header="Step _Over"    InputGestureText="F10"       Click="StepOver_Click"   IsEnabled="False" help:ContextHelp.Key="Command.StepOver" />
-                <MenuItem x:Name="StepOutMenuItem"    Header="Step O_ut"     InputGestureText="Shift+F11" Click="StepOut_Click"    IsEnabled="False" help:ContextHelp.Key="Command.StepOut" />
-                <MenuItem x:Name="ContinueMenuItem"   Header="_Continue"     InputGestureText="F5"       Click="ContinueDebug_Click" IsEnabled="False" help:ContextHelp.Key="Command.ContinueDebug" />
-                <MenuItem x:Name="StopDebugMenuItem"  Header="Stop D_ebug"  InputGestureText="Shift+F5" Click="StopDebug_Click"  IsEnabled="False" help:ContextHelp.Key="Command.StopDebug" />
+                <MenuItem x:Name="StartDebugMenuItem" Header="Start _Debug"  Command="{x:Static local:MainWindow.StartDebugCommand}" InputGestureText="F5" help:ContextHelp.Key="Command.StartDebug" />
+                <MenuItem x:Name="StepIntoMenuItem"   Header="Step _Into"    Command="{x:Static local:MainWindow.StepIntoCommand}" InputGestureText="F11" help:ContextHelp.Key="Command.StepInto" />
+                <MenuItem x:Name="StepOverMenuItem"   Header="Step _Over"    Command="{x:Static local:MainWindow.StepOverCommand}" InputGestureText="F10" help:ContextHelp.Key="Command.StepOver" />
+                <MenuItem x:Name="StepOutMenuItem"    Header="Step O_ut"     Command="{x:Static local:MainWindow.StepOutCommand}" InputGestureText="Shift+F11" help:ContextHelp.Key="Command.StepOut" />
+                <MenuItem x:Name="ContinueMenuItem"   Header="_Continue"     Command="{x:Static local:MainWindow.ContinueDebugCommand}" InputGestureText="F5" help:ContextHelp.Key="Command.ContinueDebug" />
+                <MenuItem x:Name="StopDebugMenuItem"  Header="Stop D_ebug"  Command="{x:Static local:MainWindow.StopDebugCommand}" InputGestureText="Shift+F5" help:ContextHelp.Key="Command.StopDebug" />
             </MenuItem>
 
             <MenuItem Header="_Tools" help:ContextHelp.Key="Menu.Tools">
@@ -489,6 +501,9 @@
                     <Separator />
                     <MenuItem Header="_Open Developer Debugging Folder"
                               Click="OpenDeveloperDebuggingFolder_Click" />
+                    <MenuItem x:Name="CaptureLayoutForensicsMenuItem"
+                              Header="_Capture Layout Forensics"
+                              Click="CaptureLayoutForensics_Click" />
                     <MenuItem Header="Open _Latest Diagnostic Session Folder"
                               Click="OpenLatestDiagnosticSessionFolder_Click" />
                     <MenuItem Header="_Copy Diagnostics Summary to Clipboard"
@@ -732,13 +747,12 @@
 
                 <Grid x:Name="ContinueTooltipHost"
                       Style="{StaticResource IdeToolbarTooltipHostStyle}"
-                      ToolTip="Continue (F5)">
+                      ToolTip="Continue running until the next breakpoint or until the script finishes. (F5)">
                 <Button x:Name="ContinueButton"
                         help:ContextHelp.Key="Command.ContinueDebug"
-                        Click="ContinueDebug_Click"
-                        IsEnabled="False"
+                        Command="{x:Static local:MainWindow.ContinueDebugCommand}"
                         Style="{StaticResource IdeToolbarButtonStyle}"
-                        ToolTip="Continue (F5)">
+                        ToolTip="Continue running until the next breakpoint or until the script finishes. (F5)">
                     <StackPanel Orientation="Horizontal">
                         <Viewbox Style="{StaticResource ToolbarIconViewboxStyle}">
                             <Path Data="M 0,2 L 7,8 L 0,14 Z M 8,2 L 15,8 L 8,14 Z"
@@ -751,13 +765,12 @@
 
                 <Grid x:Name="StepOverTooltipHost"
                       Style="{StaticResource IdeToolbarTooltipHostStyle}"
-                      ToolTip="Step Over (F10)">
+                      ToolTip="Execute the current statement without entering called functions, then pause at the next statement in the current scope. (F10)">
                 <Button x:Name="StepOverButton"
                         help:ContextHelp.Key="Command.StepOver"
-                        Click="StepOver_Click"
-                        IsEnabled="False"
+                        Command="{x:Static local:MainWindow.StepOverCommand}"
                         Style="{StaticResource IdeToolbarButtonStyle}"
-                        ToolTip="Step Over (F10)">
+                        ToolTip="Execute the current statement without entering called functions, then pause at the next statement in the current scope. (F10)">
                     <StackPanel Orientation="Horizontal">
                         <Viewbox Style="{StaticResource ToolbarIconViewboxStyle}">
                             <Path Data="M 0,6 H 10 L 7,3 L 10,6 L 7,9 M 0,12 H 16 V 13 H 0 Z"
@@ -770,13 +783,12 @@
 
                 <Grid x:Name="StepIntoTooltipHost"
                       Style="{StaticResource IdeToolbarTooltipHostStyle}"
-                      ToolTip="Step Into (F11)">
+                      ToolTip="Enter a called PowerShell function or script when it can be debugged. (F11)">
                 <Button x:Name="StepIntoButton"
                         help:ContextHelp.Key="Command.StepInto"
-                        Click="StepInto_Click"
-                        IsEnabled="False"
+                        Command="{x:Static local:MainWindow.StepIntoCommand}"
                         Style="{StaticResource IdeToolbarButtonStyle}"
-                        ToolTip="Step Into (F11)">
+                        ToolTip="Enter a called PowerShell function or script when it can be debugged. (F11)">
                     <StackPanel Orientation="Horizontal">
                         <Viewbox Style="{StaticResource ToolbarIconViewboxStyle}">
                             <Path Data="M 8,0 V 10 L 5,7 H 3 L 8,13 L 13,7 H 11 L 8,10 V 0"
@@ -789,13 +801,12 @@
 
                 <Grid x:Name="StepOutTooltipHost"
                       Style="{StaticResource IdeToolbarTooltipHostStyle}"
-                      ToolTip="Step Out (Shift+F11)">
+                      ToolTip="Continue until the current function or scope returns to its caller. (Shift+F11)">
                 <Button x:Name="StepOutButton"
                         help:ContextHelp.Key="Command.StepOut"
-                        Click="StepOut_Click"
-                        IsEnabled="False"
+                        Command="{x:Static local:MainWindow.StepOutCommand}"
                         Style="{StaticResource IdeToolbarButtonStyle}"
-                        ToolTip="Step Out (Shift+F11)">
+                        ToolTip="Continue until the current function or scope returns to its caller. (Shift+F11)">
                     <StackPanel Orientation="Horizontal">
                         <Viewbox Style="{StaticResource ToolbarIconViewboxStyle}">
                             <Path Data="M 8,16 V 6 L 5,9 H 3 L 8,3 L 13,9 H 11 L 8,6 V 16 M 0,2 H 16 V 3 H 0 Z"
@@ -965,7 +976,8 @@
             </StatusBarItem>
         </StatusBar>
 
-        <Grid Margin="4">
+        <Grid x:Name="WorkspaceGrid"
+              Margin="4">
             <Grid.RowDefinitions>
                 <RowDefinition x:Name="EditorRowDefinition" Height="*" />
                 <RowDefinition x:Name="EditorConsoleRowSplitterDefinition" Height="6" />
@@ -977,7 +989,7 @@
 
                 <ColumnDefinition x:Name="ExplorerSplitterColumnDefinition" Width="6" />
 
-                <ColumnDefinition x:Name="EditorColumnDefinition" Width="*" />
+                <ColumnDefinition x:Name="EditorColumnDefinition" Width="*" MinWidth="320" />
 
                 <ColumnDefinition x:Name="ConsoleSideSplitterColumnDefinition" Width="0" />
 
@@ -988,7 +1000,44 @@
                 <ColumnDefinition x:Name="DebugPanelColumn" Width="0" MinWidth="0" />
             </Grid.ColumnDefinitions>
 
-            <Border Grid.Row="0"
+            <!--
+                 Stage 2 owns SideBySide horizontal geometry here. The grid is
+                 intentionally empty in non-SideBySide modes; MainWindow moves
+                 the existing pane elements into it as one coordinated projection.
+            -->
+            <Grid x:Name="SideBySideGrid"
+                  Grid.Row="0"
+                  Grid.RowSpan="3"
+                  Grid.Column="2"
+                  Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition x:Name="SideBySideEditorColumnDefinition" Width="*" MinWidth="320" />
+                    <ColumnDefinition x:Name="SideBySideEditorConsoleSplitterColumnDefinition" Width="0" />
+                    <ColumnDefinition x:Name="SideBySideConsoleColumnDefinition" Width="0" MinWidth="220" />
+                    <ColumnDefinition x:Name="SideBySideConsoleDebugSplitterColumnDefinition" Width="0" />
+                    <ColumnDefinition x:Name="SideBySideDebugColumnDefinition" Width="0" MinWidth="160" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Permanently owned by the SideBySide topology. The horizontal
+                     WorkspaceGrid splitter remains a separate native control. -->
+                <GridSplitter x:Name="SideBySideDebugSplitter"
+                              Grid.Row="0"
+                              Grid.Column="3"
+                              Width="6"
+                              HorizontalAlignment="Stretch"
+                              VerticalAlignment="Stretch"
+                              ResizeDirection="Columns"
+                              ResizeBehavior="PreviousAndNext"
+                              ShowsPreview="False"
+                              Style="{StaticResource IdeColumnSplitterStyle}"
+                              DragStarted="SideBySideDebugSplitter_DragStarted"
+                              DragDelta="SideBySideDebugSplitter_DragDelta"
+                              DragCompleted="SideBySideDebugSplitter_DragCompleted"
+                              Visibility="Collapsed" />
+            </Grid>
+
+            <Border x:Name="ExplorerPaneBorder"
+                    Grid.Row="0"
                     Grid.RowSpan="3"
                     Grid.Column="0"
                     help:ContextHelp.Key="Explorer.Area"
@@ -1314,10 +1363,13 @@
                 </Grid>
             </Border>
 
-            <GridSplitter Grid.Row="0"
+            <GridSplitter x:Name="ExplorerPaneSplitter"
+                          Grid.Row="0"
                           Grid.RowSpan="3"
                           Grid.Column="1"
                           Style="{StaticResource IdeColumnSplitterStyle}"
+                          DragStarted="ExplorerPaneSplitter_DragStarted"
+                          DragCompleted="ExplorerPaneSplitter_DragCompleted"
                           Visibility="{Binding IsExplorerVisible, Converter={StaticResource BooleanToVisibilityConverter}}" />
 
             <Border x:Name="EditorPaneBorder" Grid.Row="0"
@@ -1382,7 +1434,7 @@
                                         <TextBlock Text="{Binding DisplayTitle}"
                                                    VerticalAlignment="Center"
                                                    Margin="0,0,6,0"
-                                                   ToolTip="{Binding FilePath, TargetNullValue=Unsaved document}" />
+                                                   ToolTip="{Binding EditorTabToolTip}" />
                                         <Button Content="x"
                                                 help:ContextHelp.Key="Editor.CloseTabButton"
                                                 Width="16"
@@ -1454,9 +1506,9 @@
                                                                   IsEnabled="{Binding DataContext.IsRunAvailable, Source={x:Reference RootWindow}}"
                                                                   Click="RunSelection_Click" />
                                                         <MenuItem Header="Toggle Breakpoint"
+                                                                  Command="{x:Static local:MainWindow.ToggleBreakpointCommand}"
                                                                   help:ContextHelp.Key="Command.ToggleBreakpoint"
-                                                                  InputGestureText="F9"
-                                                                  Click="ToggleBreakpoint_Click" />
+                                                                  InputGestureText="F9" />
                                                         <Separator />
                                                         <MenuItem Header="Selection" />
                                                         <MenuItem Header="Transform" />
@@ -1554,6 +1606,9 @@
                           Style="{StaticResource IdeRowSplitterStyle}" />
 
             <GridSplitter x:Name="EditorConsoleColumnSplitter"
+                          DragStarted="HorizontalSplitter_DragStarted"
+                          DragDelta="HorizontalSplitter_DragDelta"
+                          DragCompleted="HorizontalSplitter_DragCompleted"
                           Grid.Row="0"
                           Grid.RowSpan="3"
                           Grid.Column="3"
@@ -1895,21 +1950,205 @@
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
 
-                            <TextBlock Text="Debugger Process Output"
-                                       Margin="0,0,0,4"
-                                       Style="{StaticResource IdeSectionHeaderTextStyle}"
-                                       help:ContextHelp.Key="Debug.Area" />
+                            <DockPanel Grid.Row="0" Margin="0,0,0,4">
+                                <TextBlock Text="Debug Output"
+                                           VerticalAlignment="Center"
+                                           Style="{StaticResource IdeSectionHeaderTextStyle}"
+                                           help:ContextHelp.Key="Debug.Area" />
+                                <StackPanel DockPanel.Dock="Right"
+                                            Orientation="Horizontal"
+                                            HorizontalAlignment="Right">
+                                    <Button Content="Clear"
+                                            Style="{StaticResource IdeSecondaryButtonStyle}"
+                                            Margin="0,0,6,0"
+                                            ToolTip="Clear Debug Output. This does not stop the debug session."
+                                            AutomationProperties.Name="Clear Debug Output"
+                                            Click="DebugOutputClear_Click" />
+                                    <Button Content="Copy All"
+                                            Style="{StaticResource IdeSecondaryButtonStyle}"
+                                            Margin="0,0,6,0"
+                                            ToolTip="Copy the currently visible Debug Output events."
+                                            AutomationProperties.Name="Copy visible Debug Output"
+                                            Click="DebugOutputCopyAll_Click" />
+                                    <Button Content="Save Log"
+                                            Style="{StaticResource IdeSecondaryButtonStyle}"
+                                            Margin="0,0,6,0"
+                                            ToolTip="Save the currently visible Debug Output events as a text log."
+                                            AutomationProperties.Name="Save Debug Output log"
+                                            Click="DebugOutputSaveLog_Click" />
+                                    <ToggleButton x:Name="DebugOutputAutoScrollToggle"
+                                                  Content="Auto-scroll"
+                                                  IsChecked="True"
+                                                  Style="{StaticResource IdeBottomPaneTabToggleButtonStyle}"
+                                                  Margin="0,0,6,0"
+                                                  ToolTip="Keep Debug Output positioned at the newest event."
+                                                  AutomationProperties.Name="Debug Output auto-scroll"
+                                                  Checked="DebugOutputAutoScroll_Checked"
+                                                  Unchecked="DebugOutputAutoScroll_Unchecked" />
+                                    <Button x:Name="DebugOutputFiltersButton"
+                                            Content="Filters"
+                                            Style="{StaticResource IdeSecondaryButtonStyle}"
+                                            ToolTip="Choose which Debug Output event categories are visible."
+                                            AutomationProperties.Name="Debug Output filters"
+                                            Click="DebugOutputFilters_Click" />
+                                </StackPanel>
+                            </DockPanel>
 
-                            <TextBox Grid.Row="1"
-                                     Text="{Binding DebuggerOutputText, Mode=OneWay}"
-                                     IsReadOnly="True"
-                                     AcceptsReturn="True"
-                                     TextWrapping="NoWrap"
-                                     VerticalScrollBarVisibility="Auto"
-                                     HorizontalScrollBarVisibility="Auto"
-                                     FontFamily="Consolas"
+                            <Popup x:Name="DebugOutputFiltersPopup"
+                                   PlacementTarget="{Binding ElementName=DebugOutputFiltersButton}"
+                                   Placement="Bottom"
+                                   StaysOpen="False"
+                                   AllowsTransparency="True">
+                                <Border Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+                                        BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+                                        BorderThickness="1"
+                                        Padding="10">
+                                    <StackPanel>
+                                        <TextBlock Text="Event filters"
+                                                   FontWeight="SemiBold"
+                                                   Margin="0,0,0,6" />
+                                        <CheckBox Content="Debugger"
+                                                  IsChecked="True"
+                                                  Tag="Debugger"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <CheckBox Content="Breakpoints"
+                                                  IsChecked="True"
+                                                  Tag="Breakpoints"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <CheckBox Content="Steps"
+                                                  IsChecked="True"
+                                                  Tag="Steps"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <CheckBox Content="Output"
+                                                  IsChecked="True"
+                                                  Tag="Output"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <CheckBox Content="Host"
+                                                  IsChecked="True"
+                                                  Tag="Host"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <CheckBox Content="Warnings"
+                                                  IsChecked="True"
+                                                  Tag="Warnings"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <CheckBox Content="Verbose"
+                                                  Tag="Verbose"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <CheckBox Content="Debug"
+                                                  Tag="Debug"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <CheckBox Content="Information"
+                                                  Tag="Information"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <CheckBox Content="Errors"
+                                                  IsChecked="True"
+                                                  Tag="Errors"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <CheckBox Content="Exceptions"
+                                                  IsChecked="True"
+                                                  Tag="Exceptions"
+                                                  Click="DebugOutputFilter_Click" />
+                                        <Separator Margin="0,6" />
+                                        <CheckBox Content="Include Script Output"
+                                                  IsChecked="True"
+                                                  ToolTip="Show output produced by the debugged script and child processes."
+                                                  AutomationProperties.Name="Include Script Output"
+                                                  Click="DebugOutputIncludeScriptOutput_Click" />
+                                    </StackPanel>
+                                </Border>
+                            </Popup>
+
+                            <ListBox x:Name="DebugOutputList"
+                                     Grid.Row="1"
+                                     Loaded="DebugOutputList_Loaded"
+                                     Unloaded="DebugOutputList_Unloaded"
+                                     SelectionMode="Extended"
+                                     ItemsSource="{Binding ElementName=RootWindow, Path=DebugOutputPresentation.VisibleItems}"
+                                     BorderThickness="0"
+                                     Background="Transparent"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                     ScrollViewer.ScrollChanged="DebugOutputList_ScrollChanged"
+                                     VirtualizingPanel.IsVirtualizing="True"
+                                     VirtualizingPanel.VirtualizationMode="Recycling"
+                                     KeyboardNavigation.TabNavigation="Continue"
                                      ToolTip="Output from the separate PowerShell debugger process. Interactive PowerShell remains in Console."
-                                     help:ContextHelp.Key="Debug.Area" />
+                                     help:ContextHelp.Key="Debug.Area">
+                                <ListBox.ItemContainerStyle>
+                                    <Style TargetType="ListBoxItem">
+                                        <Setter Property="Padding" Value="2,0" />
+                                        <Setter Property="MinHeight" Value="0" />
+                                        <Setter Property="VerticalContentAlignment" Value="Center" />
+                                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    </Style>
+                                </ListBox.ItemContainerStyle>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border>
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Padding" Value="1,1" />
+                                                    <Setter Property="Background" Value="Transparent" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsSessionBoundary}" Value="True">
+                                                            <Setter Property="Background" Value="{DynamicResource Theme.Surface.Tertiary}" />
+                                                            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
+                                                            <Setter Property="BorderThickness" Value="0,1,0,1" />
+                                                            <Setter Property="Padding" Value="3,3" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding LocalTime}"
+                                                           Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
+                                                           Margin="0,0,8,0"
+                                                           FontFamily="Consolas" />
+                                                <TextBlock Grid.Column="1"
+                                                           Text="{Binding CategoryLabel, StringFormat=[{0}]}"
+                                                           Foreground="{Binding Category, Converter={StaticResource DebugOutputCategoryBrushConverter}}"
+                                                           FontWeight="SemiBold"
+                                                           Margin="0,0,8,0" />
+                                                <Button Grid.Column="2"
+                                                        Content="{Binding LocationLabel}"
+                                                        Visibility="{Binding IsNavigable, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                                        Style="{StaticResource IdeSecondaryButtonStyle}"
+                                                        Padding="0"
+                                                        MinHeight="0"
+                                                        Margin="0,0,8,0"
+                                                        ToolTip="Navigate to this source location."
+                                                        Click="DebugOutputNavigate_Click" />
+                                                <StackPanel Grid.Column="3">
+                                                    <TextBlock Text="{Binding DisplayText}"
+                                                               Foreground="{Binding Category, Converter={StaticResource DebugOutputCategoryBrushConverter}}"
+                                                               TextWrapping="Wrap" />
+                                                            <Expander Header="Details"
+                                                                      Visibility="{Binding IsExpandable, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                                              Margin="0"
+                                                              Padding="0"
+                                                              MinHeight="0">
+                                                        <TextBlock Text="{Binding Details}"
+                                                                   TextWrapping="Wrap"
+                                                                   FontFamily="Consolas" />
+                                                    </Expander>
+                                                </StackPanel>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                            <TextBlock x:Name="DebugOutputEmptyState"
+                                       Text="No debugger output yet."
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
+                                       IsHitTestVisible="False" />
                         </Grid>
 
                         <Grid x:Name="ActivityBottomPane"
@@ -1952,11 +2191,14 @@
                 </Grid>
             </Border>
             <!-- Debug splitter — only visible when debug panel is open -->
-            <GridSplitter Grid.Row="0"
+            <GridSplitter x:Name="DebugPanelSplitter"
+                          Grid.Row="0"
                           Grid.RowSpan="3"
                           Grid.Column="5"
-                          x:Name="DebugPanelSplitter"
                           Style="{StaticResource IdeColumnSplitterStyle}"
+                          DragStarted="DebugPanelSplitter_DragStarted"
+                          DragDelta="DebugPanelSplitter_DragDelta"
+                          DragCompleted="DebugPanelSplitter_DragCompleted"
                           Visibility="Collapsed" />
 
             <!-- Debug panels — Variables / Call Stack / Breakpoints -->
@@ -1996,6 +2238,21 @@
                         <TextBlock DockPanel.Dock="Left"
                                    Text="Debug"
                                    Style="{StaticResource IdeSectionHeaderTextStyle}" />
+                        <Border x:Name="DebugStaleIndicator"
+                                DockPanel.Dock="Left"
+                                Visibility="Collapsed"
+                                Margin="10,0,0,0"
+                                Padding="7,2"
+                                Background="{DynamicResource Theme.Status.Warning.Background}"
+                                BorderBrush="{DynamicResource Theme.Status.Warning.Border}"
+                                BorderThickness="1"
+                                CornerRadius="3"
+                                ToolTip="One or more source files changed after debugging started. The debugger is using an older source snapshot. Restart debugging to restore accurate source navigation."
+                                AutomationProperties.Name="Debug Stale">
+                            <TextBlock Text="⚠ Debug Stale"
+                                       Foreground="{DynamicResource Theme.Status.Warning.Foreground}"
+                                       FontWeight="SemiBold" />
+                        </Border>
                     </DockPanel>
 
                     <Grid Grid.Row="1">
@@ -2005,7 +2262,9 @@
                                     SelectionChanged="DebugPaneTabControl_SelectionChanged">
 
                             <!-- Variables tab -->
-                            <TabItem Header="Variables" help:ContextHelp.Key="Debug.Variables">
+                            <TabItem Header="Variables"
+                                     ToolTip="Show read-only variables for the current paused execution scope."
+                                     help:ContextHelp.Key="Debug.Variables">
                                 <Grid Margin="0,4,0,0">
                                     <DataGrid x:Name="DebugVariablesGrid"
                                               help:ContextHelp.Key="Debug.Variables"
@@ -2039,9 +2298,11 @@
                             </TabItem>
 
                             <!-- Call Stack tab -->
-                            <TabItem Header="Call Stack" help:ContextHelp.Key="Debug.CallStack">
+                            <TabItem Header="Call Stack"
+                                     ToolTip="Show the active call stack and navigate to available source frames."
+                                     help:ContextHelp.Key="Debug.CallStack">
                                 <Grid Margin="0,4,0,0">
-                                    <DataGrid x:Name="DebugCallStackGrid"
+                                            <DataGrid x:Name="DebugCallStackGrid"
                                               help:ContextHelp.Key="Debug.CallStack"
                                               Style="{StaticResource IdeToolWindowDataGridStyle}"
                                               AutoGenerateColumns="False"
@@ -2049,13 +2310,15 @@
                                               CanUserAddRows="False"
                                               CanUserDeleteRows="False"
                                               SelectionMode="Single"
+                                              SelectionChanged="DebugCallStackGrid_SelectionChanged"
                                               GridLinesVisibility="Horizontal"
                                               FontFamily="Consolas"
                                               FontSize="12">
                                         <DataGrid.Columns>
+                                            <DataGridCheckBoxColumn Header="Current" Binding="{Binding IsCurrentFrame}" Width="52" IsReadOnly="True" />
                                             <DataGridTextColumn Header="Function" Binding="{Binding FunctionName}" Width="100" />
-                                            <DataGridTextColumn Header="Script"   Binding="{Binding ScriptName}"   Width="*" />
-                                            <DataGridTextColumn Header="Line"     Binding="{Binding LineNumber}"   Width="45" />
+                                            <DataGridTextColumn Header="Script"   Binding="{Binding DisplayScriptName}"   Width="*" />
+                                            <DataGridTextColumn Header="Line"     Binding="{Binding DisplayLineNumber}"   Width="175" />
                                         </DataGrid.Columns>
                                     </DataGrid>
                                     <TextBlock Text="No active call stack.">

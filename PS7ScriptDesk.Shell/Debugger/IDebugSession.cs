@@ -9,11 +9,17 @@ namespace PS7ScriptDesk.Shell.Debug
     public interface IDebugSession : IDisposable
     {
         DebugSessionState CurrentState { get; }
+        Guid SessionId { get; }
+        long PauseGeneration { get; }
+        DebugTerminationInfo? TerminationInfo { get; }
+        DebuggerPauseReason CurrentPauseReason { get; }
 
         event Action<DebugSessionState>? StateChanged;
         event Action<string?, int>? BreakpointHit;
         event Action? SessionEnded;
+        event Action<DebugTerminationInfo>? Terminated;
         event Action<string>? OutputReceived;
+        event Action<DebuggerEvent>? TypedEventReceived;
 
         Task StartAsync(PowerShellRuntimeInfo runtime, string launchScriptPath, IReadOnlyList<DebugBreakpointInfo> breakpoints);
         Task ContinueAsync();

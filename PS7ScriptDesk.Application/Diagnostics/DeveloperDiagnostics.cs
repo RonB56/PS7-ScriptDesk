@@ -29,8 +29,11 @@ namespace PS7ScriptDesk.Application.Diagnostics
         private const int MaximumPropertyValueLength = 2048;
         private const int MaximumStoredHighLevelEvents = 200;
         private const int MaximumReadableExceptionLength = 8192;
-        // Engineering safety bound for optional diagnostics, subject to stress calibration.
-        private const int DiagnosticsQueueCapacity = 128;
+        // Keep the asynchronous diagnostics writer ahead of high-rate UI forensics
+        // such as splitter DragDelta telemetry. Dropping those records makes a
+        // physical trace impossible to classify even though the application works.
+        private const int DiagnosticsQueueCapacity = 4096;
+        private const int CriticalForensicsQueueCapacity = 8192;
         private const string LegacyTerminalCaptureDirectoryName = "TerminalCaptures";
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -169,6 +172,38 @@ namespace PS7ScriptDesk.Application.Diagnostics
 
         public static void LogInfo(string category, string message, IReadOnlyDictionary<string, object?>? additionalProperties = null, [CallerMemberName] string? methodName = null, [CallerFilePath] string? sourceFile = null)
             => LogCore("Info", category, methodName, "Info", "Info", message, null, additionalProperties, sourceFile);
+
+        public static void LogCriticalForensic(string category, string eventName, string message, IReadOnlyDictionary<string, object?>? additionalProperties = null, [CallerMemberName] string? methodName = null, [CallerFilePath] string? sourceFile = null)
+        {
+            try
+            {
+                var session = _sessionState;
+                if (session is null)
+                {
+                    return;
+                }
+
+                var diagnosticEvent = CreateEvent(
+                    "Info",
+                    category,
+                    methodName,
+                    eventName,
+                    "CriticalForensic",
+                    message,
+                    null,
+                    additionalProperties,
+                    sourceFile);
+                session.IncrementCriticalAccepted();
+                if (!session.CriticalChannel.Writer.TryWrite(new DeveloperDiagnosticEnvelope(diagnosticEvent)))
+                {
+                    session.IncrementCriticalDropped();
+                }
+            }
+            catch
+            {
+                _sessionState?.IncrementCriticalDropped();
+            }
+        }
 
         public static void LogWarning(string category, string message, IReadOnlyDictionary<string, object?>? additionalProperties = null, [CallerMemberName] string? methodName = null, [CallerFilePath] string? sourceFile = null)
             => LogCore("Warning", category, methodName, "Warning", "Warning", message, null, additionalProperties, sourceFile);
@@ -372,6 +407,11 @@ namespace PS7ScriptDesk.Application.Diagnostics
             builder.AppendLine($"Diagnostics Storage State: {session?.StorageState.ToString() ?? "(not active)"}");
             builder.AppendLine($"Disabled Secondary Artifacts: {session?.DisabledArtifactCount.ToString(CultureInfo.InvariantCulture) ?? "0"}");
             builder.AppendLine($"Dropped Diagnostic Events: {Volatile.Read(ref _droppedEventCount)}");
+            builder.AppendLine($"General Diagnostic Events Accepted: {session?.GeneralAcceptedEvents ?? 0}");
+            builder.AppendLine($"General Diagnostic Events Dropped: {session?.GeneralDroppedEvents ?? Volatile.Read(ref _droppedEventCount)}");
+            builder.AppendLine($"Critical Forensic Events Accepted: {session?.CriticalAcceptedEvents ?? 0}");
+            builder.AppendLine($"Critical Forensic Events Written: {session?.CriticalWrittenEvents ?? 0}");
+            builder.AppendLine($"Critical Forensic Events Dropped: {session?.CriticalDroppedEvents ?? 0}");
             builder.AppendLine($"Developer Debugging Folder: {RootDirectory}");
             builder.AppendLine($"Latest Session Folder: {session?.SessionDirectoryPath ?? ReadLatestSessionPointer() ?? "(none)"}");
             builder.AppendLine($"OS Version: {RuntimeInformation.OSDescription}");
@@ -597,9 +637,17 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 Path.Combine(sessionDirectory, "developer-diagnostics-readable.log"),
                 Path.Combine(sessionDirectory, "errors.ndjson"),
                 Path.Combine(sessionDirectory, "diagnostics-summary.txt"),
+                Path.Combine(sessionDirectory, "critical-ui-forensics.ndjson"),
                 CreateFilePathMap(sessionDirectory),
                 configuration,
                 Channel.CreateBounded<DeveloperDiagnosticEnvelope>(new BoundedChannelOptions(DiagnosticsQueueCapacity)
+                {
+                    AllowSynchronousContinuations = false,
+                    SingleReader = true,
+                    SingleWriter = false,
+                    FullMode = BoundedChannelFullMode.Wait
+                }),
+                Channel.CreateBounded<DeveloperDiagnosticEnvelope>(new BoundedChannelOptions(CriticalForensicsQueueCapacity)
                 {
                     AllowSynchronousContinuations = false,
                     SingleReader = true,
@@ -616,6 +664,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
             WriteManifest(state);
             WriteLatestSessionPointer(state);
             state.WriterTask = Task.Run(() => WriterLoopAsync(state));
+            state.CriticalWriterTask = Task.Run(() => CriticalWriterLoopAsync(state));
 
             Enqueue(state, CreateEvent(
                 "Info",
@@ -641,6 +690,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
             try
             {
                 state.Channel.Writer.TryComplete();
+                state.CriticalChannel.Writer.TryComplete();
             }
             catch
             {
@@ -648,7 +698,12 @@ namespace PS7ScriptDesk.Application.Diagnostics
 
             try
             {
-                state.WriterTask?.Wait(TimeSpan.FromSeconds(2));
+                // High-rate UI forensics fan out to the primary file, category
+                // file, readable log, and periodic summary. Give the writer a
+                // bounded but sufficient drain window before the session package
+                // is considered complete.
+                state.WriterTask?.Wait(TimeSpan.FromSeconds(10));
+                state.CriticalWriterTask?.Wait(TimeSpan.FromSeconds(10));
             }
             catch
             {
@@ -693,6 +748,45 @@ namespace PS7ScriptDesk.Application.Diagnostics
             finally
             {
                 RefreshSummaryFile();
+            }
+        }
+
+        private static async Task CriticalWriterLoopAsync(SessionRuntimeState state)
+        {
+            try
+            {
+                await foreach (var envelope in state.CriticalChannel.Reader.ReadAllAsync().ConfigureAwait(false))
+                {
+                    WriteCriticalEventToFile(state, envelope.Event);
+                }
+            }
+            catch
+            {
+                state.IncrementCriticalDropped();
+            }
+        }
+
+        private static void WriteCriticalEventToFile(SessionRuntimeState state, DeveloperDiagnosticEvent diagnosticEvent)
+        {
+            if (state.StorageState == DiagnosticsStorageState.StorageDisabled)
+            {
+                state.IncrementCriticalDropped();
+                return;
+            }
+
+            try
+            {
+                var json = JsonSerializer.Serialize(diagnosticEvent, JsonOptions);
+                // Critical forensics has its own single-reader writer and must not
+                // share the injectable/general artifact delegate or disabled-artifact
+                // state used by best-effort diagnostics.
+                AppendLine(state.CriticalForensicsPath, json);
+                state.IncrementCriticalWritten();
+            }
+            catch (Exception ex)
+            {
+                state.IncrementCriticalDropped();
+                ReportArtifactFailureOnce(state, "CriticalForensics", ex, primaryFailure: false, artifactDisabled: false);
             }
         }
 
@@ -897,13 +991,16 @@ namespace PS7ScriptDesk.Application.Diagnostics
         {
             try
             {
+                state.IncrementGeneralAccepted();
                 if (!state.Channel.Writer.TryWrite(new DeveloperDiagnosticEnvelope(diagnosticEvent)))
                 {
+                    state.IncrementGeneralDropped();
                     Interlocked.Increment(ref _droppedEventCount);
                 }
             }
             catch
             {
+                state.IncrementGeneralDropped();
                 Interlocked.Increment(ref _droppedEventCount);
             }
         }
@@ -1028,6 +1125,8 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 IReadOnlyDictionary<string, object?> dictionary => SanitizeProperties(dictionary),
                 IDictionary<string, object?> dictionary => SanitizeProperties(new Dictionary<string, object?>(dictionary)),
                 IEnumerable<string> strings => strings.Select(item => SanitizePreview(item, MaximumPropertyValueLength)).ToArray(),
+                double number when double.IsNaN(number) || double.IsInfinity(number) => number.ToString("R", CultureInfo.InvariantCulture),
+                float number when float.IsNaN(number) || float.IsInfinity(number) => number.ToString("R", CultureInfo.InvariantCulture),
                 bool or byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal => value,
                 _ => SanitizePreview(Convert.ToString(value, CultureInfo.InvariantCulture), MaximumPropertyValueLength)
             };
@@ -1371,9 +1470,11 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 string readableLogPath,
                 string errorsJsonLinesPath,
                 string summaryFilePath,
+                string criticalForensicsPath,
                 Dictionary<string, string> categoryFilePaths,
                 DeveloperDiagnosticsConfiguration configuration,
                 Channel<DeveloperDiagnosticEnvelope> channel,
+                Channel<DeveloperDiagnosticEnvelope> criticalChannel,
                 DateTimeOffset startedUtc)
             {
                 SessionId = sessionId;
@@ -1383,9 +1484,11 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 ReadableLogPath = readableLogPath;
                 ErrorsJsonLinesPath = errorsJsonLinesPath;
                 SummaryFilePath = summaryFilePath;
+                CriticalForensicsPath = criticalForensicsPath;
                 CategoryFilePaths = categoryFilePaths;
                 Configuration = configuration;
                 Channel = channel;
+                CriticalChannel = criticalChannel;
                 StartedUtc = startedUtc;
             }
 
@@ -1409,9 +1512,35 @@ namespace PS7ScriptDesk.Application.Diagnostics
 
             public Channel<DeveloperDiagnosticEnvelope> Channel { get; }
 
+            public Channel<DeveloperDiagnosticEnvelope> CriticalChannel { get; }
+
+            public string CriticalForensicsPath { get; }
+
             public DateTimeOffset StartedUtc { get; }
 
             public Task? WriterTask { get; set; }
+
+            public Task? CriticalWriterTask { get; set; }
+
+            public long GeneralAcceptedEvents => Volatile.Read(ref _generalAcceptedEvents);
+
+            public long GeneralDroppedEvents => Volatile.Read(ref _generalDroppedEvents);
+
+            public long CriticalAcceptedEvents => Volatile.Read(ref _criticalAcceptedEvents);
+
+            public long CriticalWrittenEvents => Volatile.Read(ref _criticalWrittenEvents);
+
+            public long CriticalDroppedEvents => Volatile.Read(ref _criticalDroppedEvents);
+
+            public void IncrementGeneralAccepted() => Interlocked.Increment(ref _generalAcceptedEvents);
+
+            public void IncrementGeneralDropped() => Interlocked.Increment(ref _generalDroppedEvents);
+
+            public void IncrementCriticalAccepted() => Interlocked.Increment(ref _criticalAcceptedEvents);
+
+            public void IncrementCriticalWritten() => Interlocked.Increment(ref _criticalWrittenEvents);
+
+            public void IncrementCriticalDropped() => Interlocked.Increment(ref _criticalDroppedEvents);
 
             public DiagnosticsStorageState StorageState => (DiagnosticsStorageState)Volatile.Read(ref _storageState);
 
@@ -1461,6 +1590,11 @@ namespace PS7ScriptDesk.Application.Diagnostics
             private readonly HashSet<string> _disabledArtifacts = new(StringComparer.OrdinalIgnoreCase);
             private readonly HashSet<string> _reportedFailures = new(StringComparer.OrdinalIgnoreCase);
             private int _storageState;
+            private long _generalAcceptedEvents;
+            private long _generalDroppedEvents;
+            private long _criticalAcceptedEvents;
+            private long _criticalWrittenEvents;
+            private long _criticalDroppedEvents;
         }
 
         private enum DiagnosticsStorageState

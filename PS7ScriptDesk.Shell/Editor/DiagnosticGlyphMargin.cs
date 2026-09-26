@@ -96,7 +96,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 var fillBrush = isWarning ? WarningFillBrush : ErrorFillBrush;
                 var strokePen = isWarning ? WarningStrokePen : ErrorStrokePen;
 
-                var y = visualLine.VisualTop - textView.ScrollOffset.Y;
+                var y = GetVisualLineTopInMarginCoordinates(visualLine, textView);
                 var glyphBounds = new Rect(3, y + 3, 12, Math.Max(10, visualLine.Height - 6));
                 var radiusX = Math.Min(6, glyphBounds.Width / 2);
                 var radiusY = Math.Min(6, glyphBounds.Height / 2);
@@ -122,10 +122,10 @@ namespace PS7ScriptDesk.Shell.Editor
                 return;
             }
 
-            var clickY = e.GetPosition(this).Y + TextView.ScrollOffset.Y;
+            var clickY = e.GetPosition(this).Y;
             foreach (var visualLine in TextView.VisualLines)
             {
-                var lineTop = visualLine.VisualTop;
+                var lineTop = GetVisualLineTopInMarginCoordinates(visualLine, TextView);
                 var lineBottom = lineTop + visualLine.Height;
                 if (clickY >= lineTop && clickY <= lineBottom)
                 {
@@ -139,6 +139,40 @@ namespace PS7ScriptDesk.Shell.Editor
                     return;
                 }
             }
+        }
+
+        protected override void OnTextViewChanged(TextView oldTextView, TextView newTextView)
+        {
+            if (oldTextView is not null)
+            {
+                oldTextView.VisualLinesChanged -= TextView_VisualLayoutChanged;
+                oldTextView.ScrollOffsetChanged -= TextView_VisualLayoutChanged;
+            }
+
+            base.OnTextViewChanged(oldTextView, newTextView);
+
+            if (newTextView is not null)
+            {
+                newTextView.VisualLinesChanged += TextView_VisualLayoutChanged;
+                newTextView.ScrollOffsetChanged += TextView_VisualLayoutChanged;
+            }
+
+            InvalidateVisual();
+        }
+
+        private void TextView_VisualLayoutChanged(object? sender, EventArgs e)
+        {
+            InvalidateVisual();
+        }
+
+        private static double GetVisualLineTopInMarginCoordinates(VisualLine visualLine, TextView textView)
+        {
+            if (visualLine.TextLines.Count > 0)
+            {
+                return visualLine.GetTextLineVisualYPosition(visualLine.TextLines[0], VisualYPosition.TextTop) - textView.VerticalOffset;
+            }
+
+            return visualLine.VisualTop - textView.VerticalOffset;
         }
 
 

@@ -161,6 +161,125 @@ public sealed class DeveloperDiagnosticsReliabilityTests
         }
     }
 
+    [Fact]
+    public async Task HighRateUiForensics_ArePersistedWithoutQueueDrops()
+    {
+        StartDiagnostics("High-rate UI forensics persistence test");
+        var sessionDirectory = DeveloperDiagnostics.CurrentSessionDirectory!;
+
+        try
+        {
+            for (var index = 0; index < 600; index++)
+            {
+                DeveloperDiagnostics.LogInfo(
+                    "UI",
+                    "Synthetic debug splitter target telemetry.",
+                    new Dictionary<string, object?>
+                    {
+                        ["horizontalChange"] = index + 1,
+                        ["previousTargetWidth"] = 637d,
+                        ["nextTargetWidth"] = 322d,
+                        ["debugSplitterIsDragging"] = true
+                    });
+            }
+        }
+        finally
+        {
+            StopDiagnostics();
+        }
+
+        var json = await File.ReadAllTextAsync(Path.Combine(sessionDirectory, "ui-events.ndjson"));
+        var persistedCount = CountOccurrences(json, "Synthetic debug splitter target telemetry.");
+
+        Assert.Equal(600, persistedCount);
+        Assert.Contains("Dropped Diagnostic Events: 0", DeveloperDiagnostics.BuildSummaryText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CriticalForensicsRemainLosslessDuringConcurrentGeneralEventFlood()
+    {
+        DeveloperDiagnostics.ConfigureFromSettings(new ApplicationSettings
+        {
+            IsDeveloperDiagnosticsEnabled = true,
+            DeveloperDiagnosticsWriteJsonLines = true,
+            DeveloperDiagnosticsWriteReadableLog = false
+        }, "Critical forensic stress test");
+        var sessionDirectory = DeveloperDiagnostics.CurrentSessionDirectory!;
+
+        try
+        {
+            for (var index = 0; index < 10_000; index++)
+            {
+                DeveloperDiagnostics.LogInfo("Noise", "Synthetic high-rate input noise.", new Dictionary<string, object?> { ["index"] = index });
+                if (index < 500)
+                {
+                    DeveloperDiagnostics.LogCriticalForensic(
+                        "UI",
+                        "Synthetic.DebugSplitterDragDelta",
+                        "Synthetic critical debug splitter target telemetry.",
+                        new Dictionary<string, object?>
+                        {
+                            ["phase"] = index % 3 == 0 ? "Entry" : index % 3 == 1 ? "AfterHandler" : "AfterDispatcher",
+                            ["horizontalChange"] = index + 1,
+                            ["verticalChange"] = 0d,
+                            ["targetPreviousIdentity"] = 1001,
+                            ["targetNextIdentity"] = 1002,
+                            ["previousTargetWidthValue"] = 637d,
+                            ["nextTargetWidthValue"] = 322d,
+                            ["previousTargetActualWidth"] = 637d,
+                            ["nextTargetActualWidth"] = 322d,
+                            ["debugSplitterIsDragging"] = true
+                        });
+                }
+            }
+        }
+        finally
+        {
+            DeveloperDiagnostics.ConfigureFromSettings(new ApplicationSettings(), "Critical forensic stress test cleanup");
+        }
+
+        var criticalPath = Path.Combine(sessionDirectory, "critical-ui-forensics.ndjson");
+        var criticalJson = await File.ReadAllTextAsync(criticalPath);
+        var summary = await File.ReadAllTextAsync(Path.Combine(sessionDirectory, "diagnostics-summary.txt"));
+
+        Assert.Equal(500, CountOccurrences(criticalJson, "Synthetic critical debug splitter target telemetry."));
+        Assert.Contains("Critical Forensic Events Accepted: 500", summary, StringComparison.Ordinal);
+        Assert.Contains("Critical Forensic Events Written: 500", summary, StringComparison.Ordinal);
+        Assert.Contains("Critical Forensic Events Dropped: 0", summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CriticalForensics_SanitizeNonFiniteMeasurementValues()
+    {
+        StartDiagnostics("Critical non-finite measurement test");
+        var sessionDirectory = DeveloperDiagnostics.CurrentSessionDirectory!;
+
+        try
+        {
+            DeveloperDiagnostics.LogCriticalForensic(
+                "UI",
+                "Synthetic.NonFiniteMeasurement",
+                "Synthetic critical measurement.",
+                new Dictionary<string, object?>
+                {
+                    ["actualWidth"] = double.NaN,
+                    ["actualHeight"] = double.PositiveInfinity
+                });
+        }
+        finally
+        {
+            StopDiagnostics();
+        }
+
+        var criticalJson = await File.ReadAllTextAsync(Path.Combine(sessionDirectory, "critical-ui-forensics.ndjson"));
+        var summary = await File.ReadAllTextAsync(Path.Combine(sessionDirectory, "diagnostics-summary.txt"));
+        Assert.Contains("Synthetic critical measurement.", criticalJson, StringComparison.Ordinal);
+        Assert.Contains("NaN", criticalJson, StringComparison.Ordinal);
+        Assert.Contains("Infinity", criticalJson, StringComparison.Ordinal);
+        Assert.Contains("Critical Forensic Events Written: 1", summary, StringComparison.Ordinal);
+        Assert.Contains("Critical Forensic Events Dropped: 0", summary, StringComparison.Ordinal);
+    }
+
     private static async Task AssertSecondaryArtifactFailureAsync(string artifactName, Func<string, bool> shouldFail, Action writeEvent)
     {
         var diagnosticsType = typeof(DeveloperDiagnostics);
@@ -216,5 +335,18 @@ public sealed class DeveloperDiagnosticsReliabilityTests
         }
 
         Assert.True(condition(), "Expected diagnostics state transition was not observed within one second.");
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        var offset = 0;
+        while ((offset = text.IndexOf(value, offset, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            offset += value.Length;
+        }
+
+        return count;
     }
 }

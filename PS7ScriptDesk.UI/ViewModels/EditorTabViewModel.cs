@@ -35,6 +35,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private string? _lastKnownFileContentSha256;
         private string _recoveryId;
         private bool _isRecoveredContent;
+        private bool _isDebugSourceStale;
         private string _recoveryNoticeText = string.Empty;
         private DocumentLanguage _language;
 
@@ -73,6 +74,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     _title = value;
                     OnPropertyChanged();
                     OnPropertyChanged(nameof(DisplayTitle));
+                    OnPropertyChanged(nameof(EditorTabToolTip));
                 }
             }
         }
@@ -87,6 +89,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     _filePath = value;
                     Language = DocumentLanguageClassifier.ClassifyPath(value ?? Title);
                     OnPropertyChanged();
+                    OnPropertyChanged(nameof(EditorTabToolTip));
                 }
             }
         }
@@ -198,6 +201,19 @@ namespace PS7ScriptDesk.UI.ViewModels
         /// </summary>
         public int CurrentDebugLine { get; private set; } = -1;
 
+        public bool IsDebugSourceStale => _isDebugSourceStale;
+
+        public string EditorTabToolTip
+        {
+            get
+            {
+                var pathText = string.IsNullOrWhiteSpace(FilePath) ? "Unsaved document" : FilePath;
+                return IsDebugSourceStale
+                    ? $"This document changed after debugging started. The debugger is using an older source snapshot. Restart debugging to restore accurate source navigation.\n\n{pathText}"
+                    : pathText;
+            }
+        }
+
         public void SetCurrentDebugLine(int lineNumber)
         {
             var normalized = lineNumber > 0 ? lineNumber : -1;
@@ -219,6 +235,20 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             CurrentDebugLine = -1;
             OnPropertyChanged(nameof(CurrentDebugLine));
+        }
+
+        public bool SetDebugSourceStale(bool isStale)
+        {
+            if (_isDebugSourceStale == isStale)
+            {
+                return false;
+            }
+
+            _isDebugSourceStale = isStale;
+            OnPropertyChanged(nameof(IsDebugSourceStale));
+            OnPropertyChanged(nameof(DisplayTitle));
+            OnPropertyChanged(nameof(EditorTabToolTip));
+            return true;
         }
 
         public int BreakpointCount => _breakpoints.Count;
@@ -276,7 +306,12 @@ namespace PS7ScriptDesk.UI.ViewModels
             get
             {
                 var title = IsRecoveredContent ? $"{Title} (Recovered)" : Title;
-                return IsDirty ? $"{title}*" : title;
+                if (IsDirty)
+                {
+                    title += "*";
+                }
+
+                return IsDebugSourceStale ? $"{title}  ⚠ Debug Stale" : title;
             }
         }
 
@@ -442,6 +477,34 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             return removed;
+        }
+
+        /// <summary>
+        /// Replaces the editor's logical breakpoint coordinates after a document-aware
+        /// tracker has followed them through an AvalonEdit mutation.
+        /// </summary>
+        public bool ReplaceBreakpointLines(IEnumerable<(int LineNumber, bool IsEnabled)> breakpoints)
+        {
+            var next = new SortedDictionary<int, bool>();
+            foreach (var (lineNumber, isEnabled) in breakpoints ?? Enumerable.Empty<(int, bool)>())
+            {
+                var normalizedLine = Math.Max(1, lineNumber);
+                next[normalizedLine] = isEnabled;
+            }
+
+            if (_breakpoints.SequenceEqual(next))
+            {
+                return false;
+            }
+
+            _breakpoints.Clear();
+            foreach (var pair in next)
+            {
+                _breakpoints[pair.Key] = pair.Value;
+            }
+
+            NotifyBreakpointsChanged();
+            return true;
         }
 
         public void ClearInvalidBreakpoints()

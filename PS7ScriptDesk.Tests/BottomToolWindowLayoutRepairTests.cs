@@ -7,7 +7,7 @@ public sealed class BottomToolWindowLayoutRepairTests
     {
         var mainXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml");
         var mainCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
-        var workspaceGridRows = ExtractBetween(mainXaml, "<Grid Margin=\"4\">", "</Grid.RowDefinitions>");
+        var workspaceGridRows = ExtractBetween(mainXaml, "<Grid x:Name=\"WorkspaceGrid\"", "</Grid.RowDefinitions>");
         var consolePaneXaml = ExtractBetween(mainXaml, "<Border x:Name=\"ConsolePaneBorder\"", "<!-- Debug splitter");
         var toolGroupXaml = ExtractBetween(mainXaml, "<Border x:Name=\"BottomToolWindowBorder\"", "<!-- Debug splitter");
         var toolBorderDeclaration = ExtractBetween(mainXaml, "<Border x:Name=\"BottomToolWindowBorder\"", "Visibility=\"Collapsed\">");
@@ -29,9 +29,9 @@ public sealed class BottomToolWindowLayoutRepairTests
         Assert.Contains("Grid.Row=\"3\"", toolGroupXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Grid.Column=", toolBorderDeclaration, StringComparison.Ordinal);
 
-        Assert.Contains("Grid.SetRow(ConsolePaneBorder, 0);", sideBySideCase, StringComparison.Ordinal);
-        Assert.Contains("Grid.SetRowSpan(ConsolePaneBorder, 3);", sideBySideCase, StringComparison.Ordinal);
-        Assert.Contains("Grid.SetColumn(ConsolePaneBorder, 4);", sideBySideCase, StringComparison.Ordinal);
+        Assert.Contains("ActivateSideBySideLocalProjection();", sideBySideCase, StringComparison.Ordinal);
+        Assert.Contains("ApplySideBySideLocalDebugProjection", sideBySideCase, StringComparison.Ordinal);
+        Assert.DoesNotContain("Grid.SetColumn(ConsolePaneBorder, 4);", sideBySideCase, StringComparison.Ordinal);
         Assert.DoesNotContain("Grid.SetColumn(BottomToolWindow", presenter, StringComparison.Ordinal);
         Assert.DoesNotContain("targetColumn", presenter, StringComparison.Ordinal);
     }

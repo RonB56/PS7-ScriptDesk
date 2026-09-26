@@ -34,6 +34,21 @@
                     AutomationProperties.Name="Dock debug pane back"
                     Click="DockBackButton_Click"
                     help:ContextHelp.Key="Debug.Area" />
+            <Border x:Name="DebugStaleIndicator"
+                    DockPanel.Dock="Left"
+                    Visibility="Collapsed"
+                    Margin="10,0,0,0"
+                    Padding="7,2"
+                    Background="{DynamicResource Theme.Status.Warning.Background}"
+                    BorderBrush="{DynamicResource Theme.Status.Warning.Border}"
+                    BorderThickness="1"
+                    CornerRadius="3"
+                    ToolTip="One or more source files changed after debugging started. The debugger is using an older source snapshot. Restart debugging to restore accurate source navigation."
+                    AutomationProperties.Name="Debug Stale">
+                <TextBlock Text="⚠ Debug Stale"
+                           Foreground="{DynamicResource Theme.Status.Warning.Foreground}"
+                           FontWeight="SemiBold" />
+            </Border>
           </DockPanel>
         </Border>
 
@@ -42,6 +57,7 @@
                       SelectionChanged="DebugTabControl_SelectionChanged"
                       AutomationProperties.Name="Debugger tool content">
             <TabItem Header="Variables"
+                     ToolTip="Show read-only variables for the current paused execution scope."
                      help:ContextHelp.Key="Debug.Variables">
                 <DataGrid x:Name="DebugVariablesGrid"
                           Style="{DynamicResource IdeToolWindowDataGridStyle}"
@@ -62,6 +78,7 @@
             </TabItem>
 
             <TabItem Header="Call Stack"
+                     ToolTip="Show the active call stack and navigate to available source frames."
                      help:ContextHelp.Key="Debug.CallStack">
                 <DataGrid x:Name="DebugCallStackGrid"
                           Style="{DynamicResource IdeToolWindowDataGridStyle}"
@@ -75,8 +92,8 @@
                           FontSize="12">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Function" Binding="{Binding FunctionName}" Width="100" />
-                        <DataGridTextColumn Header="Script" Binding="{Binding ScriptName}" Width="*" />
-                        <DataGridTextColumn Header="Line" Binding="{Binding LineNumber}" Width="45" />
+                        <DataGridTextColumn Header="Script" Binding="{Binding DisplayScriptName}" Width="*" />
+                        <DataGridTextColumn Header="Line" Binding="{Binding DisplayLineNumber}" Width="175" />
                     </DataGrid.Columns>
                 </DataGrid>
             </TabItem>

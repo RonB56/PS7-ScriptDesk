@@ -17,6 +17,15 @@
     <SolidColorBrush x:Key="Theme.Text.Secondary" Color="#9FB2C9"/>
     <SolidColorBrush x:Key="Theme.Text.Inverse" Color="#0F172A"/>
 
+    <SolidColorBrush x:Key="Theme.Debugger.Output.Foreground" Color="#E5EEF9"/>
+    <SolidColorBrush x:Key="Theme.Debugger.Debugger.Foreground" Color="#FFE08A"/>
+    <SolidColorBrush x:Key="Theme.Debugger.Breakpoint.Foreground" Color="#FFB454"/>
+    <SolidColorBrush x:Key="Theme.Debugger.Warning.Foreground" Color="#FFC46B"/>
+    <SolidColorBrush x:Key="Theme.Debugger.Error.Foreground" Color="#FF8F8F"/>
+    <SolidColorBrush x:Key="Theme.Debugger.Debug.Foreground" Color="#8BE9FD"/>
+    <SolidColorBrush x:Key="Theme.Debugger.Verbose.Foreground" Color="#94A3B8"/>
+    <SolidColorBrush x:Key="Theme.Debugger.Information.Foreground" Color="#A7E3B5"/>
+
     <SolidColorBrush x:Key="Theme.ToolTip.Background" Color="#1F2937"/>
     <SolidColorBrush x:Key="Theme.ToolTip.Foreground" Color="#E5EEF9"/>
     <SolidColorBrush x:Key="Theme.ToolTip.SecondaryForeground" Color="#9FB2C9"/>

@@ -1,4 +1,5 @@
 using System.Windows.Input;
+using PS7ScriptDesk.Shell;
 using PS7ScriptDesk.Shell.Editor;
 
 namespace PS7ScriptDesk.Tests;
@@ -76,6 +77,37 @@ public sealed class EditorShortcutRoutingTests
         Assert.Equal(-1, up);
         Assert.True(EditorShortcutRouting.TryGetMoveLineDirection(Key.Down, ModifierKeys.Alt, out var down));
         Assert.Equal(1, down);
+    }
+
+    [Fact]
+    public void SystemKeyF10ResolvesToF10ForDebuggerRouting()
+    {
+        Assert.Equal(Key.F10, DebuggerCommandRouting.ResolveKey(Key.System, Key.F10));
+        Assert.True(DebuggerCommandRouting.IsGesture(
+            Key.System,
+            Key.F10,
+            ModifierKeys.None,
+            Key.F10));
+    }
+
+    [Fact]
+    public void SystemKeyF10WithModifiersDoesNotMatchUnmodifiedStepOver()
+    {
+        Assert.False(DebuggerCommandRouting.IsGesture(
+            Key.System,
+            Key.F10,
+            ModifierKeys.Alt,
+            Key.F10));
+        Assert.False(DebuggerCommandRouting.IsGesture(
+            Key.System,
+            Key.F10,
+            ModifierKeys.Shift,
+            Key.F10));
+        Assert.False(DebuggerCommandRouting.IsGesture(
+            Key.F10,
+            Key.None,
+            ModifierKeys.Control,
+            Key.F10));
     }
 
     [Fact]

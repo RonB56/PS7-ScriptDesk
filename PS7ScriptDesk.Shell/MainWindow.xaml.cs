@@ -50,6 +50,7 @@ using PS7ScriptDesk.Shell.Controls;
 using PS7ScriptDesk.Shell.Debug;
 using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.Shell.Help;
+using PS7ScriptDesk.Shell.Layout;
 using PS7ScriptDesk.Shell.Services;
 using PS7ScriptDesk.Shell.Themes;
 using PS7ScriptDesk.UI.ViewModels;
@@ -58,9 +59,44 @@ namespace PS7ScriptDesk.Shell
 {
     public partial class MainWindow : Window
     {
+        public static readonly RoutedUICommand StartDebugCommand = new(
+            "Start Debug",
+            nameof(StartDebugCommand),
+            typeof(MainWindow));
+
+        public static readonly RoutedUICommand ContinueDebugCommand = new(
+            "Continue",
+            nameof(ContinueDebugCommand),
+            typeof(MainWindow));
+
+        public static readonly RoutedUICommand StopDebugCommand = new(
+            "Stop Debug",
+            nameof(StopDebugCommand),
+            typeof(MainWindow));
+
+        public static readonly RoutedUICommand StepOverCommand = new(
+            "Step Over",
+            nameof(StepOverCommand),
+            typeof(MainWindow));
+
+        public static readonly RoutedUICommand StepIntoCommand = new(
+            "Step Into",
+            nameof(StepIntoCommand),
+            typeof(MainWindow));
+
+        public static readonly RoutedUICommand StepOutCommand = new(
+            "Step Out",
+            nameof(StepOutCommand),
+            typeof(MainWindow));
+
+        public static readonly RoutedUICommand ToggleBreakpointCommand = new(
+            "Toggle Breakpoint",
+            nameof(ToggleBreakpointCommand),
+            typeof(MainWindow));
+
         private const double MinimumExplorerWidth = 190;
         private const double MinimumConsoleHeight = 160;
-        private const double MinimumConsoleSideWidth = 260;
+        private const double MinimumConsoleSideWidth = 220;
         private const double MinimumBottomToolWindowHeight = 120;
         private const double BottomToolWindowSplitterThickness = 6;
         private const double DefaultConsoleHeight = 180;
@@ -69,6 +105,7 @@ namespace PS7ScriptDesk.Shell
         private const double MinimumExplorerSectionHeight = 120;
         private const double DebugPanelWidth = 220;
         private const double MinimumDebugPanelWidth = 160;
+        private const double MinimumSideBySideWindowWidth = 986;
         private const int LiveSyntaxDiagnosticsQuietDelayMilliseconds = 0;
         private const int LiveSyntaxDiagnosticsLargeFileQuietDelayMilliseconds = 125;
         private const int LiveSyntaxDiagnosticsMinimumIntervalMilliseconds = 16;
@@ -208,6 +245,7 @@ namespace PS7ScriptDesk.Shell
         private EditorInputTraceContext? _activeEditorTextInputTrace;
         private readonly Dictionary<TextEditor, BreakpointLineBackgroundRenderer> _breakpointRenderers = new();
         private readonly Dictionary<TextEditor, BreakpointGlyphMargin> _breakpointGlyphMargins = new();
+        private readonly Dictionary<EditorTabViewModel, EditorBreakpointTracker> _breakpointTrackers = new();
         private readonly Dictionary<TextEditor, ErrorMarkerRenderer> _errorRenderers = new();
         private readonly Dictionary<TextEditor, DiagnosticGlyphMargin> _diagnosticGlyphMargins = new();
         private readonly Dictionary<TextEditor, PowerShellSyntaxColorizer> _syntaxColorizers = new();
@@ -228,6 +266,7 @@ namespace PS7ScriptDesk.Shell
         private readonly IApplicationSettingsService _applicationSettingsService;
         private readonly IUiScaleService _uiScaleService;
         private readonly ApplicationSettings _loadedSettings;
+        private readonly WorkspaceLayoutCoordinator _layoutCoordinator;
         private readonly PowerShellIntelliSenseService _intelliSenseService = new();
         private readonly InProcessPowerShellSyntaxDiagnosticsService _liveSyntaxDiagnosticsService = new();
         private readonly PowerShellDiagnosticsService _diagnosticsService = new();
@@ -259,6 +298,12 @@ namespace PS7ScriptDesk.Shell
         private double _lastKnownConsoleSideWidth = DefaultConsoleSideWidth;
         private double _lastKnownBottomToolWindowHeight = DefaultBottomToolWindowHeight;
         private double _lastKnownDebugPanelWidth = DebugPanelWidth;
+        private bool _layoutBudgetNormalizationActive;
+        private bool _sideBySideLocalProjectionActive;
+        private bool _captureLayoutForensicsOnNextSizeChanged;
+        private WpfPoint? _editorConsoleSplitterInputDownPosition;
+        private WpfPoint? _debugSplitterInputDownPosition;
+        private LayoutInvariantResult? _lastLayoutInvariantResult;
         private string _lastFindText = string.Empty;
         private string _lastReplaceText = string.Empty;
         private bool _lastFindMatchCase;
@@ -267,9 +312,19 @@ namespace PS7ScriptDesk.Shell
         private readonly ThemeService _themeService = new();
         private IDebugSession? _debugSession;
         private Action<DebugSessionState>? _debugSessionStateChangedHandler;
+        private Action<DebuggerEvent>? _debugSessionTypedEventHandler;
+        private Action<DebugTerminationInfo>? _debugSessionTerminatedHandler;
+        private bool _debugOutputAutoScrollSuppressed;
+        private bool _debugOutputFollowing = true;
+        private ScrollViewer? _debugOutputScrollViewer;
+        private object? _debugOutputLastVisibleItem;
+        private bool _debugOutputScrollOperationPending;
+        private long _debugOutputForensicSequence;
+        private readonly DebugOutputPresentationModel _debugOutputPresentation = new();
         private EditorTabViewModel? _activeDebugTab;
         private string? _activeDebugLaunchPath;
         private string? _activeDebugSnapshotPath;
+        private DebugSourceMap? _activeDebugSourceMap;
         private int _debugPanelRefreshVersion;
         private BottomToolWindow? _bottomToolWindow;
         private GitWorkspaceWindow? _gitWorkspaceWindow;
@@ -287,6 +342,10 @@ namespace PS7ScriptDesk.Shell
         }
 
         private WorkspaceLayoutMode _workspaceLayoutMode = WorkspaceLayoutMode.HorizontalSplit;
+
+        internal WorkspaceLayoutState LayoutState => _layoutCoordinator.State;
+
+        internal LayoutInvariantResult? LastLayoutInvariantResult => _lastLayoutInvariantResult;
 
         private bool IsConsoleHeightRowOwned =>
             _workspaceLayoutMode is WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit;
@@ -316,6 +375,7 @@ namespace PS7ScriptDesk.Shell
         private bool _isSynchronizingBottomToolWindowTab;
         private Rect? _lastBottomToolWindowBounds;
         private IReadOnlyList<DebugCallStackFrame>? _currentDebugCallStack;
+        private string? _selectedDebugFrameId;
         private ObservableCollection<BreakpointRow>? _currentBreakpointRows;
         private int _selectedDebugTabIndex;
         private bool _isSynchronizingDebugTabSelection;
@@ -406,6 +466,7 @@ namespace PS7ScriptDesk.Shell
             _liveConsoleServiceForObservation = liveConsoleServiceForObservation;
             _terminalOutputObservationSubscription = _terminalOutputObservationHub.Subscribe(new TerminalOutputCorrelationObserver());
             _loadedSettings = loadedSettings ?? new ApplicationSettings();
+            _layoutCoordinator = new WorkspaceLayoutCoordinator(WorkspaceLayoutSettingsAdapter.FromSettings(_loadedSettings));
             _scriptDiagnosticStore.Changed += ScriptDiagnosticStore_Changed;
             UpdateAnalyzerSettingsMenu();
             _uiScaleService = uiScaleService ?? UiScaleServiceHost.Current;
@@ -465,6 +526,11 @@ namespace PS7ScriptDesk.Shell
 
 
             InitializeComponent();
+            AttachSplitterInputForensics(EditorConsoleColumnSplitter);
+            AttachSplitterInputForensics(DebugPanelSplitter);
+            AttachSplitterInputForensics(SideBySideDebugSplitter);
+            ((System.Collections.Specialized.INotifyCollectionChanged)_debugOutputPresentation.VisibleItems).CollectionChanged += DebugOutputPresentation_CollectionChanged;
+            UpdateDebugOutputEmptyState();
             AddHandler(Keyboard.KeyDownEvent, new KeyEventHandler(Window_KeyDownTrace), handledEventsToo: true);
             AddHandler(TextCompositionManager.PreviewTextInputEvent, new TextCompositionEventHandler(Window_PreviewTextInputTrace), handledEventsToo: true);
             AddHandler(TextCompositionManager.TextInputEvent, new TextCompositionEventHandler(Window_TextInputTrace), handledEventsToo: true);
@@ -537,8 +603,429 @@ namespace PS7ScriptDesk.Shell
 
         private MainWindowViewModel? ViewModel => Volatile.Read(ref _viewModel);
 
+        public DebugOutputPresentationModel DebugOutputPresentation => _debugOutputPresentation;
+
+        private WorkspaceMode ToLayoutWorkspaceMode(WorkspaceLayoutMode mode)
+            => Enum.TryParse<WorkspaceMode>(mode.ToString(), out var result) ? result : WorkspaceMode.HorizontalSplit;
+
+        private ColumnDefinition ActiveSideBySideEditorColumn => SideBySideEditorColumnDefinition;
+
+        private ColumnDefinition ActiveSideBySideConsoleColumn => SideBySideConsoleColumnDefinition;
+
+        private ColumnDefinition ActiveSideBySideDebugColumn => SideBySideDebugColumnDefinition;
+
+        private void ActivateSideBySideLocalProjection()
+        {
+            // Reset Thumb/GridSplitter interaction state before moving controls
+            // between visual parents. The Editor/Console splitter is already
+            // collapsed in the source topology; apply the same lifecycle boundary
+            // to the Debug splitter, which is visible in Horizontal mode.
+            EditorConsoleColumnSplitter.Visibility = Visibility.Collapsed;
+            DebugPanelSplitter.Visibility = Visibility.Collapsed;
+            SideBySideDebugSplitter.Visibility = Visibility.Collapsed;
+            if (!_sideBySideLocalProjectionActive)
+            {
+                foreach (var element in new FrameworkElement[]
+                {
+                    EditorPaneBorder,
+                    EditorConsoleColumnSplitter,
+                    ConsolePaneBorder,
+                    DebugPanelBorder
+                })
+                {
+                    WorkspaceGrid.Children.Remove(element);
+                    if (!SideBySideGrid.Children.Contains(element))
+                    {
+                        SideBySideGrid.Children.Add(element);
+                    }
+                }
+
+                _sideBySideLocalProjectionActive = true;
+            }
+
+            Grid.SetColumn(SideBySideGrid, 2);
+            Grid.SetRow(SideBySideGrid, 0);
+            Grid.SetRowSpan(SideBySideGrid, 3);
+            SideBySideGrid.Visibility = Visibility.Visible;
+
+            Grid.SetRow(EditorPaneBorder, 0);
+            Grid.SetColumn(EditorPaneBorder, 0);
+            Grid.SetRowSpan(EditorPaneBorder, 1);
+            Grid.SetColumnSpan(EditorPaneBorder, 1);
+            Grid.SetRow(EditorConsoleColumnSplitter, 0);
+            Grid.SetColumn(EditorConsoleColumnSplitter, 1);
+            Grid.SetRowSpan(EditorConsoleColumnSplitter, 1);
+            Grid.SetRow(ConsolePaneBorder, 0);
+            Grid.SetColumn(ConsolePaneBorder, 2);
+            Grid.SetRowSpan(ConsolePaneBorder, 1);
+            Grid.SetColumnSpan(ConsolePaneBorder, 1);
+            Grid.SetRow(DebugPanelBorder, 0);
+            Grid.SetColumn(DebugPanelBorder, 4);
+            Grid.SetRowSpan(DebugPanelBorder, 1);
+            Grid.SetColumnSpan(DebugPanelBorder, 1);
+
+            ActiveSideBySideEditorColumn.Width = new GridLength(1, GridUnitType.Star);
+            ActiveSideBySideEditorColumn.MinWidth = MinimumEditorWidth;
+            ActiveSideBySideConsoleColumn.Width = new GridLength(
+                Math.Max(_layoutCoordinator.State.Console.RequestedSideBySideWidth, MinimumConsoleSideWidth),
+                GridUnitType.Pixel);
+            ActiveSideBySideConsoleColumn.MinWidth = MinimumConsoleSideWidth;
+            ActiveSideBySideDebugColumn.Width = new GridLength(0, GridUnitType.Pixel);
+            ActiveSideBySideDebugColumn.MinWidth = 0;
+            SideBySideEditorConsoleSplitterColumnDefinition.Width = new GridLength(6, GridUnitType.Pixel);
+            SideBySideConsoleDebugSplitterColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+            EditorConsoleColumnSplitter.Visibility = Visibility.Visible;
+            DebugPanelSplitter.Visibility = Visibility.Collapsed;
+            SideBySideDebugSplitter.Visibility = Visibility.Collapsed;
+            DebugPanelBorder.Visibility = Visibility.Collapsed;
+            SideBySideGrid.UpdateLayout();
+            ApplySideBySideContentStarSizing(
+                Math.Max(_layoutCoordinator.State.Console.RequestedSideBySideWidth, MinimumConsoleSideWidth),
+                0,
+                "ActivateSideBySideLocalProjection");
+        }
+
+        private void DeactivateSideBySideLocalProjection()
+        {
+            if (!_sideBySideLocalProjectionActive)
+            {
+                return;
+            }
+
+            EditorConsoleColumnSplitter.Visibility = Visibility.Collapsed;
+            DebugPanelSplitter.Visibility = Visibility.Collapsed;
+            SideBySideDebugSplitter.Visibility = Visibility.Collapsed;
+            SideBySideGrid.Visibility = Visibility.Collapsed;
+            foreach (var element in new FrameworkElement[]
+            {
+                EditorPaneBorder,
+                EditorConsoleColumnSplitter,
+                ConsolePaneBorder,
+                DebugPanelBorder
+            })
+            {
+                SideBySideGrid.Children.Remove(element);
+                if (!WorkspaceGrid.Children.Contains(element))
+                {
+                    WorkspaceGrid.Children.Add(element);
+                }
+            }
+
+            _sideBySideLocalProjectionActive = false;
+            Grid.SetRow(EditorPaneBorder, 0);
+            Grid.SetColumn(EditorPaneBorder, 2);
+            Grid.SetRowSpan(EditorPaneBorder, 1);
+            Grid.SetColumnSpan(EditorPaneBorder, 1);
+            Grid.SetRow(EditorConsoleColumnSplitter, 0);
+            Grid.SetColumn(EditorConsoleColumnSplitter, 3);
+            Grid.SetRowSpan(EditorConsoleColumnSplitter, 3);
+            Grid.SetRow(ConsolePaneBorder, 2);
+            Grid.SetColumn(ConsolePaneBorder, 2);
+            Grid.SetRowSpan(ConsolePaneBorder, 1);
+            Grid.SetColumnSpan(ConsolePaneBorder, 1);
+            Grid.SetRow(DebugPanelBorder, 0);
+            Grid.SetColumn(DebugPanelBorder, 6);
+            Grid.SetRowSpan(DebugPanelBorder, 3);
+            Grid.SetColumnSpan(DebugPanelBorder, 1);
+            NeutralizeInactiveSideBySideTopology();
+        }
+
+        private void NeutralizeInactiveSideBySideTopology()
+        {
+            // A collapsed Grid does not consume space, but retaining its last
+            // pixel definitions makes transition diagnostics and later projection
+            // vulnerable to stale nested geometry. The coordinator already owns the
+            // conceptual widths, so an inactive nested topology must be neutral.
+            SideBySideEditorColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+            SideBySideEditorColumnDefinition.MinWidth = 0;
+            SideBySideEditorConsoleSplitterColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+            SideBySideConsoleColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+            SideBySideConsoleColumnDefinition.MinWidth = 0;
+            SideBySideConsoleDebugSplitterColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+            SideBySideDebugColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+            SideBySideDebugColumnDefinition.MinWidth = 0;
+        }
+
+        private void ApplySideBySideLocalDebugProjection(bool visible)
+        {
+            LogDebugSplitterWriterSnapshot("ApplySideBySideLocalDebugProjection", "Before", visible);
+            if (!_sideBySideLocalProjectionActive)
+            {
+                return;
+            }
+
+            var docked = visible && _debugPaneWindow is null;
+            var requestedDebugWidth = docked
+                ? Math.Max(_layoutCoordinator.State.Debug.RequestedDockedWidth, MinimumDebugPanelWidth)
+                : 0;
+            ActiveSideBySideDebugColumn.MinWidth = docked ? MinimumDebugPanelWidth : 0;
+            SideBySideConsoleDebugSplitterColumnDefinition.Width = docked
+                ? new GridLength(6, GridUnitType.Pixel)
+                : new GridLength(0, GridUnitType.Pixel);
+            SideBySideDebugSplitter.Visibility = docked ? Visibility.Visible : Visibility.Collapsed;
+            DebugPanelBorder.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            if (!docked)
+            {
+                DebugPanelBorder.Visibility = Visibility.Collapsed;
+            }
+
+            ApplySideBySideContentStarSizing(
+                Math.Max(_layoutCoordinator.State.Console.RequestedSideBySideWidth, MinimumConsoleSideWidth),
+                requestedDebugWidth,
+                "ApplySideBySideLocalDebugProjection");
+
+            LogDebugSplitterWriterSnapshot("ApplySideBySideLocalDebugProjection", "After", visible);
+        }
+
+        private void ApplySideBySideContentStarSizing(double consoleWidth, double debugWidth, string reason)
+        {
+            if (!_sideBySideLocalProjectionActive || SideBySideGrid is null)
+            {
+                return;
+            }
+
+            var splitterWidth = SideBySideEditorConsoleSplitterColumnDefinition.Width.GridUnitType == GridUnitType.Pixel
+                ? SideBySideEditorConsoleSplitterColumnDefinition.Width.Value
+                : SideBySideEditorConsoleSplitterColumnDefinition.ActualWidth;
+            splitterWidth += SideBySideConsoleDebugSplitterColumnDefinition.Width.GridUnitType == GridUnitType.Pixel
+                ? SideBySideConsoleDebugSplitterColumnDefinition.Width.Value
+                : SideBySideConsoleDebugSplitterColumnDefinition.ActualWidth;
+            var hostWidth = SideBySideGrid.ActualWidth;
+            if (!double.IsFinite(hostWidth) || hostWidth <= 0)
+            {
+                hostWidth = WorkspaceGrid.ActualWidth - ExplorerColumnDefinition.ActualWidth - ExplorerSplitterColumnDefinition.ActualWidth;
+            }
+
+            var availableContentWidth = Math.Max(0, hostWidth - splitterWidth);
+            var requestedConsoleWidth = Math.Max(consoleWidth, MinimumConsoleSideWidth);
+            var requestedDebugWidth = debugWidth > 0 ? Math.Max(debugWidth, MinimumDebugPanelWidth) : 0;
+
+            if (requestedDebugWidth <= 0)
+            {
+                ActiveSideBySideEditorColumn.Width = new GridLength(1, GridUnitType.Star);
+                ActiveSideBySideConsoleColumn.Width = new GridLength(requestedConsoleWidth, GridUnitType.Pixel);
+                ActiveSideBySideDebugColumn.Width = new GridLength(0, GridUnitType.Pixel);
+                return;
+            }
+
+            var requestedEditorWidth = Math.Max(
+                MinimumEditorWidth,
+                availableContentWidth - requestedConsoleWidth - requestedDebugWidth);
+
+            ActiveSideBySideEditorColumn.Width = new GridLength(requestedEditorWidth, GridUnitType.Star);
+            ActiveSideBySideConsoleColumn.Width = new GridLength(requestedConsoleWidth, GridUnitType.Star);
+            ActiveSideBySideDebugColumn.Width = requestedDebugWidth > 0
+                ? new GridLength(requestedDebugWidth, GridUnitType.Star)
+                : new GridLength(0, GridUnitType.Pixel);
+
+            DeveloperDiagnostics.LogInfo(
+                "UI",
+                "SideBySide content columns projected as star-sized native splitter targets.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["hostWidth"] = hostWidth,
+                    ["splitterWidth"] = splitterWidth,
+                    ["editorStarWeight"] = requestedEditorWidth,
+                    ["consoleStarWeight"] = requestedConsoleWidth,
+                    ["debugStarWeight"] = requestedDebugWidth,
+                    ["consoleIntent"] = _layoutCoordinator.State.Console.RequestedSideBySideWidth,
+                    ["debugIntent"] = _layoutCoordinator.State.Debug.RequestedDockedWidth
+                });
+        }
+
+        private void CaptureConceptualLayoutState(string reason)
+        {
+            LogDebugSplitterWriterSnapshot("CaptureConceptualLayoutState", $"Before:{reason}", null);
+            if (!IsInitialized || WorkspaceGrid is null)
+            {
+                return;
+            }
+
+            var state = _layoutCoordinator.State;
+            state.WorkspaceMode = ToLayoutWorkspaceMode(_workspaceLayoutMode);
+            state.Explorer.IsVisible = ViewModel?.IsExplorerVisible ?? ExplorerPaneBorder.Visibility == Visibility.Visible;
+            state.Editor.IsVisible = EditorPaneBorder.Visibility == Visibility.Visible;
+            state.Console.IsVisible = ConsolePaneBorder.Visibility == Visibility.Visible;
+            state.Debug.IsVisible = DebugPanelBorder.Visibility == Visibility.Visible;
+            state.Debug.DockState = _debugPaneWindow is not null
+                ? LayoutDockState.Floating
+                : state.Debug.IsVisible ? LayoutDockState.Docked : LayoutDockState.Hidden;
+            state.LowerTools.IsVisible = _isBottomToolWindowVisible;
+            state.LowerTools.DockState = !_isBottomToolWindowVisible
+                ? LayoutDockState.Hidden
+                : _isBottomToolWindowFloating ? LayoutDockState.Floating : LayoutDockState.Docked;
+            state.LowerTools.SelectedTab = Enum.TryParse<LayoutBottomToolTab>(_selectedBottomToolTab.ToString(), out var selectedTab)
+                ? selectedTab
+                : LayoutBottomToolTab.Problems;
+            state.MainWindow.IsMaximized = WindowState == WindowState.Maximized;
+            state.MainWindow.RestoreBounds = WindowState == WindowState.Normal
+                ? new Rect(Left, Top, Width, Height)
+                : RestoreBounds;
+            state.MainWindow.AvailableWorkspaceWidth = WorkspaceGrid.ActualWidth;
+            state.MainWindow.AvailableWorkspaceHeight = WorkspaceGrid.ActualHeight;
+
+            if (ExplorerColumnDefinition.ActualWidth >= state.Explorer.MinimumWidth)
+            {
+                _layoutCoordinator.CaptureExplorerWidth(ExplorerColumnDefinition.ActualWidth);
+            }
+
+            if (IsConsoleHeightRowOwned && ConsoleRowDefinition.ActualHeight >= state.Console.MinimumHeight)
+            {
+                var consoleHeight = ConsoleRowDefinition.ActualHeight;
+                if (BottomToolWindowBorder.Visibility == Visibility.Visible && !_isBottomToolWindowFloating)
+                {
+                    consoleHeight -= BottomToolWindowSplitterRowDefinition.ActualHeight;
+                    consoleHeight -= BottomToolWindowRowDefinition.ActualHeight;
+                }
+
+                _layoutCoordinator.CaptureConsoleHeight(consoleHeight);
+            }
+
+            var sideBySideConsoleWidth = _sideBySideLocalProjectionActive
+                ? ActiveSideBySideConsoleColumn.ActualWidth
+                : ConsoleSideColumnDefinition.ActualWidth;
+            if (IsDebugPaneAdjacentToSideConsole && sideBySideConsoleWidth >= state.Console.MinimumSideBySideWidth)
+            {
+                _layoutCoordinator.CaptureConsoleSideWidth(sideBySideConsoleWidth);
+            }
+
+            if (DebugPanelBorder.Visibility == Visibility.Visible)
+            {
+                _layoutCoordinator.CaptureDebugDockedWidth(ActiveDebugWidthColumn.ActualWidth);
+            }
+
+            if (BottomToolWindowBorder.Visibility == Visibility.Visible && !_isBottomToolWindowFloating)
+            {
+                _layoutCoordinator.CaptureLowerToolHeight(BottomToolWindowRowDefinition.ActualHeight);
+            }
+
+            DeveloperDiagnostics.LogInfo(
+                "UI",
+                "Conceptual layout state captured from an intentional projection boundary.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["workspaceMode"] = state.WorkspaceMode.ToString(),
+                    ["explorerWidthIntent"] = state.Explorer.RequestedWidth,
+                    ["consoleHeightIntent"] = state.Console.RequestedVerticalHeight,
+                    ["consoleSideWidthIntent"] = state.Console.RequestedSideBySideWidth,
+                    ["debugDockedWidthIntent"] = state.Debug.RequestedDockedWidth,
+                    ["bottomToolHeightIntent"] = state.LowerTools.RequestedDockedHeight
+                });
+        }
+
+        private LayoutGeometrySnapshot BuildLayoutGeometrySnapshot()
+        {
+            var activeHorizontalWidth = ExplorerColumnDefinition.ActualWidth + ExplorerSplitterColumnDefinition.ActualWidth;
+            if (_sideBySideLocalProjectionActive)
+            {
+                activeHorizontalWidth += ActiveSideBySideEditorColumn.ActualWidth +
+                                         SideBySideEditorConsoleSplitterColumnDefinition.ActualWidth +
+                                         ActiveSideBySideConsoleColumn.ActualWidth +
+                                         SideBySideConsoleDebugSplitterColumnDefinition.ActualWidth +
+                                         ActiveSideBySideDebugColumn.ActualWidth;
+            }
+            else
+            {
+                activeHorizontalWidth += EditorColumnDefinition.ActualWidth;
+                if (IsDebugPaneAdjacentToSideConsole)
+                {
+                    activeHorizontalWidth += ConsoleSideSplitterColumnDefinition.ActualWidth + ConsoleSideColumnDefinition.ActualWidth;
+                    if (_layoutCoordinator.State.Debug.DockState == LayoutDockState.Docked)
+                    {
+                        activeHorizontalWidth += DebugPanelSplitterColumn.ActualWidth + DebugPanelColumn.ActualWidth;
+                    }
+                }
+                else if (_layoutCoordinator.State.Debug.DockState == LayoutDockState.Docked)
+                {
+                    activeHorizontalWidth += DebugPanelSplitter.ActualWidth + ConsoleSideColumnDefinition.ActualWidth;
+                }
+            }
+
+            var activeVerticalHeight = _workspaceLayoutMode switch
+            {
+                WorkspaceLayoutMode.SideBySideSplit => WorkspaceGrid.ActualHeight,
+                WorkspaceLayoutMode.EditorMaximized => EditorRowDefinition.ActualHeight,
+                WorkspaceLayoutMode.ConsoleMaximized => ConsoleRowDefinition.ActualHeight,
+                _ => EditorRowDefinition.ActualHeight + EditorConsoleRowSplitterDefinition.ActualHeight + ConsoleRowDefinition.ActualHeight
+            };
+            var allColumnWidth = _sideBySideLocalProjectionActive
+                ? activeHorizontalWidth
+                : ExplorerColumnDefinition.ActualWidth + ExplorerSplitterColumnDefinition.ActualWidth + EditorColumnDefinition.ActualWidth + ConsoleSideSplitterColumnDefinition.ActualWidth + ConsoleSideColumnDefinition.ActualWidth + DebugPanelSplitterColumn.ActualWidth + DebugPanelColumn.ActualWidth;
+            var allRowHeight = EditorRowDefinition.ActualHeight + EditorConsoleRowSplitterDefinition.ActualHeight + ConsoleRowDefinition.ActualHeight;
+            return new LayoutGeometrySnapshot(
+                WorkspaceGrid.ActualWidth,
+                WorkspaceGrid.ActualHeight,
+                activeHorizontalWidth,
+                activeVerticalHeight,
+                ExplorerColumnDefinition.ActualWidth,
+                _sideBySideLocalProjectionActive ? ActiveSideBySideEditorColumn.ActualWidth : EditorColumnDefinition.ActualWidth,
+                _sideBySideLocalProjectionActive
+                    ? ActiveSideBySideConsoleColumn.ActualWidth
+                    : IsDebugPaneAdjacentToSideConsole ? ConsoleSideColumnDefinition.ActualWidth : ConsolePaneBorder.ActualWidth,
+                _layoutCoordinator.State.Debug.DockState == LayoutDockState.Docked ? ActiveDebugWidthColumn.ActualWidth : 0,
+                BottomToolWindowRowDefinition.ActualHeight,
+                Math.Max(0, allColumnWidth - activeHorizontalWidth),
+                Math.Max(0, allRowHeight - activeVerticalHeight),
+                _layoutCoordinator.State.Explorer.IsVisible,
+                _layoutCoordinator.State.Debug.IsVisible,
+                _layoutCoordinator.State.LowerTools.IsVisible,
+                _layoutCoordinator.State.Debug.DockState == LayoutDockState.Floating,
+                _layoutCoordinator.State.LowerTools.DockState == LayoutDockState.Floating);
+        }
+
+        private LayoutInvariantResult ValidateLayoutState(string reason)
+        {
+            CaptureConceptualLayoutState($"Validate:{reason}");
+            _lastLayoutInvariantResult = _layoutCoordinator.Validate(BuildLayoutGeometrySnapshot());
+            var properties = new Dictionary<string, object?>
+            {
+                ["reason"] = reason,
+                ["workspaceMode"] = _layoutCoordinator.State.WorkspaceMode.ToString(),
+                ["debugDockState"] = _layoutCoordinator.State.Debug.DockState.ToString(),
+                ["lowerToolDockState"] = _layoutCoordinator.State.LowerTools.DockState.ToString(),
+                ["underfillHorizontal"] = _lastLayoutInvariantResult.Budget.UnusedHorizontalWidth,
+                ["overflowHorizontal"] = _lastLayoutInvariantResult.Budget.OverflowHorizontalWidth,
+                ["underfillVertical"] = _lastLayoutInvariantResult.Budget.UnusedVerticalHeight,
+                ["overflowVertical"] = _lastLayoutInvariantResult.Budget.OverflowVerticalHeight,
+                ["violationCount"] = _lastLayoutInvariantResult.Violations.Count,
+                ["violations"] = string.Join(" | ", _lastLayoutInvariantResult.Violations.Select(violation => $"{violation.Code}:{violation.Message}"))
+            };
+            DeveloperDiagnostics.LogInfo("UI", "Layout transition invariants evaluated.", properties);
+            return _lastLayoutInvariantResult;
+        }
+
+        private void AddConceptualLayoutState(IDictionary<string, object?> state)
+        {
+            var layoutState = _layoutCoordinator.State;
+            state["conceptual.workspaceMode"] = layoutState.WorkspaceMode.ToString();
+            state["conceptual.explorerVisible"] = layoutState.Explorer.IsVisible;
+            state["conceptual.explorerWidthIntent"] = layoutState.Explorer.RequestedWidth;
+            state["conceptual.editorVisible"] = layoutState.Editor.IsVisible;
+            state["conceptual.editorUsesElasticWidth"] = layoutState.Editor.UsesElasticWidth;
+            state["conceptual.consoleVisible"] = layoutState.Console.IsVisible;
+            state["conceptual.consoleHeightIntent"] = layoutState.Console.RequestedVerticalHeight;
+            state["conceptual.consoleSideWidthIntent"] = layoutState.Console.RequestedSideBySideWidth;
+            state["conceptual.debugDockState"] = layoutState.Debug.DockState.ToString();
+            state["conceptual.debugDockedWidthIntent"] = layoutState.Debug.RequestedDockedWidth;
+            state["conceptual.lowerToolDockState"] = layoutState.LowerTools.DockState.ToString();
+            state["conceptual.lowerToolSelectedTab"] = layoutState.LowerTools.SelectedTab.ToString();
+            state["conceptual.lowerToolHeightIntent"] = layoutState.LowerTools.RequestedDockedHeight;
+            state["conceptual.activeEditorRegion"] = layoutState.ActiveEditorRegion;
+            state["conceptual.activeConsoleRegion"] = layoutState.ActiveConsoleRegion;
+            state["conceptual.activeDebugRegion"] = layoutState.ActiveDebugRegion;
+            state["conceptual.activeLowerToolRegion"] = layoutState.ActiveLowerToolRegion;
+            state["conceptual.sideBySideLocalProjectionActive"] = _sideBySideLocalProjectionActive;
+            state["conceptual.sideBySideEditorElastic"] = _sideBySideLocalProjectionActive && ActiveSideBySideEditorColumn.Width.IsStar;
+            state["conceptual.sideBySideConsoleActualWidth"] = _sideBySideLocalProjectionActive ? ActiveSideBySideConsoleColumn.ActualWidth : null;
+            state["conceptual.sideBySideDebugActualWidth"] = _sideBySideLocalProjectionActive ? ActiveSideBySideDebugColumn.ActualWidth : null;
+            LogDebugSplitterWriterSnapshot("CaptureConceptualLayoutState", "After", null);
+        }
+
         private void MainWindow_SizeChanged(object sender, SizeChangedEventArgs e)
         {
+            LogDebugSplitterWriterSnapshot("MainWindow_SizeChanged", "Before", null);
             using var performanceScope = PerformanceTrace.Begin(
                 "TerminalResize",
                 "MainWindowSizeChanged",
@@ -547,8 +1034,15 @@ namespace PS7ScriptDesk.Shell
                     ["newWidth"] = e.NewSize.Width,
                     ["newHeight"] = e.NewSize.Height
                 });
+            if (_captureLayoutForensicsOnNextSizeChanged)
+            {
+                _captureLayoutForensicsOnNextSizeChanged = false;
+                CaptureLayoutForensicsSnapshot("MainWindow.SizeChangedAfterSplitter");
+            }
+
             if (!DeveloperDiagnostics.IsEnabled)
             {
+                NormalizeLayoutBudget("MainWindowSizeChanged");
                 return;
             }
 
@@ -564,6 +1058,9 @@ namespace PS7ScriptDesk.Shell
                         ["newWindowWidth"] = e.NewSize.Width,
                         ["newWindowHeight"] = e.NewSize.Height
                     }));
+
+            NormalizeLayoutBudget("MainWindowSizeChanged");
+            LogDebugSplitterWriterSnapshot("MainWindow_SizeChanged", "After", null);
         }
 
         private void TerminalConsole_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -1588,6 +2085,7 @@ namespace PS7ScriptDesk.Shell
                     new Dictionary<string, object?>
                     {
                         ["key"] = e.Key.ToString(),
+                        ["systemKey"] = e.SystemKey.ToString(),
                         ["modifiers"] = Keyboard.Modifiers.ToString(),
                         ["handledOnEntry"] = e.Handled,
                         ["sourceType"] = DescribeInputElement(e.Source as IInputElement),
@@ -1768,15 +2266,13 @@ namespace PS7ScriptDesk.Shell
 
             if (!isCtrl && !isShift && e.Key == Key.F5)
             {
-                e.Handled = true;
-
                 if (_debugSession?.CurrentState == DebugSessionState.Paused)
                 {
-                    ContinueDebug_Click(sender, new RoutedEventArgs());
+                    TryExecuteDebuggerShortcut(ContinueDebugCommand, "Continue", e);
                     return;
                 }
 
-                StartDebug_Click(sender, new RoutedEventArgs());
+                TryExecuteDebuggerShortcut(StartDebugCommand, "StartDebug", e);
                 return;
             }
 
@@ -1801,29 +2297,28 @@ namespace PS7ScriptDesk.Shell
 
             if (!isCtrl && isShift && e.Key == Key.F5)
             {
-                e.Handled = true;
-                StopDebug_Click(sender, new RoutedEventArgs());
+                TryExecuteDebuggerShortcut(StopDebugCommand, "StopDebug", e);
                 return;
             }
 
-            if (!isCtrl && !isShift && e.Key == Key.F10)
+            if (!isCtrl && !isShift &&
+                DebuggerCommandRouting.IsGesture(e.Key, e.SystemKey, Keyboard.Modifiers, Key.F10))
             {
-                e.Handled = true;
-                StepOver_Click(sender, new RoutedEventArgs());
+                TryExecuteDebuggerShortcut(StepOverCommand, "StepOver", e);
                 return;
             }
 
-            if (!isCtrl && !isShift && e.Key == Key.F11)
+            if (!isCtrl && !isShift &&
+                DebuggerCommandRouting.IsGesture(e.Key, e.SystemKey, Keyboard.Modifiers, Key.F11))
             {
-                e.Handled = true;
-                StepInto_Click(sender, new RoutedEventArgs());
+                TryExecuteDebuggerShortcut(StepIntoCommand, "StepInto", e);
                 return;
             }
 
-            if (!isCtrl && isShift && e.Key == Key.F11)
+            if (isShift && !isCtrl &&
+                DebuggerCommandRouting.IsGesture(e.Key, e.SystemKey, Keyboard.Modifiers, Key.F11, ModifierKeys.Shift))
             {
-                e.Handled = true;
-                StepOut_Click(sender, new RoutedEventArgs());
+                TryExecuteDebuggerShortcut(StepOutCommand, "StepOut", e);
                 return;
             }
 
@@ -2329,8 +2824,32 @@ namespace PS7ScriptDesk.Shell
                 var contentChanged = !string.Equals(tab.Content, editorText, StringComparison.Ordinal);
                 var lineCount = editorTextEditor.Document?.LineCount ?? 1;
                 tab.UpdateContentFromEditor(editorText, lineCount);
+                if (contentChanged)
+                {
+                    RefreshDebugStaleTabState("EditorDocumentChanged");
+                }
                 contentSynchronizationExecuted = true;
                 if (contentChanged) _liveAnalyzerEligibleRevisions.Add((tab.DiagnosticDocument.DocumentId, tab.DiagnosticDocument.Revision));
+
+                if (contentChanged && tab.CurrentDebugLine > 0)
+                {
+                    var clearedLine = tab.CurrentDebugLine;
+                    tab.ClearCurrentDebugLine();
+                    editorTextEditor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+                    RefreshBreakpointGlyphMargin(editorTextEditor);
+                    DeveloperDiagnostics.LogDecision(
+                        "Debugger",
+                        "ExecutionHighlight",
+                        "Current execution highlight was cleared because the visible editor buffer changed.",
+                        "ClearedOnDocumentEdit",
+                        new Dictionary<string, object?>
+                        {
+                            ["editorLineCleared"] = clearedLine,
+                            ["editorRevision"] = tab.DiagnosticDocument.Revision,
+                            ["debugSessionState"] = _debugSession?.CurrentState.ToString(),
+                            ["reason"] = "The current editor revision can no longer be treated as the runtime source revision."
+                        });
+                }
             }
             contentSynchronizationStopwatch?.Stop();
 
@@ -3103,6 +3622,456 @@ namespace PS7ScriptDesk.Shell
             ShowBottomToolWindow(BottomToolTab.DebugOutput, reason);
         }
 
+        private void DebugOutputPresentation_CollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+        {
+            UpdateDebugOutputEmptyState();
+            if (DebugOutputList is not null && DebugOutputList.Items.Count == 0)
+            {
+                _debugOutputLastVisibleItem = null;
+            }
+
+            LogDebugOutputScrollForensics("VisibleCollectionChanged", e.NewItems?.OfType<DebugOutputItem>().LastOrDefault(), null, null);
+            RequestDebugOutputScrollToNewest("VisibleCollectionChanged");
+        }
+
+        private void UpdateDebugOutputEmptyState()
+        {
+            if (DebugOutputEmptyState is not null)
+            {
+                DebugOutputEmptyState.Visibility = _debugOutputPresentation.Items.Count == 0
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+            }
+        }
+
+        private void DebugOutputClear_Click(object sender, RoutedEventArgs e)
+        {
+            if (DebugOutputAutoScrollToggle.IsChecked == true)
+            {
+                _debugOutputAutoScrollSuppressed = false;
+                _debugOutputFollowing = true;
+            }
+            _debugOutputPresentation.Clear();
+            ViewModel?.ClearDebugOutput();
+            DeveloperDiagnostics.LogUserAction("Debugger", "DebugOutputCleared", "Debug Output presentation records cleared; debugger session state was not changed.");
+        }
+
+        private void DebugOutputCopyAll_Click(object sender, RoutedEventArgs e)
+        {
+            var text = _debugOutputPresentation.FormatVisibleItems();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return;
+            }
+
+            try
+            {
+                Clipboard.SetText(text, TextDataFormat.UnicodeText);
+                DeveloperDiagnostics.LogUserAction("Debugger", "DebugOutputCopied", "Visible filtered Debug Output records copied.", new Dictionary<string, object?> { ["characterCount"] = text.Length });
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("Debugger", ex, "Debug Output copy failed.", new Dictionary<string, object?> { ["characterCount"] = text.Length });
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = "Unable to copy Debug Output.";
+                }
+            }
+        }
+
+        private void DebugOutputSaveLog_Click(object sender, RoutedEventArgs e)
+        {
+            var text = _debugOutputPresentation.FormatVisibleItems();
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
+                DefaultExt = ".txt",
+                AddExtension = true,
+                OverwritePrompt = true,
+                FileName = "PS7ScriptDesk-DebugOutput.txt"
+            };
+
+            if (dialog.ShowDialog(this) != true)
+            {
+                return;
+            }
+
+            try
+            {
+                File.WriteAllText(dialog.FileName, text + Environment.NewLine);
+                DeveloperDiagnostics.LogUserAction("Debugger", "DebugOutputSaved", "Visible filtered Debug Output records saved.", new Dictionary<string, object?> { ["path"] = dialog.FileName, ["characterCount"] = text.Length });
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("Debugger", ex, "Debug Output save failed.", new Dictionary<string, object?> { ["path"] = dialog.FileName });
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = "Unable to save Debug Output.";
+                }
+            }
+        }
+
+        private void DebugOutputAutoScroll_Checked(object sender, RoutedEventArgs e)
+        {
+            _debugOutputAutoScrollSuppressed = false;
+            _debugOutputFollowing = true;
+            RequestDebugOutputScrollToNewest("AutoScrollEnabled");
+        }
+
+        private void DebugOutputAutoScroll_Unchecked(object sender, RoutedEventArgs e)
+        {
+            _debugOutputAutoScrollSuppressed = true;
+            _debugOutputFollowing = false;
+        }
+
+        private void DebugOutputFilters_Click(object sender, RoutedEventArgs e)
+        {
+            DebugOutputFiltersPopup.IsOpen = true;
+        }
+
+        private void DebugOutputFilter_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is CheckBox checkBox &&
+                checkBox.Tag is string tag &&
+                Enum.TryParse<DebugOutputFilterGroup>(tag, out var group))
+            {
+                _debugOutputPresentation.SetFilter(group, checkBox.IsChecked == true);
+                RequestDebugOutputScrollToNewest("FilterChanged");
+                DeveloperDiagnostics.LogUserAction("Debugger", "DebugOutputFilterChanged", "Debug Output category filter changed.", new Dictionary<string, object?> { ["group"] = group.ToString(), ["enabled"] = checkBox.IsChecked == true });
+            }
+        }
+
+        private void DebugOutputIncludeScriptOutput_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is CheckBox checkBox)
+            {
+                _debugOutputPresentation.IncludeScriptOutput = checkBox.IsChecked == true;
+                RequestDebugOutputScrollToNewest("IncludeScriptOutputChanged");
+                DeveloperDiagnostics.LogUserAction("Debugger", "DebugOutputScriptOutputFilterChanged", "Debug Output script/process output filter changed.", new Dictionary<string, object?> { ["enabled"] = checkBox.IsChecked == true });
+            }
+        }
+
+        private void DebugOutputList_ScrollChanged(object sender, ScrollChangedEventArgs e)
+        {
+            var scrollViewer = e.OriginalSource as ScrollViewer ?? _debugOutputScrollViewer;
+            if (scrollViewer is null)
+            {
+                return;
+            }
+
+            var previousFollowing = _debugOutputFollowing;
+            var previousSuppressed = _debugOutputAutoScrollSuppressed;
+            LogDebugOutputScrollForensics("ScrollChanged.BeforeDecision", _debugOutputLastVisibleItem as DebugOutputItem, scrollViewer, new Dictionary<string, object?>
+            {
+                ["verticalChange"] = e.VerticalChange,
+                ["extentHeightChange"] = e.ExtentHeightChange,
+                ["viewportHeightChange"] = e.ViewportHeightChange,
+                ["originalSourceType"] = e.OriginalSource.GetType().FullName
+            });
+
+            var atBottom = DebugOutputAutoScrollLifecycle.IsAtBottom(
+                scrollViewer.VerticalOffset,
+                scrollViewer.ScrollableHeight);
+            if (atBottom)
+            {
+                _debugOutputAutoScrollSuppressed = false;
+                _debugOutputFollowing = true;
+                return;
+            }
+
+            // Extent-only changes are layout growth. Preserve an existing follow state
+            // so adding a row does not look like the user intentionally scrolled away.
+            if (Math.Abs(e.VerticalChange) < 0.01 && Math.Abs(e.ExtentHeightChange) > 0.01)
+            {
+                return;
+            }
+
+            _debugOutputAutoScrollSuppressed = true;
+            _debugOutputFollowing = false;
+
+            if (previousFollowing != _debugOutputFollowing || previousSuppressed != _debugOutputAutoScrollSuppressed)
+            {
+                DeveloperDiagnostics.LogStateTransition(
+                    "Debugger",
+                    "DebugOutputAutoScrollState",
+                    previousFollowing ? "Following" : "Suppressed",
+                    _debugOutputFollowing ? "Following" : "Suppressed",
+                    "Debug Output scroll state changed after ScrollChanged.",
+                    new Dictionary<string, object?>
+                    {
+                        ["trigger"] = "ScrollChanged",
+                        ["verticalChange"] = e.VerticalChange,
+                        ["extentHeightChange"] = e.ExtentHeightChange,
+                        ["verticalOffset"] = scrollViewer.VerticalOffset,
+                        ["scrollableHeight"] = scrollViewer.ScrollableHeight,
+                        ["atBottom"] = atBottom,
+                        ["previousSuppressed"] = previousSuppressed,
+                        ["suppressed"] = _debugOutputAutoScrollSuppressed
+                    });
+            }
+        }
+
+        private void DebugOutputList_Loaded(object sender, RoutedEventArgs e)
+        {
+            var firstLoad = _debugOutputScrollViewer is null;
+            _debugOutputScrollViewer = FindVisualChild<ScrollViewer>(DebugOutputList);
+            if (firstLoad && DebugOutputAutoScrollToggle.IsChecked == true)
+            {
+                _debugOutputAutoScrollSuppressed = false;
+                _debugOutputFollowing = true;
+            }
+            RequestDebugOutputScrollToNewest("ListLoaded");
+        }
+
+        private void DebugOutputList_Unloaded(object sender, RoutedEventArgs e)
+        {
+            _debugOutputScrollViewer = null;
+        }
+
+        private void RequestDebugOutputScrollToNewest(string reason)
+        {
+            var list = DebugOutputList;
+            var toggle = DebugOutputAutoScrollToggle;
+            var requestSequence = System.Threading.Interlocked.Increment(ref _debugOutputForensicSequence);
+            LogDebugOutputScrollForensics($"ScrollRequest.BeforeGate.{requestSequence}", list?.Items.OfType<DebugOutputItem>().LastOrDefault(), _debugOutputScrollViewer, new Dictionary<string, object?>
+            {
+                ["reason"] = reason,
+                ["requestSequence"] = requestSequence,
+                ["dispatcherPriority"] = DispatcherPriority.ContextIdle.ToString(),
+                ["scrollRequested"] = false
+            });
+            if (_debugOutputScrollOperationPending)
+            {
+                LogDebugOutputScrollForensics($"ScrollRequest.RejectedPending.{requestSequence}", list?.Items.OfType<DebugOutputItem>().LastOrDefault(), _debugOutputScrollViewer, new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["requestSequence"] = requestSequence,
+                    ["scrollRequested"] = false
+                });
+                return;
+            }
+
+            if (!_debugOutputFollowing ||
+                !DebugOutputAutoScrollLifecycle.ShouldRequestScroll(
+                    list is not null && toggle is not null,
+                    IsLoaded,
+                    toggle?.IsChecked == true,
+                    _debugOutputAutoScrollSuppressed,
+                    list?.Items.Count ?? 0))
+            {
+                if (!_debugOutputFollowing)
+                {
+                    DeveloperDiagnostics.LogDecision("Debugger", "DebugOutputAutoScroll", "Auto-scroll request suppressed because the user is not following the bottom.", "Suppressed", new Dictionary<string, object?> { ["reason"] = reason });
+                }
+
+                LogDebugOutputScrollForensics($"ScrollRequest.RejectedGate.{requestSequence}", list?.Items.OfType<DebugOutputItem>().LastOrDefault(), _debugOutputScrollViewer, new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["requestSequence"] = requestSequence,
+                    ["scrollRequested"] = false,
+                    ["gateShouldRequestScroll"] = DebugOutputAutoScrollLifecycle.ShouldRequestScroll(
+                        list is not null && toggle is not null,
+                        IsLoaded,
+                        toggle?.IsChecked == true,
+                        _debugOutputAutoScrollSuppressed,
+                        list?.Items.Count ?? 0)
+                });
+
+                return;
+            }
+
+            _debugOutputScrollOperationPending = true;
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                var currentList = DebugOutputList;
+                var currentToggle = DebugOutputAutoScrollToggle;
+                if (!_debugOutputFollowing ||
+                    !DebugOutputAutoScrollLifecycle.ShouldRequestScroll(
+                        currentList is not null && currentToggle is not null,
+                        IsLoaded,
+                        currentToggle?.IsChecked == true,
+                        _debugOutputAutoScrollSuppressed,
+                        currentList?.Items.Count ?? 0))
+                {
+                    _debugOutputScrollOperationPending = false;
+                    return;
+                }
+
+                var currentScrollViewer = _debugOutputScrollViewer ?? FindVisualChild<ScrollViewer>(currentList!);
+                if (currentList!.Items.Count == 0)
+                {
+                    _debugOutputLastVisibleItem = null;
+                    _debugOutputScrollOperationPending = false;
+                    return;
+                }
+
+                var newestVisibleItem = currentList.Items[^1];
+                _debugOutputLastVisibleItem = newestVisibleItem;
+                LogDebugOutputScrollForensics($"ScrollRequest.BeforeScroll.{requestSequence}", newestVisibleItem as DebugOutputItem, currentScrollViewer, new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["requestSequence"] = requestSequence,
+                    ["scrollRequested"] = true,
+                    ["scrollIntoViewRequested"] = true,
+                    ["scrollToEndRequested"] = true,
+                    ["dispatcherPriority"] = DispatcherPriority.ContextIdle.ToString()
+                });
+                currentList.ScrollIntoView(newestVisibleItem);
+                currentScrollViewer?.ScrollToEnd();
+                LogDebugOutputScrollForensics($"ScrollRequest.AfterImmediateScroll.{requestSequence}", newestVisibleItem as DebugOutputItem, currentScrollViewer, new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["requestSequence"] = requestSequence,
+                    ["scrollRequested"] = true,
+                    ["scrollIntoViewRequested"] = true,
+                    ["scrollToEndRequested"] = true
+                });
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    try
+                    {
+                        var settledList = DebugOutputList;
+                        var settledToggle = DebugOutputAutoScrollToggle;
+                        if (!_debugOutputFollowing ||
+                            !DebugOutputAutoScrollLifecycle.ShouldRequestScroll(
+                                settledList is not null && settledToggle is not null,
+                                IsLoaded,
+                                settledToggle?.IsChecked == true,
+                                _debugOutputAutoScrollSuppressed,
+                                settledList?.Items.Count ?? 0))
+                        {
+                            return;
+                        }
+
+                        var settledScrollViewer = _debugOutputScrollViewer ?? FindVisualChild<ScrollViewer>(settledList!);
+                        if (settledList!.Items.Count == 0)
+                        {
+                            _debugOutputLastVisibleItem = null;
+                            return;
+                        }
+
+                        var finalVisibleItem = settledList.Items[^1];
+                        settledList.ScrollIntoView(finalVisibleItem);
+                        settledScrollViewer?.ScrollToEnd();
+                        var atBottom = settledScrollViewer is null ||
+                            DebugOutputAutoScrollLifecycle.IsAtBottom(
+                                settledScrollViewer.VerticalOffset,
+                                settledScrollViewer.ScrollableHeight);
+                        DeveloperDiagnostics.LogDecision(
+                            "Debugger",
+                            "DebugOutputAutoScroll",
+                            "Newest visible Debug Output item received bounded true-bottom settling.",
+                            atBottom ? "TrueBottom" : "FollowRequested",
+                            new Dictionary<string, object?>
+                            {
+                                ["reason"] = reason,
+                                ["requestSequence"] = requestSequence,
+                                ["visibleItemCount"] = settledList.Items.Count,
+                                ["verticalOffset"] = settledScrollViewer?.VerticalOffset,
+                                ["scrollableHeight"] = settledScrollViewer?.ScrollableHeight
+                            });
+                        LogDebugOutputScrollForensics($"ScrollRequest.AfterDeferredScroll.{requestSequence}", finalVisibleItem as DebugOutputItem, settledScrollViewer, new Dictionary<string, object?>
+                        {
+                            ["reason"] = reason,
+                            ["requestSequence"] = requestSequence,
+                            ["scrollRequested"] = true,
+                            ["scrollIntoViewRequested"] = true,
+                            ["scrollToEndRequested"] = true,
+                            ["finalAtBottom"] = atBottom,
+                            ["dispatcherPriority"] = DispatcherPriority.ContextIdle.ToString()
+                        });
+                    }
+                    finally
+                    {
+                        _debugOutputScrollOperationPending = false;
+                    }
+                }), DispatcherPriority.ContextIdle);
+            }), DispatcherPriority.ContextIdle);
+        }
+
+        private void LogDebugOutputScrollForensics(
+            string stage,
+            DebugOutputItem? newestVisibleItem,
+            ScrollViewer? scrollViewer,
+            IReadOnlyDictionary<string, object?>? additionalProperties)
+        {
+            var properties = new Dictionary<string, object?>
+            {
+                ["stage"] = stage,
+                ["visibleItemCount"] = DebugOutputList?.Items.Count ?? 0,
+                ["retainedItemCount"] = _debugOutputPresentation.Items.Count,
+                ["autoScrollEnabled"] = DebugOutputAutoScrollToggle?.IsChecked == true,
+                ["following"] = _debugOutputFollowing,
+                ["suppressed"] = _debugOutputAutoScrollSuppressed,
+                ["userConsideredManuallyAway"] = !_debugOutputFollowing || _debugOutputAutoScrollSuppressed,
+                ["scrollOperationPending"] = _debugOutputScrollOperationPending,
+                ["debugOutputListLoaded"] = DebugOutputList?.IsLoaded == true,
+                ["scrollViewerExists"] = scrollViewer is not null,
+                ["verticalOffset"] = scrollViewer?.VerticalOffset,
+                ["scrollableHeight"] = scrollViewer?.ScrollableHeight,
+                ["extentHeight"] = scrollViewer?.ExtentHeight,
+                ["viewportHeight"] = scrollViewer?.ViewportHeight,
+                ["newestVisibleSessionId"] = newestVisibleItem?.SessionId,
+                ["newestVisibleSequence"] = newestVisibleItem?.Sequence,
+                ["newestVisibleCategory"] = newestVisibleItem?.Category.ToString(),
+                ["newestVisibleIdentity"] = newestVisibleItem is null ? null : RuntimeHelpers.GetHashCode(newestVisibleItem),
+                ["selectedIndex"] = DebugOutputList?.SelectedIndex,
+                ["itemContainerGeneratorStatus"] = DebugOutputList?.ItemContainerGenerator.Status.ToString(),
+                ["newestContainerExists"] = newestVisibleItem is not null && DebugOutputList?.ItemContainerGenerator.ContainerFromItem(newestVisibleItem) is ListBoxItem,
+                ["finalAtBottom"] = scrollViewer is null || DebugOutputAutoScrollLifecycle.IsAtBottom(scrollViewer.VerticalOffset, scrollViewer.ScrollableHeight)
+            };
+
+            if (additionalProperties is not null)
+            {
+                foreach (var pair in additionalProperties)
+                {
+                    properties[pair.Key] = pair.Value;
+                }
+            }
+
+            DeveloperDiagnostics.LogDebug("Debugger", "Debug Output auto-scroll forensic state.", properties);
+        }
+
+        private static T? FindVisualChild<T>(DependencyObject? parent)
+            where T : DependencyObject
+        {
+            if (parent is null)
+            {
+                return null;
+            }
+
+            for (var index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+            {
+                var child = VisualTreeHelper.GetChild(parent, index);
+                if (child is T match)
+                {
+                    return match;
+                }
+
+                var nested = FindVisualChild<T>(child);
+                if (nested is not null)
+                {
+                    return nested;
+                }
+            }
+
+            return null;
+        }
+
+        private void DebugOutputNavigate_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement { DataContext: DebugOutputItem item } &&
+                item.IsNavigable &&
+                item.FilePath is not null &&
+                item.LineNumber is > 0)
+            {
+                if (SetDebugCurrentLocation(item.FilePath, item.LineNumber.Value))
+                {
+                    DeveloperDiagnostics.LogUserAction("Debugger", "DebugOutputSourceNavigation", "Debug Output source location activated through the session-owned source map.", new Dictionary<string, object?> { ["filePath"] = item.FilePath, ["lineNumber"] = item.LineNumber.Value });
+                }
+            }
+        }
+
         private void BottomActivityToolTab_Click(object sender, RoutedEventArgs e)
         {
             SelectBottomToolTab(BottomToolTab.Activity, "UserSelected");
@@ -3313,8 +4282,10 @@ namespace PS7ScriptDesk.Shell
 
         private void ShowBottomToolWindow(BottomToolTab selectedTab, string reason)
         {
+            using var layoutTransition = _layoutCoordinator.BeginTransition($"BottomToolsShow:{reason}");
             SelectBottomToolTab(selectedTab, reason);
             _isBottomToolWindowVisible = true;
+            _layoutCoordinator.SetLowerToolDockState(_isBottomToolWindowFloating ? LayoutDockState.Floating : LayoutDockState.Docked);
 
             if (_isBottomToolWindowFloating)
             {
@@ -3324,6 +4295,7 @@ namespace PS7ScriptDesk.Shell
             {
                 ApplyBottomToolWindowPresentationState(reason);
             }
+            ValidateLayoutState($"BottomToolsShow:{reason}");
 
             DeveloperDiagnostics.LogUserAction(
                 "UI",
@@ -3334,6 +4306,8 @@ namespace PS7ScriptDesk.Shell
 
         private void HideBottomToolWindow(string reason)
         {
+            using var layoutTransition = _layoutCoordinator.BeginTransition($"BottomToolsHide:{reason}");
+            CaptureConceptualLayoutState($"BeforeBottomToolsHide:{reason}");
             // Reconcile the outer console row while the docked tool window is still
             // visible.  The outer row includes the tool-window rows while they are
             // shown; capturing after those rows are collapsed would preserve the
@@ -3355,8 +4329,10 @@ namespace PS7ScriptDesk.Shell
             }
 
             _isBottomToolWindowVisible = false;
+            _layoutCoordinator.SetLowerToolDockState(LayoutDockState.Hidden);
             EnsureBottomToolWindowContentDocked();
             ApplyBottomToolWindowPresentationState(reason);
+            ValidateLayoutState($"BottomToolsHide:{reason}");
 
             DeveloperDiagnostics.LogUserAction(
                 "UI",
@@ -3367,14 +4343,17 @@ namespace PS7ScriptDesk.Shell
 
         private void PopOutBottomToolWindow(string reason)
         {
+            using var layoutTransition = _layoutCoordinator.BeginTransition($"BottomToolsPopOut:{reason}");
             CaptureDockedBottomToolWindowHeight();
             _isBottomToolWindowVisible = true;
             _isBottomToolWindowFloating = true;
+            _layoutCoordinator.SetLowerToolDockState(LayoutDockState.Floating);
 
             if (_bottomToolWindow is { IsLoaded: true } existingWindow)
             {
                 ApplyBottomToolWindowPresentationState(reason);
                 existingWindow.Activate();
+                ValidateLayoutState($"BottomToolsPopOut:{reason}");
                 DeveloperDiagnostics.LogDecision(
                     "UI",
                     "BottomToolWindowPopOut",
@@ -3399,6 +4378,7 @@ namespace PS7ScriptDesk.Shell
             EnsureBottomToolWindowContentFloating(bottomToolWindow);
             ApplyBottomToolWindowPresentationState(reason);
             bottomToolWindow.Show();
+            ValidateLayoutState($"BottomToolsPopOut:{reason}");
 
             DeveloperDiagnostics.LogUserAction(
                 "UI",
@@ -3409,6 +4389,7 @@ namespace PS7ScriptDesk.Shell
 
         private void DockBottomToolWindow(string reason)
         {
+            using var layoutTransition = _layoutCoordinator.BeginTransition($"BottomToolsDock:{reason}");
             CaptureBottomToolWindowBounds();
 
             var bottomToolWindow = _bottomToolWindow;
@@ -3424,9 +4405,11 @@ namespace PS7ScriptDesk.Shell
 
             _isBottomToolWindowVisible = true;
             _isBottomToolWindowFloating = false;
+            _layoutCoordinator.SetLowerToolDockState(LayoutDockState.Docked);
             EnsureBottomToolWindowContentDocked();
             ApplyBottomToolWindowPresentationState(reason);
             bottomToolWindow?.CloseForDockBack();
+            ValidateLayoutState($"BottomToolsDock:{reason}");
 
             DeveloperDiagnostics.LogUserAction(
                 "UI",
@@ -3444,6 +4427,10 @@ namespace PS7ScriptDesk.Shell
 
             var previousTab = _selectedBottomToolTab;
             _selectedBottomToolTab = selectedTab;
+            if (Enum.TryParse<LayoutBottomToolTab>(selectedTab.ToString(), out var layoutTab))
+            {
+                _layoutCoordinator.State.LowerTools.SelectedTab = layoutTab;
+            }
             _isSynchronizingBottomToolWindowTab = true;
             try
             {
@@ -4684,6 +5671,10 @@ namespace PS7ScriptDesk.Shell
             if (_tabByEditor.TryGetValue(editorTextEditor, out var previousTab))
             {
                 previousTab.PropertyChanged -= EditorTab_PropertyChanged;
+                if (_breakpointTrackers.Remove(previousTab, out var previousBreakpointTracker))
+                {
+                    previousBreakpointTracker.Dispose();
+                }
                 _editorByTab.Remove(previousTab);
                 _tabByEditor.Remove(editorTextEditor);
             }
@@ -4708,6 +5699,12 @@ namespace PS7ScriptDesk.Shell
             {
                 _editorTextSynchronizationInProgress.Remove(editorTextEditor);
             }
+
+            if (_breakpointTrackers.Remove(tab, out var existingBreakpointTracker))
+            {
+                existingBreakpointTracker.Dispose();
+            }
+            _breakpointTrackers[tab] = new EditorBreakpointTracker(document, tab);
 
             SynchronizeEditorTextFromViewModel(editorTextEditor, tab.Content);
             RestoreEditorViewState(editorTextEditor, tab);
@@ -4991,6 +5988,15 @@ namespace PS7ScriptDesk.Shell
             {
                 editorTextEditor.TextArea.LeftMargins.Insert(0, margin);
             }
+
+            DeveloperDiagnostics.LogInfo(
+                "EditorDiagnostics",
+                "Diagnostic gutter attached to the editor margin lifecycle.",
+                new Dictionary<string, object?>
+                {
+                    ["editorIdentity"] = GetEditorInputIdentity(editorTextEditor),
+                    ["marginAttached"] = editorTextEditor.TextArea.LeftMargins.Contains(margin)
+                });
         }
 
         private static IReadOnlyList<ParseErrorInfo> BuildParseErrorsFromTab(EditorTabViewModel tab)
@@ -5081,6 +6087,20 @@ namespace PS7ScriptDesk.Shell
                 _breakpointGlyphMargins.Remove(editorTextEditor);
             }
 
+            if (_diagnosticGlyphMargins.TryGetValue(editorTextEditor, out var diagnosticGlyphMargin))
+            {
+                editorTextEditor.TextArea.LeftMargins.Remove(diagnosticGlyphMargin);
+                _diagnosticGlyphMargins.Remove(editorTextEditor);
+                DeveloperDiagnostics.LogInfo(
+                    "EditorDiagnostics",
+                    "Diagnostic gutter detached during editor unregister.",
+                    new Dictionary<string, object?>
+                    {
+                        ["editorIdentity"] = GetEditorInputIdentity(editorTextEditor),
+                        ["marginAttached"] = editorTextEditor.TextArea.LeftMargins.Contains(diagnosticGlyphMargin)
+                    });
+            }
+
             editorTextEditor.TextArea.TextView.MouseMove -= OnTextViewMouseMove;
             editorTextEditor.TextArea.TextView.MouseLeave -= OnTextViewMouseLeave;
             editorTextEditor.TextArea.TextView.MouseHover -= OnTextViewMouseHover;
@@ -5132,6 +6152,10 @@ namespace PS7ScriptDesk.Shell
 
             if (e.PropertyName == nameof(EditorTabViewModel.BreakpointVersion))
             {
+                if (_breakpointTrackers.TryGetValue(tab, out var breakpointTracker))
+                {
+                    breakpointTracker.SynchronizeFromModel();
+                }
                 editorTextEditor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
                 RefreshBreakpointGlyphMargin(editorTextEditor);
                 RefreshBreakpointsList();
@@ -6714,12 +7738,119 @@ namespace PS7ScriptDesk.Shell
         // Debug menu / toolbar handlers
         // -------------------------------------------------------------------------
 
+        private void StartDebugCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = _debugSession is null && CanStartDebugSession();
+            e.Handled = true;
+        }
+
+        private void ContinueDebugCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = _debugSession?.CurrentState == DebugSessionState.Paused;
+            e.Handled = true;
+        }
+
+        private void StopDebugCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = _debugSession is not null && _debugSession.CurrentState != DebugSessionState.Stopped;
+            e.Handled = true;
+        }
+
+        private void StepOverCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = _debugSession?.CurrentState == DebugSessionState.Paused;
+            e.Handled = true;
+        }
+
+        private void StepIntoCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = _debugSession?.CurrentState == DebugSessionState.Paused;
+            e.Handled = true;
+        }
+
+        private void StepOutCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = _debugSession?.CurrentState == DebugSessionState.Paused;
+            e.Handled = true;
+        }
+
+        private void ToggleBreakpointCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = FindActiveEditor() is not null;
+            e.Handled = true;
+        }
+
+        private void StartDebugCommand_Executed(object sender, ExecutedRoutedEventArgs e) =>
+            StartDebug_Click(sender, e);
+
+        private void ContinueDebugCommand_Executed(object sender, ExecutedRoutedEventArgs e) =>
+            ContinueDebug_Click(sender, e);
+
+        private void StopDebugCommand_Executed(object sender, ExecutedRoutedEventArgs e) =>
+            StopDebug_Click(sender, e);
+
+        private void StepOverCommand_Executed(object sender, ExecutedRoutedEventArgs e) =>
+            StepOver_Click(sender, e);
+
+        private void StepIntoCommand_Executed(object sender, ExecutedRoutedEventArgs e) =>
+            StepInto_Click(sender, e);
+
+        private void StepOutCommand_Executed(object sender, ExecutedRoutedEventArgs e) =>
+            StepOut_Click(sender, e);
+
+        private void ToggleBreakpointCommand_Executed(object sender, ExecutedRoutedEventArgs e) =>
+            ToggleBreakpoint_Click(sender, e);
+
+        private bool TryExecuteDebuggerShortcut(
+            RoutedCommand command,
+            string commandName,
+            KeyEventArgs keyEvent)
+        {
+            var canExecute = command.CanExecute(null, this);
+            var handled = canExecute;
+
+            DeveloperDiagnostics.LogUserAction(
+                "Debugger",
+                "DebuggerShortcut",
+                $"Debugger shortcut evaluated for {commandName}.",
+                new Dictionary<string, object?>
+                {
+                    ["command"] = commandName,
+                    ["key"] = keyEvent.Key.ToString(),
+                    ["systemKey"] = keyEvent.SystemKey.ToString(),
+                    ["modifiers"] = Keyboard.Modifiers.ToString(),
+                    ["focusedElement"] = DescribeFocusedElement(),
+                    ["debuggerState"] = _debugSession?.CurrentState.ToString(),
+                    ["canExecute"] = canExecute,
+                    ["handled"] = handled
+                });
+
+            if (!handled)
+            {
+                return false;
+            }
+
+            keyEvent.Handled = true;
+            command.Execute(null, this);
+            return true;
+        }
+
         private void DebugToggle_Click(object sender, RoutedEventArgs e)
         {
             if (ViewModel?.IsDebugSessionActive == true)
-                StopDebug_Click(sender, e);
+            {
+                if (StopDebugCommand.CanExecute(null, this))
+                {
+                    StopDebugCommand.Execute(null, this);
+                }
+            }
             else
-                StartDebug_Click(sender, e);
+            {
+                if (StartDebugCommand.CanExecute(null, this))
+                {
+                    StartDebugCommand.Execute(null, this);
+                }
+            }
         }
 
         private async void StartDebug_Click(object sender, RoutedEventArgs e)
@@ -6843,8 +7974,11 @@ namespace PS7ScriptDesk.Shell
                 _debugSession = debugSession;
                 _activeDebugTab = selectedTab;
                 _activeDebugLaunchPath = launchScriptPath;
+                _activeDebugSourceMap = BuildDebugSourceMap(debugSession.SessionId, launchScriptPath, selectedTab);
+                RefreshDebugStaleTabState("NewDebugSession");
+                _debugOutputPresentation.Clear();
+                _debugOutputPresentation.BeginSession(debugSession.SessionId, launchScriptPath);
                 ViewModel.ClearDebugOutput();
-                ViewModel.AppendDebugOutput($"Starting debugger for {Path.GetFileName(launchScriptPath)}");
                 SelectDebugOutputBottomPane("Debug session started; showing output from the separate debugger process.");
                 TraceDebugShell("StartDebug_Click", $"Created PsesDebugSession; sessionHash={debugSession.GetHashCode()}; {DescribeDebugUiState()}");
                 DeveloperDiagnostics.LogInfo("Debugger", "PsesDebugSession object created.", new Dictionary<string, object?> { ["sessionHash"] = debugSession.GetHashCode() });
@@ -6853,6 +7987,61 @@ namespace PS7ScriptDesk.Shell
                     _ = HandleDebugSessionStateChangedAsync(debugSession, state);
                 }));
                 debugSession.StateChanged += _debugSessionStateChangedHandler;
+
+                _debugSessionTypedEventHandler = debuggerEvent => Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (ViewModel is null || !ReferenceEquals(_debugSession, debugSession) || debuggerEvent.SessionId != debugSession.SessionId)
+                    {
+                        DeveloperDiagnostics.LogDecision(
+                            "Debugger",
+                            "TypedDebugEvent",
+                            "Typed debug event was ignored because it belonged to a stale or inactive session.",
+                            "IgnoredStaleTypedEvent",
+                            new Dictionary<string, object?>
+                            {
+                                ["eventSessionId"] = debuggerEvent.SessionId,
+                                ["activeSessionId"] = _debugSession?.SessionId,
+                                ["sequence"] = debuggerEvent.Sequence,
+                                ["category"] = debuggerEvent.Category.ToString()
+                            });
+                        return;
+                    }
+
+                    _debugOutputPresentation.Append(PresentDebuggerEvent(debuggerEvent));
+                    if (debuggerEvent.Category != DebuggerEventCategory.Protocol &&
+                        debuggerEvent.Category != DebuggerEventCategory.NativeStdout &&
+                        debuggerEvent.Category != DebuggerEventCategory.NativeStderr)
+                    {
+                        TraceDebugShell("DebugSession.TypedEventReceived", $"sequence={debuggerEvent.Sequence}; category={debuggerEvent.Category}; source={debuggerEvent.Source}; {DescribeDebugUiState()}");
+                    }
+                }));
+                debugSession.TypedEventReceived += _debugSessionTypedEventHandler;
+
+                _debugSessionTerminatedHandler = termination => Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (ViewModel is null || !ReferenceEquals(_debugSession, debugSession) || termination.SessionId != debugSession.SessionId)
+                    {
+                        return;
+                    }
+
+                    ViewModel.StatusText = $"Debug session ended — {termination.Reason}";
+                    TraceDebugShell("DebugSession.Terminated", $"reason={termination.Reason}; exitCode={termination.ExitCode?.ToString() ?? "(none)"}; userRequested={termination.WasUserRequested}; exception={termination.Exception is not null}; {DescribeDebugUiState()}");
+                    DeveloperDiagnostics.LogStateTransition(
+                        "Debugger",
+                        "DebugSessionTerminated",
+                        "Active",
+                        termination.Reason.ToString(),
+                        "Structured debugger termination received by the shell UI.",
+                        new Dictionary<string, object?>
+                        {
+                            ["sessionId"] = termination.SessionId,
+                            ["terminationReason"] = termination.Reason.ToString(),
+                            ["exitCode"] = termination.ExitCode,
+                            ["wasUserRequested"] = termination.WasUserRequested,
+                            ["hasException"] = termination.Exception is not null
+                        });
+                }));
+                debugSession.Terminated += _debugSessionTerminatedHandler;
 
                 debugSession.BreakpointHit += (scriptPath, lineNumber) => Dispatcher.BeginInvoke(new Action(() =>
                 {
@@ -6892,9 +8081,20 @@ namespace PS7ScriptDesk.Shell
                             ["scriptPath"] = scriptPath,
                             ["lineNumber"] = lineNumber
                         });
-                    ViewModel.StatusText = lineNumber > 0
-                        ? $"Breakpoint hit — line {lineNumber}"
-                        : "Breakpoint hit";
+                    TryMapDebugLocation(scriptPath, lineNumber, out var mapped, out _);
+                    ViewModel.StatusText = DebuggerCoordinatePresentation.FormatBreakpointStatus(lineNumber, mapped.Status);
+                    DeveloperDiagnostics.LogDecision(
+                        "Debugger",
+                        "BreakpointPresentation",
+                        "Breakpoint user-facing coordinate presentation was selected from the session-owned source map.",
+                        mapped.Status.ToString(),
+                        new Dictionary<string, object?>
+                        {
+                            ["runtimeLine"] = lineNumber,
+                            ["mappingStatus"] = mapped.Status.ToString(),
+                            ["mappedEditorLine"] = mapped.EditorLine,
+                            ["isNavigable"] = mapped.CanNavigate
+                        });
 
                     SetDebugCurrentLocation(scriptPath, lineNumber);
                     RefreshDebugCommandAvailability(true);
@@ -6911,9 +8111,10 @@ namespace PS7ScriptDesk.Shell
 
                     TraceDebugShell("DebugSession.SessionEnded", $"SessionEnded fired; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
                     DeveloperDiagnostics.LogInfo("Debugger", "Debug session ended event received.");
-                    ViewModel.AppendDebugOutput("Debugger session ended.");
                     await TearDownDebugSessionAsync(DebugTeardownReason.SessionEndedEvent).ConfigureAwait(true);
-                    ViewModel.StatusText = "Debug session ended";
+                    ViewModel.StatusText = debugSession.TerminationInfo is { } termination
+                        ? $"Debug session ended — {termination.Reason}"
+                        : "Debug session ended";
                 }));
 
                 debugSession.OutputReceived += chunk => Dispatcher.BeginInvoke(new Action(() =>
@@ -6943,6 +8144,8 @@ namespace PS7ScriptDesk.Shell
                                 ["containsAtLine"] = containsAtLine
                             });
                     }
+                    // Compatibility retention for existing diagnostics/tests. The visible pane is
+                    // populated only by TypedEventReceived to avoid double rendering.
                     ViewModel.AppendDebugOutput(chunk ?? string.Empty);
 
                     var condensed = string.IsNullOrWhiteSpace(chunk)
@@ -7058,12 +8261,15 @@ namespace PS7ScriptDesk.Shell
             TraceDebugShell("StepOut_Click", $"Entry; {DescribeDebugUiState()}");
             if (_debugSession?.CurrentState == DebugSessionState.Paused)
             {
+                var debugSession = _debugSession;
+                var previousPauseGeneration = debugSession.PauseGeneration;
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
                 InvalidateDebugPanelRefresh("StepOut requested");
                 ClearLiveDebugVariableCache("StepOut requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping out...";
-                await ExecuteDebugControlAsync(_debugSession, session => session.StepOutAsync(), "Step Out failed").ConfigureAwait(true);
+                await ExecuteDebugControlAsync(debugSession, session => session.StepOutAsync(), "Step Out failed").ConfigureAwait(true);
+                _ = EnsureStepOutLocationAsync(debugSession, previousPauseGeneration);
             }
         }
 
@@ -7128,11 +8334,66 @@ namespace PS7ScriptDesk.Shell
 
                 foreach (var line in tab.GetEnabledBreakpointLines())
                 {
-                    breakpoints.Add(new DebugBreakpointInfo(scriptPathForTab, line));
+                    breakpoints.Add(new DebugBreakpointInfo(scriptPathForTab, line)
+                    {
+                        SourceDocumentId = tab.DiagnosticDocument.DocumentId,
+                        SourceRevision = tab.DiagnosticDocument.Revision
+                    });
                 }
             }
 
             return breakpoints;
+        }
+
+        private DebugSourceMap BuildDebugSourceMap(Guid sessionId, string launchScriptPath, EditorTabViewModel launchTab)
+        {
+            var map = new DebugSourceMap(sessionId);
+            var launchIsSnapshot = string.IsNullOrWhiteSpace(launchTab.FilePath) ||
+                !string.Equals(
+                    DebugSourceMap.NormalizePath(launchScriptPath),
+                    DebugSourceMap.NormalizePath(launchTab.FilePath!),
+                    StringComparison.OrdinalIgnoreCase);
+
+            map.Register(
+                launchScriptPath,
+                launchTab.DiagnosticDocument.DocumentId,
+                launchTab.DiagnosticDocument.Revision,
+                launchTab.FilePath,
+                launchTab.Content ?? string.Empty,
+                launchIsSnapshot);
+
+            if (ViewModel is not null)
+            {
+                foreach (var tab in ViewModel.OpenTabs)
+                {
+                    if (ReferenceEquals(tab, launchTab) || string.IsNullOrWhiteSpace(tab.FilePath))
+                    {
+                        continue;
+                    }
+
+                    map.Register(
+                        tab.FilePath,
+                        tab.DiagnosticDocument.DocumentId,
+                        tab.DiagnosticDocument.Revision,
+                        tab.FilePath,
+                        tab.Content ?? string.Empty,
+                        isSnapshot: false);
+                }
+            }
+
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Session-owned debug source map created.",
+                new Dictionary<string, object?>
+                {
+                    ["sessionId"] = sessionId,
+                    ["sourceDocumentId"] = launchTab.DiagnosticDocument.DocumentId,
+                    ["sourceRevision"] = launchTab.DiagnosticDocument.Revision,
+                    ["launchPath"] = launchScriptPath,
+                    ["launchIsSnapshot"] = launchIsSnapshot,
+                    ["openDocumentCount"] = ViewModel?.OpenTabs.Count ?? 0
+                });
+            return map;
         }
 
         private bool CanStartDebugSession()
@@ -7328,17 +8589,8 @@ namespace PS7ScriptDesk.Shell
                     });
             }
 
-            StartDebugMenuItem.IsEnabled  = canStart;
             DebugToggleButton.IsEnabled   = canStart || hasSession;
-            StepIntoMenuItem.IsEnabled    = isPaused;
-            StepOverMenuItem.IsEnabled    = isPaused;
-            StepOutMenuItem.IsEnabled     = isPaused;
-            ContinueMenuItem.IsEnabled    = isPaused;
-            StopDebugMenuItem.IsEnabled   = hasSession;
-            StepIntoButton.IsEnabled      = isPaused;
-            StepOverButton.IsEnabled      = isPaused;
-            StepOutButton.IsEnabled       = isPaused;
-            ContinueButton.IsEnabled      = isPaused;
+            CommandManager.InvalidateRequerySuggested();
 
             // Keep the ViewModel in sync so CanRunScript() can block the Run button
             // while a debug session is active.
@@ -7360,12 +8612,12 @@ namespace PS7ScriptDesk.Shell
                         ["sessionState"] = sessionState?.ToString(),
                         ["hasSession"] = hasSession,
                         ["canStart"] = canStart,
-                        ["startEnabled"] = StartDebugMenuItem.IsEnabled,
-                        ["stepIntoEnabled"] = StepIntoMenuItem.IsEnabled,
-                        ["stepOverEnabled"] = StepOverMenuItem.IsEnabled,
-                        ["stepOutEnabled"] = StepOutMenuItem.IsEnabled,
-                        ["continueEnabled"] = ContinueMenuItem.IsEnabled,
-                        ["stopEnabled"] = StopDebugMenuItem.IsEnabled
+                        ["startCanExecute"] = canStart,
+                        ["stepIntoCanExecute"] = isPaused,
+                        ["stepOverCanExecute"] = isPaused,
+                        ["stepOutCanExecute"] = isPaused,
+                        ["continueCanExecute"] = isPaused,
+                        ["stopCanExecute"] = hasSession
                     });
             }
         }
@@ -7407,6 +8659,87 @@ namespace PS7ScriptDesk.Shell
                 }
 
                 TraceDebugShell("ExecuteDebugControlAsync", $"Control action failed; failureStatusPrefix='{failureStatusPrefix}'; exceptionType={ex.GetType().Name}; message={ex.Message}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
+            }
+        }
+
+        private async Task EnsureStepOutLocationAsync(IDebugSession debugSession, long previousPauseGeneration)
+        {
+            try
+            {
+                for (var attempt = 0; attempt < 80; attempt++)
+                {
+                    if (!ReferenceEquals(_debugSession, debugSession))
+                    {
+                        return;
+                    }
+
+                    if (debugSession.CurrentState == DebugSessionState.Paused && debugSession.PauseGeneration > previousPauseGeneration)
+                    {
+                        break;
+                    }
+
+                    await Task.Delay(25).ConfigureAwait(false);
+                }
+
+                if (!ReferenceEquals(_debugSession, debugSession) ||
+                    debugSession.CurrentState != DebugSessionState.Paused ||
+                    debugSession.PauseGeneration <= previousPauseGeneration)
+                {
+                    DeveloperDiagnostics.LogDecision(
+                        "Debugger",
+                        "StepOutLocationRecovery",
+                        "Step Out did not produce a newer paused generation for location recovery.",
+                        "Skipped",
+                        new Dictionary<string, object?>
+                        {
+                            ["sessionId"] = debugSession.SessionId,
+                            ["previousPauseGeneration"] = previousPauseGeneration,
+                            ["currentPauseGeneration"] = debugSession.PauseGeneration,
+                            ["currentState"] = debugSession.CurrentState.ToString()
+                        });
+                    return;
+                }
+
+                var pauseGeneration = debugSession.PauseGeneration;
+                var callStack = await debugSession.GetCallStackAsync().ConfigureAwait(false);
+                var currentFrame = callStack.FirstOrDefault(frame => frame.IsCurrentFrame && frame.LineNumber > 0)
+                    ?? callStack.FirstOrDefault(frame => frame.LineNumber > 0);
+                if (currentFrame is null)
+                {
+                    DeveloperDiagnostics.LogDecision("Debugger", "StepOutLocationRecovery", "Step Out paused without a source-bearing call-stack frame.", "Rejected", new Dictionary<string, object?> { ["sessionId"] = debugSession.SessionId, ["pauseGeneration"] = pauseGeneration });
+                    return;
+                }
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (!ReferenceEquals(_debugSession, debugSession) ||
+                        debugSession.CurrentState != DebugSessionState.Paused ||
+                        debugSession.PauseGeneration != pauseGeneration)
+                    {
+                        return;
+                    }
+
+                    TryMapDebugLocation(currentFrame.ScriptName, currentFrame.LineNumber, out var mapped, out _);
+                    var applied = SetDebugCurrentLocation(currentFrame.ScriptName, currentFrame.LineNumber);
+                    DeveloperDiagnostics.LogInfo(
+                        "Debugger",
+                        "Step Out paused-location recovery completed.",
+                        new Dictionary<string, object?>
+                        {
+                            ["sessionId"] = debugSession.SessionId,
+                            ["pauseGeneration"] = pauseGeneration,
+                            ["runtimeFunction"] = currentFrame.FunctionName,
+                            ["runtimePath"] = currentFrame.ScriptName,
+                            ["runtimeLine"] = currentFrame.LineNumber,
+                            ["highlightApplied"] = applied,
+                            ["sourceMappingStatus"] = mapped.Status.ToString(),
+                            ["mappedEditorLine"] = mapped.EditorLine
+                        });
+                });
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("Debugger", ex, "Step Out paused-location recovery failed.", new Dictionary<string, object?> { ["sessionId"] = debugSession.SessionId, ["previousPauseGeneration"] = previousPauseGeneration });
             }
         }
 
@@ -7459,7 +8792,49 @@ namespace PS7ScriptDesk.Shell
             }
             else
             {
+                _selectedDebugFrameId = null;
+                ClearDebugPanels();
                 ClearLiveDebugVariableCache($"Debug session state changed to {actualState}");
+            }
+        }
+
+        private void DebugCallStackGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (DebugCallStackGrid.SelectedItem is not DebugCallStackFrame selectedFrame ||
+                _debugSession is null ||
+                _debugSession.CurrentState != DebugSessionState.Paused ||
+                selectedFrame.SessionId != _debugSession.SessionId ||
+                selectedFrame.PauseGeneration != _debugSession.PauseGeneration)
+            {
+                return;
+            }
+
+            _selectedDebugFrameId = selectedFrame.FrameId;
+            var navigationAllowed = selectedFrame.IsNavigable &&
+                selectedFrame.MappedSourceLine is > 0 &&
+                selectedFrame.MappedSourceDocumentId.HasValue;
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Call stack inspection frame selected.",
+                new Dictionary<string, object?>
+                {
+                    ["sessionId"] = selectedFrame.SessionId,
+                    ["pauseGeneration"] = selectedFrame.PauseGeneration,
+                    ["frameIndex"] = selectedFrame.FrameIndex,
+                    ["navigationAllowed"] = navigationAllowed,
+                    ["variablesScope"] = "Current"
+                });
+
+            if (navigationAllowed)
+            {
+                SetDebugCurrentLocation(selectedFrame.ScriptName, selectedFrame.LineNumber);
+            }
+
+            if (ViewModel is not null)
+            {
+                ViewModel.StatusText = navigationAllowed
+                    ? $"Selected frame {selectedFrame.FrameIndex}: variables show the current execution frame."
+                    : $"Selected frame {selectedFrame.FrameIndex} has no navigable source location; variables show the current execution frame.";
             }
         }
 
@@ -7487,11 +8862,26 @@ namespace PS7ScriptDesk.Shell
                 debugSession.StateChanged -= _debugSessionStateChangedHandler;
             }
 
+            if (debugSession is not null && _debugSessionTypedEventHandler is not null)
+            {
+                debugSession.TypedEventReceived -= _debugSessionTypedEventHandler;
+            }
+
+            if (debugSession is not null && _debugSessionTerminatedHandler is not null)
+            {
+                debugSession.Terminated -= _debugSessionTerminatedHandler;
+            }
+
             _debugSessionStateChangedHandler = null;
+            _debugSessionTypedEventHandler = null;
+            _debugSessionTerminatedHandler = null;
             Interlocked.Increment(ref _debugPanelRefreshVersion);
             _debugSession = null;
             _activeDebugTab = null;
             _activeDebugLaunchPath = null;
+            var sourceMapToInvalidate = _activeDebugSourceMap;
+            _activeDebugSourceMap = null;
+            RefreshDebugStaleTabState("DebugSessionTeardown");
             var snapshotToDelete = _activeDebugSnapshotPath;
             _activeDebugSnapshotPath = null;
             RefreshDebugCommandAvailability(false);
@@ -7544,6 +8934,7 @@ namespace PS7ScriptDesk.Shell
             }
 
             TryDeleteTemporaryDebugSnapshot(snapshotToDelete);
+            sourceMapToInvalidate?.Invalidate();
             TraceDebugShell(
                 "TearDownDebugSessionAsync",
                 $"Completed; reason={reason}; stopped={stopped}; operationId={operationId}; terminalMutationRequested=false; {DescribeDebugUiState()}");
@@ -8206,11 +9597,6 @@ namespace PS7ScriptDesk.Shell
                 _lastKnownBottomToolWindowHeight = _loadedSettings.DockedBottomToolWindowHeight!.Value;
             }
 
-            if (IsUsableLength(_loadedSettings.DockedDebugPanelWidth, MinimumDebugPanelWidth))
-            {
-                _lastKnownDebugPanelWidth = _loadedSettings.DockedDebugPanelWidth!.Value;
-            }
-
             if (IsUsableLength(_loadedSettings.WorkspaceSectionHeight, MinimumExplorerSectionHeight))
             {
                 WorkspaceTreeRowDefinition.Height = new GridLength(_loadedSettings.WorkspaceSectionHeight!.Value, GridUnitType.Pixel);
@@ -8237,10 +9623,12 @@ namespace PS7ScriptDesk.Shell
             ApplyExplorerVisibilityLayout();
             SetDebugPanelVisible(_loadedSettings.IsDebugPanelVisible);
             RestoreBottomToolWindowFromSettings();
+            NormalizeLayoutBudget("SettingsRestore");
 
             if (_loadedSettings.StartMaximized)
             {
                 WindowState = WindowState.Maximized;
+                Dispatcher.BeginInvoke(new Action(() => NormalizeLayoutBudget("SettingsRestoreMaximized")), DispatcherPriority.Loaded);
             }
         }
 
@@ -9212,10 +10600,20 @@ namespace PS7ScriptDesk.Shell
 
         private void ApplyWorkspaceLayoutMode(WorkspaceLayoutMode mode, string source)
         {
+            LogDebugSplitterWriterSnapshot("ApplyWorkspaceLayoutMode", $"Before:{source}", mode);
+            using var layoutTransition = _layoutCoordinator.BeginTransition($"WorkspaceLayout:{source}");
             var previousMode = _workspaceLayoutMode;
+            CaptureLayoutForensicsSnapshot($"WorkspaceLayout.{source}.Before");
+            CaptureConceptualLayoutState($"BeforeWorkspaceLayout:{source}");
             CaptureDockedBottomToolWindowHeight();
+            CaptureDockedDebugPanelWidth();
             CaptureWorkspaceLayoutSizes();
             _workspaceLayoutMode = mode;
+            _layoutCoordinator.SetWorkspaceMode(ToLayoutWorkspaceMode(mode));
+            if (mode != WorkspaceLayoutMode.SideBySideSplit)
+            {
+                DeactivateSideBySideLocalProjection();
+            }
 
             EditorPaneBorder.Visibility = Visibility.Visible;
             ConsolePaneBorder.Visibility = Visibility.Visible;
@@ -9231,6 +10629,7 @@ namespace PS7ScriptDesk.Shell
             Grid.SetColumn(ConsolePaneBorder, 2);
             Grid.SetColumnSpan(ConsolePaneBorder, 1);
             EditorColumnDefinition.Width = new GridLength(1, GridUnitType.Star);
+            EditorColumnDefinition.MinWidth = MinimumEditorWidth;
             ConsoleSideSplitterColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
             ConsoleSideColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
             ConsoleSideColumnDefinition.MinWidth = 0;
@@ -9263,18 +10662,42 @@ namespace PS7ScriptDesk.Shell
                     EditorConsoleRowSplitter.Visibility = Visibility.Collapsed;
                     EditorConsoleRowSplitterDefinition.Height = new GridLength(0, GridUnitType.Pixel);
                     ConsoleRowDefinition.Height = new GridLength(0, GridUnitType.Pixel);
-                    ConsoleSideSplitterColumnDefinition.Width = new GridLength(6, GridUnitType.Pixel);
-                    ConsoleSideColumnDefinition.Width = new GridLength(Math.Max(_lastKnownConsoleSideWidth, MinimumConsoleSideWidth), GridUnitType.Pixel);
-                    ConsoleSideColumnDefinition.MinWidth = MinimumConsoleSideWidth;
-                    EditorConsoleColumnSplitter.Visibility = Visibility.Visible;
-                    Grid.SetRow(ConsolePaneBorder, 0);
-                    Grid.SetRowSpan(ConsolePaneBorder, 3);
-                    Grid.SetColumn(ConsolePaneBorder, 4);
+                    EditorColumnDefinition.Width = new GridLength(1, GridUnitType.Star);
+                    EditorColumnDefinition.MinWidth = MinimumEditorWidth;
+                    ConsoleSideSplitterColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+                    ConsoleSideColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+                    ConsoleSideColumnDefinition.MinWidth = 0;
+                    DebugPanelSplitterColumn.Width = new GridLength(0, GridUnitType.Pixel);
+                    DebugPanelColumn.Width = new GridLength(0, GridUnitType.Pixel);
+                    DebugPanelColumn.MinWidth = 0;
+                    EditorConsoleColumnSplitter.Visibility = Visibility.Collapsed;
+                    ActivateSideBySideLocalProjection();
+                    ApplySideBySideLocalDebugProjection(_layoutCoordinator.State.Debug.DockState != LayoutDockState.Hidden);
                     ConsolePaneBorder.BorderThickness = new Thickness(1, 0, 0, 0);
                     break;
             }
 
+            // Normalize the inactive Console placement after mode-specific changes.
+            // This prevents a collapsed border from retaining the old SideBySide
+            // column location and leaving stale geometry outside the workspace.
+            if (mode != WorkspaceLayoutMode.SideBySideSplit)
+            {
+                Grid.SetColumn(ConsolePaneBorder, 2);
+                Grid.SetColumnSpan(ConsolePaneBorder, 1);
+                ConsolePaneBorder.BorderThickness = new Thickness(0, 1, 0, 0);
+            }
+
+            ApplyDebugPanelGridPlacement();
+            if (DebugPanelBorder.Visibility == Visibility.Visible)
+            {
+                SetDebugPanelVisible(true);
+            }
+
             ApplyBottomToolWindowPresentationState(source);
+            NormalizeLayoutBudget($"WorkspaceLayout:{source}");
+            ValidateLayoutState($"WorkspaceLayout:{source}");
+            CaptureLayoutForensicsSnapshot($"WorkspaceLayout.{source}.AfterImmediate");
+            ScheduleWorkspaceTransitionForensics(source);
 
             if (ViewModel is not null && !string.Equals(source, "SettingsRestore", StringComparison.Ordinal))
             {
@@ -9312,6 +10735,33 @@ namespace PS7ScriptDesk.Shell
                     "Workspace layout command applied.",
                     diagnosticsProperties);
             }
+            LogDebugSplitterWriterSnapshot("ApplyWorkspaceLayoutMode", $"After:{source}", mode);
+        }
+
+        private void ScheduleWorkspaceTransitionForensics(string source)
+        {
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            Dispatcher.BeginInvoke(
+                DispatcherPriority.Loaded,
+                new Action(() => CaptureLayoutForensicsSnapshot($"WorkspaceLayout.{source}.AfterLoaded")));
+            Dispatcher.BeginInvoke(
+                DispatcherPriority.Render,
+                new Action(() => CaptureLayoutForensicsSnapshot($"WorkspaceLayout.{source}.AfterRender")));
+
+            var timer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+            {
+                Interval = TimeSpan.FromMilliseconds(150)
+            };
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
+                CaptureLayoutForensicsSnapshot($"WorkspaceLayout.{source}.After150ms");
+            };
+            timer.Start();
         }
 
         private void CaptureWorkspaceLayoutSizes()
@@ -9333,9 +10783,11 @@ namespace PS7ScriptDesk.Shell
             }
 
             if (_workspaceLayoutMode == WorkspaceLayoutMode.SideBySideSplit &&
-                ConsoleSideColumnDefinition.ActualWidth >= MinimumConsoleSideWidth)
+                (_sideBySideLocalProjectionActive ? ActiveSideBySideConsoleColumn.ActualWidth : ConsoleSideColumnDefinition.ActualWidth) >= MinimumConsoleSideWidth)
             {
-                _lastKnownConsoleSideWidth = ConsoleSideColumnDefinition.ActualWidth;
+                _lastKnownConsoleSideWidth = _sideBySideLocalProjectionActive
+                    ? ActiveSideBySideConsoleColumn.ActualWidth
+                    : ConsoleSideColumnDefinition.ActualWidth;
             }
         }
 
@@ -9351,6 +10803,8 @@ namespace PS7ScriptDesk.Shell
 
         private void ApplyExplorerVisibilityLayout()
         {
+            using var layoutTransition = _layoutCoordinator.BeginTransition("ExplorerVisibility");
+            CaptureConceptualLayoutState("BeforeExplorerVisibility");
             var isVisible = ViewModel?.IsExplorerVisible ?? true;
 
             if (isVisible)
@@ -9371,8 +10825,6 @@ namespace PS7ScriptDesk.Shell
                 ExplorerSplitterColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
             }
 
-            EditorColumnDefinition.Width = new GridLength(1, GridUnitType.Star);
-
             DeveloperDiagnostics.LogInfo(
                 "UI",
                 "Explorer side pane layout applied.",
@@ -9384,6 +10836,129 @@ namespace PS7ScriptDesk.Shell
                     ["splitterColumnWidth"] = ExplorerSplitterColumnDefinition.Width.Value,
                     ["lastKnownWidth"] = _lastKnownExplorerWidth
                 });
+
+            NormalizeLayoutBudget("ExplorerVisibility");
+            ValidateLayoutState("ExplorerVisibility");
+        }
+
+        private void NormalizeLayoutBudget(string reason)
+        {
+            if (_layoutBudgetNormalizationActive || !IsLoaded)
+            {
+                return;
+            }
+
+            LogDebugSplitterWriterSnapshot("NormalizeLayoutBudget", $"Before:{reason}", null);
+            _layoutBudgetNormalizationActive = true;
+            try
+            {
+                var sideBySide = _workspaceLayoutMode == WorkspaceLayoutMode.SideBySideSplit;
+                var explorerVisible = ExplorerColumnDefinition.Width.Value > 0;
+                var debugDockedVisible = sideBySide &&
+                                         _debugPaneWindow is null &&
+                                         DebugPanelBorder.Visibility == Visibility.Visible;
+
+                // SideBySide has three user-facing minimum panes plus two splitters.
+                // Raising the window minimum is intentional: it preserves the editor
+                // and debugger rather than allowing WPF to create an overflowing grid.
+                MinWidth = sideBySide && explorerVisible && debugDockedVisible
+                    ? MinimumSideBySideWindowWidth
+                    : 800;
+
+                if (!sideBySide || !debugDockedVisible || WorkspaceGrid.ActualWidth <= 0)
+                {
+                    return;
+                }
+
+                if (_sideBySideLocalProjectionActive)
+                {
+                    var localHostWidth = SideBySideGrid.ActualWidth;
+                    var localConsoleWidth = Math.Max(_layoutCoordinator.State.Console.RequestedSideBySideWidth, MinimumConsoleSideWidth);
+                    var localDebugWidth = Math.Max(_layoutCoordinator.State.Debug.RequestedDockedWidth, MinimumDebugPanelWidth);
+                    var splitterWidth = SideBySideEditorConsoleSplitterColumnDefinition.ActualWidth + SideBySideConsoleDebugSplitterColumnDefinition.ActualWidth;
+                    var localContentWidth = localConsoleWidth + localDebugWidth;
+
+                    ApplySideBySideContentStarSizing(localConsoleWidth, localDebugWidth, reason);
+                    ActiveSideBySideEditorColumn.MinWidth = MinimumEditorWidth;
+                    ActiveSideBySideConsoleColumn.MinWidth = MinimumConsoleSideWidth;
+                    ActiveSideBySideDebugColumn.MinWidth = MinimumDebugPanelWidth;
+
+                    DeveloperDiagnostics.LogInfo(
+                        "UI",
+                        "SideBySide local layout budget evaluated without rewriting the elastic Editor column.",
+                        new Dictionary<string, object?>
+                        {
+                            ["reason"] = reason,
+                            ["localHostWidth"] = localHostWidth,
+                            ["contentWidthIntent"] = localContentWidth,
+                            ["editorIsElastic"] = ActiveSideBySideEditorColumn.Width.IsStar,
+                            ["consoleIsElastic"] = ActiveSideBySideConsoleColumn.Width.IsStar,
+                            ["debugIsElastic"] = ActiveSideBySideDebugColumn.Width.IsStar,
+                            ["consoleWidth"] = localConsoleWidth,
+                            ["debugWidth"] = localDebugWidth,
+                            ["remainingWidth"] = localHostWidth - localContentWidth - splitterWidth
+                        });
+                    LogDebugSplitterWriterSnapshot("NormalizeLayoutBudget", $"After:{reason}", null);
+                    return;
+                }
+
+                var fixedWidth = ExplorerColumnDefinition.ActualWidth +
+                                 ExplorerSplitterColumnDefinition.ActualWidth +
+                                 ConsoleSideSplitterColumnDefinition.ActualWidth +
+                                 DebugPanelSplitterColumn.ActualWidth;
+                var availablePaneWidth = Math.Max(0, WorkspaceGrid.ActualWidth - fixedWidth);
+                var editorWidth = Math.Max(EditorColumnDefinition.ActualWidth, MinimumEditorWidth);
+                var centerWidth = Math.Max(ConsoleSideColumnDefinition.ActualWidth, MinimumConsoleSideWidth);
+                var debugWidth = Math.Max(DebugPanelColumn.ActualWidth, MinimumDebugPanelWidth);
+                var requestedPaneWidth = editorWidth + centerWidth + debugWidth;
+
+                if (requestedPaneWidth <= availablePaneWidth + 0.5)
+                {
+                    return;
+                }
+
+                var overflow = requestedPaneWidth - availablePaneWidth;
+                var reducibleCenter = Math.Max(0, centerWidth - MinimumConsoleSideWidth);
+                var centerReduction = Math.Min(overflow, reducibleCenter);
+                centerWidth -= centerReduction;
+                overflow -= centerReduction;
+
+                var reducibleEditor = Math.Max(0, editorWidth - MinimumEditorWidth);
+                var editorReduction = Math.Min(overflow, reducibleEditor);
+                editorWidth -= editorReduction;
+                overflow -= editorReduction;
+
+                var reducibleDebug = Math.Max(0, debugWidth - MinimumDebugPanelWidth);
+                var debugReduction = Math.Min(overflow, reducibleDebug);
+                debugWidth -= debugReduction;
+
+                EditorColumnDefinition.Width = new GridLength(editorWidth, GridUnitType.Pixel);
+                ConsoleSideColumnDefinition.Width = new GridLength(centerWidth, GridUnitType.Pixel);
+                DebugPanelColumn.Width = new GridLength(debugWidth, GridUnitType.Pixel);
+
+                DeveloperDiagnostics.LogDecision(
+                    "UI",
+                    "NormalizeLayoutBudget",
+                    "Side-by-side pane widths were clamped to the available workspace budget.",
+                    overflow > 0 ? "MinimumBudgetStillExceedsWorkspace" : "PaneWidthsClamped",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["workspaceWidth"] = WorkspaceGrid.ActualWidth,
+                        ["availablePaneWidth"] = availablePaneWidth,
+                        ["editorWidth"] = editorWidth,
+                        ["centerWidth"] = centerWidth,
+                        ["debugWidth"] = debugWidth,
+                        ["remainingOverflow"] = Math.Max(0, overflow),
+                        ["explorerVisible"] = explorerVisible,
+                        ["debugDockedVisible"] = debugDockedVisible
+                    });
+                LogDebugSplitterWriterSnapshot("NormalizeLayoutBudget", $"After:{reason}", null);
+            }
+            finally
+            {
+                _layoutBudgetNormalizationActive = false;
+            }
         }
 
         private void SaveApplicationSettings()
@@ -9394,6 +10969,7 @@ namespace PS7ScriptDesk.Shell
             CaptureBottomToolWindowBounds();
             CaptureWorkspaceLayoutSizes();
             CaptureDockedBottomToolWindowHeight();
+            CaptureConceptualLayoutState("SaveApplicationSettings");
 
             if (IsUsableLength(restoreBounds.Width, MinWidth))
             {
@@ -9437,6 +11013,8 @@ namespace PS7ScriptDesk.Shell
             settings.DockedBottomToolWindowHeight = _lastKnownBottomToolWindowHeight;
             settings.IsDebugPanelVisible = DebugPanelBorder.Visibility == Visibility.Visible;
             settings.DockedDebugPanelWidth = _lastKnownDebugPanelWidth;
+
+            WorkspaceLayoutSettingsAdapter.ApplyToSettings(_layoutCoordinator.State, settings);
 
             if (WorkspaceTreeRowDefinition.ActualHeight >= MinimumExplorerSectionHeight)
             {
@@ -9565,6 +11143,7 @@ namespace PS7ScriptDesk.Shell
             VerboseDebuggerLoggingMenuItem.IsEnabled = enabled;
             VerboseTerminalLoggingMenuItem.IsEnabled = enabled;
             VerboseEditorLoggingMenuItem.IsEnabled = enabled;
+            CaptureLayoutForensicsMenuItem.IsEnabled = enabled;
         }
 
         private void PersistDeveloperDiagnosticsSettings(string statusText)
@@ -9616,6 +11195,113 @@ namespace PS7ScriptDesk.Shell
         private void OpenDeveloperDebuggingFolder_Click(object sender, RoutedEventArgs e)
         {
             OpenFolderInExplorer(DeveloperDiagnostics.DeveloperDebuggingRootDirectory);
+        }
+
+        private void CaptureLayoutForensics_Click(object sender, RoutedEventArgs e)
+        {
+            var path = CaptureLayoutForensicsSnapshot("Tools.Developer.CaptureLayoutForensics");
+            if (ViewModel is not null)
+            {
+                ViewModel.StatusText = path is null
+                    ? "Layout forensics capture failed; see developer diagnostics."
+                    : $"Layout forensics snapshot written: {path}";
+            }
+        }
+
+        private string? CaptureLayoutForensicsSnapshot(string trigger)
+        {
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return null;
+            }
+
+            var elements = new Dictionary<string, FrameworkElement?>
+            {
+                ["ExplorerPaneBorder"] = ExplorerPaneBorder,
+                ["ExplorerPaneSplitter"] = ExplorerPaneSplitter,
+                ["EditorPaneBorder"] = EditorPaneBorder,
+                ["EditorConsoleRowSplitter"] = EditorConsoleRowSplitter,
+                ["EditorConsoleColumnSplitter"] = EditorConsoleColumnSplitter,
+                ["ConsolePaneBorder"] = ConsolePaneBorder,
+                ["DebugPanelSplitter"] = DebugPanelSplitter,
+                ["DebugPanelBorder"] = DebugPanelBorder,
+                ["BottomToolWindowSplitter"] = BottomToolWindowSplitter,
+                ["BottomToolWindowBorder"] = BottomToolWindowBorder,
+                ["SideBySideGrid"] = SideBySideGrid,
+                ["WindowContent"] = Content as FrameworkElement
+            };
+            var state = new Dictionary<string, object?>
+            {
+                ["workspaceLayoutMode"] = _workspaceLayoutMode.ToString(),
+                ["explorerVisible"] = ViewModel?.IsExplorerVisible,
+                ["debugVisible"] = DebugPanelBorder.Visibility == Visibility.Visible,
+                ["debugFloating"] = _debugPaneWindow is not null,
+                ["bottomToolWindowVisible"] = _isBottomToolWindowVisible,
+                ["bottomToolWindowFloating"] = _isBottomToolWindowFloating,
+                ["selectedBottomToolTab"] = _selectedBottomToolTab.ToString(),
+                ["lastKnownExplorerWidth"] = _lastKnownExplorerWidth,
+                ["lastKnownConsoleHeight"] = _lastKnownConsoleHeight,
+                ["lastKnownConsoleSideWidth"] = _lastKnownConsoleSideWidth,
+                ["lastKnownBottomToolWindowHeight"] = _lastKnownBottomToolWindowHeight,
+                ["lastKnownDebugPanelWidth"] = _lastKnownDebugPanelWidth,
+                ["persistedExplorerWidth"] = _loadedSettings.ExplorerWidth,
+                ["persistedConsoleSideWidth"] = _loadedSettings.ConsoleSideWidth,
+                ["persistedDockedBottomToolWindowHeight"] = _loadedSettings.DockedBottomToolWindowHeight,
+                ["persistedDockedDebugPanelWidth"] = _loadedSettings.DockedDebugPanelWidth,
+                ["workspaceActualWidth"] = WorkspaceGrid.ActualWidth,
+                ["workspaceActualHeight"] = WorkspaceGrid.ActualHeight
+            };
+            AddConceptualLayoutState(state);
+            state["invariant.isValid"] = _lastLayoutInvariantResult?.IsValid;
+            state["invariant.violationCount"] = _lastLayoutInvariantResult?.Violations.Count;
+            state["invariant.violations"] = _lastLayoutInvariantResult is null
+                ? null
+                : string.Join(" | ", _lastLayoutInvariantResult.Violations.Select(violation => $"{violation.Code}:{violation.Message}"));
+            state["budget.unusedHorizontal"] = _lastLayoutInvariantResult?.Budget.UnusedHorizontalWidth;
+            state["budget.overflowHorizontal"] = _lastLayoutInvariantResult?.Budget.OverflowHorizontalWidth;
+            state["budget.unusedVertical"] = _lastLayoutInvariantResult?.Budget.UnusedVerticalHeight;
+            state["budget.overflowVertical"] = _lastLayoutInvariantResult?.Budget.OverflowVerticalHeight;
+            state["mismatch.consoleSideWidthIntentVsActual"] = IsDebugPaneAdjacentToSideConsole
+                ? _layoutCoordinator.State.Console.RequestedSideBySideWidth - ConsoleSideColumnDefinition.ActualWidth
+                : null;
+            state["mismatch.debugDockWidthIntentVsActual"] = _layoutCoordinator.State.Debug.DockState == LayoutDockState.Docked
+                ? _layoutCoordinator.State.Debug.RequestedDockedWidth - ActiveDebugWidthColumn.ActualWidth
+                : null;
+            var columns = new Dictionary<string, ColumnDefinition>
+            {
+                ["ExplorerColumnDefinition"] = ExplorerColumnDefinition,
+                ["ExplorerSplitterColumnDefinition"] = ExplorerSplitterColumnDefinition,
+                ["EditorColumnDefinition"] = EditorColumnDefinition,
+                ["ConsoleSideSplitterColumnDefinition"] = ConsoleSideSplitterColumnDefinition,
+                ["ConsoleSideColumnDefinition"] = ConsoleSideColumnDefinition,
+                ["DebugPanelSplitterColumn"] = DebugPanelSplitterColumn,
+                ["DebugPanelColumn"] = DebugPanelColumn,
+                ["SideBySideEditorColumnDefinition"] = SideBySideEditorColumnDefinition,
+                ["SideBySideEditorConsoleSplitterColumnDefinition"] = SideBySideEditorConsoleSplitterColumnDefinition,
+                ["SideBySideConsoleColumnDefinition"] = SideBySideConsoleColumnDefinition,
+                ["SideBySideConsoleDebugSplitterColumnDefinition"] = SideBySideConsoleDebugSplitterColumnDefinition,
+                ["SideBySideDebugColumnDefinition"] = SideBySideDebugColumnDefinition
+            };
+            var rows = new Dictionary<string, RowDefinition>
+            {
+                ["EditorRowDefinition"] = EditorRowDefinition,
+                ["EditorConsoleRowSplitterDefinition"] = EditorConsoleRowSplitterDefinition,
+                ["ConsoleRowDefinition"] = ConsoleRowDefinition,
+                ["BottomToolWindowSplitterRowDefinition"] = BottomToolWindowSplitterRowDefinition,
+                ["BottomToolWindowRowDefinition"] = BottomToolWindowRowDefinition
+            };
+            var path = LayoutForensicsCapture.TryCapture(this, WorkspaceGrid, elements, columns, rows, state, trigger);
+            DeveloperDiagnostics.LogInfo(
+                "UI",
+                path is null ? "Layout forensics capture failed." : "Layout forensics snapshot captured.",
+                new Dictionary<string, object?>
+                {
+                    ["trigger"] = trigger,
+                    ["path"] = path,
+                    ["workspaceWidth"] = WorkspaceGrid.ActualWidth,
+                    ["workspaceHeight"] = WorkspaceGrid.ActualHeight
+                });
+            return path;
         }
 
         private void OpenLogsFolder_Click(object sender, RoutedEventArgs e)
@@ -11059,36 +12745,649 @@ namespace PS7ScriptDesk.Shell
 
         private const double MinimumSavedDebugPaneWindowWidth = 240;
         private const double MinimumSavedDebugPaneWindowHeight = 180;
+        private const double MinimumEditorWidth = 320;
+
+        private bool IsDebugPaneAdjacentToSideConsole =>
+            _workspaceLayoutMode == WorkspaceLayoutMode.SideBySideSplit;
+
+        private void ApplyDebugPanelGridPlacement()
+        {
+            if (_sideBySideLocalProjectionActive)
+            {
+                Grid.SetColumn(SideBySideDebugSplitter, 3);
+                Grid.SetColumn(DebugPanelBorder, 4);
+                return;
+            }
+
+            var splitterColumn = IsDebugPaneAdjacentToSideConsole ? 5 : 3;
+            var panelColumn = IsDebugPaneAdjacentToSideConsole ? 6 : 4;
+            Grid.SetColumn(DebugPanelSplitter, splitterColumn);
+            Grid.SetColumn(DebugPanelBorder, panelColumn);
+        }
+
+        private ColumnDefinition ActiveDebugCenterColumn =>
+            _sideBySideLocalProjectionActive ? ActiveSideBySideConsoleColumn :
+            IsDebugPaneAdjacentToSideConsole ? ConsoleSideColumnDefinition : EditorColumnDefinition;
+
+        private ColumnDefinition ActiveDebugWidthColumn =>
+            _sideBySideLocalProjectionActive ? ActiveSideBySideDebugColumn :
+            IsDebugPaneAdjacentToSideConsole ? DebugPanelColumn : ConsoleSideColumnDefinition;
+
+        private void DebugPanelSplitter_DragStarted(object sender, DragStartedEventArgs e)
+        {
+            DebugSplitter_DragStarted(DebugPanelSplitter, e);
+        }
+
+        private void SideBySideDebugSplitter_DragStarted(object sender, DragStartedEventArgs e)
+        {
+            DebugSplitter_DragStarted(SideBySideDebugSplitter, e);
+        }
+
+        private void DebugSplitter_DragStarted(GridSplitter splitter, DragStartedEventArgs e)
+        {
+            LogSplitterDragLifecycle(splitter, "DragStarted", e);
+            // Native GridSplitter PreviousAndNext behavior is the sole resize owner.
+            // This handler is diagnostic-only and deliberately does not mark the event handled.
+            DeveloperDiagnostics.LogCriticalForensic(
+                "UI",
+                "DebugSplitterDragStarted.Initial",
+                "Docked Debug splitter drag started; native GridSplitter owns the resize.",
+                BuildSplitterLayoutDiagnostics("DragStarted", splitter));
+            CaptureLayoutForensicsSnapshot($"{splitter.Name}.DragStarted");
+        }
+
+        private void AttachSplitterInputForensics(GridSplitter splitter)
+        {
+            splitter.AddHandler(UIElement.PreviewMouseLeftButtonDownEvent, new MouseButtonEventHandler(Splitter_PreviewMouseLeftButtonDownForensics), handledEventsToo: true);
+            splitter.AddHandler(UIElement.MouseLeftButtonDownEvent, new MouseButtonEventHandler(Splitter_MouseLeftButtonDownForensics), handledEventsToo: true);
+            splitter.AddHandler(Mouse.PreviewMouseMoveEvent, new MouseEventHandler(Splitter_PreviewMouseMoveForensics), handledEventsToo: true);
+            splitter.AddHandler(Mouse.MouseMoveEvent, new MouseEventHandler(Splitter_MouseMoveForensics), handledEventsToo: true);
+            splitter.AddHandler(Mouse.GotMouseCaptureEvent, new MouseEventHandler(Splitter_GotMouseCaptureForensics), handledEventsToo: true);
+            splitter.AddHandler(Mouse.LostMouseCaptureEvent, new MouseEventHandler(Splitter_LostMouseCaptureForensics), handledEventsToo: true);
+            splitter.IsMouseCapturedChanged += Splitter_IsMouseCapturedChangedForensics;
+            splitter.AddHandler(UIElement.PreviewMouseLeftButtonUpEvent, new MouseButtonEventHandler(Splitter_PreviewMouseLeftButtonUpForensics), handledEventsToo: true);
+            splitter.AddHandler(UIElement.MouseLeftButtonUpEvent, new MouseButtonEventHandler(Splitter_MouseLeftButtonUpForensics), handledEventsToo: true);
+        }
+
+        private void Splitter_PreviewMouseLeftButtonDownForensics(object sender, MouseButtonEventArgs e)
+            => LogSplitterInputForensics(sender as GridSplitter, "PreviewMouseLeftButtonDown", e);
+
+        private void Splitter_MouseLeftButtonDownForensics(object sender, MouseButtonEventArgs e)
+            => LogSplitterInputForensics(sender as GridSplitter, "MouseLeftButtonDown", e);
+
+        private void Splitter_PreviewMouseMoveForensics(object sender, MouseEventArgs e)
+            => LogSplitterInputForensics(sender as GridSplitter, "PreviewMouseMove", e);
+
+        private void Splitter_MouseMoveForensics(object sender, MouseEventArgs e)
+            => LogSplitterInputForensics(sender as GridSplitter, "MouseMove", e);
+
+        private void Splitter_GotMouseCaptureForensics(object sender, MouseEventArgs e)
+            => LogSplitterInputForensics(sender as GridSplitter, "GotMouseCapture", e);
+
+        private void Splitter_LostMouseCaptureForensics(object sender, MouseEventArgs e)
+            => LogSplitterInputForensics(sender as GridSplitter, "LostMouseCapture", e);
+
+        private void Splitter_IsMouseCapturedChangedForensics(object sender, DependencyPropertyChangedEventArgs e)
+            => LogSplitterInputForensics(sender as GridSplitter, "IsMouseCapturedChanged", null, e.NewValue);
+
+        private void Splitter_PreviewMouseLeftButtonUpForensics(object sender, MouseButtonEventArgs e)
+            => LogSplitterInputForensics(sender as GridSplitter, "PreviewMouseLeftButtonUp", e);
+
+        private void Splitter_MouseLeftButtonUpForensics(object sender, MouseButtonEventArgs e)
+            => LogSplitterInputForensics(sender as GridSplitter, "MouseLeftButtonUp", e);
+
+        private void LogSplitterInputForensics(GridSplitter? splitter, string phase, MouseEventArgs? e, object? changedValue = null)
+        {
+            if (!DeveloperDiagnostics.IsEnabled || splitter is null)
+            {
+                return;
+            }
+
+            if (ReferenceEquals(splitter, DebugPanelSplitter) && phase is "PreviewMouseMove" or "MouseMove")
+            {
+                return;
+            }
+
+            var parent = VisualTreeHelper.GetParent(splitter) as Grid;
+            var position = e is null ? Mouse.GetPosition(splitter) : e.GetPosition(splitter);
+            var parentPosition = parent is null
+                ? (WpfPoint?)null
+                : e is null ? Mouse.GetPosition(parent) : e.GetPosition(parent);
+            var downPosition = GetSplitterInputDownPosition(splitter);
+            if (phase is "PreviewMouseLeftButtonDown" or "MouseLeftButtonDown")
+            {
+                SetSplitterInputDownPosition(splitter, position);
+                downPosition = position;
+            }
+
+            var deltaX = downPosition is null ? (double?)null : position.X - downPosition.Value.X;
+            var deltaY = downPosition is null ? (double?)null : position.Y - downPosition.Value.Y;
+            var originalSource = e?.OriginalSource;
+            var routedSource = e?.Source;
+            var mouseDevice = Mouse.PrimaryDevice;
+            var captured = mouseDevice?.Captured ?? Mouse.Captured;
+            var templateRoot = splitter.Template?.FindName("Root", splitter) as DependencyObject;
+            var gripLine = splitter.Template?.FindName("GripLine", splitter) as DependencyObject;
+            var templateParent = templateRoot is null ? null : VisualTreeHelper.GetParent(templateRoot)?.GetType().FullName;
+
+            DeveloperDiagnostics.LogInfo(
+                "UI",
+                "Splitter input lifecycle event observed.",
+                new Dictionary<string, object?>
+                {
+                    ["phase"] = phase,
+                    ["splitterName"] = splitter.Name,
+                    ["routedEvent"] = e?.RoutedEvent.Name ?? "IsMouseCapturedChanged",
+                    ["handled"] = e?.Handled,
+                    ["changedValue"] = changedValue,
+                    ["originalSource"] = DescribeInputElement(originalSource),
+                    ["source"] = DescribeInputElement(routedSource),
+                    ["visualChain"] = DescribeVisualChain(originalSource as DependencyObject, 10),
+                    ["leftButton"] = e?.LeftButton.ToString(),
+                    ["mouseX"] = position.X,
+                    ["mouseY"] = position.Y,
+                    ["parentMouseX"] = parentPosition is null ? (double?)null : parentPosition.Value.X,
+                    ["parentMouseY"] = parentPosition is null ? (double?)null : parentPosition.Value.Y,
+                    ["downX"] = downPosition is null ? (double?)null : downPosition.Value.X,
+                    ["downY"] = downPosition is null ? (double?)null : downPosition.Value.Y,
+                    ["deltaXFromDown"] = deltaX,
+                    ["deltaYFromDown"] = deltaY,
+                    ["minimumHorizontalDragDistance"] = SystemParameters.MinimumHorizontalDragDistance,
+                    ["minimumVerticalDragDistance"] = SystemParameters.MinimumVerticalDragDistance,
+                    ["isMouseCaptured"] = splitter.IsMouseCaptured,
+                    ["capturedMouse"] = DescribeInputElement(captured),
+                    ["mouseCaptureMode"] = "NotExposedByTargetFramework",
+                    ["isMouseDirectlyOver"] = splitter.IsMouseDirectlyOver,
+                    ["isMouseOver"] = splitter.IsMouseOver,
+                    ["parent"] = parent?.Name,
+                    ["gridColumn"] = Grid.GetColumn(splitter),
+                    ["gridRow"] = Grid.GetRow(splitter),
+                    ["rowSpan"] = Grid.GetRowSpan(splitter),
+                    ["visibility"] = splitter.Visibility.ToString(),
+                    ["isVisible"] = splitter.IsVisible,
+                    ["isEnabled"] = splitter.IsEnabled,
+                    ["actualWidth"] = splitter.ActualWidth,
+                    ["actualHeight"] = splitter.ActualHeight,
+                    ["resizeDirection"] = splitter.ResizeDirection.ToString(),
+                    ["resizeBehavior"] = splitter.ResizeBehavior.ToString(),
+                    ["showsPreview"] = splitter.ShowsPreview,
+                    ["templateIdentity"] = splitter.Template is null ? null : RuntimeHelpers.GetHashCode(splitter.Template),
+                    ["templateRoot"] = DescribeInputElement(templateRoot),
+                    ["templateGripLine"] = DescribeInputElement(gripLine),
+                    ["templateRootParentType"] = templateParent
+                });
+        }
+
+        private WpfPoint? GetSplitterInputDownPosition(GridSplitter splitter)
+            => ReferenceEquals(splitter, EditorConsoleColumnSplitter) ? _editorConsoleSplitterInputDownPosition :
+                ReferenceEquals(splitter, DebugPanelSplitter) || ReferenceEquals(splitter, SideBySideDebugSplitter) ? _debugSplitterInputDownPosition : null;
+
+        private void SetSplitterInputDownPosition(GridSplitter splitter, WpfPoint position)
+        {
+            if (ReferenceEquals(splitter, EditorConsoleColumnSplitter))
+            {
+                _editorConsoleSplitterInputDownPosition = position;
+            }
+            else if (ReferenceEquals(splitter, DebugPanelSplitter) || ReferenceEquals(splitter, SideBySideDebugSplitter))
+            {
+                _debugSplitterInputDownPosition = position;
+            }
+        }
+
+        private static string DescribeInputElement(object? value)
+            => value is FrameworkElement element
+                ? $"{element.GetType().FullName}({element.Name});id={RuntimeHelpers.GetHashCode(element):X8}"
+                : value is null ? "<null>" : $"{value.GetType().FullName};id={RuntimeHelpers.GetHashCode(value):X8}";
+
+        private static string DescribeVisualChain(DependencyObject? value, int maxDepth)
+        {
+            var entries = new List<string>();
+            var current = value;
+            for (var index = 0; current is not null && index < maxDepth; index++)
+            {
+                entries.Add(DescribeInputElement(current));
+                current = VisualTreeHelper.GetParent(current);
+            }
+
+            return string.Join(" -> ", entries);
+        }
+
+        private void DebugPanelSplitter_DragDelta(object sender, DragDeltaEventArgs e)
+        {
+            DebugSplitter_DragDelta(DebugPanelSplitter, e);
+        }
+
+        private void SideBySideDebugSplitter_DragDelta(object sender, DragDeltaEventArgs e)
+        {
+            DebugSplitter_DragDelta(SideBySideDebugSplitter, e);
+        }
+
+        private void DebugSplitter_DragDelta(GridSplitter splitter, DragDeltaEventArgs e)
+        {
+            LogSplitterDragLifecycle(splitter, "DragDelta", e);
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            var diagnostics = BuildDebugSplitterTargetColumnDiagnostics("Entry", splitter);
+            diagnostics["horizontalChange"] = e.HorizontalChange;
+            diagnostics["verticalChange"] = e.VerticalChange;
+            DeveloperDiagnostics.LogCriticalForensic("UI", "DebugSplitterDragDelta.Entry", "Debug splitter DragDelta entered before application handling.", diagnostics);
+
+            DeveloperDiagnostics.LogCriticalForensic(
+                "UI",
+                "DebugSplitterDragDelta.AfterHandler",
+                "Debug splitter DragDelta completed application handling without width mutation.",
+                BuildDebugSplitterTargetColumnDiagnostics("AfterHandler", splitter));
+
+            Dispatcher.BeginInvoke(
+                DispatcherPriority.Input,
+                new Action(() =>
+                {
+                    if (!DeveloperDiagnostics.IsEnabled)
+                    {
+                        return;
+                    }
+
+                    var afterDispatcher = BuildDebugSplitterTargetColumnDiagnostics("AfterDispatcher", splitter);
+                    afterDispatcher["horizontalChange"] = e.HorizontalChange;
+                    afterDispatcher["verticalChange"] = e.VerticalChange;
+                    DeveloperDiagnostics.LogCriticalForensic("UI", "DebugSplitterDragDelta.AfterDispatcher", "Debug splitter DragDelta observed after dispatcher processing.", afterDispatcher);
+                }));
+        }
+
+        private void DebugPanelSplitter_DragCompleted(object sender, DragCompletedEventArgs e)
+        {
+            DebugSplitter_DragCompleted(DebugPanelSplitter, e);
+        }
+
+        private void SideBySideDebugSplitter_DragCompleted(object sender, DragCompletedEventArgs e)
+        {
+            DebugSplitter_DragCompleted(SideBySideDebugSplitter, e);
+        }
+
+        private void DebugSplitter_DragCompleted(GridSplitter splitter, DragCompletedEventArgs e)
+        {
+            LogSplitterDragLifecycle(splitter, "DragCompleted", e);
+            // GridSplitter has already committed its native PreviousAndNext resize
+            // when DragCompleted is raised. Capture both nested SideBySide columns
+            // before any normalization can project the old coordinator values back
+            // into the visual tree.
+            CaptureConceptualLayoutState("DebugSplitterNativeCommit");
+            CaptureDockedDebugPanelWidth();
+            NormalizeLayoutBudget("DebugSplitterDragCompleted");
+            CaptureConceptualLayoutState("DebugSplitterDragCompleted");
+            ValidateLayoutState("DebugSplitterDragCompleted");
+            DeveloperDiagnostics.LogCriticalForensic(
+                "UI",
+                "DebugSplitterDragCompleted.Final",
+                "Docked Debug splitter drag completed; native GridSplitter result captured.",
+                BuildSplitterLayoutDiagnostics("DragCompleted", splitter));
+            CaptureLayoutForensicsSnapshot($"{splitter.Name}.DragCompleted");
+            SchedulePostSplitterForensics();
+            _captureLayoutForensicsOnNextSizeChanged = true;
+        }
+
+        private void SchedulePostSplitterForensics()
+        {
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            // These are diagnostics-only samples. They do not participate in layout
+            // projection and make the native commit/reconciliation timeline visible
+            // even when the window itself does not raise SizeChanged for the drag.
+            Dispatcher.BeginInvoke(
+                DispatcherPriority.Loaded,
+                new Action(() => CaptureLayoutForensicsSnapshot("DebugPanelSplitter.AfterLayout")));
+            Dispatcher.BeginInvoke(
+                DispatcherPriority.Render,
+                new Action(() => CaptureLayoutForensicsSnapshot("DebugPanelSplitter.AfterRender")));
+
+            var timer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+            {
+                Interval = TimeSpan.FromMilliseconds(150)
+            };
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
+                CaptureLayoutForensicsSnapshot("DebugPanelSplitter.AfterRelease150ms");
+            };
+            timer.Start();
+        }
+
+        private void HorizontalSplitter_DragStarted(object sender, DragStartedEventArgs e)
+        {
+            LogSplitterDragLifecycle(EditorConsoleColumnSplitter, "DragStarted", e);
+            CaptureLayoutForensicsSnapshot("EditorConsoleColumnSplitter.DragStarted");
+        }
+
+        private void HorizontalSplitter_DragDelta(object sender, DragDeltaEventArgs e)
+        {
+            LogSplitterDragLifecycle(EditorConsoleColumnSplitter, "DragDelta", e);
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            var parent = VisualTreeHelper.GetParent(EditorConsoleColumnSplitter) as Grid;
+            var column = Grid.GetColumn(EditorConsoleColumnSplitter);
+            var previous = parent is not null && column > 0 && column - 1 < parent.ColumnDefinitions.Count
+                ? parent.ColumnDefinitions[column - 1]
+                : null;
+            var next = parent is not null && column + 1 < parent.ColumnDefinitions.Count
+                ? parent.ColumnDefinitions[column + 1]
+                : null;
+            var diagnostics = new Dictionary<string, object?>
+            {
+                ["phase"] = "EditorConsoleDragDelta",
+                ["splitterName"] = EditorConsoleColumnSplitter.Name,
+                ["splitterParent"] = parent?.Name,
+                ["splitterGridColumn"] = column,
+                ["splitterActualWidth"] = EditorConsoleColumnSplitter.ActualWidth,
+                ["showsPreview"] = EditorConsoleColumnSplitter.ShowsPreview,
+                ["resizeDirection"] = EditorConsoleColumnSplitter.ResizeDirection.ToString(),
+                ["resizeBehavior"] = EditorConsoleColumnSplitter.ResizeBehavior.ToString(),
+                ["previousColumnWidth"] = previous?.Width,
+                ["previousColumnActualWidth"] = previous?.ActualWidth,
+                ["nextColumnWidth"] = next?.Width,
+                ["nextColumnActualWidth"] = next?.ActualWidth,
+                ["horizontalChange"] = e.HorizontalChange,
+                ["verticalChange"] = e.VerticalChange
+            };
+            DeveloperDiagnostics.LogInfo("UI", "Editor/Console splitter native drag delta observed.", diagnostics);
+        }
+
+        private void HorizontalSplitter_DragCompleted(object sender, DragCompletedEventArgs e)
+        {
+            LogSplitterDragLifecycle(EditorConsoleColumnSplitter, "DragCompleted", e);
+            CaptureWorkspaceLayoutSizes();
+            CaptureConceptualLayoutState("EditorConsoleColumnSplitter.DragCompleted");
+            ValidateLayoutState("EditorConsoleColumnSplitter.DragCompleted");
+            CaptureLayoutForensicsSnapshot("EditorConsoleColumnSplitter.DragCompleted");
+            _captureLayoutForensicsOnNextSizeChanged = true;
+        }
+
+        private void LogSplitterDragLifecycle(GridSplitter splitter, string phase, RoutedEventArgs e)
+        {
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            var diagnostics = new Dictionary<string, object?>
+            {
+                    ["phase"] = phase,
+                    ["splitterName"] = splitter.Name,
+                    ["routedEvent"] = e?.RoutedEvent?.Name,
+                    ["handled"] = e?.Handled,
+                    ["isDragging"] = splitter.IsDragging,
+                    ["isMouseCaptured"] = splitter.IsMouseCaptured,
+                    ["capturedMouse"] = DescribeInputElement(Mouse.PrimaryDevice?.Captured ?? Mouse.Captured),
+                    ["mouseCaptureMode"] = "NotExposedByTargetFramework",
+                    ["parent"] = (VisualTreeHelper.GetParent(splitter) as FrameworkElement)?.Name,
+                    ["gridColumn"] = Grid.GetColumn(splitter),
+                    ["gridRow"] = Grid.GetRow(splitter),
+                    ["rowSpan"] = Grid.GetRowSpan(splitter),
+                    ["visibility"] = splitter.Visibility.ToString(),
+                    ["isVisible"] = splitter.IsVisible,
+                    ["isEnabled"] = splitter.IsEnabled
+            };
+            if (ReferenceEquals(splitter, DebugPanelSplitter))
+            {
+                DeveloperDiagnostics.LogCriticalForensic("UI", $"DebugSplitterLifecycle.{phase}", "Splitter Thumb drag lifecycle event observed.", diagnostics);
+            }
+            else
+            {
+                DeveloperDiagnostics.LogInfo("UI", "Splitter Thumb drag lifecycle event observed.", diagnostics);
+            }
+        }
+
+        private void ExplorerPaneSplitter_DragStarted(object sender, DragStartedEventArgs e)
+        {
+            CaptureLayoutForensicsSnapshot("ExplorerPaneSplitter.DragStarted");
+        }
+
+        private void ExplorerPaneSplitter_DragCompleted(object sender, DragCompletedEventArgs e)
+        {
+            if (ExplorerColumnDefinition.ActualWidth >= MinimumExplorerWidth)
+            {
+                _lastKnownExplorerWidth = ExplorerColumnDefinition.ActualWidth;
+            }
+            CaptureConceptualLayoutState("ExplorerPaneSplitter.DragCompleted");
+            ValidateLayoutState("ExplorerPaneSplitter.DragCompleted");
+            CaptureLayoutForensicsSnapshot("ExplorerPaneSplitter.DragCompleted");
+            _captureLayoutForensicsOnNextSizeChanged = true;
+        }
+
+        private Dictionary<string, object?> BuildSplitterLayoutDiagnostics(string phase, GridSplitter? splitter = null)
+        {
+            splitter ??= _sideBySideLocalProjectionActive ? SideBySideDebugSplitter : DebugPanelSplitter;
+            var splitterParent = VisualTreeHelper.GetParent(splitter) as FrameworkElement;
+            var splitterGrid = splitterParent as Grid;
+            var previousColumn = splitterGrid is not null && Grid.GetColumn(splitter) > 0 && Grid.GetColumn(splitter) - 1 < splitterGrid.ColumnDefinitions.Count
+                ? splitterGrid.ColumnDefinitions[Grid.GetColumn(splitter) - 1]
+                : null;
+            var nextColumn = splitterGrid is not null && Grid.GetColumn(splitter) + 1 < splitterGrid.ColumnDefinitions.Count
+                ? splitterGrid.ColumnDefinitions[Grid.GetColumn(splitter) + 1]
+                : null;
+            var diagnostics = new Dictionary<string, object?>
+            {
+                ["phase"] = phase,
+                ["splitterName"] = splitter.Name,
+                ["splitterParent"] = splitterParent?.Name,
+                ["splitterGridColumn"] = Grid.GetColumn(splitter),
+                ["splitterGridRow"] = Grid.GetRow(splitter),
+                ["splitterRowSpan"] = Grid.GetRowSpan(splitter),
+                ["splitterWidth"] = splitter.Width,
+                ["splitterActualWidth"] = splitter.ActualWidth,
+                ["splitterHorizontalAlignment"] = splitter.HorizontalAlignment,
+                ["splitterVerticalAlignment"] = splitter.VerticalAlignment,
+                ["splitterVisibility"] = splitter.Visibility,
+                ["showsPreview"] = splitter.ShowsPreview,
+                ["dragIncrement"] = splitter.DragIncrement,
+                ["keyboardIncrement"] = splitter.KeyboardIncrement,
+                ["resizeDirection"] = splitter.ResizeDirection.ToString(),
+                ["resizeBehavior"] = splitter.ResizeBehavior.ToString(),
+                ["previousColumnWidth"] = previousColumn?.Width,
+                ["previousColumnActualWidth"] = previousColumn?.ActualWidth,
+                ["previousColumnMinWidth"] = previousColumn?.MinWidth,
+                ["previousColumnMaxWidth"] = previousColumn?.MaxWidth,
+                ["nextColumnWidth"] = nextColumn?.Width,
+                ["nextColumnActualWidth"] = nextColumn?.ActualWidth,
+                ["nextColumnMinWidth"] = nextColumn?.MinWidth,
+                ["nextColumnMaxWidth"] = nextColumn?.MaxWidth,
+                ["sideBySideGridIdentity"] = SideBySideGrid.GetHashCode(),
+                ["consoleColumnIdentity"] = SideBySideConsoleColumnDefinition.GetHashCode(),
+                ["debugColumnIdentity"] = SideBySideDebugColumnDefinition.GetHashCode(),
+                ["activeConsoleIsNamedColumn"] = splitterGrid is not null && splitterGrid.ColumnDefinitions.Count > 2 && ReferenceEquals(splitterGrid.ColumnDefinitions[2], SideBySideConsoleColumnDefinition),
+                ["activeDebugIsNamedColumn"] = splitterGrid is not null && splitterGrid.ColumnDefinitions.Count > 4 && ReferenceEquals(splitterGrid.ColumnDefinitions[4], SideBySideDebugColumnDefinition),
+                ["debugSplitterParentIsSideBySide"] = ReferenceEquals(splitterParent, SideBySideGrid),
+                ["editorActualWidth"] = _sideBySideLocalProjectionActive ? ActiveSideBySideEditorColumn.ActualWidth : EditorColumnDefinition.ActualWidth,
+                ["centerActualWidth"] = ActiveDebugCenterColumn.ActualWidth,
+                ["debugActualWidth"] = ActiveDebugWidthColumn.ActualWidth,
+                ["workspaceWidth"] = WorkspaceGrid.ActualWidth,
+                ["workspaceMode"] = _workspaceLayoutMode.ToString(),
+                ["debugPaneDocked"] = _debugPaneWindow is null,
+                ["debugPaneVisible"] = DebugPanelBorder.Visibility == Visibility.Visible
+            };
+            if (ReferenceEquals(splitterParent, SideBySideGrid))
+            {
+                AddSideBySideColumnDiagnostics(diagnostics, splitterGrid);
+            }
+
+            return diagnostics;
+        }
+
+        private Dictionary<string, object?> BuildDebugSplitterTargetColumnDiagnostics(string phase, GridSplitter? splitter = null)
+        {
+            splitter ??= _sideBySideLocalProjectionActive ? SideBySideDebugSplitter : DebugPanelSplitter;
+            var diagnostics = BuildSplitterLayoutDiagnostics($"DebugSplitterDragDelta.{phase}", splitter);
+            var parent = VisualTreeHelper.GetParent(splitter) as Grid;
+            var splitterColumn = Grid.GetColumn(splitter);
+            var previous = parent is not null && splitterColumn > 0 && splitterColumn - 1 < parent.ColumnDefinitions.Count
+                ? parent.ColumnDefinitions[splitterColumn - 1]
+                : null;
+            var next = parent is not null && splitterColumn + 1 < parent.ColumnDefinitions.Count
+                ? parent.ColumnDefinitions[splitterColumn + 1]
+                : null;
+
+            AddColumnTargetDiagnostics(diagnostics, "previous", previous);
+            AddColumnTargetDiagnostics(diagnostics, "next", next);
+            diagnostics["targetParentIdentity"] = parent is null ? null : RuntimeHelpers.GetHashCode(parent);
+            diagnostics["targetPreviousIdentity"] = previous is null ? null : RuntimeHelpers.GetHashCode(previous);
+            diagnostics["targetNextIdentity"] = next is null ? null : RuntimeHelpers.GetHashCode(next);
+            diagnostics["targetPreviousIsNamedConsole"] = ReferenceEquals(previous, SideBySideConsoleColumnDefinition);
+            diagnostics["targetNextIsNamedDebug"] = ReferenceEquals(next, SideBySideDebugColumnDefinition);
+            diagnostics["nativeExpectedSplitBehavior"] = previous?.Width.GridUnitType == GridUnitType.Star && next?.Width.GridUnitType == GridUnitType.Star
+                ? "Split"
+                : previous?.Width.GridUnitType != GridUnitType.Star ? "Resize1" : "Resize2";
+            diagnostics["nativeTargetPairIsStarStar"] = previous?.Width.GridUnitType == GridUnitType.Star && next?.Width.GridUnitType == GridUnitType.Star;
+            diagnostics["targetParentIsSideBySideGrid"] = ReferenceEquals(parent, SideBySideGrid);
+            diagnostics["debugSplitterIsDragging"] = splitter.IsDragging;
+            diagnostics["debugSplitterIsMouseCaptured"] = splitter.IsMouseCaptured;
+            diagnostics["requestedConsoleSideBySideWidth"] = _layoutCoordinator.State.Console.RequestedSideBySideWidth;
+            diagnostics["requestedDebugDockedWidth"] = _layoutCoordinator.State.Debug.RequestedDockedWidth;
+            diagnostics["cachedConsoleSideWidth"] = _lastKnownConsoleSideWidth;
+            diagnostics["cachedDebugPanelWidth"] = _lastKnownDebugPanelWidth;
+            diagnostics["activeConsoleIdentity"] = RuntimeHelpers.GetHashCode(ActiveSideBySideConsoleColumn);
+            diagnostics["activeDebugIdentity"] = RuntimeHelpers.GetHashCode(ActiveSideBySideDebugColumn);
+            diagnostics["activeConsoleIsPreviousTarget"] = ReferenceEquals(previous, ActiveSideBySideConsoleColumn);
+            diagnostics["activeDebugIsNextTarget"] = ReferenceEquals(next, ActiveSideBySideDebugColumn);
+            return diagnostics;
+        }
+
+        private static void AddSideBySideColumnDiagnostics(
+            Dictionary<string, object?> diagnostics,
+            Grid? parent)
+        {
+            if (parent is null)
+            {
+                return;
+            }
+
+            diagnostics["sideBySideColumnCount"] = parent.ColumnDefinitions.Count;
+            for (var index = 0; index < parent.ColumnDefinitions.Count; index++)
+            {
+                var column = parent.ColumnDefinitions[index];
+                diagnostics[$"sideBySideColumn{index}Identity"] = RuntimeHelpers.GetHashCode(column);
+                diagnostics[$"sideBySideColumn{index}Name"] = column.Name;
+                diagnostics[$"sideBySideColumn{index}WidthValue"] = column.Width.Value;
+                diagnostics[$"sideBySideColumn{index}WidthUnit"] = column.Width.GridUnitType.ToString();
+                diagnostics[$"sideBySideColumn{index}ActualWidth"] = column.ActualWidth;
+                diagnostics[$"sideBySideColumn{index}MinWidth"] = column.MinWidth;
+                diagnostics[$"sideBySideColumn{index}MaxWidth"] = column.MaxWidth;
+            }
+        }
+
+        private static void AddColumnTargetDiagnostics(
+            Dictionary<string, object?> diagnostics,
+            string prefix,
+            ColumnDefinition? column)
+        {
+            diagnostics[$"{prefix}TargetExists"] = column is not null;
+            diagnostics[$"{prefix}TargetWidthValue"] = column?.Width.Value;
+            diagnostics[$"{prefix}TargetWidthUnit"] = column?.Width.GridUnitType.ToString();
+            diagnostics[$"{prefix}TargetActualWidth"] = column?.ActualWidth;
+            diagnostics[$"{prefix}TargetMinWidth"] = column?.MinWidth;
+            diagnostics[$"{prefix}TargetMaxWidth"] = column?.MaxWidth;
+        }
+
+        private void LogDebugSplitterWriterSnapshot(string writer, string phase, object? requestedMode)
+        {
+            if (!DeveloperDiagnostics.IsEnabled || (!_sideBySideLocalProjectionActive && !DebugPanelSplitter.IsDragging))
+            {
+                return;
+            }
+
+            var diagnostics = BuildDebugSplitterTargetColumnDiagnostics($"Writer.{writer}.{phase}");
+            diagnostics["writer"] = writer;
+            diagnostics["writerPhase"] = phase;
+            diagnostics["requestedMode"] = requestedMode?.ToString();
+            DeveloperDiagnostics.LogCriticalForensic("UI", $"DebugSplitterWriter.{writer}.{phase}", "Debug splitter target-column writer observed.", diagnostics);
+        }
 
         /// <summary>Shows or hides the right-side debug panel column.</summary>
         private void SetDebugPanelVisible(bool visible)
         {
+            LogDebugSplitterWriterSnapshot("SetDebugPanelVisible", $"Before:{visible}", visible);
+            using var layoutTransition = _layoutCoordinator.BeginTransition($"DebugVisibility:{visible}");
+            CaptureConceptualLayoutState($"BeforeDebugVisibility:{visible}");
             CaptureDockedDebugPanelWidth();
+            ApplyDebugPanelGridPlacement();
 
             if (visible)
             {
-                DebugPanelColumn.Width         = new GridLength(Math.Max(_lastKnownDebugPanelWidth, MinimumDebugPanelWidth), GridUnitType.Pixel);
-                DebugPanelColumn.MinWidth      = MinimumDebugPanelWidth;
-                DebugPanelSplitterColumn.Width = new GridLength(6, GridUnitType.Pixel);
-                DebugPanelSplitter.Visibility  = Visibility.Visible;
+                if (_sideBySideLocalProjectionActive)
+                {
+                    ApplySideBySideLocalDebugProjection(true);
+                }
+                else if (IsDebugPaneAdjacentToSideConsole)
+                {
+                    DebugPanelColumn.Width         = new GridLength(Math.Max(_lastKnownDebugPanelWidth, MinimumDebugPanelWidth), GridUnitType.Pixel);
+                    DebugPanelColumn.MinWidth      = MinimumDebugPanelWidth;
+                    DebugPanelSplitterColumn.Width = new GridLength(6, GridUnitType.Pixel);
+                    ConsoleSideColumnDefinition.MinWidth = MinimumConsoleSideWidth;
+                }
+                else
+                {
+                    // In stacked/horizontal layouts the side-console column is the
+                    // only column directly adjacent to the debug splitter. Reuse it
+                    // for the docked pane so the editor is not an indirect resize
+                    // target through zero-width columns.
+                    ConsoleSideColumnDefinition.Width = new GridLength(Math.Max(_lastKnownDebugPanelWidth, MinimumDebugPanelWidth), GridUnitType.Pixel);
+                    ConsoleSideColumnDefinition.MinWidth = MinimumDebugPanelWidth;
+                    ConsoleSideSplitterColumnDefinition.Width = new GridLength(6, GridUnitType.Pixel);
+                    DebugPanelColumn.Width = new GridLength(0, GridUnitType.Pixel);
+                    DebugPanelColumn.MinWidth = 0;
+                    DebugPanelSplitterColumn.Width = new GridLength(0, GridUnitType.Pixel);
+                }
+                DebugPanelSplitter.Visibility = _sideBySideLocalProjectionActive ? Visibility.Collapsed : Visibility.Visible;
+                SideBySideDebugSplitter.Visibility = _sideBySideLocalProjectionActive ? Visibility.Visible : Visibility.Collapsed;
                 DebugPanelBorder.Visibility    = Visibility.Visible;
             }
             else
             {
-                if (DebugPanelColumn.ActualWidth >= MinimumDebugPanelWidth)
+                if (_sideBySideLocalProjectionActive && ActiveSideBySideDebugColumn.ActualWidth >= MinimumDebugPanelWidth)
+                {
+                    _lastKnownDebugPanelWidth = ActiveSideBySideDebugColumn.ActualWidth;
+                }
+                else if (IsDebugPaneAdjacentToSideConsole && DebugPanelColumn.ActualWidth >= MinimumDebugPanelWidth)
                 {
                     _lastKnownDebugPanelWidth = DebugPanelColumn.ActualWidth;
                 }
+                else if (!IsDebugPaneAdjacentToSideConsole && ConsoleSideColumnDefinition.ActualWidth >= MinimumDebugPanelWidth)
+                {
+                    _lastKnownDebugPanelWidth = ConsoleSideColumnDefinition.ActualWidth;
+                }
 
-                DebugPanelColumn.Width         = new GridLength(0, GridUnitType.Pixel);
-                DebugPanelColumn.MinWidth      = 0;
-                DebugPanelSplitterColumn.Width = new GridLength(0, GridUnitType.Pixel);
-                DebugPanelSplitter.Visibility  = Visibility.Collapsed;
-                DebugPanelBorder.Visibility    = Visibility.Collapsed;
+                if (_sideBySideLocalProjectionActive)
+                {
+                    ApplySideBySideLocalDebugProjection(false);
+                }
+                else
+                {
+                    DebugPanelColumn.Width         = new GridLength(0, GridUnitType.Pixel);
+                    DebugPanelColumn.MinWidth      = 0;
+                    DebugPanelSplitterColumn.Width = new GridLength(0, GridUnitType.Pixel);
+                    if (!IsDebugPaneAdjacentToSideConsole)
+                    {
+                        ConsoleSideColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+                        ConsoleSideColumnDefinition.MinWidth = 0;
+                        ConsoleSideSplitterColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+                    }
+                }
             }
 
             ShowDebugPanelMenuItem.IsChecked = visible;
+            _layoutCoordinator.SetDebugDockState(!visible
+                ? LayoutDockState.Hidden
+                : _debugPaneWindow is not null ? LayoutDockState.Floating : LayoutDockState.Docked);
             ApplyDebugPanePresentationState();
+            NormalizeLayoutBudget($"DebugVisibility:{visible}");
+            ValidateLayoutState($"DebugVisibility:{visible}");
 
             DeveloperDiagnostics.LogInfo(
                 "Debugger",
@@ -11096,12 +13395,15 @@ namespace PS7ScriptDesk.Shell
                 new Dictionary<string, object?>
                 {
                     ["isVisible"] = visible,
-                    ["columnWidth"] = DebugPanelColumn.Width.Value,
-                    ["columnMinWidth"] = DebugPanelColumn.MinWidth,
-                    ["splitterColumnWidth"] = DebugPanelSplitterColumn.Width.Value,
+                    ["columnWidth"] = _sideBySideLocalProjectionActive ? ActiveSideBySideDebugColumn.Width.Value : IsDebugPaneAdjacentToSideConsole ? DebugPanelColumn.Width.Value : ConsoleSideColumnDefinition.Width.Value,
+                    ["columnMinWidth"] = _sideBySideLocalProjectionActive ? ActiveSideBySideDebugColumn.MinWidth : IsDebugPaneAdjacentToSideConsole ? DebugPanelColumn.MinWidth : ConsoleSideColumnDefinition.MinWidth,
+                    ["splitterColumnWidth"] = _sideBySideLocalProjectionActive ? SideBySideConsoleDebugSplitterColumnDefinition.Width.Value : IsDebugPaneAdjacentToSideConsole ? DebugPanelSplitterColumn.Width.Value : ConsoleSideSplitterColumnDefinition.Width.Value,
+                    ["editorColumnWidth"] = EditorColumnDefinition.ActualWidth,
+                    ["centerColumnWidth"] = IsDebugPaneAdjacentToSideConsole ? ConsoleSideColumnDefinition.ActualWidth : 0,
                     ["lastKnownDockedWidth"] = _lastKnownDebugPanelWidth,
                     ["isPoppedOut"] = _debugPaneWindow is not null
                 });
+            LogDebugSplitterWriterSnapshot("SetDebugPanelVisible", $"After:{visible}", visible);
         }
 
         private void ShowDebugPanel_Click(object sender, RoutedEventArgs e)
@@ -11146,6 +13448,7 @@ namespace PS7ScriptDesk.Shell
 
         private void PopOutDebugPane(string reason)
         {
+            using var layoutTransition = _layoutCoordinator.BeginTransition($"DebugPopOut:{reason}");
             DeveloperDiagnostics.LogUserAction(
                 "Debugger",
                 "DebugPanePopOutRequested",
@@ -11161,7 +13464,9 @@ namespace PS7ScriptDesk.Shell
 
             if (_debugPaneWindow is not null)
             {
+                _layoutCoordinator.SetDebugDockState(LayoutDockState.Floating);
                 _debugPaneWindow.Activate();
+                ValidateLayoutState($"DebugPopOut:{reason}");
                 DeveloperDiagnostics.LogDecision("Debugger", "PopOutDebugPane", "Debug pane pop-out request reused the existing floating window.", "AlreadyPoppedOut", new Dictionary<string, object?> { ["reason"] = reason });
                 return;
             }
@@ -11187,6 +13492,9 @@ namespace PS7ScriptDesk.Shell
 
             DeveloperDiagnostics.LogInfo("Debugger", "Floating Debug pane window created.", new Dictionary<string, object?> { ["reason"] = reason });
             debugPaneWindow.Show();
+            ReleaseDockedDebugPanelAllocation("PopOut");
+            _layoutCoordinator.SetDebugDockState(LayoutDockState.Floating);
+            ValidateLayoutState($"DebugPopOut:{reason}");
             DeveloperDiagnostics.LogInfo(
                 "Debugger",
                 "Floating Debug pane window shown.",
@@ -11199,6 +13507,7 @@ namespace PS7ScriptDesk.Shell
 
         private void DockDebugPane(string reason)
         {
+            using var layoutTransition = _layoutCoordinator.BeginTransition($"DebugDock:{reason}");
             DeveloperDiagnostics.LogUserAction(
                 "Debugger",
                 "DebugPaneDockBackRequested",
@@ -11219,6 +13528,7 @@ namespace PS7ScriptDesk.Shell
             CaptureDebugPaneWindowBounds(debugPaneWindow);
             SyncDebugPaneTabSelection(debugPaneWindow.SelectedTabIndex, "DockBack");
             _debugPaneWindow = null;
+            _layoutCoordinator.SetDebugDockState(LayoutDockState.Docked);
             SetDebugPanelVisible(true);
             ApplyDebugPaneItemsSources("DockBack");
             debugPaneWindow.CloseForDockBack();
@@ -11279,17 +13589,74 @@ namespace PS7ScriptDesk.Shell
 
         private void ApplyDebugPanePresentationState()
         {
+            LogDebugSplitterWriterSnapshot("ApplyDebugPanePresentationState", "Before", null);
             var isPoppedOut = _debugPaneWindow is not null;
             DebugPaneTabControl.Visibility = isPoppedOut ? Visibility.Collapsed : Visibility.Visible;
             DebugPanePoppedOutPlaceholder.Visibility = isPoppedOut ? Visibility.Visible : Visibility.Collapsed;
             PopOutDebugPaneButton.Visibility = isPoppedOut ? Visibility.Collapsed : Visibility.Visible;
             PopOutDebugPaneMenuItem.Visibility = isPoppedOut ? Visibility.Collapsed : Visibility.Visible;
             DockDebugPaneMenuItem.Visibility = isPoppedOut ? Visibility.Visible : Visibility.Collapsed;
+            ApplyDebugStaleIndicator();
 
             if (isPoppedOut)
             {
                 DeveloperDiagnostics.LogInfo("Debugger", "Docked Debug pane placeholder shown because the pane is popped out.", new Dictionary<string, object?> { ["selectedTabIndex"] = _selectedDebugTabIndex });
             }
+            LogDebugSplitterWriterSnapshot("ApplyDebugPanePresentationState", "After", null);
+        }
+
+        private void ReleaseDockedDebugPanelAllocation(string reason)
+        {
+            CaptureDockedDebugPanelWidth();
+            if (_sideBySideLocalProjectionActive)
+            {
+                ApplySideBySideLocalDebugProjection(false);
+                NormalizeLayoutBudget($"DebugPaneFloating:{reason}");
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "SideBySide local Debug allocation released while the pane is floating.",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["lastKnownDockedWidth"] = _lastKnownDebugPanelWidth,
+                        ["workspaceMode"] = _workspaceLayoutMode.ToString()
+                    });
+                return;
+            }
+
+            DebugPanelColumn.Width = new GridLength(0, GridUnitType.Pixel);
+            DebugPanelColumn.MinWidth = 0;
+            DebugPanelSplitterColumn.Width = new GridLength(0, GridUnitType.Pixel);
+            ConsoleSideColumnDefinition.Width = IsDebugPaneAdjacentToSideConsole
+                ? ConsoleSideColumnDefinition.Width
+                : new GridLength(0, GridUnitType.Pixel);
+            if (!IsDebugPaneAdjacentToSideConsole)
+            {
+                ConsoleSideColumnDefinition.MinWidth = 0;
+                ConsoleSideSplitterColumnDefinition.Width = new GridLength(0, GridUnitType.Pixel);
+            }
+
+            DebugPanelSplitter.Visibility = Visibility.Collapsed;
+            SideBySideDebugSplitter.Visibility = Visibility.Collapsed;
+            DebugPanelBorder.Visibility = Visibility.Collapsed;
+            NormalizeLayoutBudget($"DebugPaneFloating:{reason}");
+
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Docked Debug allocation released while the pane is floating.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["lastKnownDockedWidth"] = _lastKnownDebugPanelWidth,
+                    ["workspaceMode"] = _workspaceLayoutMode.ToString()
+                });
+        }
+
+        private void ApplyDebugStaleIndicator()
+        {
+            var hasStaleDocument = ViewModel?.OpenTabs.Any(tab => tab.IsDebugSourceStale) == true;
+            DebugStaleIndicator.Visibility = hasStaleDocument ? Visibility.Visible : Visibility.Collapsed;
+            _debugPaneWindow?.SetDebugStaleIndicator(hasStaleDocument);
         }
 
         private void SyncDebugPaneTabSelection(int selectedTabIndex, string reason)
@@ -11369,10 +13736,15 @@ namespace PS7ScriptDesk.Shell
 
         private void CaptureDockedDebugPanelWidth()
         {
+            var activeWidth = _sideBySideLocalProjectionActive
+                ? ActiveSideBySideDebugColumn.ActualWidth
+                : IsDebugPaneAdjacentToSideConsole
+                ? DebugPanelColumn.ActualWidth
+                : ConsoleSideColumnDefinition.ActualWidth;
             if (DebugPanelBorder.Visibility == Visibility.Visible &&
-                DebugPanelColumn.ActualWidth >= MinimumDebugPanelWidth)
+                activeWidth >= MinimumDebugPanelWidth)
             {
-                _lastKnownDebugPanelWidth = DebugPanelColumn.ActualWidth;
+                _lastKnownDebugPanelWidth = activeWidth;
             }
         }
 
@@ -11673,6 +14045,43 @@ namespace PS7ScriptDesk.Shell
                     {
                         TraceDebugShell("RefreshDebugPanelsAsync", $"Skipped UI update; reason={reason}; skipReason={uiSkipReason}; refreshVersion={refreshVersion}; currentVersion={uiSnapshot.CurrentVersion}; {DescribeDebugUiState()}");
                         DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel UI update was skipped because the refresh became stale.", "SkippedUiUpdate", new Dictionary<string, object?> { ["reason"] = reason, ["skipReason"] = uiSkipReason, ["refreshVersion"] = refreshVersion, ["currentVersion"] = uiSnapshot.CurrentVersion, ["variableCount"] = filteredVariables.Count, ["callStackCount"] = callStack.Count });
+                        return;
+                    }
+
+                    callStack = callStack.Select(ApplyDebugSourceMapping).ToArray();
+
+                    var resultSessionId = debugSession.SessionId;
+                    var resultPauseGeneration = debugSession.PauseGeneration;
+                    var resultsAreCurrent = variables.All(variable =>
+                            DebugInspectionResultGuard.IsCurrent(
+                                resultSessionId,
+                                resultPauseGeneration,
+                                variable.SessionId,
+                                variable.PauseGeneration,
+                                variable.FrameId,
+                                null)) &&
+                        callStack.All(frame =>
+                            DebugInspectionResultGuard.IsCurrent(
+                                resultSessionId,
+                                resultPauseGeneration,
+                                frame.SessionId,
+                                frame.PauseGeneration,
+                                frame.FrameId,
+                                null));
+                    if (!resultsAreCurrent)
+                    {
+                        DeveloperDiagnostics.LogDecision(
+                            "Debugger",
+                            "RefreshDebugPanelsAsync",
+                            "Inspection results were rejected because their session or pause generation was stale.",
+                            "SkippedStaleInspectionResult",
+                            new Dictionary<string, object?>
+                            {
+                                ["sessionId"] = resultSessionId,
+                                ["pauseGeneration"] = resultPauseGeneration,
+                                ["variableCount"] = variables.Count,
+                                ["callStackCount"] = callStack.Count
+                            });
                         return;
                     }
 
@@ -12030,36 +14439,145 @@ namespace PS7ScriptDesk.Shell
         /// Highlights the debug stop location, selecting the matching tab when PowerShell
         /// reported a script path for the paused frame.
         /// </summary>
-        private void SetDebugCurrentLocation(string? scriptPath, int lineNumber)
+        private DebugCallStackFrame ApplyDebugSourceMapping(DebugCallStackFrame frame)
+        {
+            var mapped = _activeDebugSourceMap?.Map(frame.ScriptName, frame.LineNumber, GetCurrentDebugDocumentRevision)
+                ?? DebugMappedSourceLocation.Unmapped(frame.ScriptName, frame.LineNumber);
+            var targetTab = FindDebugSourceTab(mapped);
+            if (mapped.CanNavigate && targetTab is null)
+            {
+                mapped = mapped with { Status = DebugSourceMappingStatus.MissingSource, CanNavigate = false };
+            }
+            var canNavigate = mapped.CanNavigate && targetTab is not null && mapped.EditorLine is > 0;
+
+            return frame with
+            {
+                MappedSourceDocumentId = mapped.SourceDocumentId,
+                MappedSourcePath = mapped.EditorPath,
+                MappedSourceLine = mapped.EditorLine,
+                SourceMappingStatus = mapped.Status,
+                IsNavigable = canNavigate
+            };
+        }
+
+        private long? GetCurrentDebugDocumentRevision(Guid documentId)
+            => ViewModel?.OpenTabs.FirstOrDefault(tab => tab.DiagnosticDocument.DocumentId == documentId)?.DiagnosticDocument.Revision;
+
+        private void RefreshDebugStaleTabState(string reason)
+        {
+            if (ViewModel is null)
+            {
+                return;
+            }
+
+            foreach (var tab in ViewModel.OpenTabs)
+            {
+                var isStale = _debugSession is not null &&
+                    _activeDebugSourceMap?.IsDocumentRevisionMismatch(tab.DiagnosticDocument.DocumentId, GetCurrentDebugDocumentRevision) == true;
+
+                if (!tab.SetDebugSourceStale(isStale))
+                {
+                    continue;
+                }
+
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "DebugStaleTabCue",
+                    "Editor tab stale-debug presentation state changed from the active session source map.",
+                    isStale ? "Shown" : "Cleared",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["documentId"] = tab.DiagnosticDocument.DocumentId,
+                        ["editorRevision"] = tab.DiagnosticDocument.Revision,
+                        ["debugSessionPresent"] = _debugSession is not null
+                    });
+            }
+
+            ApplyDebugStaleIndicator();
+        }
+
+        private EditorTabViewModel? FindDebugSourceTab(DebugMappedSourceLocation mapped)
+        {
+            if (ViewModel is null || !mapped.SourceDocumentId.HasValue)
+            {
+                return null;
+            }
+
+            return ViewModel.OpenTabs.FirstOrDefault(tab =>
+                tab.DiagnosticDocument.DocumentId == mapped.SourceDocumentId.Value);
+        }
+
+        private bool TryMapDebugLocation(string? runtimePath, int runtimeLine, out DebugMappedSourceLocation mapped, out EditorTabViewModel? targetTab)
+        {
+            mapped = _activeDebugSourceMap?.Map(runtimePath, runtimeLine, GetCurrentDebugDocumentRevision)
+                ?? DebugMappedSourceLocation.Unmapped(runtimePath, runtimeLine);
+            targetTab = FindDebugSourceTab(mapped);
+            if (mapped.CanNavigate && targetTab is null)
+            {
+                mapped = mapped with { Status = DebugSourceMappingStatus.MissingSource, CanNavigate = false };
+            }
+            return mapped.CanNavigate && targetTab is not null && mapped.EditorLine is > 0;
+        }
+
+        private DebuggerEvent PresentDebuggerEvent(DebuggerEvent debuggerEvent)
+        {
+            if (debuggerEvent.Category != DebuggerEventCategory.Breakpoint || debuggerEvent.LineNumber is not > 0)
+            {
+                return debuggerEvent;
+            }
+
+            TryMapDebugLocation(debuggerEvent.FilePath, debuggerEvent.LineNumber.Value, out var mapped, out _);
+            var displayText = DebuggerCoordinatePresentation.FormatBreakpointHit(debuggerEvent.LineNumber.Value, mapped.Status);
+            var isNavigable = debuggerEvent.IsNavigable && mapped.CanNavigate;
+            return debuggerEvent.WithPresentation(displayText, isNavigable);
+        }
+
+        private bool SetDebugCurrentLocation(string? scriptPath, int lineNumber)
         {
             if (lineNumber <= 0 || ViewModel is null)
             {
-                return;
+                return false;
             }
 
-            ClearDebugCurrentLine();
-
-            EditorTabViewModel? targetTab = ViewModel.SelectedTab;
-            if (!string.IsNullOrWhiteSpace(scriptPath))
+            var clearedHighlightCount = ClearDebugCurrentLine();
+            if (clearedHighlightCount > 0)
             {
-                if (!string.IsNullOrWhiteSpace(_activeDebugLaunchPath) &&
-                    string.Equals(Path.GetFullPath(_activeDebugLaunchPath), Path.GetFullPath(scriptPath), StringComparison.OrdinalIgnoreCase) &&
-                    _activeDebugTab is not null)
-                {
-                    targetTab = _activeDebugTab;
-                }
-                else
-                {
-                    targetTab = ViewModel.OpenTabs.FirstOrDefault(tab =>
-                        !string.IsNullOrWhiteSpace(tab.FilePath) &&
-                        string.Equals(Path.GetFullPath(tab.FilePath), Path.GetFullPath(scriptPath), StringComparison.OrdinalIgnoreCase))
-                        ?? targetTab;
-                }
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "ExecutionHighlight",
+                    "Existing execution highlight was cleared before evaluating a new runtime location.",
+                    "ClearedBeforeMapping",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtimePath"] = scriptPath,
+                        ["runtimeLine"] = lineNumber,
+                        ["clearedEditorCount"] = clearedHighlightCount
+                    });
             }
 
-            if (targetTab is null)
+            if (!TryMapDebugLocation(scriptPath, lineNumber, out var mapped, out var targetTab) ||
+                targetTab is null || mapped.EditorLine is not > 0)
             {
-                return;
+                var reason = _activeDebugSourceMap is null
+                    ? "no active source map"
+                    : $"mapping status={mapped.Status}; capturedRevision={mapped.CapturedRevision?.ToString() ?? "(none)"}; currentRevision={mapped.CurrentRevision?.ToString() ?? "(none)"}";
+                ViewModel.StatusText = mapped.Status == DebugSourceMappingStatus.RevisionMismatch
+                    ? "Debugger paused in an older source revision; save or restart debugging to navigate safely"
+                    : "Debugger source location is not available in an open editor document";
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "DebugSourceNavigation",
+                    "Runtime source location was rejected because the session-owned source map could not provide a safe editor destination.",
+                    "Rejected",
+                    new Dictionary<string, object?>
+                    {
+                        ["runtimePath"] = scriptPath,
+                        ["runtimeLine"] = lineNumber,
+                        ["mappingStatus"] = mapped.Status.ToString(),
+                        ["reason"] = reason
+                    });
+                return false;
             }
 
             if (!ReferenceEquals(ViewModel.SelectedTab, targetTab))
@@ -12067,31 +14585,36 @@ namespace PS7ScriptDesk.Shell
                 ViewModel.SelectedTab = targetTab;
             }
 
-            targetTab.SetCurrentDebugLine(lineNumber);
+            targetTab.SetCurrentDebugLine(mapped.EditorLine.Value);
 
             if (_editorByTab.TryGetValue(targetTab, out var editor))
             {
                 editor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
                 RefreshBreakpointGlyphMargin(editor);
 
-                if (editor.Document is not null && lineNumber <= editor.Document.LineCount)
+                if (editor.Document is not null && mapped.EditorLine.Value <= editor.Document.LineCount)
                 {
-                    editor.ScrollToLine(lineNumber);
-                    editor.CaretOffset = editor.Document.GetLineByNumber(lineNumber).Offset;
+                    editor.ScrollToLine(mapped.EditorLine.Value);
+                    editor.CaretOffset = editor.Document.GetLineByNumber(mapped.EditorLine.Value).Offset;
                     editor.Focus();
                 }
             }
+
+            return true;
         }
 
         /// <summary>Clears the debug current-line highlight from all open editors.</summary>
-        private void ClearDebugCurrentLine()
+        private int ClearDebugCurrentLine()
         {
-            if (ViewModel is null) return;
+            if (ViewModel is null) return 0;
+
+            var clearedCount = 0;
 
             foreach (var tab in ViewModel.OpenTabs)
             {
                 if (tab.CurrentDebugLine <= 0) continue;
                 tab.ClearCurrentDebugLine();
+                clearedCount++;
 
                 if (_editorByTab.TryGetValue(tab, out var editor))
                 {
@@ -12099,6 +14622,8 @@ namespace PS7ScriptDesk.Shell
                     RefreshBreakpointGlyphMargin(editor);
                 }
             }
+
+            return clearedCount;
         }
 
         private void DebugBreakpointRemove_Click(object sender, RoutedEventArgs e)

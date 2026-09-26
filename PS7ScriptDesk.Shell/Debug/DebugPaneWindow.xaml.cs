@@ -26,6 +26,11 @@ namespace PS7ScriptDesk.Shell.Debug
 
         public object? SelectedBreakpointItem => DebugBreakpointsGrid.SelectedItem;
 
+        public void SetDebugStaleIndicator(bool isVisible)
+        {
+            DebugStaleIndicator.Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
+        }
+
         private void Window_Loaded(object sender, RoutedEventArgs e)
         {
             ContextHelp.ValidateWindowTopics(this);

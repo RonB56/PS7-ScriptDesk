@@ -239,15 +239,15 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("Click=\"RunSelection_Click\"", toolbarXaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding StopCommand}\"", toolbarXaml, StringComparison.Ordinal);
         Assert.Contains("Click=\"DebugToggle_Click\"", toolbarXaml, StringComparison.Ordinal);
-        Assert.Contains("Click=\"ContinueDebug_Click\"", toolbarXaml, StringComparison.Ordinal);
-        Assert.Contains("Click=\"StepOver_Click\"", toolbarXaml, StringComparison.Ordinal);
-        Assert.Contains("Click=\"StepInto_Click\"", toolbarXaml, StringComparison.Ordinal);
-        Assert.Contains("Click=\"StepOut_Click\"", toolbarXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.ContinueDebugCommand}\"", toolbarXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.StepOverCommand}\"", toolbarXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.StepIntoCommand}\"", toolbarXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.StepOutCommand}\"", toolbarXaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding ClearConsoleCommand}\"", toolbarXaml, StringComparison.Ordinal);
         Assert.Contains("Click=\"HelpOverview_Click\"", toolbarXaml, StringComparison.Ordinal);
 
         Assert.Equal(2, CountOccurrences(toolbarXaml, "IsEnabled=\"{Binding IsRunAvailable}\""));
-        Assert.Equal(5, CountOccurrences(toolbarXaml, "IsEnabled=\"False\""));
+        Assert.Equal(1, CountOccurrences(toolbarXaml, "IsEnabled=\"False\""));
 
         Assert.Contains("ToolTip=\"New Script (Ctrl+N)\"", toolbarXaml, StringComparison.Ordinal);
         Assert.Contains("ToolTip=\"Open File (Ctrl+O)\"", toolbarXaml, StringComparison.Ordinal);
@@ -296,6 +296,49 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("Text=\"Help\"", toolbarXaml, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.Name=\"Close Tab\"", toolbarXaml, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.Name=\"Close All Tabs\"", toolbarXaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DiagnosticGutter_UsesViewportInvalidationAndSharedLineCoordinates()
+    {
+        var margin = ReadRepositoryFile("PS7ScriptDesk.Shell", "Editor", "DiagnosticGlyphMargin.cs");
+        var breakpointMargin = ReadRepositoryFile("PS7ScriptDesk.Shell", "Editor", "BreakpointGlyphMargin.cs");
+        var mainCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+
+        Assert.Contains("oldTextView.VisualLinesChanged -= TextView_VisualLayoutChanged;", margin, StringComparison.Ordinal);
+        Assert.Contains("oldTextView.ScrollOffsetChanged -= TextView_VisualLayoutChanged;", margin, StringComparison.Ordinal);
+        Assert.Contains("newTextView.VisualLinesChanged += TextView_VisualLayoutChanged;", margin, StringComparison.Ordinal);
+        Assert.Contains("newTextView.ScrollOffsetChanged += TextView_VisualLayoutChanged;", margin, StringComparison.Ordinal);
+        Assert.Contains("GetTextLineVisualYPosition(visualLine.TextLines[0], VisualYPosition.TextTop) - textView.VerticalOffset", margin, StringComparison.Ordinal);
+        Assert.Contains("var y = GetVisualLineTopInMarginCoordinates(visualLine, textView);", margin, StringComparison.Ordinal);
+        Assert.Contains("editorTextEditor.TextArea.LeftMargins.Remove(diagnosticGlyphMargin);", mainCode, StringComparison.Ordinal);
+
+        Assert.Contains("oldTextView.VisualLinesChanged -= TextView_VisualLayoutChanged;", breakpointMargin, StringComparison.Ordinal);
+        Assert.Contains("newTextView.ScrollOffsetChanged += TextView_VisualLayoutChanged;", breakpointMargin, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(100, 0, 100)]
+    [InlineData(100, 25, 75)]
+    [InlineData(100, 100, 0)]
+    public void DiagnosticGutter_DocumentLineTopMapsToViewportY(double documentTop, double verticalOffset, double expectedViewportY)
+    {
+        Assert.Equal(expectedViewportY, documentTop - verticalOffset);
+    }
+
+    [Fact]
+    public void MainWindow_DebuggerMenusExposeAuthoritativeCommandsAndGestures()
+    {
+        var mainXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml");
+
+        Assert.Contains("<Window.CommandBindings>", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.StartDebugCommand}\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.ContinueDebugCommand}\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.StopDebugCommand}\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.StepOverCommand}\" InputGestureText=\"F10\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.StepIntoCommand}\" InputGestureText=\"F11\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.StepOutCommand}\" InputGestureText=\"Shift+F11\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{x:Static local:MainWindow.ToggleBreakpointCommand}\" InputGestureText=\"F9\"", mainXaml, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -465,7 +508,7 @@ public sealed class MainWindowStructuralPolishTests
 
         Assert.Contains("Style=\"{StaticResource IdeColumnSplitterStyle}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Style=\"{StaticResource IdeRowSplitterStyle}\"", mainXaml, StringComparison.Ordinal);
-        Assert.Contains("<Grid Margin=\"4\">", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("<Grid x:Name=\"WorkspaceGrid\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"EditorConsoleRowSplitterDefinition\" Height=\"6\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"EditorConsoleRowSplitter\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"EditorConsoleColumnSplitter\"", mainXaml, StringComparison.Ordinal);

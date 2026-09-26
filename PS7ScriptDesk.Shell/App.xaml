@@ -1470,6 +1470,10 @@
                             <Trigger Property="IsKeyboardFocusWithin" Value="True">
                                 <Setter TargetName="TabBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
                             </Trigger>
+                            <DataTrigger Binding="{Binding IsDebugSourceStale}" Value="True">
+                                <Setter TargetName="TabBorder" Property="Background" Value="{DynamicResource Theme.Status.Warning.Background}" />
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Status.Warning.Foreground}" />
+                            </DataTrigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.55" />
                             </Trigger>

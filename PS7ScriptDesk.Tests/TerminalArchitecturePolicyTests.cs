@@ -96,7 +96,8 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.Contains("write: function (d, callback)", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("term.write(d, callback)", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("DebuggerOutputText", viewModelSource, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding DebuggerOutputText, Mode=OneWay}\"", shellXaml, StringComparison.Ordinal);
+        Assert.Contains("ItemsSource=\"{Binding ElementName=RootWindow, Path=DebugOutputPresentation.VisibleItems}\"", shellXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Text=\"{Binding DebuggerOutputText, Mode=OneWay}\"", shellXaml, StringComparison.Ordinal);
     }
 
     [Fact]
