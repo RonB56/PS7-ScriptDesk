@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
 
 namespace PS7ScriptDesk.Shell.Debug
 {
@@ -55,6 +58,284 @@ namespace PS7ScriptDesk.Shell.Debug
                    activeSessionId == resultSessionId &&
                    activePauseGeneration == resultPauseGeneration &&
                    (activeFrameId is null || string.Equals(activeFrameId, resultFrameId, StringComparison.Ordinal));
+        }
+    }
+
+    public enum DebuggerInspectionLifecycleState
+    {
+        Empty = 0,
+        Starting = 1,
+        Paused = 2,
+        Executing = 3,
+        Stopped = 4
+    }
+
+    public sealed record DebuggerInspectionRequestIdentity(
+        Guid SessionId,
+        long PauseGeneration,
+        long RequestGeneration,
+        string? FrameId);
+
+    public sealed record DebuggerInspectionRequest(
+        DebuggerInspectionRequestIdentity Identity,
+        CancellationToken CancellationToken);
+
+    /// <summary>
+    /// Owns pause-scoped debugger inspection identity. The shell is the single owner;
+    /// docked and floating panes project this state and never retain independent selection.
+    /// </summary>
+    public sealed class DebuggerInspectionContext : IDisposable
+    {
+        private readonly object _gate = new();
+        private CancellationTokenSource? _requestCancellation;
+        private HashSet<string> _validFrameIds = new(StringComparer.Ordinal);
+        private bool _disposed;
+        private long _requestGeneration;
+
+        public Guid SessionId { get; private set; }
+
+        public long PauseGeneration { get; private set; }
+
+        public DebugFrameIdentity? CurrentExecutionFrame { get; private set; }
+
+        public DebugFrameIdentity? SelectedInspectionFrame { get; private set; }
+
+        public DebuggerInspectionLifecycleState LifecycleState { get; private set; } = DebuggerInspectionLifecycleState.Empty;
+
+        public long RequestGeneration => Interlocked.Read(ref _requestGeneration);
+
+        public void BeginSession(Guid sessionId)
+        {
+            if (sessionId == Guid.Empty)
+            {
+                throw new ArgumentException("A debugger session identity is required.", nameof(sessionId));
+            }
+
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                InvalidateRequestsLocked();
+                SessionId = sessionId;
+                PauseGeneration = 0;
+                CurrentExecutionFrame = null;
+                SelectedInspectionFrame = null;
+                _validFrameIds.Clear();
+                LifecycleState = DebuggerInspectionLifecycleState.Starting;
+            }
+        }
+
+        public void PreparePaused(Guid sessionId, long pauseGeneration)
+        {
+            if (sessionId == Guid.Empty)
+            {
+                throw new ArgumentException("A debugger session identity is required.", nameof(sessionId));
+            }
+
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                if (SessionId == sessionId && PauseGeneration == pauseGeneration && LifecycleState == DebuggerInspectionLifecycleState.Paused)
+                {
+                    return;
+                }
+
+                InvalidateRequestsLocked();
+                SessionId = sessionId;
+                PauseGeneration = pauseGeneration;
+                CurrentExecutionFrame = null;
+                SelectedInspectionFrame = null;
+                _validFrameIds.Clear();
+                LifecycleState = DebuggerInspectionLifecycleState.Paused;
+            }
+        }
+
+        public bool PublishCallStack(IReadOnlyList<DebugCallStackFrame> callStack)
+        {
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                if (LifecycleState != DebuggerInspectionLifecycleState.Paused || callStack.Count == 0)
+                {
+                    return false;
+                }
+
+                var current = callStack.FirstOrDefault(frame => frame.IsCurrentFrame) ?? callStack[0];
+                if (current.SessionId != SessionId || current.PauseGeneration != PauseGeneration)
+                {
+                    return false;
+                }
+
+                _validFrameIds = callStack
+                    .Where(frame => frame.SessionId == SessionId && frame.PauseGeneration == PauseGeneration)
+                    .Select(frame => frame.FrameId)
+                    .ToHashSet(StringComparer.Ordinal);
+                if (!_validFrameIds.Contains(current.FrameId))
+                {
+                    return false;
+                }
+
+                CurrentExecutionFrame = current.Identity with { IsCurrentFrame = true };
+                SelectedInspectionFrame = CurrentExecutionFrame with { IsSelectedInspectionFrame = true };
+                return true;
+            }
+        }
+
+        public bool TrySelectFrame(DebugCallStackFrame frame, out string rejectionReason)
+        {
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                if (LifecycleState != DebuggerInspectionLifecycleState.Paused)
+                {
+                    rejectionReason = "Inspection selection requires a paused debugger session.";
+                    return false;
+                }
+
+                if (frame.SessionId != SessionId || frame.PauseGeneration != PauseGeneration)
+                {
+                    rejectionReason = "The selected frame belongs to a different session or pause generation.";
+                    return false;
+                }
+
+                if (!_validFrameIds.Contains(frame.FrameId))
+                {
+                    rejectionReason = "The selected frame is not part of the active call stack.";
+                    return false;
+                }
+
+                InvalidateRequestsLocked();
+                SelectedInspectionFrame = frame.Identity with
+                {
+                    IsCurrentFrame = CurrentExecutionFrame?.FrameId == frame.FrameId,
+                    IsSelectedInspectionFrame = true
+                };
+                rejectionReason = string.Empty;
+                return true;
+            }
+        }
+
+        public DebuggerInspectionRequest BeginRequest(string? frameId = null)
+        {
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                if (LifecycleState != DebuggerInspectionLifecycleState.Paused || SessionId == Guid.Empty)
+                {
+                    throw new InvalidOperationException("Inspection requests require a paused debugger session.");
+                }
+
+                InvalidateRequestsLocked();
+                _requestCancellation = new CancellationTokenSource();
+                var requestGeneration = Interlocked.Increment(ref _requestGeneration);
+                return new DebuggerInspectionRequest(
+                    new DebuggerInspectionRequestIdentity(SessionId, PauseGeneration, requestGeneration, frameId),
+                    _requestCancellation.Token);
+            }
+        }
+
+        public bool IsCurrent(DebuggerInspectionRequestIdentity identity)
+        {
+            lock (_gate)
+            {
+                return !_disposed &&
+                       LifecycleState == DebuggerInspectionLifecycleState.Paused &&
+                       identity.SessionId != Guid.Empty &&
+                       identity.SessionId == SessionId &&
+                       identity.PauseGeneration == PauseGeneration &&
+                       identity.RequestGeneration == RequestGeneration &&
+                       (identity.FrameId is null || _validFrameIds.Contains(identity.FrameId));
+            }
+        }
+
+        public IReadOnlyList<DebugCallStackFrame> ApplySelection(IReadOnlyList<DebugCallStackFrame> callStack)
+        {
+            lock (_gate)
+            {
+                var currentFrameId = CurrentExecutionFrame?.FrameId;
+                var selectedFrameId = SelectedInspectionFrame?.FrameId;
+                return callStack.Select(frame => frame with
+                {
+                    IsCurrentFrame = string.Equals(frame.FrameId, currentFrameId, StringComparison.Ordinal),
+                    IsSelectedInspectionFrame = string.Equals(frame.FrameId, selectedFrameId, StringComparison.Ordinal)
+                }).ToArray();
+            }
+        }
+
+        public void BeginExecution()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                InvalidateRequestsLocked();
+                CurrentExecutionFrame = null;
+                SelectedInspectionFrame = null;
+                _validFrameIds.Clear();
+                LifecycleState = DebuggerInspectionLifecycleState.Executing;
+            }
+        }
+
+        public void Stop()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                InvalidateRequestsLocked();
+                SessionId = Guid.Empty;
+                PauseGeneration = 0;
+                CurrentExecutionFrame = null;
+                SelectedInspectionFrame = null;
+                _validFrameIds.Clear();
+                LifecycleState = DebuggerInspectionLifecycleState.Stopped;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                InvalidateRequestsLocked();
+                _disposed = true;
+                SessionId = Guid.Empty;
+                PauseGeneration = 0;
+                CurrentExecutionFrame = null;
+                SelectedInspectionFrame = null;
+                _validFrameIds.Clear();
+                LifecycleState = DebuggerInspectionLifecycleState.Empty;
+            }
+        }
+
+        private void InvalidateRequestsLocked()
+        {
+            var requestCancellation = _requestCancellation;
+            _requestCancellation = null;
+            if (requestCancellation is not null)
+            {
+                requestCancellation.Cancel();
+                requestCancellation.Dispose();
+            }
+
+            Interlocked.Increment(ref _requestGeneration);
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(nameof(DebuggerInspectionContext));
+            }
         }
     }
 }

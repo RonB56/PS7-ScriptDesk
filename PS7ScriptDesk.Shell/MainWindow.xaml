@@ -2316,6 +2316,7 @@
                                               FontSize="12">
                                         <DataGrid.Columns>
                                             <DataGridCheckBoxColumn Header="Current" Binding="{Binding IsCurrentFrame}" Width="52" IsReadOnly="True" />
+                                            <DataGridCheckBoxColumn Header="Selected" Binding="{Binding IsSelectedInspectionFrame}" Width="60" IsReadOnly="True" />
                                             <DataGridTextColumn Header="Function" Binding="{Binding FunctionName}" Width="100" />
                                             <DataGridTextColumn Header="Script"   Binding="{Binding DisplayScriptName}"   Width="*" />
                                             <DataGridTextColumn Header="Line"     Binding="{Binding DisplayLineNumber}"   Width="175" />

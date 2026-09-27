@@ -375,7 +375,8 @@ namespace PS7ScriptDesk.Shell
         private bool _isSynchronizingBottomToolWindowTab;
         private Rect? _lastBottomToolWindowBounds;
         private IReadOnlyList<DebugCallStackFrame>? _currentDebugCallStack;
-        private string? _selectedDebugFrameId;
+        private readonly DebuggerInspectionContext _debugInspectionContext = new();
+        private bool _isSynchronizingDebugFrameSelection;
         private ObservableCollection<BreakpointRow>? _currentBreakpointRows;
         private int _selectedDebugTabIndex;
         private bool _isSynchronizingDebugTabSelection;
@@ -7972,6 +7973,7 @@ namespace PS7ScriptDesk.Shell
                 TraceDebugShell("StartDebug_Click", $"Launch plan prepared; tab='{selectedTab.Title}'; launchPath='{Path.GetFileName(launchScriptPath)}'; breakpointCount={breakpoints.Count}; before session creation; {DescribeDebugUiState()}");
                 var debugSession = new PsesDebugSession();
                 _debugSession = debugSession;
+                _debugInspectionContext.BeginSession(debugSession.SessionId);
                 _activeDebugTab = selectedTab;
                 _activeDebugLaunchPath = launchScriptPath;
                 _activeDebugSourceMap = BuildDebugSourceMap(debugSession.SessionId, launchScriptPath, selectedTab);
@@ -8230,6 +8232,7 @@ namespace PS7ScriptDesk.Shell
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
+                _debugInspectionContext.BeginExecution();
                 InvalidateDebugPanelRefresh("StepInto requested");
                 ClearLiveDebugVariableCache("StepInto requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping in...";
@@ -8247,6 +8250,7 @@ namespace PS7ScriptDesk.Shell
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
+                _debugInspectionContext.BeginExecution();
                 InvalidateDebugPanelRefresh("StepOver requested");
                 ClearLiveDebugVariableCache("StepOver requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping over...";
@@ -8265,6 +8269,7 @@ namespace PS7ScriptDesk.Shell
                 var previousPauseGeneration = debugSession.PauseGeneration;
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
+                _debugInspectionContext.BeginExecution();
                 InvalidateDebugPanelRefresh("StepOut requested");
                 ClearLiveDebugVariableCache("StepOut requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping out...";
@@ -8282,6 +8287,7 @@ namespace PS7ScriptDesk.Shell
             {
                 RefreshDebugCommandAvailability(false);
                 ClearDebugCurrentLine();
+                _debugInspectionContext.BeginExecution();
                 InvalidateDebugPanelRefresh("Continue requested");
                 ClearLiveDebugVariableCache("Continue requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Continuing...";
@@ -8787,12 +8793,13 @@ namespace PS7ScriptDesk.Shell
 
             if (isPaused && ViewModel is not null)
             {
+                _debugInspectionContext.PreparePaused(debugSession.SessionId, debugSession.PauseGeneration);
                 ViewModel.StatusText = "Debug session paused — choose Continue, Step Over, Step Into, Step Out, or Stop Debug";
                 ScheduleDebugPanelRefresh("StateChangedPaused");
             }
             else
             {
-                _selectedDebugFrameId = null;
+                _debugInspectionContext.BeginExecution();
                 ClearDebugPanels();
                 ClearLiveDebugVariableCache($"Debug session state changed to {actualState}");
             }
@@ -8800,16 +8807,38 @@ namespace PS7ScriptDesk.Shell
 
         private void DebugCallStackGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (DebugCallStackGrid.SelectedItem is not DebugCallStackFrame selectedFrame ||
-                _debugSession is null ||
-                _debugSession.CurrentState != DebugSessionState.Paused ||
-                selectedFrame.SessionId != _debugSession.SessionId ||
-                selectedFrame.PauseGeneration != _debugSession.PauseGeneration)
+            if (_isSynchronizingDebugFrameSelection || sender is not DataGrid grid || grid.SelectedItem is not DebugCallStackFrame selectedFrame)
             {
                 return;
             }
 
-            _selectedDebugFrameId = selectedFrame.FrameId;
+            HandleDebugCallStackFrameSelection(selectedFrame, grid == DebugCallStackGrid ? "DockedCallStack" : "FloatingCallStack");
+        }
+
+        private void HandleDebugCallStackFrameSelection(DebugCallStackFrame selectedFrame, string source)
+        {
+            var rejectionReason = "No active paused debugger session.";
+            var selectionAccepted = _debugSession is not null &&
+                _debugSession.CurrentState == DebugSessionState.Paused &&
+                _debugInspectionContext.TrySelectFrame(selectedFrame, out rejectionReason);
+            if (!selectionAccepted)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "CallStackFrameSelection",
+                    "Call stack frame selection was rejected because it was not valid for the active inspection context.",
+                    "Rejected",
+                    new Dictionary<string, object?>
+                    {
+                        ["source"] = source,
+                        ["frameId"] = selectedFrame.FrameId,
+                        ["rejectionReason"] = rejectionReason
+                    });
+                return;
+            }
+
+            var updatedCallStack = _debugInspectionContext.ApplySelection(_currentDebugCallStack ?? new[] { selectedFrame });
+            ApplyDebugCallStackItemsSource(updatedCallStack, $"FrameSelected:{source}", null);
             var navigationAllowed = selectedFrame.IsNavigable &&
                 selectedFrame.MappedSourceLine is > 0 &&
                 selectedFrame.MappedSourceDocumentId.HasValue;
@@ -8822,7 +8851,10 @@ namespace PS7ScriptDesk.Shell
                     ["pauseGeneration"] = selectedFrame.PauseGeneration,
                     ["frameIndex"] = selectedFrame.FrameIndex,
                     ["navigationAllowed"] = navigationAllowed,
-                    ["variablesScope"] = "Current"
+                    ["variablesScope"] = "Current",
+                    ["currentFrameId"] = _debugInspectionContext.CurrentExecutionFrame?.FrameId,
+                    ["selectedFrameId"] = _debugInspectionContext.SelectedInspectionFrame?.FrameId,
+                    ["source"] = source
                 });
 
             if (navigationAllowed)
@@ -8875,6 +8907,7 @@ namespace PS7ScriptDesk.Shell
             _debugSessionStateChangedHandler = null;
             _debugSessionTypedEventHandler = null;
             _debugSessionTerminatedHandler = null;
+            _debugInspectionContext.Stop();
             Interlocked.Increment(ref _debugPanelRefreshVersion);
             _debugSession = null;
             _activeDebugTab = null;
@@ -13479,6 +13512,7 @@ namespace PS7ScriptDesk.Shell
             _debugPaneWindow = debugPaneWindow;
             debugPaneWindow.DockBackRequested += DebugPaneWindow_DockBackRequested;
             debugPaneWindow.SelectedTabIndexChanged += DebugPaneWindow_SelectedTabIndexChanged;
+            debugPaneWindow.CallStackFrameSelectionChanged += DebugPaneWindow_CallStackFrameSelectionChanged;
             debugPaneWindow.RemoveSelectedBreakpointRequested += DebugPaneWindow_RemoveSelectedBreakpointRequested;
             debugPaneWindow.Closed += DebugPaneWindow_Closed;
             debugPaneWindow.LocationChanged += DebugPaneWindow_LocationChanged;
@@ -13544,6 +13578,11 @@ namespace PS7ScriptDesk.Shell
             SyncDebugPaneTabSelection(e.SelectedIndex, "FloatingWindowTabControl");
         }
 
+        private void DebugPaneWindow_CallStackFrameSelectionChanged(object? sender, DebugCallStackFrameSelectionChangedEventArgs e)
+        {
+            HandleDebugCallStackFrameSelection(e.Frame, "FloatingCallStack");
+        }
+
         private void DebugPaneWindow_RemoveSelectedBreakpointRequested(object? sender, EventArgs e)
         {
             if (sender is DebugPaneWindow debugPaneWindow)
@@ -13563,6 +13602,7 @@ namespace PS7ScriptDesk.Shell
 
             if (ReferenceEquals(_debugPaneWindow, debugPaneWindow))
             {
+                debugPaneWindow.CallStackFrameSelectionChanged -= DebugPaneWindow_CallStackFrameSelectionChanged;
                 _debugPaneWindow = null;
                 ApplyDebugPanePresentationState();
                 ApplyDebugPaneItemsSources("FloatingWindowClosed");
@@ -13799,21 +13839,43 @@ namespace PS7ScriptDesk.Shell
         private void ApplyDebugCallStackItemsSource(IReadOnlyList<DebugCallStackFrame>? callStack, string reason, int? refreshVersion)
         {
             _currentDebugCallStack = callStack;
-            DebugCallStackGrid.ItemsSource = callStack;
-
-            if (_debugPaneWindow is not null)
+            _isSynchronizingDebugFrameSelection = true;
+            try
             {
-                _debugPaneWindow.DebugCallStackGrid.ItemsSource = callStack;
-                DeveloperDiagnostics.LogInfo(
-                    "Debugger",
-                    "Debug Call Stack synchronized to floating window.",
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = reason,
-                        ["refreshVersion"] = refreshVersion,
-                        ["callStackCount"] = callStack?.Count ?? 0
-                    });
+                DebugCallStackGrid.ItemsSource = callStack;
+                SelectDebugFrameInGrid(DebugCallStackGrid, callStack);
+
+                if (_debugPaneWindow is not null)
+                {
+                    _debugPaneWindow.DebugCallStackGrid.ItemsSource = callStack;
+                    SelectDebugFrameInGrid(_debugPaneWindow.DebugCallStackGrid, callStack);
+                    DeveloperDiagnostics.LogInfo(
+                        "Debugger",
+                        "Debug Call Stack synchronized to floating window.",
+                        new Dictionary<string, object?>
+                        {
+                            ["reason"] = reason,
+                            ["refreshVersion"] = refreshVersion,
+                            ["callStackCount"] = callStack?.Count ?? 0,
+                            ["selectedFrameId"] = _debugInspectionContext.SelectedInspectionFrame?.FrameId
+                        });
+                }
             }
+            finally
+            {
+                _isSynchronizingDebugFrameSelection = false;
+            }
+        }
+
+        private static void SelectDebugFrameInGrid(DataGrid grid, IReadOnlyList<DebugCallStackFrame>? callStack)
+        {
+            if (callStack is null)
+            {
+                grid.SelectedItem = null;
+                return;
+            }
+
+            grid.SelectedItem = callStack.FirstOrDefault(frame => frame.IsSelectedInspectionFrame);
         }
 
         private void ApplyDebugBreakpointsItemsSource(ObservableCollection<BreakpointRow>? breakpoints, string reason)
@@ -13853,6 +13915,18 @@ namespace PS7ScriptDesk.Shell
             }
 
             var refreshVersion = Interlocked.Increment(ref _debugPanelRefreshVersion);
+            DebuggerInspectionRequest request;
+            try
+            {
+                _debugInspectionContext.PreparePaused(debugSession.SessionId, debugSession.PauseGeneration);
+                request = _debugInspectionContext.BeginRequest();
+            }
+            catch (InvalidOperationException ex)
+            {
+                DeveloperDiagnostics.LogDecision("Debugger", "ScheduleDebugPanelRefresh", "Debug panel refresh was skipped because no paused inspection context was available.", "SkippedNoInspectionContext", new Dictionary<string, object?> { ["reason"] = reason, ["message"] = ex.Message });
+                return;
+            }
+
             TraceDebugShell("ScheduleDebugPanelRefresh", $"Scheduled; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
             DeveloperDiagnostics.LogInfo(
                 "Debugger",
@@ -13865,7 +13939,7 @@ namespace PS7ScriptDesk.Shell
                     ["hasCurrentDebugLocation"] = HasActiveDebugCurrentLocation()
                 });
 
-            _ = RefreshDebugPanelsAsync(debugSession, refreshVersion, reason).ContinueWith(
+            _ = RefreshDebugPanelsAsync(debugSession, refreshVersion, reason, request).ContinueWith(
                 task =>
                 {
                     if (task.Exception is not null)
@@ -13969,11 +14043,12 @@ namespace PS7ScriptDesk.Shell
         /// Queries variables and call stack from the live debug session and populates
         /// the Variables and Call Stack grids when the session remains paused.
         /// </summary>
-        private async Task RefreshDebugPanelsAsync(IDebugSession debugSession, int refreshVersion, string reason)
+        private async Task RefreshDebugPanelsAsync(IDebugSession debugSession, int refreshVersion, string reason, DebuggerInspectionRequest request)
         {
             try
             {
-                await Task.Delay(250).ConfigureAwait(false);
+                await Task.Delay(250, request.CancellationToken).ConfigureAwait(false);
+                request.CancellationToken.ThrowIfCancellationRequested();
 
                 var preQuerySnapshot = await GetDebugPanelRefreshSnapshotOnUiThreadAsync(debugSession, refreshVersion, reason, "AfterDelay").ConfigureAwait(false);
                 if (preQuerySnapshot is null)
@@ -13989,12 +14064,19 @@ namespace PS7ScriptDesk.Shell
                     return;
                 }
 
+                if (!_debugInspectionContext.IsCurrent(request.Identity))
+                {
+                    DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was skipped because its inspection request was stale before querying.", "SkippedStaleInspectionRequest", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
+                    return;
+                }
+
                 DeveloperDiagnostics.LogInfo("Debugger", "Debug variable query starting.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
                 TraceDebugShell("RefreshDebugPanelsAsync", $"Variables query starting; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
                 IReadOnlyList<DebugVariableInfo> variables;
                 try
                 {
                     variables = await debugSession.GetVariablesAsync().ConfigureAwait(false);
+                    request.CancellationToken.ThrowIfCancellationRequested();
                 }
                 catch (Exception ex)
                 {
@@ -14018,12 +14100,19 @@ namespace PS7ScriptDesk.Shell
                     return;
                 }
 
+                if (!_debugInspectionContext.IsCurrent(request.Identity))
+                {
+                    DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was skipped because its inspection request became stale after variables were queried.", "SkippedStaleInspectionRequest", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
+                    return;
+                }
+
                 DeveloperDiagnostics.LogInfo("Debugger", "Debug call stack query starting.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
                 TraceDebugShell("RefreshDebugPanelsAsync", $"Call stack query starting; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
                 IReadOnlyList<DebugCallStackFrame> callStack;
                 try
                 {
                     callStack = await debugSession.GetCallStackAsync().ConfigureAwait(false);
+                    request.CancellationToken.ThrowIfCancellationRequested();
                 }
                 catch (Exception ex)
                 {
@@ -14048,7 +14137,14 @@ namespace PS7ScriptDesk.Shell
                         return;
                     }
 
+                    if (!_debugInspectionContext.IsCurrent(request.Identity) || !_debugInspectionContext.PublishCallStack(callStack))
+                    {
+                        DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Inspection results were rejected because the request or call stack belonged to an older inspection context.", "SkippedStaleInspectionRequest", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
+                        return;
+                    }
+
                     callStack = callStack.Select(ApplyDebugSourceMapping).ToArray();
+                    callStack = _debugInspectionContext.ApplySelection(callStack);
 
                     var resultSessionId = debugSession.SessionId;
                     var resultPauseGeneration = debugSession.PauseGeneration;
@@ -14117,6 +14213,12 @@ namespace PS7ScriptDesk.Shell
             }
             catch (Exception ex)
             {
+                if (ex is OperationCanceledException)
+                {
+                    DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was cancelled because its inspection context was invalidated.", "CancelledStaleInspectionRequest", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
+                    return;
+                }
+
                 TraceDebugShell("RefreshDebugPanelsAsync", $"Failed; reason={reason}; exceptionType={ex.GetType().Name}; message={ex.Message}; refreshVersion={refreshVersion}; currentVersion={Volatile.Read(ref _debugPanelRefreshVersion)}; {DescribeDebugUiState()}");
                 DeveloperDiagnostics.LogException("Debugger", ex, "Debug panel refresh failed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
                 ClearLiveDebugVariableCache($"Debug panel refresh failed: {reason}");

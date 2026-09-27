@@ -20,6 +20,8 @@ namespace PS7ScriptDesk.Shell.Debug
 
         public event EventHandler<DebugPaneTabChangedEventArgs>? SelectedTabIndexChanged;
 
+        public event EventHandler<DebugCallStackFrameSelectionChangedEventArgs>? CallStackFrameSelectionChanged;
+
         public event EventHandler? RemoveSelectedBreakpointRequested;
 
         public int SelectedTabIndex => DebugTabControl.SelectedIndex;
@@ -82,6 +84,14 @@ namespace PS7ScriptDesk.Shell.Debug
             SelectedTabIndexChanged?.Invoke(this, new DebugPaneTabChangedEventArgs(DebugTabControl.SelectedIndex));
         }
 
+        private void DebugCallStackGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (DebugCallStackGrid.SelectedItem is DebugCallStackFrame frame)
+            {
+                CallStackFrameSelectionChanged?.Invoke(this, new DebugCallStackFrameSelectionChangedEventArgs(frame));
+            }
+        }
+
         private void RemoveSelectedBreakpointButton_Click(object sender, RoutedEventArgs e)
         {
             RemoveSelectedBreakpointRequested?.Invoke(this, EventArgs.Empty);
@@ -108,5 +118,15 @@ namespace PS7ScriptDesk.Shell.Debug
         }
 
         public int SelectedIndex { get; }
+    }
+
+    public sealed class DebugCallStackFrameSelectionChangedEventArgs : EventArgs
+    {
+        public DebugCallStackFrameSelectionChangedEventArgs(DebugCallStackFrame frame)
+        {
+            Frame = frame;
+        }
+
+        public DebugCallStackFrame Frame { get; }
     }
 }
