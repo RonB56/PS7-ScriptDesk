@@ -187,6 +187,95 @@ public sealed class LiveDebuggerIntegrationTests
     }
 
     [Fact(Timeout = 60000)]
+    public async Task RealPowerShellDebugger_LineBreakpointNestedFrameCapturesCurrentLocals()
+    {
+        var runtime = FindRuntime();
+        if (runtime is null)
+        {
+            throw SkipException.ForSkip("No validated PowerShell 7 runtime was discovered.");
+        }
+
+        var root = Directory.CreateTempSubdirectory("PS7ScriptDesk-LineBreakpointFrameVariables-");
+        try
+        {
+            var scriptPath = Path.Combine(root.FullName, "line-breakpoint-nested.ps1");
+            var lines = new[]
+            {
+                "function FunctionA([string]$ParamA) {",
+                "    $LocalA = 'LOCAL-A'",
+                "    FunctionB 'PARAM-B'",
+                "}",
+                "",
+                "function FunctionB([string]$ParamB) {",
+                "    $LocalB = 'LOCAL-B'",
+                "    FunctionC 'PARAM-C'",
+                "}",
+                "",
+                "function FunctionC([string]$ParamC) {",
+                "    $LocalC = 'LOCAL-C'",
+                "    $NumberC = 333",
+                "    $ArrayC = @(1, 2, 3)",
+                "    $ObjectC = [pscustomobject]@{ Name = 'OBJECT-C' }",
+                "    $BreakHere = 'BREAKPOINT-HERE'",
+                "    Write-Output $BreakHere",
+                "}",
+                "FunctionA 'PARAM-A'"
+            };
+            var script = string.Join(Environment.NewLine, lines) + Environment.NewLine;
+            await File.WriteAllTextAsync(scriptPath, script);
+
+            using var session = new PsesDebugSession();
+            var recorder = new EventRecorder(session);
+            await session.StartAsync(runtime, scriptPath, new[] { new DebugBreakpointInfo(scriptPath, 17) });
+            await recorder.WaitForStateAsync(DebugSessionState.Paused);
+
+            var callStack = await session.GetCallStackAsync();
+            var functionC = Assert.Single(callStack, frame => frame.FunctionName == "FunctionC");
+            var functionB = Assert.Single(callStack, frame => frame.FunctionName == "FunctionB");
+            var functionA = Assert.Single(callStack, frame => frame.FunctionName == "FunctionA");
+            Assert.True(functionC.IsCurrentFrame);
+
+            var current = await session.GetFrameVariablesAsync(
+                new DebuggerFrameInspectionIdentity(session.SessionId, session.PauseGeneration, 1, functionC.FrameId, functionC.FrameIndex)
+                {
+                    ThreadId = functionC.ThreadId,
+                    ProviderFrameId = functionC.ProviderFrameId
+                });
+            var outer = await session.GetFrameVariablesAsync(
+                new DebuggerFrameInspectionIdentity(session.SessionId, session.PauseGeneration, 2, functionB.FrameId, functionB.FrameIndex)
+                {
+                    ThreadId = functionB.ThreadId,
+                    ProviderFrameId = functionB.ProviderFrameId
+                });
+
+            var scopeDiagnostic = await session.QueryCurrentProviderScopeDiagnosticAsync();
+            Assert.Equal("System.Management.Automation.CallStackFrame", scopeDiagnostic.FrameType);
+            Assert.Equal("FunctionC", scopeDiagnostic.FrameFunctionName);
+            Assert.Contains("ParamC", scopeDiagnostic.GetVariableScopeZeroNames);
+            Assert.Contains("LocalC", scopeDiagnostic.GetVariableScopeZeroNames);
+            Assert.Contains("NumberC", scopeDiagnostic.GetVariableScopeZeroNames);
+            Assert.DoesNotContain("LocalA", scopeDiagnostic.GetVariableScopeZeroNames);
+            Assert.DoesNotContain("LocalB", scopeDiagnostic.GetVariableScopeZeroNames);
+            Assert.True(scopeDiagnostic.DirectParamCPresent && scopeDiagnostic.DirectLocalCPresent && scopeDiagnostic.DirectNumberCPresent);
+            Assert.Equal(DebuggerVariableAvailability.Available, current.Availability);
+            Assert.Contains(current.Variables, variable => variable.Name == "ParamC" && variable.Value == "PARAM-C");
+            Assert.Contains(current.Variables, variable => variable.Name == "LocalC" && variable.Value == "LOCAL-C");
+            Assert.Contains(current.Variables, variable => variable.Name == "NumberC" && variable.Value == "333");
+            Assert.Contains(current.Variables, variable => variable.Name == "ArrayC");
+            Assert.Contains(current.Variables, variable => variable.Name == "ObjectC");
+            Assert.Contains(current.Variables, variable => variable.Name == "BreakHere" && variable.Value == "BREAKPOINT-HERE");
+            Assert.Equal(DebuggerVariableAvailability.Unavailable, outer.Availability);
+            Assert.DoesNotContain(current.Variables, variable => variable.Name == "LocalA" || variable.Name == "LocalB");
+            Assert.Equal(functionC.ProviderFrameId, callStack.Single(frame => frame.IsCurrentFrame).ProviderFrameId);
+            Assert.False(functionA.IsCurrentFrame);
+        }
+        finally
+        {
+            root.Delete(true);
+        }
+    }
+
+    [Fact(Timeout = 60000)]
     public async Task RealPowerShellDebugger_InspectsDistinctNestedFrameVariables()
     {
         var runtime = FindRuntime();
@@ -250,6 +339,8 @@ public sealed class LiveDebuggerIntegrationTests
             Assert.Contains(variablesC.Variables, variable => variable.Name == "ArrayC");
             Assert.Contains(variablesC.Variables, variable => variable.Name == "ObjectC");
             Assert.Contains(variablesC.Variables, variable => variable.Name == "BreakHere" && variable.Value == "BREAKPOINT-HERE");
+            Assert.Contains(variablesC.Variables, variable => variable.Name == "args");
+            Assert.Contains(variablesC.Variables, variable => variable.Name == "MyInvocation");
             Assert.DoesNotContain(variablesC.Variables, variable => variable.Name == "LocalA" || variable.Name == "LocalB");
             Assert.Equal(DebugSessionState.Paused, session.CurrentState);
             Assert.Equal(functionC.ProviderFrameId, callStack.Single(frame => frame.IsCurrentFrame).ProviderFrameId);

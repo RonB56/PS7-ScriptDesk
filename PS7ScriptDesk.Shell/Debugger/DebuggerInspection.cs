@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using PS7ScriptDesk.Application.Diagnostics;
 
 namespace PS7ScriptDesk.Shell.Debug
 {
@@ -187,6 +188,8 @@ namespace PS7ScriptDesk.Shell.Debug
             lock (_gate)
             {
                 ThrowIfDisposed();
+                var previousSelectedFrame = SelectedInspectionFrame;
+                var previousCurrentFrame = CurrentExecutionFrame;
                 InvalidateRequestsLocked();
                 SessionId = sessionId;
                 PauseGeneration = 0;
@@ -194,6 +197,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 SelectedInspectionFrame = null;
                 _validFrameIds.Clear();
                 LifecycleState = DebuggerInspectionLifecycleState.Starting;
+                LogSelectionTransition(previousSelectedFrame, null, "StopClear", "BeginSession", previousCurrentFrame);
             }
         }
 
@@ -212,6 +216,8 @@ namespace PS7ScriptDesk.Shell.Debug
                     return;
                 }
 
+                var previousSelectedFrame = SelectedInspectionFrame;
+                var previousCurrentFrame = CurrentExecutionFrame;
                 InvalidateRequestsLocked();
                 SessionId = sessionId;
                 PauseGeneration = pauseGeneration;
@@ -219,6 +225,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 SelectedInspectionFrame = null;
                 _validFrameIds.Clear();
                 LifecycleState = DebuggerInspectionLifecycleState.Paused;
+                LogSelectionTransition(previousSelectedFrame, null, "NewPauseInitialization", "PreparePaused", previousCurrentFrame);
             }
         }
 
@@ -253,8 +260,36 @@ namespace PS7ScriptDesk.Shell.Debug
                     return false;
                 }
 
+                var previousSelectedFrame = SelectedInspectionFrame;
                 CurrentExecutionFrame = current.Identity with { IsCurrentFrame = true };
-                SelectedInspectionFrame = CurrentExecutionFrame with { IsSelectedInspectionFrame = true };
+                var preservedSelectedFrame = previousSelectedFrame is not null
+                    ? callStack.FirstOrDefault(frame => string.Equals(frame.FrameId, previousSelectedFrame.FrameId, StringComparison.Ordinal))
+                    : null;
+                if (preservedSelectedFrame is not null)
+                {
+                    SelectedInspectionFrame = preservedSelectedFrame.Identity with
+                    {
+                        IsCurrentFrame = string.Equals(preservedSelectedFrame.FrameId, current.FrameId, StringComparison.Ordinal),
+                        IsSelectedInspectionFrame = true
+                    };
+                    LogSelectionTransition(
+                        previousSelectedFrame,
+                        SelectedInspectionFrame,
+                        "CallStackRefreshPreserve",
+                        "PublishCallStack",
+                        CurrentExecutionFrame);
+                }
+                else
+                {
+                    SelectedInspectionFrame = CurrentExecutionFrame with { IsSelectedInspectionFrame = true };
+                    LogSelectionTransition(
+                        previousSelectedFrame,
+                        SelectedInspectionFrame,
+                        previousSelectedFrame is null ? "NewPauseInitialization" : "SelectedFrameMissing",
+                        "PublishCallStack",
+                        CurrentExecutionFrame);
+                }
+
                 return true;
             }
         }
@@ -282,12 +317,14 @@ namespace PS7ScriptDesk.Shell.Debug
                     return false;
                 }
 
+                var previousSelectedFrame = SelectedInspectionFrame;
                 InvalidateRequestsLocked();
                 SelectedInspectionFrame = frame.Identity with
                 {
                     IsCurrentFrame = CurrentExecutionFrame?.FrameId == frame.FrameId,
                     IsSelectedInspectionFrame = true
                 };
+                LogSelectionTransition(previousSelectedFrame, SelectedInspectionFrame, "UserSelection", "TrySelectFrame", CurrentExecutionFrame);
                 rejectionReason = string.Empty;
                 return true;
             }
@@ -349,11 +386,14 @@ namespace PS7ScriptDesk.Shell.Debug
                     return;
                 }
 
+                var previousSelectedFrame = SelectedInspectionFrame;
+                var previousCurrentFrame = CurrentExecutionFrame;
                 InvalidateRequestsLocked();
                 CurrentExecutionFrame = null;
                 SelectedInspectionFrame = null;
                 _validFrameIds.Clear();
                 LifecycleState = DebuggerInspectionLifecycleState.Executing;
+                LogSelectionTransition(previousSelectedFrame, null, "ResumeClear", "BeginExecution", previousCurrentFrame);
             }
         }
 
@@ -366,6 +406,8 @@ namespace PS7ScriptDesk.Shell.Debug
                     return;
                 }
 
+                var previousSelectedFrame = SelectedInspectionFrame;
+                var previousCurrentFrame = CurrentExecutionFrame;
                 InvalidateRequestsLocked();
                 SessionId = Guid.Empty;
                 PauseGeneration = 0;
@@ -373,6 +415,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 SelectedInspectionFrame = null;
                 _validFrameIds.Clear();
                 LifecycleState = DebuggerInspectionLifecycleState.Stopped;
+                LogSelectionTransition(previousSelectedFrame, null, "StopClear", "Stop", previousCurrentFrame);
             }
         }
 
@@ -385,6 +428,8 @@ namespace PS7ScriptDesk.Shell.Debug
                     return;
                 }
 
+                var previousSelectedFrame = SelectedInspectionFrame;
+                var previousCurrentFrame = CurrentExecutionFrame;
                 InvalidateRequestsLocked();
                 _disposed = true;
                 SessionId = Guid.Empty;
@@ -393,6 +438,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 SelectedInspectionFrame = null;
                 _validFrameIds.Clear();
                 LifecycleState = DebuggerInspectionLifecycleState.Empty;
+                LogSelectionTransition(previousSelectedFrame, null, "StopClear", "Dispose", previousCurrentFrame);
             }
         }
 
@@ -407,6 +453,38 @@ namespace PS7ScriptDesk.Shell.Debug
             }
 
             Interlocked.Increment(ref _requestGeneration);
+        }
+
+        private static void LogSelectionTransition(
+            DebugFrameIdentity? previousSelectedFrame,
+            DebugFrameIdentity? selectedFrame,
+            string reason,
+            string source,
+            DebugFrameIdentity? currentExecutionFrame = null)
+        {
+            try
+            {
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Selected inspection frame transition applied.",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["source"] = source,
+                        ["oldSelectedIdentity"] = previousSelectedFrame?.FrameId,
+                        ["newSelectedIdentity"] = selectedFrame?.FrameId,
+                        ["sessionId"] = currentExecutionFrame?.SessionId ?? selectedFrame?.SessionId ?? previousSelectedFrame?.SessionId,
+                        ["pauseGeneration"] = currentExecutionFrame?.PauseGeneration ?? selectedFrame?.PauseGeneration ?? previousSelectedFrame?.PauseGeneration,
+                        ["threadId"] = currentExecutionFrame?.ThreadId ?? selectedFrame?.ThreadId ?? previousSelectedFrame?.ThreadId,
+                        ["providerFrameId"] = selectedFrame?.ProviderFrameId,
+                        ["currentExecutionFrameId"] = currentExecutionFrame?.FrameId,
+                        ["frameIndex"] = selectedFrame?.FrameIndex
+                    });
+            }
+            catch
+            {
+                // Developer diagnostics must never affect debugger state publication.
+            }
         }
 
         private void ThrowIfDisposed()

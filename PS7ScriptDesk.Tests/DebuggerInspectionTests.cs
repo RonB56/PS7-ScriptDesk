@@ -117,6 +117,54 @@ namespace PS7ScriptDesk.Tests
         }
 
         [Fact]
+        public void ContextPreservesSelectedFrameAcrossSamePauseRepublishAndReorder()
+        {
+            var sessionId = Guid.NewGuid();
+            using var context = new DebuggerInspectionContext();
+            context.BeginSession(sessionId);
+            context.PreparePaused(sessionId, 1);
+            var frames = CreateFrames(sessionId, 1);
+
+            Assert.True(context.PublishCallStack(frames));
+            Assert.True(context.TrySelectFrame(frames[2], out var rejectionReason), rejectionReason);
+
+            var republished = new[]
+            {
+                frames[2] with { FrameIndex = 0 },
+                frames[0] with { FrameIndex = 1 },
+                frames[1] with { FrameIndex = 2 }
+            };
+
+            Assert.True(context.PublishCallStack(republished));
+            Assert.Equal(frames[0].FrameId, context.CurrentExecutionFrame?.FrameId);
+            Assert.Equal(frames[2].FrameId, context.SelectedInspectionFrame?.FrameId);
+            Assert.Equal(0, context.SelectedInspectionFrame?.FrameIndex);
+
+            var projected = context.ApplySelection(republished);
+            Assert.True(projected[0].IsSelectedInspectionFrame);
+            Assert.True(projected[1].IsCurrentFrame);
+            Assert.False(projected[1].IsSelectedInspectionFrame);
+        }
+
+        [Fact]
+        public void ContextFallsBackToCurrentOnlyWhenSelectedFrameDisappears()
+        {
+            var sessionId = Guid.NewGuid();
+            using var context = new DebuggerInspectionContext();
+            context.BeginSession(sessionId);
+            context.PreparePaused(sessionId, 1);
+            var frames = CreateFrames(sessionId, 1);
+
+            Assert.True(context.PublishCallStack(frames));
+            Assert.True(context.TrySelectFrame(frames[2], out var rejectionReason), rejectionReason);
+
+            var withoutSelected = new[] { frames[0], frames[1] };
+            Assert.True(context.PublishCallStack(withoutSelected));
+            Assert.Equal(frames[0].FrameId, context.CurrentExecutionFrame?.FrameId);
+            Assert.Equal(frames[0].FrameId, context.SelectedInspectionFrame?.FrameId);
+        }
+
+        [Fact]
         public void ContextRejectsStaleFrameWhenPauseReusesProviderIdentity()
         {
             var sessionId = Guid.NewGuid();
