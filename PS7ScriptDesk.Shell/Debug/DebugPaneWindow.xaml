@@ -57,9 +57,17 @@
                       SelectionChanged="DebugTabControl_SelectionChanged"
                       AutomationProperties.Name="Debugger tool content">
             <TabItem Header="Variables"
-                     ToolTip="Show read-only variables for the current paused execution scope."
+                     ToolTip="Show read-only variables for the selected paused execution frame."
                      help:ContextHelp.Key="Debug.Variables">
-                <DataGrid x:Name="DebugVariablesGrid"
+                <Grid>
+                    <TextBlock x:Name="DebugVariablesContextText"
+                               Text="Variables: no active frame"
+                               Margin="4,2,4,0"
+                               VerticalAlignment="Top"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource Theme.Text.Secondary}" />
+                    <DataGrid x:Name="DebugVariablesGrid"
+                          Margin="0,24,0,0"
                           Style="{DynamicResource IdeToolWindowDataGridStyle}"
                           AutoGenerateColumns="False"
                           IsReadOnly="True"
@@ -74,7 +82,25 @@
                         <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="70" />
                         <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*" />
                     </DataGrid.Columns>
-                </DataGrid>
+                    </DataGrid>
+                    <TextBlock x:Name="DebugVariablesEmptyStateText"
+                               Text="No variables available."
+                               Margin="8,36,8,8"
+                               VerticalAlignment="Center"
+                               HorizontalAlignment="Center"
+                               IsHitTestVisible="False">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock" BasedOn="{DynamicResource IdeEmptyPaneTextStyle}">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasItems, ElementName=DebugVariablesGrid}" Value="False">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Grid>
             </TabItem>
 
             <TabItem Header="Call Stack"

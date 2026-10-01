@@ -6,6 +6,8 @@ namespace PS7ScriptDesk.Shell.Debug
     {
         public Guid SessionId { get; init; }
         public long PauseGeneration { get; init; }
+        public long ThreadId { get; init; }
+        public string ProviderFrameId { get; init; } = string.Empty;
         public string Scope { get; init; } = "Current";
         public string FrameId { get; init; } = string.Empty;
         public bool IsNull { get; init; }

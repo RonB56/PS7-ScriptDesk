@@ -27,6 +27,12 @@ namespace PS7ScriptDesk.Shell.Debug
         Task StepOverAsync();
         Task StepOutAsync();
         Task<IReadOnlyList<DebugVariableInfo>> GetVariablesAsync();
+        Task<IReadOnlyList<DebugVariableInfo>> GetVariablesAsync(
+            DebuggerFrameInspectionIdentity frameIdentity,
+            CancellationToken cancellationToken = default);
+        Task<DebuggerVariableInspectionResult> GetFrameVariablesAsync(
+            DebuggerFrameInspectionIdentity frameIdentity,
+            CancellationToken cancellationToken = default);
         Task<IReadOnlyList<DebugCallStackFrame>> GetCallStackAsync();
         Task<bool> StopAsync(CancellationToken cancellationToken = default);
     }

@@ -17,7 +17,12 @@ namespace PS7ScriptDesk.Shell.Debug
         bool IsSelectedInspectionFrame,
         bool IsNavigable)
     {
-        public string FrameId => $"{SessionId:N}/{PauseGeneration}/{FrameIndex}";
+        public long ThreadId { get; init; }
+        public string ProviderFrameId { get; init; } = string.Empty;
+        public string FrameId => BuildFrameId(SessionId, PauseGeneration, ThreadId, ProviderFrameId);
+
+        public static string BuildFrameId(Guid sessionId, long pauseGeneration, long threadId, string providerFrameId)
+            => $"{sessionId:N}/{pauseGeneration}/thread-{threadId}/frame-{providerFrameId}";
 
         public static DebugFrameIdentity Create(
             Guid sessionId,
@@ -27,10 +32,12 @@ namespace PS7ScriptDesk.Shell.Debug
             string? scriptPath,
             int lineNumber,
             string? invocationName,
-            bool isCurrentFrame)
+            bool isCurrentFrame,
+            long threadId = 1,
+            string? providerFrameId = null)
         {
             var normalizedPath = scriptPath ?? string.Empty;
-            return new DebugFrameIdentity(
+            var identity = new DebugFrameIdentity(
                 sessionId,
                 pauseGeneration,
                 frameIndex,
@@ -41,6 +48,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 isCurrentFrame,
                 isCurrentFrame,
                 lineNumber > 0 && !string.IsNullOrWhiteSpace(normalizedPath) && System.IO.File.Exists(normalizedPath));
+            return identity with { ThreadId = threadId, ProviderFrameId = providerFrameId ?? $"test-frame-{frameIndex}" };
         }
     }
 
@@ -52,11 +60,17 @@ namespace PS7ScriptDesk.Shell.Debug
             Guid resultSessionId,
             long resultPauseGeneration,
             string? resultFrameId = null,
-            string? activeFrameId = null)
+            string? activeFrameId = null,
+            long? resultThreadId = null,
+            long? activeThreadId = null,
+            string? resultProviderFrameId = null,
+            string? activeProviderFrameId = null)
         {
             return activeSessionId != Guid.Empty &&
                    activeSessionId == resultSessionId &&
                    activePauseGeneration == resultPauseGeneration &&
+                   (!activeThreadId.HasValue || activeThreadId == resultThreadId) &&
+                   (activeProviderFrameId is null || string.Equals(activeProviderFrameId, resultProviderFrameId, StringComparison.Ordinal)) &&
                    (activeFrameId is null || string.Equals(activeFrameId, resultFrameId, StringComparison.Ordinal));
         }
     }
@@ -76,9 +90,68 @@ namespace PS7ScriptDesk.Shell.Debug
         long RequestGeneration,
         string? FrameId);
 
+    public sealed record DebuggerFrameInspectionIdentity(
+        Guid SessionId,
+        long PauseGeneration,
+        long RequestGeneration,
+        string FrameId,
+        int FrameIndex)
+    {
+        public long ThreadId { get; init; }
+        public string ProviderFrameId { get; init; } = string.Empty;
+
+        public static DebuggerFrameInspectionIdentity FromFrame(DebugFrameIdentity frame, long requestGeneration)
+            => new(frame.SessionId, frame.PauseGeneration, requestGeneration, frame.FrameId, frame.FrameIndex)
+            {
+                ThreadId = frame.ThreadId,
+                ProviderFrameId = frame.ProviderFrameId
+            };
+    }
+
     public sealed record DebuggerInspectionRequest(
         DebuggerInspectionRequestIdentity Identity,
         CancellationToken CancellationToken);
+
+    public enum DebuggerVariableAvailability
+    {
+        Available = 0,
+        Unavailable = 1,
+        Failed = 2,
+        Stale = 3,
+        Cancelled = 4
+    }
+
+    public enum DebuggerVariableScopeKind
+    {
+        CurrentFrameLocals = 0,
+        SharedScriptOrGlobal = 1,
+        InvocationMetadata = 2,
+        Unavailable = 3
+    }
+
+    /// <summary>
+    /// The truthful result of a frame-scoped variables request. An unavailable
+    /// result is intentionally distinct from an empty, successfully loaded list.
+    /// </summary>
+    public sealed record DebuggerVariableInspectionResult(
+        DebuggerVariableAvailability Availability,
+        DebuggerVariableScopeKind ScopeKind,
+        IReadOnlyList<DebugVariableInfo> Variables,
+        DebuggerFrameInspectionIdentity FrameIdentity,
+        string? Reason = null)
+    {
+        public bool IsAvailable => Availability == DebuggerVariableAvailability.Available;
+
+        public static DebuggerVariableInspectionResult UnavailableFor(
+            DebuggerFrameInspectionIdentity frameIdentity,
+            string reason)
+            => new(
+                DebuggerVariableAvailability.Unavailable,
+                DebuggerVariableScopeKind.Unavailable,
+                Array.Empty<DebugVariableInfo>(),
+                frameIdentity,
+                reason);
+    }
 
     /// <summary>
     /// Owns pause-scoped debugger inspection identity. The shell is the single owner;
@@ -159,7 +232,13 @@ namespace PS7ScriptDesk.Shell.Debug
                     return false;
                 }
 
-                var current = callStack.FirstOrDefault(frame => frame.IsCurrentFrame) ?? callStack[0];
+                var currentFrames = callStack.Where(frame => frame.IsCurrentFrame).ToArray();
+                if (currentFrames.Length != 1)
+                {
+                    return false;
+                }
+
+                var current = currentFrames[0];
                 if (current.SessionId != SessionId || current.PauseGeneration != PauseGeneration)
                 {
                     return false;

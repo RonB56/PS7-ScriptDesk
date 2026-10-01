@@ -121,6 +121,7 @@ namespace PS7ScriptDesk.PowerShell.Services
         private long _nextConPtyReadId;
         private long _nextTerminalOutputChunkId;
         private bool _terminalSessionTeardownInProgress = true;
+        private int? _terminalReaderFaultedGeneration;
         private bool _redirectedTerminalTransportActive;
         private readonly ResizeFailureEpisode _resizeFailureEpisode = new();
         private long _resizeSequence;
@@ -146,7 +147,9 @@ namespace PS7ScriptDesk.PowerShell.Services
             {
                 lock (_syncRoot)
                 {
-                    return IsProcessRunningNoThrow(_process);
+                    return !_terminalSessionTeardownInProgress &&
+                           _terminalReaderFaultedGeneration != _terminalSessionGeneration &&
+                           IsProcessRunningNoThrow(_process);
                 }
             }
         }
@@ -228,6 +231,7 @@ namespace PS7ScriptDesk.PowerShell.Services
             {
                 _terminalSessionGeneration++;
                 _terminalSessionTeardownInProgress = false;
+                _terminalReaderFaultedGeneration = null;
                 _resizeFailureEpisode.ResetForSession(_terminalSessionGeneration);
                 _handledTerminalExitProcessId = null;
                 _pendingStartToken = null;
@@ -1351,6 +1355,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _currentDispatchStartedUtc = null;
                 _handledTerminalExitProcessId = null;
                 _terminalSessionTeardownInProgress = true;
+                _terminalReaderFaultedGeneration = null;
                 _resizeFailureEpisode.ResetForSession(_terminalSessionGeneration);
                 _commandDispatchGeneration++;
             }
@@ -1789,17 +1794,19 @@ namespace PS7ScriptDesk.PowerShell.Services
                 _redirectedTerminalTransportActive = false;
                 _terminalInputRouter.Activate(sessionGeneration, _terminalWriter);
 
-                _readerCancellationTokenSource = new CancellationTokenSource();
+                var readerCancellation = new CancellationTokenSource();
+                var readerOutputHandle = outputReadSide;
+                _readerCancellationTokenSource = readerCancellation;
                 TerminalStartupTrace.Write("CONPTY_READER_TASK_REQUESTED", $"pid={processInformation.dwProcessId}; sessionGeneration={sessionGeneration}");
                 _stdoutReaderTask = Task.Run(
                     () =>
                     {
                         TerminalStartupTrace.Write("CONPTY_READER_TASK_SCHEDULED", $"pid={processInformation.dwProcessId}; sessionGeneration={sessionGeneration}");
                         return ReadPseudoConsoleOutputLoopAsync(
-                            _outputReaderHandle,
+                            readerOutputHandle,
                             onOutput,
                             sessionGeneration,
-                            _readerCancellationTokenSource.Token);
+                            readerCancellation.Token);
                     });
                 TerminalStartupTrace.Write("CONPTY_READER_TASK_CREATED", $"taskCreated={_stdoutReaderTask is not null}; pid={processInformation.dwProcessId}");
                 TerminalStartupTrace.Write("PROCESS_LAUNCH_METHOD_EXIT", $"pid={processInformation.dwProcessId}; sessionGeneration={sessionGeneration}");
@@ -2078,9 +2085,43 @@ namespace PS7ScriptDesk.PowerShell.Services
             int sessionGeneration,
             CancellationToken cancellationToken)
         {
+            var readerInstanceId = Guid.NewGuid().ToString("N");
+            var readerStartedAt = Stopwatch.StartNew();
+            Process? processAtReaderStart;
+            IntPtr pseudoConsoleAtReaderStart;
+            IntPtr outputReaderHandleAtReaderStart;
+            bool teardownAtReaderStart;
+            bool hostAttachedAtReaderStart;
+            long totalCharsRead = 0;
+            bool receivedAnyBytes = false;
+            lock (_syncRoot)
+            {
+                processAtReaderStart = _process;
+                pseudoConsoleAtReaderStart = _pseudoConsoleHandle;
+                outputReaderHandleAtReaderStart = _outputReaderHandle;
+                teardownAtReaderStart = _terminalSessionTeardownInProgress;
+                hostAttachedAtReaderStart = _hostAttached;
+            }
+
+            TerminalCriticalTrace.LogStage(
+                "ConPTY.Reader.StartBoundary",
+                new Dictionary<string, object?>
+                {
+                    ["readerInstanceId"] = readerInstanceId,
+                    ["terminalSessionGeneration"] = sessionGeneration,
+                    ["outputReaderHandleArgumentValid"] = outputReaderHandle != IntPtr.Zero,
+                    ["outputReaderHandleTrackedValid"] = outputReaderHandleAtReaderStart != IntPtr.Zero,
+                    ["pseudoConsoleHandleValid"] = pseudoConsoleAtReaderStart != IntPtr.Zero,
+                    ["cancellationRequested"] = cancellationToken.IsCancellationRequested,
+                    ["childProcessId"] = TryGetProcessId(processAtReaderStart),
+                    ["childProcessAlive"] = IsProcessRunningNoThrow(processAtReaderStart),
+                    ["teardownInProgress"] = teardownAtReaderStart,
+                    ["hostAttached"] = hostAttachedAtReaderStart,
+                    ["terminalReaderFaultedGeneration"] = _terminalReaderFaultedGeneration
+                });
             try
             {
-                TerminalStartupTrace.Write("CONPTY_READER_STARTED", $"sessionGeneration={sessionGeneration}; cancellationRequested={cancellationToken.IsCancellationRequested}");
+                TerminalStartupTrace.Write("CONPTY_READER_STARTED", $"readerInstanceId={readerInstanceId}; sessionGeneration={sessionGeneration}; cancellationRequested={cancellationToken.IsCancellationRequested}; outputReaderHandleValid={outputReaderHandle != IntPtr.Zero}; pseudoConsoleHandleValid={pseudoConsoleAtReaderStart != IntPtr.Zero}; childPid={TryGetProcessId(processAtReaderStart)?.ToString() ?? "?"}");
                 TerminalCriticalTrace.LogStage(
                     "ConPTY.ReadLoop.Begin",
                     new Dictionary<string, object?>
@@ -2112,6 +2153,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                     }
 
                     TerminalStartupTrace.FirstRead($"chars={charsRead}; sessionGeneration={sessionGeneration}");
+                    totalCharsRead += charsRead;
+                    receivedAnyBytes = true;
                     if (charsRead > 0)
                     {
                         TerminalStartupTrace.FirstNonEmptyOutput($"chars={charsRead}; sessionGeneration={sessionGeneration}; contentOmitted=true");
@@ -2132,7 +2175,10 @@ namespace PS7ScriptDesk.PowerShell.Services
                         ? Interlocked.Increment(ref _nextConPtyReadId)
                         : null;
                     var readChunk = new string(buffer, 0, charsRead);
-                    TerminalOutputCorrelationTrace.RecordRawRead(sessionGeneration, readChunk, readId!.Value);
+                    if (readId is { } performanceReadId)
+                    {
+                        TerminalOutputCorrelationTrace.RecordRawRead(sessionGeneration, readChunk, performanceReadId);
+                    }
 
                     if (!_firstOutputLogged)
                     {
@@ -2180,8 +2226,31 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
             catch (Exception ex)
             {
-                TerminalStartupTrace.Write("CONPTY_READER_TASK_FAULTED", $"exception={ex.GetType().Name}; message={ex.Message}; stack={ex.StackTrace}");
-                if (IsCurrentSessionGeneration(sessionGeneration))
+                var isCurrentGeneration = IsCurrentSessionGeneration(sessionGeneration);
+                Process? processAtFailure;
+                IntPtr pseudoConsoleAtFailure;
+                IntPtr outputReaderHandleAtFailure;
+                bool teardownAtFailure;
+                bool hostAttachedAtFailure;
+                int? faultedGeneration;
+                lock (_syncRoot)
+                {
+                    processAtFailure = _process;
+                    pseudoConsoleAtFailure = _pseudoConsoleHandle;
+                    outputReaderHandleAtFailure = _outputReaderHandle;
+                    teardownAtFailure = _terminalSessionTeardownInProgress;
+                    hostAttachedAtFailure = _hostAttached;
+                    if (isCurrentGeneration && !teardownAtFailure)
+                    {
+                        _terminalReaderFaultedGeneration = sessionGeneration;
+                    }
+
+                    faultedGeneration = _terminalReaderFaultedGeneration;
+                }
+
+                var processIdAtFailure = TryGetProcessId(processAtFailure);
+                TerminalStartupTrace.Write("CONPTY_READER_TASK_FAULTED", $"readerInstanceId={readerInstanceId}; sessionGeneration={sessionGeneration}; isCurrentGeneration={isCurrentGeneration}; exception={ex.GetType().Name}; message={ex.Message}; stack={ex.StackTrace}; childPid={processIdAtFailure?.ToString() ?? "?"}; childAlive={IsProcessRunningNoThrow(processAtFailure)}; pseudoConsoleHandleValid={pseudoConsoleAtFailure != IntPtr.Zero}; outputReaderHandleValid={outputReaderHandleAtFailure != IntPtr.Zero}; cancellationRequested={cancellationToken.IsCancellationRequested}; teardownInProgress={teardownAtFailure}; faultedGeneration={faultedGeneration}; elapsedMs={readerStartedAt.ElapsedMilliseconds}");
+                if (isCurrentGeneration)
                 {
                     TerminalCriticalTrace.LogException(
                         "ConPTY.Reader.FatalException",
@@ -2189,9 +2258,21 @@ namespace PS7ScriptDesk.PowerShell.Services
                         new Dictionary<string, object?>
                         {
                             ["terminalSessionGeneration"] = sessionGeneration,
+                            ["readerInstanceId"] = readerInstanceId,
+                            ["readerElapsedMs"] = readerStartedAt.ElapsedMilliseconds,
+                            ["childProcessId"] = processIdAtFailure,
+                            ["childProcessAlive"] = IsProcessRunningNoThrow(processAtFailure),
+                            ["childProcessExited"] = processAtFailure is not null && !IsProcessRunningNoThrow(processAtFailure),
+                            ["pseudoConsoleHandleValid"] = pseudoConsoleAtFailure != IntPtr.Zero,
+                            ["outputReaderHandleValid"] = outputReaderHandleAtFailure != IntPtr.Zero,
+                            ["hostAttached"] = hostAttachedAtFailure,
+                            ["receivedAnyBytesBeforeFailure"] = receivedAnyBytes,
+                            ["totalCharsReadBeforeFailure"] = totalCharsRead,
+                            ["cancellationRequested"] = cancellationToken.IsCancellationRequested,
+                            ["teardownInProgress"] = teardownAtFailure,
+                            ["faultedGeneration"] = faultedGeneration,
                             ["failureBoundary"] = "ReadPseudoConsoleOutputLoopAsync.outerCatch",
                             ["uiDispatcherTransition"] = "unknown-before-during-or-after",
-                            ["statusMessageUsesExceptionMessageOnly"] = true,
                             ["contentOmitted"] = true
                         });
                     AppLogger.Error("LiveConsole", "ConPTY terminal reader stopped unexpectedly.", ex);

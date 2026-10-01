@@ -2263,10 +2263,17 @@
 
                             <!-- Variables tab -->
                             <TabItem Header="Variables"
-                                     ToolTip="Show read-only variables for the current paused execution scope."
+                                     ToolTip="Show read-only variables for the selected paused execution frame."
                                      help:ContextHelp.Key="Debug.Variables">
                                 <Grid Margin="0,4,0,0">
+                                    <TextBlock x:Name="DebugVariablesContextText"
+                                               Text="Variables: no active frame"
+                                               Margin="4,2,4,0"
+                                               VerticalAlignment="Top"
+                                               FontWeight="SemiBold"
+                                               Foreground="{DynamicResource Theme.Text.Secondary}" />
                                     <DataGrid x:Name="DebugVariablesGrid"
+                                              Margin="0,24,0,0"
                                               help:ContextHelp.Key="Debug.Variables"
                                               Style="{StaticResource IdeToolWindowDataGridStyle}"
                                               AutoGenerateColumns="False"
@@ -2283,7 +2290,7 @@
                                             <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*" />
                                         </DataGrid.Columns>
                                     </DataGrid>
-                                    <TextBlock Text="No variables available.">
+                                    <TextBlock x:Name="DebugVariablesEmptyStateText" Text="No variables available.">
                                         <TextBlock.Style>
                                             <Style TargetType="TextBlock" BasedOn="{StaticResource IdeEmptyPaneTextStyle}">
                                                 <Style.Triggers>

@@ -8862,11 +8862,16 @@ namespace PS7ScriptDesk.Shell
                 SetDebugCurrentLocation(selectedFrame.ScriptName, selectedFrame.LineNumber);
             }
 
+            ApplyDebugVariablesItemsSource(null, $"FrameSelected:{source}", null);
+            ClearLiveDebugVariableCache($"Selected inspection frame changed: {selectedFrame.FrameId}");
+            UpdateDebugVariablesContext(selectedFrame.Identity, "Loading");
+            ScheduleDebugPanelRefresh($"FrameSelected:{source}");
+
             if (ViewModel is not null)
             {
                 ViewModel.StatusText = navigationAllowed
-                    ? $"Selected frame {selectedFrame.FrameIndex}: variables show the current execution frame."
-                    : $"Selected frame {selectedFrame.FrameIndex} has no navigable source location; variables show the current execution frame.";
+                    ? $"Selected frame {selectedFrame.FrameIndex}: loading frame-specific variables."
+                    : $"Selected frame {selectedFrame.FrameIndex} has no navigable source location; loading frame-specific variables.";
             }
         }
 
@@ -13829,10 +13834,60 @@ namespace PS7ScriptDesk.Shell
                         ["reason"] = reason,
                         ["refreshVersion"] = refreshVersion,
                         ["variableCount"] = variables?.Count ?? 0,
+                        ["variableSessionId"] = variables?.FirstOrDefault()?.SessionId,
+                        ["variablePauseGeneration"] = variables?.FirstOrDefault()?.PauseGeneration,
+                        ["variableThreadId"] = variables?.FirstOrDefault()?.ThreadId,
+                        ["variableProviderFrameId"] = variables?.FirstOrDefault()?.ProviderFrameId,
+                        ["variableFrameId"] = variables?.FirstOrDefault()?.FrameId,
                         ["variableNamePreview"] = variables is null
                             ? string.Empty
                             : DeveloperDiagnostics.SanitizePreview(string.Join(", ", variables.Take(12).Select(variable => variable.Name)))
                     });
+            }
+        }
+
+        private void UpdateDebugVariablesAvailability(DebuggerVariableInspectionResult result, string reason, int? refreshVersion)
+        {
+            var emptyStateText = result.Availability switch
+            {
+                DebuggerVariableAvailability.Unavailable => "Variables unavailable for the selected frame.",
+                DebuggerVariableAvailability.Stale => "Variables request is stale; waiting for the active pause.",
+                DebuggerVariableAvailability.Failed => "Variables unavailable because the debugger query failed.",
+                DebuggerVariableAvailability.Cancelled => "Variables request was cancelled.",
+                _ => "No variables available."
+            };
+
+            DebugVariablesEmptyStateText.Text = emptyStateText;
+            if (_debugPaneWindow is not null)
+            {
+                _debugPaneWindow.DebugVariablesEmptyStateText.Text = emptyStateText;
+            }
+
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Debug variable availability state applied.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["refreshVersion"] = refreshVersion,
+                    ["availability"] = result.Availability.ToString(),
+                    ["scopeKind"] = result.ScopeKind.ToString(),
+                    ["frameId"] = result.FrameIdentity.FrameId,
+                    ["frameIndex"] = result.FrameIdentity.FrameIndex,
+                    ["variableCount"] = result.Variables.Count,
+                    ["availabilityReason"] = result.Reason
+                });
+        }
+
+        private void UpdateDebugVariablesContext(DebugFrameIdentity? frame, string state)
+        {
+            var contextText = frame is null
+                ? $"Variables: {state}"
+                : $"Variables: {frame.FunctionName} (frame {frame.FrameIndex}) — {(frame.IsCurrentFrame ? "current execution frame" : "selected inspection frame")}";
+            DebugVariablesContextText.Text = contextText;
+            if (_debugPaneWindow is not null)
+            {
+                _debugPaneWindow.DebugVariablesContextText.Text = contextText;
             }
         }
 
@@ -14070,20 +14125,115 @@ namespace PS7ScriptDesk.Shell
                     return;
                 }
 
-                DeveloperDiagnostics.LogInfo("Debugger", "Debug variable query starting.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
-                TraceDebugShell("RefreshDebugPanelsAsync", $"Variables query starting; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
-                IReadOnlyList<DebugVariableInfo> variables;
+                DeveloperDiagnostics.LogInfo("Debugger", "Debug call stack query starting for frame-targeted inspection.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
+                TraceDebugShell("RefreshDebugPanelsAsync", $"Call stack query starting for frame-targeted inspection; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
+                IReadOnlyList<DebugCallStackFrame> callStack;
                 try
                 {
-                    variables = await debugSession.GetVariablesAsync().ConfigureAwait(false);
+                    callStack = await debugSession.GetCallStackAsync().ConfigureAwait(false);
                     request.CancellationToken.ThrowIfCancellationRequested();
                 }
                 catch (Exception ex)
                 {
-                    DeveloperDiagnostics.LogException("Debugger", ex, "Debug variable query failed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
+                    DeveloperDiagnostics.LogException("Debugger", ex, "Debug call stack query failed during frame-targeted inspection.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
                     throw;
                 }
-                DeveloperDiagnostics.LogInfo("Debugger", "Debug variable query completed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["variableCount"] = variables.Count });
+
+                DebugFrameIdentity? inspectionFrame = null;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    var uiSnapshot = new DebugPanelRefreshSnapshot(
+                        Volatile.Read(ref _debugPanelRefreshVersion),
+                        ReferenceEquals(_debugSession, debugSession),
+                        debugSession.CurrentState.ToString(),
+                        HasActiveDebugCurrentLocation(),
+                        IsLoaded);
+                    if (!CanRefreshDebugPanels(uiSnapshot, refreshVersion, out var uiSkipReason) ||
+                        !_debugInspectionContext.IsCurrent(request.Identity) ||
+                        !_debugInspectionContext.PublishCallStack(callStack))
+                    {
+                        DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Frame-targeted inspection was skipped because the call stack or request became stale before frame selection.", "SkippedStaleFrameInspection", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration, ["skipReason"] = uiSkipReason ?? "Inspection context rejected the call stack." });
+                        return;
+                    }
+
+                    inspectionFrame = _debugInspectionContext.SelectedInspectionFrame;
+                    DeveloperDiagnostics.LogInfo("Debugger", "Selected frame resolved for frame-targeted scope request.", new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["refreshVersion"] = refreshVersion,
+                        ["requestGeneration"] = request.Identity.RequestGeneration,
+                        ["sessionId"] = inspectionFrame?.SessionId,
+                        ["pauseGeneration"] = inspectionFrame?.PauseGeneration,
+                        ["threadId"] = inspectionFrame?.ThreadId,
+                        ["providerFrameId"] = inspectionFrame?.ProviderFrameId,
+                        ["frameId"] = inspectionFrame?.FrameId,
+                        ["frameIndex"] = inspectionFrame?.FrameIndex,
+                        ["currentFrame"] = inspectionFrame?.IsCurrentFrame,
+                        ["selectedFrame"] = inspectionFrame?.IsSelectedInspectionFrame,
+                        ["functionName"] = inspectionFrame?.FunctionName
+                    });
+                });
+
+                if (inspectionFrame is null)
+                {
+                    return;
+                }
+
+                DeveloperDiagnostics.LogInfo("Debugger", "Debug variable query starting for selected frame.", new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["refreshVersion"] = refreshVersion,
+                    ["requestGeneration"] = request.Identity.RequestGeneration,
+                    ["sessionId"] = inspectionFrame.SessionId,
+                    ["pauseGeneration"] = inspectionFrame.PauseGeneration,
+                    ["threadId"] = inspectionFrame.ThreadId,
+                    ["providerFrameId"] = inspectionFrame.ProviderFrameId,
+                    ["frameId"] = inspectionFrame.FrameId,
+                    ["frameIndex"] = inspectionFrame.FrameIndex,
+                    ["currentFrame"] = inspectionFrame.IsCurrentFrame,
+                    ["selectedFrame"] = inspectionFrame.IsSelectedInspectionFrame
+                });
+                TraceDebugShell("RefreshDebugPanelsAsync", $"Variables query starting for selected frame; reason={reason}; refreshVersion={refreshVersion}; frameId={inspectionFrame.FrameId}; {DescribeDebugUiState()}");
+                DebuggerVariableInspectionResult variableResult;
+                try
+                {
+                    var frameRequestIdentity = new DebuggerFrameInspectionIdentity(
+                        request.Identity.SessionId,
+                        request.Identity.PauseGeneration,
+                        request.Identity.RequestGeneration,
+                        inspectionFrame.FrameId,
+                        inspectionFrame.FrameIndex)
+                    {
+                        ThreadId = inspectionFrame.ThreadId,
+                        ProviderFrameId = inspectionFrame.ProviderFrameId
+                    };
+                    variableResult = await debugSession.GetFrameVariablesAsync(frameRequestIdentity, request.CancellationToken).ConfigureAwait(false);
+                    request.CancellationToken.ThrowIfCancellationRequested();
+                }
+                catch (Exception ex)
+                {
+                    DeveloperDiagnostics.LogException("Debugger", ex, "Selected-frame variable query failed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration, ["frameId"] = inspectionFrame.FrameId, ["frameIndex"] = inspectionFrame.FrameIndex });
+                    throw;
+                }
+                var variables = variableResult.Variables;
+                DeveloperDiagnostics.LogInfo("Debugger", "Selected-frame variable query completed.", new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["refreshVersion"] = refreshVersion,
+                    ["requestGeneration"] = request.Identity.RequestGeneration,
+                    ["sessionId"] = inspectionFrame.SessionId,
+                    ["pauseGeneration"] = inspectionFrame.PauseGeneration,
+                    ["threadId"] = inspectionFrame.ThreadId,
+                    ["providerFrameId"] = inspectionFrame.ProviderFrameId,
+                    ["frameId"] = inspectionFrame.FrameId,
+                    ["frameIndex"] = inspectionFrame.FrameIndex,
+                    ["currentFrame"] = inspectionFrame.IsCurrentFrame,
+                    ["selectedFrame"] = inspectionFrame.IsSelectedInspectionFrame,
+                    ["availability"] = variableResult.Availability.ToString(),
+                    ["scopeKind"] = variableResult.ScopeKind.ToString(),
+                    ["variableCount"] = variables.Count,
+                    ["availabilityReason"] = variableResult.Reason
+                });
                 var filteredVariables = FilterDebugVariablesForDisplay(variables, reason, refreshVersion);
 
                 var postVariablesSnapshot = await GetDebugPanelRefreshSnapshotOnUiThreadAsync(debugSession, refreshVersion, reason, "AfterVariables").ConfigureAwait(false);
@@ -14106,24 +14256,23 @@ namespace PS7ScriptDesk.Shell
                     return;
                 }
 
-                DeveloperDiagnostics.LogInfo("Debugger", "Debug call stack query starting.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
-                TraceDebugShell("RefreshDebugPanelsAsync", $"Call stack query starting; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
-                IReadOnlyList<DebugCallStackFrame> callStack;
-                try
-                {
-                    callStack = await debugSession.GetCallStackAsync().ConfigureAwait(false);
-                    request.CancellationToken.ThrowIfCancellationRequested();
-                }
-                catch (Exception ex)
-                {
-                    DeveloperDiagnostics.LogException("Debugger", ex, "Debug call stack query failed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
-                    throw;
-                }
-                DeveloperDiagnostics.LogInfo("Debugger", "Debug call stack query completed.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["callStackCount"] = callStack.Count });
-
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    DeveloperDiagnostics.LogInfo("Debugger", "Debug panel grid update starting.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["variableCount"] = filteredVariables.Count, ["callStackCount"] = callStack.Count });
+                    DeveloperDiagnostics.LogInfo("Debugger", "Debug panel grid update starting.", new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["refreshVersion"] = refreshVersion,
+                        ["sessionId"] = inspectionFrame.SessionId,
+                        ["pauseGeneration"] = inspectionFrame.PauseGeneration,
+                        ["threadId"] = inspectionFrame.ThreadId,
+                        ["providerFrameId"] = inspectionFrame.ProviderFrameId,
+                        ["frameId"] = inspectionFrame.FrameId,
+                        ["frameIndex"] = inspectionFrame.FrameIndex,
+                        ["currentFrame"] = inspectionFrame.IsCurrentFrame,
+                        ["selectedFrame"] = inspectionFrame.IsSelectedInspectionFrame,
+                        ["variableCount"] = filteredVariables.Count,
+                        ["callStackCount"] = callStack.Count
+                    });
                     var uiSnapshot = new DebugPanelRefreshSnapshot(
                         Volatile.Read(ref _debugPanelRefreshVersion),
                         ReferenceEquals(_debugSession, debugSession),
@@ -14137,7 +14286,7 @@ namespace PS7ScriptDesk.Shell
                         return;
                     }
 
-                    if (!_debugInspectionContext.IsCurrent(request.Identity) || !_debugInspectionContext.PublishCallStack(callStack))
+                    if (!_debugInspectionContext.IsCurrent(request.Identity))
                     {
                         DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Inspection results were rejected because the request or call stack belonged to an older inspection context.", "SkippedStaleInspectionRequest", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
                         return;
@@ -14155,7 +14304,11 @@ namespace PS7ScriptDesk.Shell
                                 variable.SessionId,
                                 variable.PauseGeneration,
                                 variable.FrameId,
-                                null)) &&
+                                inspectionFrame.FrameId,
+                                variable.ThreadId,
+                                inspectionFrame.ThreadId,
+                                variable.ProviderFrameId,
+                                inspectionFrame.ProviderFrameId)) &&
                         callStack.All(frame =>
                             DebugInspectionResultGuard.IsCurrent(
                                 resultSessionId,
@@ -14163,6 +14316,10 @@ namespace PS7ScriptDesk.Shell
                                 frame.SessionId,
                                 frame.PauseGeneration,
                                 frame.FrameId,
+                                null,
+                                frame.ThreadId,
+                                null,
+                                frame.ProviderFrameId,
                                 null));
                     if (!resultsAreCurrent)
                     {
@@ -14203,12 +14360,31 @@ namespace PS7ScriptDesk.Shell
                         }
                     }
 
+                    UpdateDebugVariablesContext(
+                        inspectionFrame,
+                        variableResult.IsAvailable ? "Loaded" : variableResult.Reason ?? "Unavailable for selected frame");
+                    UpdateDebugVariablesAvailability(variableResult with { Variables = filteredVariables }, reason, refreshVersion);
                     ApplyDebugVariablesItemsSource(filteredVariables, reason, refreshVersion);
                     ApplyDebugCallStackItemsSource(callStack, reason, refreshVersion);
                     UpdateLiveDebugVariableCache(filteredVariables, reason, refreshVersion);
                     RefreshBreakpointsList();
                     TraceDebugShell("RefreshDebugPanelsAsync", $"Updated UI grids; reason={reason}; refreshVersion={refreshVersion}; variableCount={filteredVariables.Count}; callStackCount={callStack.Count}; {DescribeDebugUiState()}");
-                    DeveloperDiagnostics.LogInfo("Debugger", "Debug panel UI grids updated.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["variableCount"] = filteredVariables.Count, ["callStackCount"] = callStack.Count });
+                    DeveloperDiagnostics.LogInfo("Debugger", "Debug panel UI grids updated.", new Dictionary<string, object?>
+                    {
+                        ["reason"] = reason,
+                        ["refreshVersion"] = refreshVersion,
+                        ["sessionId"] = inspectionFrame.SessionId,
+                        ["pauseGeneration"] = inspectionFrame.PauseGeneration,
+                        ["threadId"] = inspectionFrame.ThreadId,
+                        ["providerFrameId"] = inspectionFrame.ProviderFrameId,
+                        ["frameId"] = inspectionFrame.FrameId,
+                        ["frameIndex"] = inspectionFrame.FrameIndex,
+                        ["currentFrame"] = inspectionFrame.IsCurrentFrame,
+                        ["selectedFrame"] = inspectionFrame.IsSelectedInspectionFrame,
+                        ["variableCount"] = filteredVariables.Count,
+                        ["publishedVariableCount"] = _currentDebugVariables?.Count ?? 0,
+                        ["callStackCount"] = callStack.Count
+                    });
                 });
             }
             catch (Exception ex)
@@ -14226,6 +14402,13 @@ namespace PS7ScriptDesk.Shell
                 {
                     if (ViewModel is not null && ReferenceEquals(_debugSession, debugSession))
                     {
+                        UpdateDebugVariablesContext(null, "Unavailable for selected frame");
+                        DebugVariablesEmptyStateText.Text = "Variables unavailable because the debugger query failed.";
+                        if (_debugPaneWindow is not null)
+                        {
+                            _debugPaneWindow.DebugVariablesEmptyStateText.Text = DebugVariablesEmptyStateText.Text;
+                        }
+                        ApplyDebugVariablesItemsSource(null, "SelectedFrameVariablesUnavailable", refreshVersion);
                         ViewModel.StatusText = $"Debug panel refresh failed: {ex.Message}";
                         RefreshDebugCommandAvailability(debugSession.CurrentState == DebugSessionState.Paused);
                     }
@@ -14305,10 +14488,10 @@ namespace PS7ScriptDesk.Shell
                     continue;
                 }
 
-                filteredVariables.Add(new DebugVariableInfo(
-                    variable.Name,
-                    variable.Type,
-                    TruncateDebugVariableValue(variable.Value)));
+                filteredVariables.Add(variable with
+                {
+                    Value = TruncateDebugVariableValue(variable.Value)
+                });
             }
 
             filteredVariables.Sort(static (left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
@@ -14533,6 +14716,12 @@ namespace PS7ScriptDesk.Shell
         private void ClearDebugPanels()
         {
             ClearLiveDebugVariableCache("ClearDebugPanels");
+            UpdateDebugVariablesContext(null, "no active frame");
+            DebugVariablesEmptyStateText.Text = "No variables available.";
+            if (_debugPaneWindow is not null)
+            {
+                _debugPaneWindow.DebugVariablesEmptyStateText.Text = DebugVariablesEmptyStateText.Text;
+            }
             ApplyDebugVariablesItemsSource(null, "ClearDebugPanels", null);
             ApplyDebugCallStackItemsSource(null, "ClearDebugPanels", null);
         }

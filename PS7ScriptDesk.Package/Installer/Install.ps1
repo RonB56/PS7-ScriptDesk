@@ -1,8 +1,55 @@
-$ErrorActionPreference = 'Stop'
-
 param(
     [switch]$Force = $false
 )
+
+$ErrorActionPreference = 'Stop'
+
+function Get-ActivityIdFromError {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $text = $ErrorRecord | Out-String
+    $match = [regex]::Match($text, '(?i)ActivityId(?:\s*[:=]\s*|\s+)(?<id>[0-9a-f-]{36})')
+    if ($match.Success) {
+        return $match.Groups['id'].Value
+    }
+
+    return $null
+}
+
+function Write-DeploymentFailure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    Write-Host ('Add-AppxPackage failed: {0}' -f $ErrorRecord.Exception.Message)
+    Write-Host ('Exception type: {0}' -f $ErrorRecord.Exception.GetType().FullName)
+    Write-Host ('HResult: 0x{0:X8}' -f $ErrorRecord.Exception.HResult)
+    Write-Host 'Full error record:'
+    Write-Host ($ErrorRecord | Out-String)
+
+    $activityId = Get-ActivityIdFromError -ErrorRecord $ErrorRecord
+    if ($activityId) {
+        Write-Host "ActivityId: $activityId"
+        try {
+            Write-Host 'AppX deployment log:'
+            Get-AppPackageLog -ActivityID $activityId |
+                Select-Object Time, Id, Message |
+                Format-List |
+                Out-String |
+                Write-Host
+        }
+        catch {
+            Write-Warning ('Could not retrieve AppX deployment log for ActivityId {0}: {1}' -f $activityId, $_.Exception.Message)
+        }
+    }
+    else {
+        Write-Host 'ActivityId: not present in the captured error record.'
+    }
+}
 
 function Get-FileVersionFromName {
     param(
@@ -88,7 +135,7 @@ $packageExtensions = @('*.msixbundle', '*.appxbundle', '*.msix', '*.appx')
 Write-Host "Installer script: $PSCommandPath"
 Write-Host "Search root: $scriptRoot"
 
-$allRelevantFiles = Get-ChildItem -Path $scriptRoot -Recurse -File -Include $packageExtensions, '*.cer' |
+$allRelevantFiles = Get-ChildItem -Path $scriptRoot -Recurse -File -Include ($packageExtensions + '*.cer') |
     Sort-Object FullName
 
 $mainPackageCandidates = $allRelevantFiles |
@@ -166,6 +213,12 @@ if ($dependencyPackages) {
 }
 
 Write-Host "Installing package with Add-AppxPackage -Path '$($package.FullName)'"
-Add-AppxPackage @addAppxArgs
+try {
+    Add-AppxPackage @addAppxArgs -ErrorAction Stop
+}
+catch {
+    Write-DeploymentFailure -ErrorRecord $_
+    throw
+}
 
 Write-Host 'Installation completed successfully.'

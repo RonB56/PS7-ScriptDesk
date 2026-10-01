@@ -186,6 +186,110 @@ public sealed class LiveDebuggerIntegrationTests
         }
     }
 
+    [Fact(Timeout = 60000)]
+    public async Task RealPowerShellDebugger_InspectsDistinctNestedFrameVariables()
+    {
+        var runtime = FindRuntime();
+        if (runtime is null)
+        {
+            throw SkipException.ForSkip("No validated PowerShell 7 runtime was discovered.");
+        }
+
+        var root = Directory.CreateTempSubdirectory("PS7ScriptDesk-FrameVariables-");
+        try
+        {
+            var scriptPath = Path.Combine(root.FullName, "nested.ps1");
+            await File.WriteAllTextAsync(
+                scriptPath,
+                "function FunctionA([string]$ParamA) {\n" +
+                "    $LocalA = 'Local-A'\n" +
+                "    FunctionB 'Parameter-B'\n" +
+                "}\n" +
+                "function FunctionB([string]$ParamB) {\n" +
+                "    $LocalB = 'Local-B'\n" +
+                "    FunctionC 'Param-C'\n" +
+                "}\n" +
+                "function FunctionC([string]$ParamC) {\n" +
+                "    $LocalC = 'Local-C'\n" +
+                "    $NumberC = 333\n" +
+                "    $ArrayC = @(1, 2, 3)\n" +
+                "    $ObjectC = [pscustomobject]@{ Name = 'Object-C' }\n" +
+                "    $BreakHere = 'BREAKPOINT-HERE'\n" +
+                "    Wait-Debugger\n" +
+                "    $AfterFirstPause = 'AFTER-FIRST-PAUSE'\n" +
+                "    Wait-Debugger\n" +
+                "}\n" +
+                "FunctionA 'Parameter-A'\n");
+
+            using var session = new PsesDebugSession();
+            var recorder = new EventRecorder(session);
+            await session.StartAsync(runtime, scriptPath, Array.Empty<DebugBreakpointInfo>());
+            await recorder.WaitForStateAsync(DebugSessionState.Paused);
+
+            var callStack = await session.GetCallStackAsync();
+            var functionA = Assert.Single(callStack, frame => frame.FunctionName == "FunctionA");
+            var functionB = Assert.Single(callStack, frame => frame.FunctionName == "FunctionB");
+            var functionC = Assert.Single(callStack, frame => frame.FunctionName == "FunctionC");
+
+            var requestGeneration = 1L;
+            var variablesA = await session.GetFrameVariablesAsync(
+                new DebuggerFrameInspectionIdentity(session.SessionId, session.PauseGeneration, requestGeneration, functionA.FrameId, functionA.FrameIndex) { ThreadId = functionA.ThreadId, ProviderFrameId = functionA.ProviderFrameId });
+            var variablesB = await session.GetFrameVariablesAsync(
+                new DebuggerFrameInspectionIdentity(session.SessionId, session.PauseGeneration, requestGeneration + 1, functionB.FrameId, functionB.FrameIndex) { ThreadId = functionB.ThreadId, ProviderFrameId = functionB.ProviderFrameId });
+            var variablesC = await session.GetFrameVariablesAsync(
+                new DebuggerFrameInspectionIdentity(session.SessionId, session.PauseGeneration, requestGeneration + 2, functionC.FrameId, functionC.FrameIndex) { ThreadId = functionC.ThreadId, ProviderFrameId = functionC.ProviderFrameId });
+
+            Assert.Equal(DebuggerVariableAvailability.Unavailable, variablesA.Availability);
+            Assert.Equal(DebuggerVariableAvailability.Unavailable, variablesB.Availability);
+            Assert.Equal(DebuggerVariableAvailability.Available, variablesC.Availability);
+            Assert.Empty(variablesA.Variables);
+            Assert.Empty(variablesB.Variables);
+            Assert.Contains(variablesC.Variables, variable => variable.Name == "ParamC" && variable.Value == "Param-C");
+            Assert.Contains(variablesC.Variables, variable => variable.Name == "LocalC" && variable.Value == "Local-C");
+            Assert.Contains(variablesC.Variables, variable => variable.Name == "NumberC" && variable.Value == "333");
+            Assert.Contains(variablesC.Variables, variable => variable.Name == "ArrayC");
+            Assert.Contains(variablesC.Variables, variable => variable.Name == "ObjectC");
+            Assert.Contains(variablesC.Variables, variable => variable.Name == "BreakHere" && variable.Value == "BREAKPOINT-HERE");
+            Assert.DoesNotContain(variablesC.Variables, variable => variable.Name == "LocalA" || variable.Name == "LocalB");
+            Assert.Equal(DebugSessionState.Paused, session.CurrentState);
+            Assert.Equal(functionC.ProviderFrameId, callStack.Single(frame => frame.IsCurrentFrame).ProviderFrameId);
+
+            // Exercise the same pause/selection identity sequence used by the WPF
+            // inspection path: publish the provider stack, select an outer frame,
+            // then return to the current frame and issue a fresh request identity.
+            using var inspection = new DebuggerInspectionContext();
+            inspection.BeginSession(session.SessionId);
+            inspection.PreparePaused(session.SessionId, session.PauseGeneration);
+            Assert.True(inspection.PublishCallStack(callStack));
+            Assert.Equal(functionC.FrameId, inspection.CurrentExecutionFrame?.FrameId);
+            Assert.Equal(functionC.FrameId, inspection.SelectedInspectionFrame?.FrameId);
+
+            Assert.True(inspection.TrySelectFrame(functionB, out var selectionError), selectionError);
+            var outerRequest = inspection.BeginRequest();
+            var outerResult = await session.GetFrameVariablesAsync(
+                DebuggerFrameInspectionIdentity.FromFrame(inspection.SelectedInspectionFrame!, outerRequest.Identity.RequestGeneration));
+            Assert.Equal(DebuggerVariableAvailability.Unavailable, outerResult.Availability);
+            Assert.Empty(outerResult.Variables);
+
+            Assert.True(inspection.TrySelectFrame(functionC, out selectionError), selectionError);
+            var currentRequest = inspection.BeginRequest();
+            var currentResult = await session.GetFrameVariablesAsync(
+                DebuggerFrameInspectionIdentity.FromFrame(inspection.SelectedInspectionFrame!, currentRequest.Identity.RequestGeneration));
+            Assert.Equal(DebuggerVariableAvailability.Available, currentResult.Availability);
+            Assert.Contains(currentResult.Variables, variable => variable.Name == "ParamC");
+
+            await session.StepOverAsync();
+            await recorder.WaitForNextPauseAsync(session.PauseGeneration);
+            var staleResult = await session.GetFrameVariablesAsync(
+                DebuggerFrameInspectionIdentity.FromFrame(functionC.Identity, currentRequest.Identity.RequestGeneration));
+            Assert.Equal(DebuggerVariableAvailability.Stale, staleResult.Availability);
+        }
+        finally
+        {
+            root.Delete(true);
+        }
+    }
+
     private static PowerShellRuntimeInfo? FindRuntime()
         => new RuntimeService().DiscoverRuntimes(requireLaunchValidation: true).PreferredRuntime;
 

@@ -25,9 +25,9 @@ public sealed class DebuggerTooltipContractTests
         var mainWindow = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml");
         var floatingPane = ReadRepositoryFile("PS7ScriptDesk.Shell", "Debug", "DebugPaneWindow.xaml");
 
-        Assert.Contains("Show read-only variables for the current paused execution scope.", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Show read-only variables for the selected paused execution frame.", mainWindow, StringComparison.Ordinal);
         Assert.Contains("Show the active call stack and navigate to available source frames.", mainWindow, StringComparison.Ordinal);
-        Assert.Contains("Show read-only variables for the current paused execution scope.", floatingPane, StringComparison.Ordinal);
+        Assert.Contains("Show read-only variables for the selected paused execution frame.", floatingPane, StringComparison.Ordinal);
         Assert.Contains("Show the active call stack and navigate to available source frames.", floatingPane, StringComparison.Ordinal);
     }
 

@@ -11,11 +11,15 @@ namespace PS7ScriptDesk.Tests
         public void FrameIdentityIsStableWithinPauseAndChangesAcrossGeneration()
         {
             var sessionId = Guid.NewGuid();
-            var first = DebugFrameIdentity.Create(sessionId, 4, 0, "Outer", "C:\\scripts\\demo.ps1", 12, "Outer", true);
-            var same = DebugFrameIdentity.Create(sessionId, 4, 0, "Outer", "C:\\scripts\\demo.ps1", 12, "Outer", true);
-            var nextPause = DebugFrameIdentity.Create(sessionId, 5, 0, "Outer", "C:\\scripts\\demo.ps1", 12, "Outer", true);
+            var first = DebugFrameIdentity.Create(sessionId, 4, 0, "Outer", "C:\\scripts\\demo.ps1", 12, "Outer", true, 7, "provider-500");
+            var same = DebugFrameIdentity.Create(sessionId, 4, 0, "Outer", "C:\\scripts\\demo.ps1", 12, "Outer", true, 7, "provider-500");
+            var reordered = DebugFrameIdentity.Create(sessionId, 4, 2, "Outer", "C:\\scripts\\demo.ps1", 12, "Outer", true, 7, "provider-500");
+            var otherThread = DebugFrameIdentity.Create(sessionId, 4, 0, "Outer", "C:\\scripts\\demo.ps1", 12, "Outer", true, 8, "provider-500");
+            var nextPause = DebugFrameIdentity.Create(sessionId, 5, 0, "Outer", "C:\\scripts\\demo.ps1", 12, "Outer", true, 7, "provider-500");
 
             Assert.Equal(first.FrameId, same.FrameId);
+            Assert.Equal(first.FrameId, reordered.FrameId);
+            Assert.NotEqual(first.FrameId, otherThread.FrameId);
             Assert.NotEqual(first.FrameId, nextPause.FrameId);
             Assert.True(first.IsCurrentFrame);
             Assert.True(first.IsSelectedInspectionFrame);
@@ -30,6 +34,9 @@ namespace PS7ScriptDesk.Tests
             Assert.False(DebugInspectionResultGuard.IsCurrent(sessionId, 2, sessionId, 1));
             Assert.False(DebugInspectionResultGuard.IsCurrent(sessionId, 2, Guid.NewGuid(), 2));
             Assert.False(DebugInspectionResultGuard.IsCurrent(sessionId, 2, sessionId, 2, "old", "new"));
+            Assert.True(DebugInspectionResultGuard.IsCurrent(sessionId, 2, sessionId, 2, "frame", "frame", 7, 7, "provider-1", "provider-1"));
+            Assert.False(DebugInspectionResultGuard.IsCurrent(sessionId, 2, sessionId, 2, "frame", "frame", 8, 7, "provider-1", "provider-1"));
+            Assert.False(DebugInspectionResultGuard.IsCurrent(sessionId, 2, sessionId, 2, "frame", "frame", 7, 7, "provider-2", "provider-1"));
         }
 
         [Fact]
@@ -91,6 +98,40 @@ namespace PS7ScriptDesk.Tests
             var wrongPause = frames[1] with { PauseGeneration = 2 };
             Assert.False(context.TrySelectFrame(wrongSession, out _));
             Assert.False(context.TrySelectFrame(wrongPause, out _));
+        }
+
+        [Fact]
+        public void ContextUsesProviderCurrentMarkerWhenSyntheticRowPrecedesIt()
+        {
+            var sessionId = Guid.NewGuid();
+            using var context = new DebuggerInspectionContext();
+            context.BeginSession(sessionId);
+            context.PreparePaused(sessionId, 1);
+            var frames = CreateFrames(sessionId, 1)
+                .Select((frame, index) => frame with { IsCurrentFrame = index == 1, IsSelectedInspectionFrame = index == 1 })
+                .ToArray();
+
+            Assert.True(context.PublishCallStack(frames));
+            Assert.Equal(frames[1].FrameId, context.CurrentExecutionFrame?.FrameId);
+            Assert.False(context.PublishCallStack(frames.Select(frame => frame with { IsCurrentFrame = true }).ToArray()));
+        }
+
+        [Fact]
+        public void ContextRejectsStaleFrameWhenPauseReusesProviderIdentity()
+        {
+            var sessionId = Guid.NewGuid();
+            using var context = new DebuggerInspectionContext();
+            context.BeginSession(sessionId);
+            context.PreparePaused(sessionId, 1);
+            var oldFrames = CreateFrames(sessionId, 1);
+            Assert.True(context.PublishCallStack(oldFrames));
+            var oldRequest = context.BeginRequest(oldFrames[1].FrameId);
+
+            context.PreparePaused(sessionId, 2);
+            var newFrames = CreateFrames(sessionId, 2);
+            Assert.True(context.PublishCallStack(newFrames));
+            Assert.False(context.IsCurrent(oldRequest.Identity));
+            Assert.NotEqual(oldFrames[1].FrameId, newFrames[1].FrameId);
         }
 
         [Fact]
@@ -171,6 +212,48 @@ namespace PS7ScriptDesk.Tests
             Assert.Equal(frames[2].FrameId, context.SelectedInspectionFrame?.FrameId);
         }
 
+        [Fact]
+        public void NonCurrentFrameResultIsExplicitlyUnavailableAndContainsNoLocals()
+        {
+            var identity = new DebuggerFrameInspectionIdentity(
+                Guid.NewGuid(),
+                3,
+                8,
+                "session/3/2",
+                2);
+
+            var result = DebuggerVariableInspectionResult.UnavailableFor(
+                identity,
+                "Non-current frame locals are not exposed by the supported provider boundary.");
+
+            Assert.Equal(DebuggerVariableAvailability.Unavailable, result.Availability);
+            Assert.Equal(DebuggerVariableScopeKind.Unavailable, result.ScopeKind);
+            Assert.Empty(result.Variables);
+            Assert.False(result.IsAvailable);
+            Assert.Equal(identity.FrameId, result.FrameIdentity.FrameId);
+        }
+
+        [Fact]
+        public void AvailableResultDistinguishesEmptyCurrentFrameFromUnavailableFrame()
+        {
+            var identity = new DebuggerFrameInspectionIdentity(
+                Guid.NewGuid(),
+                4,
+                9,
+                "session/4/0",
+                0);
+
+            var result = new DebuggerVariableInspectionResult(
+                DebuggerVariableAvailability.Available,
+                DebuggerVariableScopeKind.CurrentFrameLocals,
+                Array.Empty<DebugVariableInfo>(),
+                identity);
+
+            Assert.True(result.IsAvailable);
+            Assert.Equal(DebuggerVariableScopeKind.CurrentFrameLocals, result.ScopeKind);
+            Assert.Empty(result.Variables);
+        }
+
         private static DebugCallStackFrame[] CreateFrames(Guid sessionId, long pauseGeneration)
         {
             return Enumerable.Range(0, 3)
@@ -178,6 +261,8 @@ namespace PS7ScriptDesk.Tests
                 {
                     SessionId = sessionId,
                     PauseGeneration = pauseGeneration,
+                    ThreadId = 1,
+                    ProviderFrameId = $"provider-{500 + index}",
                     FrameIndex = index,
                     InvocationName = $"Function{index}",
                     IsCurrentFrame = index == 0,

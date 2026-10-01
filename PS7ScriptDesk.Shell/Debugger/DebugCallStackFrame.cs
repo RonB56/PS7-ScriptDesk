@@ -6,6 +6,8 @@ namespace PS7ScriptDesk.Shell.Debug
     {
         public Guid SessionId { get; init; }
         public long PauseGeneration { get; init; }
+        public long ThreadId { get; init; }
+        public string ProviderFrameId { get; init; } = string.Empty;
         public int FrameIndex { get; init; }
         public string InvocationName { get; init; } = string.Empty;
         public bool IsCurrentFrame { get; init; }
@@ -15,7 +17,7 @@ namespace PS7ScriptDesk.Shell.Debug
         public string? MappedSourcePath { get; init; }
         public int? MappedSourceLine { get; init; }
         public DebugSourceMappingStatus SourceMappingStatus { get; init; } = DebugSourceMappingStatus.Unmapped;
-        public string FrameId => $"{SessionId:N}/{PauseGeneration}/{FrameIndex}";
+        public string FrameId => DebugFrameIdentity.BuildFrameId(SessionId, PauseGeneration, ThreadId, ProviderFrameId);
         public string DisplayScriptName => DebuggerCoordinatePresentation.FormatCallStackScript(ScriptName, SourceMappingStatus);
         public string DisplayLineNumber => DebuggerCoordinatePresentation.FormatCallStackLine(LineNumber, SourceMappingStatus);
 
@@ -29,6 +31,10 @@ namespace PS7ScriptDesk.Shell.Debug
             InvocationName,
             IsCurrentFrame,
             IsSelectedInspectionFrame,
-            IsNavigable);
+            IsNavigable)
+        {
+            ThreadId = ThreadId,
+            ProviderFrameId = ProviderFrameId
+        };
     }
 }

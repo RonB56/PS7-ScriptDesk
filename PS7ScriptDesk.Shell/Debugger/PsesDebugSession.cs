@@ -98,6 +98,8 @@ namespace PS7ScriptDesk.Shell.Debug
         private int _terminatedSubscriberCount;
         private long _eventSequence;
         private long _pauseGeneration;
+        private IReadOnlyList<DebugCallStackFrame>? _callStackSnapshot;
+        private long _callStackSnapshotPauseGeneration;
 
         public DebugSessionState CurrentState { get; private set; } = DebugSessionState.Stopped;
         public Guid SessionId { get; } = Guid.NewGuid();
@@ -290,27 +292,207 @@ namespace PS7ScriptDesk.Shell.Debug
 
         public async Task<IReadOnlyList<DebugVariableInfo>> GetVariablesAsync()
         {
+            var current = (await GetCallStackAsync().ConfigureAwait(false)).Single(frame => frame.IsCurrentFrame);
+            return await GetVariablesAsync(current.ThreadId, current.ProviderFrameId, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        public async Task<IReadOnlyList<DebugVariableInfo>> GetVariablesAsync(
+            DebuggerFrameInspectionIdentity frameIdentity,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(frameIdentity);
+            if (frameIdentity.SessionId != SessionId || frameIdentity.PauseGeneration != PauseGeneration)
+            {
+                throw new InvalidOperationException("The requested inspection frame belongs to a different debugger session or pause.");
+            }
+
+            if (frameIdentity.RequestGeneration <= 0 || frameIdentity.FrameIndex < 0 || frameIdentity.ThreadId <= 0 || string.IsNullOrWhiteSpace(frameIdentity.ProviderFrameId) ||
+                !string.Equals(frameIdentity.FrameId, DebugFrameIdentity.BuildFrameId(SessionId, PauseGeneration, frameIdentity.ThreadId, frameIdentity.ProviderFrameId), StringComparison.Ordinal))
+            {
+                throw new ArgumentException("The requested inspection frame identity is invalid.", nameof(frameIdentity));
+            }
+
+            return await GetVariablesAsync(frameIdentity.ThreadId, frameIdentity.ProviderFrameId, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task<DebuggerVariableInspectionResult> GetFrameVariablesAsync(
+            DebuggerFrameInspectionIdentity frameIdentity,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(frameIdentity);
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Frame-scoped variable request started.",
+                new Dictionary<string, object?>
+                {
+                    ["sessionId"] = frameIdentity.SessionId,
+                    ["pauseGeneration"] = frameIdentity.PauseGeneration,
+                    ["requestGeneration"] = frameIdentity.RequestGeneration,
+                    ["threadId"] = frameIdentity.ThreadId,
+                    ["providerFrameId"] = frameIdentity.ProviderFrameId,
+                    ["frameId"] = frameIdentity.FrameId,
+                    ["frameIndex"] = frameIdentity.FrameIndex
+                });
+            if (frameIdentity.SessionId != SessionId || frameIdentity.PauseGeneration != PauseGeneration)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "FrameScopedVariableRequest",
+                    "Frame-scoped variable request was rejected because its session or pause generation was stale.",
+                    "RejectedStaleSessionOrPause",
+                    new Dictionary<string, object?>
+                    {
+                        ["activeSessionId"] = SessionId,
+                        ["activePauseGeneration"] = PauseGeneration,
+                        ["requestSessionId"] = frameIdentity.SessionId,
+                        ["requestPauseGeneration"] = frameIdentity.PauseGeneration,
+                        ["threadId"] = frameIdentity.ThreadId,
+                        ["providerFrameId"] = frameIdentity.ProviderFrameId,
+                        ["frameId"] = frameIdentity.FrameId
+                    });
+                return new DebuggerVariableInspectionResult(
+                    DebuggerVariableAvailability.Stale,
+                    DebuggerVariableScopeKind.Unavailable,
+                    Array.Empty<DebugVariableInfo>(),
+                    frameIdentity,
+                    "The requested frame belongs to an older debugger session or pause.");
+            }
+
+            if (frameIdentity.ThreadId <= 0 || string.IsNullOrWhiteSpace(frameIdentity.ProviderFrameId))
+            {
+                return DebuggerVariableInspectionResult.UnavailableFor(frameIdentity, "The provider did not supply a stable thread and frame identity.");
+            }
+
+            var callStack = await GetCallStackAsync().ConfigureAwait(false);
+            var currentFrame = callStack.SingleOrDefault(frame => frame.IsCurrentFrame);
+            var threadMatches = currentFrame is not null && currentFrame.ThreadId == frameIdentity.ThreadId;
+            var providerFrameMatches = currentFrame is not null && string.Equals(currentFrame.ProviderFrameId, frameIdentity.ProviderFrameId, StringComparison.Ordinal);
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Frame-scoped variable request resolved current provider frame.",
+                new Dictionary<string, object?>
+                {
+                    ["sessionId"] = SessionId,
+                    ["pauseGeneration"] = PauseGeneration,
+                    ["requestedThreadId"] = frameIdentity.ThreadId,
+                    ["requestedProviderFrameId"] = frameIdentity.ProviderFrameId,
+                    ["requestedFrameId"] = frameIdentity.FrameId,
+                    ["currentThreadId"] = currentFrame?.ThreadId,
+                    ["currentProviderFrameId"] = currentFrame?.ProviderFrameId,
+                    ["currentFrameId"] = currentFrame?.FrameId,
+                    ["currentFrameIndex"] = currentFrame?.FrameIndex,
+                    ["currentFrameFlag"] = currentFrame?.IsCurrentFrame,
+                    ["callStackCount"] = callStack.Count,
+                    ["threadMatches"] = threadMatches,
+                    ["providerFrameMatches"] = providerFrameMatches
+                });
+            if (currentFrame is null || !threadMatches || !providerFrameMatches)
+            {
+                Trace(
+                    "GetFrameVariablesAsync",
+                    $"Non-current frame locals are unavailable; frameIndex={frameIdentity.FrameIndex}; threadId={frameIdentity.ThreadId}; providerFrameId={frameIdentity.ProviderFrameId}; frameId={frameIdentity.FrameId}; {DescribeSessionState()}");
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "FrameScopedVariableRequest",
+                    "Frame-scoped variable request was rejected because the requested provider frame was not the current execution frame.",
+                    "RejectedNonCurrentOrMismatchedFrame",
+                    new Dictionary<string, object?>
+                    {
+                        ["sessionId"] = SessionId,
+                        ["pauseGeneration"] = PauseGeneration,
+                        ["threadId"] = frameIdentity.ThreadId,
+                        ["providerFrameId"] = frameIdentity.ProviderFrameId,
+                        ["frameId"] = frameIdentity.FrameId,
+                        ["currentThreadId"] = currentFrame?.ThreadId,
+                        ["currentProviderFrameId"] = currentFrame?.ProviderFrameId,
+                        ["currentFrameId"] = currentFrame?.FrameId,
+                        ["callStackCount"] = callStack.Count,
+                        ["threadMatches"] = threadMatches,
+                        ["providerFrameMatches"] = providerFrameMatches
+                    });
+                return DebuggerVariableInspectionResult.UnavailableFor(
+                    frameIdentity,
+                    "PowerShell exposes only the current execution frame's locals through the supported public inspection boundary.");
+            }
+
+            var variables = await GetVariablesAsync(frameIdentity, cancellationToken).ConfigureAwait(false);
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Frame-scoped provider variable query returned.",
+                new Dictionary<string, object?>
+                {
+                    ["sessionId"] = SessionId,
+                    ["pauseGeneration"] = PauseGeneration,
+                    ["threadId"] = frameIdentity.ThreadId,
+                    ["providerFrameId"] = frameIdentity.ProviderFrameId,
+                    ["frameId"] = frameIdentity.FrameId,
+                    ["variableCount"] = variables.Count,
+                    ["variableNamePreview"] = DeveloperDiagnostics.SanitizePreview(string.Join(", ", variables.Take(12).Select(variable => variable.Name)))
+                });
+            return new DebuggerVariableInspectionResult(
+                DebuggerVariableAvailability.Available,
+                DebuggerVariableScopeKind.CurrentFrameLocals,
+                variables,
+                frameIdentity);
+        }
+
+        private async Task<IReadOnlyList<DebugVariableInfo>> GetVariablesAsync(long threadId, string providerFrameId, CancellationToken cancellationToken)
+        {
             EnsurePaused();
 
             var payload = await SendRequestAsync(
-                BuildVariablesRequestScript(),
+                BuildVariablesRequestScript(threadId, providerFrameId),
                 VariablesStartMarker,
                 VariablesEndMarker,
                 suppressNextDebugPrompt: true,
-                CancellationToken.None).ConfigureAwait(false);
+                cancellationToken).ConfigureAwait(false);
 
             if (string.IsNullOrWhiteSpace(payload))
             {
+                DeveloperDiagnostics.LogWarning(
+                    "Debugger",
+                    "Provider returned an empty variable payload for the selected current frame.",
+                    new Dictionary<string, object?>
+                    {
+                        ["sessionId"] = SessionId,
+                        ["pauseGeneration"] = PauseGeneration,
+                        ["threadId"] = threadId,
+                        ["providerFrameId"] = providerFrameId,
+                        ["frameId"] = DebugFrameIdentity.BuildFrameId(SessionId, PauseGeneration, threadId, providerFrameId)
+                    });
                 return Array.Empty<DebugVariableInfo>();
             }
 
-            var frameId = $"{SessionId:N}/{PauseGeneration}/0";
-            return DeserializeList<DebugVariableInfo>(payload, "VariablesRequest")
+            var parsedVariables = DeserializeList<DebugVariableInfo>(payload, "VariablesRequest");
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Provider variable payload parsed.",
+                new Dictionary<string, object?>
+                {
+                    ["sessionId"] = SessionId,
+                    ["pauseGeneration"] = PauseGeneration,
+                    ["threadId"] = threadId,
+                    ["providerFrameId"] = providerFrameId,
+                    ["frameId"] = DebugFrameIdentity.BuildFrameId(SessionId, PauseGeneration, threadId, providerFrameId),
+                    ["parsedVariableCount"] = parsedVariables.Count,
+                    ["errorCount"] = parsedVariables.Count(variable => !string.IsNullOrWhiteSpace(variable.Error)),
+                    ["variableNamePreview"] = DeveloperDiagnostics.SanitizePreview(string.Join(", ", parsedVariables.Take(12).Select(variable => variable.Name)))
+                });
+            var error = parsedVariables.FirstOrDefault(variable => !string.IsNullOrWhiteSpace(variable.Error));
+            if (error is not null)
+            {
+                throw new InvalidOperationException(error.Error);
+            }
+
+            var frameId = DebugFrameIdentity.BuildFrameId(SessionId, PauseGeneration, threadId, providerFrameId);
+            return parsedVariables
                 .Select(variable => variable with
                 {
                     SessionId = SessionId,
                     PauseGeneration = PauseGeneration,
-                    Scope = "Current",
+                    ThreadId = threadId,
+                    ProviderFrameId = providerFrameId,
+                    Scope = "SelectedFrame",
                     FrameId = frameId,
                     IsNull = string.Equals(variable.Type, "null", StringComparison.OrdinalIgnoreCase),
                     IsTruncated = variable.Value.EndsWith("...", StringComparison.Ordinal),
@@ -325,6 +507,14 @@ namespace PS7ScriptDesk.Shell.Debug
         {
             EnsurePaused();
 
+            lock (_syncRoot)
+            {
+                if (_callStackSnapshotPauseGeneration == PauseGeneration && _callStackSnapshot is not null)
+                {
+                    return _callStackSnapshot;
+                }
+            }
+
             var payload = await SendRequestAsync(
                 BuildCallStackRequestScript(),
                 CallStackStartMarker,
@@ -337,17 +527,41 @@ namespace PS7ScriptDesk.Shell.Debug
                 return Array.Empty<DebugCallStackFrame>();
             }
 
-            return DeserializeList<DebugCallStackFrame>(payload, "CallStackRequest")
+            var frames = DeserializeList<DebugCallStackFrame>(payload, "CallStackRequest")
                 .Select((frame, index) => frame with
                 {
                     SessionId = SessionId,
                     PauseGeneration = PauseGeneration,
                     FrameIndex = index,
-                    IsCurrentFrame = index == 0,
-                    IsSelectedInspectionFrame = index == 0,
+                    IsSelectedInspectionFrame = frame.IsCurrentFrame,
                     IsNavigable = frame.LineNumber > 0 && !string.IsNullOrWhiteSpace(frame.ScriptName) && File.Exists(frame.ScriptName)
                 })
                 .ToArray();
+            if (frames.Length == 0 || frames.Count(frame => frame.IsCurrentFrame) != 1 || frames.Any(frame => frame.ThreadId <= 0 || string.IsNullOrWhiteSpace(frame.ProviderFrameId)) || frames.Select(frame => $"{frame.ThreadId}:{frame.ProviderFrameId}").Distinct(StringComparer.Ordinal).Count() != frames.Length)
+            {
+                throw new InvalidOperationException("The debugger provider returned a call stack without unique thread and frame identities.");
+            }
+
+            lock (_syncRoot)
+            {
+                _callStackSnapshotPauseGeneration = PauseGeneration;
+                _callStackSnapshot = frames;
+            }
+            Trace("GetCallStackAsync", $"Published provider-owned frame identities; pauseGeneration={PauseGeneration}; frameCount={frames.Length}; current={frames.Single(frame => frame.IsCurrentFrame).ProviderFrameId}; {DescribeSessionState()}");
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Provider call stack snapshot published.",
+                new Dictionary<string, object?>
+                {
+                    ["sessionId"] = SessionId,
+                    ["pauseGeneration"] = PauseGeneration,
+                    ["callStackCount"] = frames.Length,
+                    ["currentFrameId"] = frames.Single(frame => frame.IsCurrentFrame).FrameId,
+                    ["currentThreadId"] = frames.Single(frame => frame.IsCurrentFrame).ThreadId,
+                    ["currentProviderFrameId"] = frames.Single(frame => frame.IsCurrentFrame).ProviderFrameId,
+                    ["frameIdentityPreview"] = DeveloperDiagnostics.SanitizePreview(string.Join("; ", frames.Take(8).Select(frame => $"{frame.FrameIndex}:{frame.FunctionName}:current={frame.IsCurrentFrame}:selected={frame.IsSelectedInspectionFrame}:thread={frame.ThreadId}:provider={frame.ProviderFrameId}:id={frame.FrameId}")))
+                });
+            return frames;
         }
 
         public void Dispose()
@@ -1454,6 +1668,11 @@ namespace PS7ScriptDesk.Shell.Debug
             if (newState == DebugSessionState.Paused)
             {
                 Interlocked.Increment(ref _pauseGeneration);
+                lock (_syncRoot)
+                {
+                    _callStackSnapshot = null;
+                    _callStackSnapshotPauseGeneration = 0;
+                }
                 CurrentPauseReason = MapPauseReason(publicationOrigin);
             }
             AppLogger.Info("Debug", $"DebugStateChanged: {newState}");
@@ -2120,7 +2339,7 @@ namespace PS7ScriptDesk.Shell.Debug
             return builder.ToString();
         }
 
-        private static string BuildVariablesRequestScript()
+        private static string BuildVariablesRequestScript(long threadId, string providerFrameId)
         {
             var builder = new StringBuilder();
             builder.AppendLine("function __PSS_FormatDebugValueText {");
@@ -2141,15 +2360,24 @@ namespace PS7ScriptDesk.Shell.Debug
             builder.AppendLine("        return $text");
             builder.AppendLine("    } catch { return '<unavailable>' }");
             builder.AppendLine("}");
-            builder.AppendLine("$items = @(Get-Variable | Sort-Object Name | ForEach-Object {");
-            builder.AppendLine("    $value = $_.Value");
+            builder.AppendLine("$threadId = " + threadId);
+            builder.AppendLine("$providerFrameId = " + ToPowerShellLiteral(providerFrameId));
+            builder.AppendLine("$frameStore = $global:__PSS_DebugFrameStore");
+            builder.AppendLine("$frame = if ($null -ne $frameStore) { $frameStore[$providerFrameId] } else { $null }");
+            builder.AppendLine("if ($null -eq $frame) {");
+            builder.AppendLine("    $items = @([pscustomobject]@{ Name = ''; Type = ''; Value = ''; Error = ('Provider frame ' + $providerFrameId + ' is not available in the active paused call stack.') })");
+            builder.AppendLine("} else {");
+            builder.AppendLine("    $frameVariables = $frame.GetFrameVariables()");
+            builder.AppendLine("    $items = @($frameVariables.GetEnumerator() | Sort-Object Key | ForEach-Object {");
+            builder.AppendLine("    $value = $_.Value.Value");
             builder.AppendLine("    $typeName = if ($null -eq $value) { 'null' } else { $value.GetType().Name }");
             builder.AppendLine("    $valueText = __PSS_FormatDebugValueText $value");
             builder.AppendLine("    if ($null -eq $valueText) { $valueText = '' }");
             builder.AppendLine("    $valueText = [string]$valueText");
             builder.AppendLine("    if ($valueText.Length -gt 500) { $valueText = $valueText.Substring(0, 500) + '...' }");
-            builder.AppendLine("    [pscustomobject]@{ Name = [string]$_.Name; Type = [string]$typeName; Value = [string]$valueText }");
-            builder.AppendLine("})");
+            builder.AppendLine("    [pscustomobject]@{ Name = [string]$_.Key; Type = [string]$typeName; Value = [string]$valueText; Error = '' }");
+            builder.AppendLine("    })");
+            builder.AppendLine("}");
             builder.AppendLine("$json = $items | ConvertTo-Json -Compress -Depth 5");
             builder.Append("[Console]::Out.WriteLine('").Append(VariablesStartMarker).AppendLine("')");
             builder.AppendLine("[Console]::Out.WriteLine($json)");
@@ -2161,13 +2389,22 @@ namespace PS7ScriptDesk.Shell.Debug
         private static string BuildCallStackRequestScript()
         {
             var builder = new StringBuilder();
+            builder.AppendLine("$global:__PSS_DebugFrameStore = @{}");
+            builder.AppendLine("$providerThreadId = [int64]1");
+            builder.AppendLine("$isCurrent = $true");
             builder.AppendLine("$items = @(Get-PSCallStack | ForEach-Object {");
+            builder.AppendLine("    $providerFrameId = [guid]::NewGuid().ToString('N')");
+            builder.AppendLine("    $global:__PSS_DebugFrameStore[$providerFrameId] = $_");
             builder.AppendLine("    [pscustomobject]@{");
+            builder.AppendLine("        ThreadId = $providerThreadId");
+            builder.AppendLine("        ProviderFrameId = $providerFrameId");
+            builder.AppendLine("        IsCurrentFrame = $isCurrent");
             builder.AppendLine("        FunctionName = [string]$_.FunctionName");
             builder.AppendLine("        ScriptName = [string]$_.ScriptName");
             builder.AppendLine("        LineNumber = [int]$_.ScriptLineNumber");
             builder.AppendLine("        InvocationName = [string]$_.InvocationInfo.MyCommand.Name");
             builder.AppendLine("    }");
+            builder.AppendLine("    $isCurrent = $false");
             builder.AppendLine("})");
             builder.AppendLine("$json = $items | ConvertTo-Json -Compress -Depth 5");
             builder.Append("[Console]::Out.WriteLine('").Append(CallStackStartMarker).AppendLine("')");
