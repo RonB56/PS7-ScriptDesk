@@ -21,7 +21,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
-        <Border Grid.Row="0" Style="{DynamicResource IdeToolWindowHeaderStyle}">
+        <Border Grid.Row="0" Style="{DynamicResource IdeLowerToolWindowHeaderStyle}">
             <TextBlock Text="Problems / Debug Output / Activity"
                        Style="{DynamicResource IdeToolWindowHeaderTextStyle}"
                        AutomationProperties.Name="Floating tool window title" />

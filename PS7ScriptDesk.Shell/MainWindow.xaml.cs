@@ -51,6 +51,7 @@ using PS7ScriptDesk.Shell.Debug;
 using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.Shell.Help;
 using PS7ScriptDesk.Shell.Layout;
+using PS7ScriptDesk.Shell.Native;
 using PS7ScriptDesk.Shell.Services;
 using PS7ScriptDesk.Shell.Themes;
 using PS7ScriptDesk.UI.ViewModels;
@@ -267,6 +268,7 @@ namespace PS7ScriptDesk.Shell
         private readonly IUiScaleService _uiScaleService;
         private readonly ApplicationSettings _loadedSettings;
         private readonly WorkspaceLayoutCoordinator _layoutCoordinator;
+        private string? _nativeTitleBarTheme;
         private readonly PowerShellIntelliSenseService _intelliSenseService = new();
         private readonly InProcessPowerShellSyntaxDiagnosticsService _liveSyntaxDiagnosticsService = new();
         private readonly PowerShellDiagnosticsService _diagnosticsService = new();
@@ -1497,6 +1499,28 @@ namespace PS7ScriptDesk.Shell
             return metadata;
         }
 
+        private void Window_SourceInitialized(object? sender, EventArgs e)
+        {
+            ApplyNativeTitleBarTheme(_themeService.CurrentTheme);
+        }
+
+        private void ApplyNativeTitleBarTheme(string? themeName)
+        {
+            var normalizedTheme = string.Equals(themeName, ThemeService.Light, StringComparison.OrdinalIgnoreCase)
+                ? ThemeService.Light
+                : string.Equals(themeName, ThemeService.IseBlue, StringComparison.OrdinalIgnoreCase)
+                    ? ThemeService.IseBlue
+                    : ThemeService.Dark;
+
+            if (string.Equals(_nativeTitleBarTheme, normalizedTheme, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _nativeTitleBarTheme = normalizedTheme;
+            NativeTitleBarTheme.TryApply(this, normalizedTheme);
+        }
+
         private async void Window_Loaded(object sender, RoutedEventArgs e)
         {
             TerminalStartupTrace.Write("WINDOW_LOADED_ENTER", $"windowId={GetHashCode():X8}");
@@ -1519,6 +1543,7 @@ namespace PS7ScriptDesk.Shell
                 ApplyShellLayoutFromSettings();
                 // Apply saved theme (5B) and zoom (2B) before anything is shown.
                 _themeService.ApplyTheme(ViewModel?.CurrentThemeName ?? "Dark");
+                ApplyNativeTitleBarTheme(_themeService.CurrentTheme);
                 ApplyEditorHighlightSettingsToAllEditors();
                 DeveloperDiagnostics.LogInfo("Startup", "Shell layout, theme, and editor highlight settings applied.");
                 StartupTimingLogger.Log("MainWindow", $"Shell layout applied in {startupStopwatch.ElapsedMilliseconds} ms");
@@ -7212,6 +7237,7 @@ namespace PS7ScriptDesk.Shell
         private void ApplyTheme(string themeName)
         {
             _themeService.ApplyTheme(themeName);
+            ApplyNativeTitleBarTheme(_themeService.CurrentTheme);
             ApplyEditorHighlightSettingsToAllEditors();
             if (ViewModel is not null)
             {

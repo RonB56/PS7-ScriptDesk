@@ -7,15 +7,30 @@
     <SolidColorBrush x:Key="Theme.Surface.Primary" Color="#1F2937"/>
     <SolidColorBrush x:Key="Theme.Surface.Secondary" Color="#18212F"/>
     <SolidColorBrush x:Key="Theme.Surface.Tertiary" Color="#273449"/>
+    <SolidColorBrush x:Key="Theme.Surface.Elevated" Color="#243244"/>
     <SolidColorBrush x:Key="Theme.Surface.Hover" Color="#314159"/>
     <SolidColorBrush x:Key="Theme.Surface.Pressed" Color="#172131"/>
 
     <SolidColorBrush x:Key="Theme.Border.Subtle" Color="#334155"/>
     <SolidColorBrush x:Key="Theme.Border.Strong" Color="#475569"/>
+    <SolidColorBrush x:Key="Theme.Border.Focus" Color="#60A5FA"/>
+    <SolidColorBrush x:Key="Theme.Border.Separator" Color="#334155"/>
+    <SolidColorBrush x:Key="Theme.Splitter.Idle" Color="#334155"/>
+    <SolidColorBrush x:Key="Theme.Splitter.Hover" Color="#60A5FA"/>
+    <SolidColorBrush x:Key="Theme.Splitter.Active" Color="#93C5FD"/>
+    <SolidColorBrush x:Key="Theme.Splitter.Focus" Color="#60A5FA"/>
 
     <SolidColorBrush x:Key="Theme.Text.Primary" Color="#E5EEF9"/>
     <SolidColorBrush x:Key="Theme.Text.Secondary" Color="#9FB2C9"/>
     <SolidColorBrush x:Key="Theme.Text.Inverse" Color="#0F172A"/>
+    <SolidColorBrush x:Key="Theme.Text.Disabled" Color="#7E8EA5"/>
+
+    <SolidColorBrush x:Key="Theme.State.Success" Color="#34D399"/>
+    <SolidColorBrush x:Key="Theme.State.Warning" Color="#FBBF24"/>
+    <SolidColorBrush x:Key="Theme.State.Error" Color="#F87171"/>
+    <SolidColorBrush x:Key="Theme.Debugger.CurrentExecution" Color="#A7E3B5"/>
+    <SolidColorBrush x:Key="Theme.Debugger.Breakpoint" Color="#FFB454"/>
+    <SolidColorBrush x:Key="Theme.Separator" Color="#334155"/>
 
     <SolidColorBrush x:Key="Theme.Debugger.Output.Foreground" Color="#E5EEF9"/>
     <SolidColorBrush x:Key="Theme.Debugger.Debugger.Foreground" Color="#FFE08A"/>

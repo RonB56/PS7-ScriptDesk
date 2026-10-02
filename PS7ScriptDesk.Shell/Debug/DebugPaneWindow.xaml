@@ -54,6 +54,7 @@
 
         <Border Grid.Row="1" Style="{DynamicResource IdeToolWindowContentBorderStyle}">
           <TabControl x:Name="DebugTabControl"
+                      ItemContainerStyle="{DynamicResource IdeDebuggerTabItemStyle}"
                       SelectionChanged="DebugTabControl_SelectionChanged"
                       AutomationProperties.Name="Debugger tool content">
             <TabItem Header="Variables"
@@ -62,13 +63,12 @@
                 <Grid>
                     <TextBlock x:Name="DebugVariablesContextText"
                                Text="Variables: no active frame"
+                       Style="{DynamicResource IdeEmptyPaneContextTextStyle}"
                                Margin="4,2,4,0"
-                               VerticalAlignment="Top"
-                               FontWeight="SemiBold"
-                               Foreground="{DynamicResource Theme.Text.Secondary}" />
+                       />
                     <DataGrid x:Name="DebugVariablesGrid"
                           Margin="0,24,0,0"
-                          Style="{DynamicResource IdeToolWindowDataGridStyle}"
+                          Style="{DynamicResource IdeDebuggerDataGridStyle}"
                           AutoGenerateColumns="False"
                           IsReadOnly="True"
                           CanUserAddRows="False"
@@ -90,7 +90,7 @@
                                HorizontalAlignment="Center"
                                IsHitTestVisible="False">
                         <TextBlock.Style>
-                            <Style TargetType="TextBlock" BasedOn="{DynamicResource IdeEmptyPaneTextStyle}">
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource IdeEmptyPaneTextStyle}">
                                 <Setter Property="Visibility" Value="Collapsed" />
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding HasItems, ElementName=DebugVariablesGrid}" Value="False">
@@ -107,7 +107,7 @@
                      ToolTip="Show the active call stack and navigate to available source frames."
                      help:ContextHelp.Key="Debug.CallStack">
                 <DataGrid x:Name="DebugCallStackGrid"
-                          Style="{DynamicResource IdeToolWindowDataGridStyle}"
+                          Style="{DynamicResource IdeDebuggerDataGridStyle}"
                           AutoGenerateColumns="False"
                           IsReadOnly="True"
                           CanUserAddRows="False"
@@ -137,7 +137,7 @@
 
                     <DataGrid x:Name="DebugBreakpointsGrid"
                               Grid.Row="0"
-                              Style="{DynamicResource IdeToolWindowDataGridStyle}"
+                              Style="{DynamicResource IdeDebuggerDataGridStyle}"
                               AutoGenerateColumns="False"
                               IsReadOnly="False"
                               CanUserAddRows="False"

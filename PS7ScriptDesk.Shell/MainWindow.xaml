@@ -13,6 +13,7 @@
         MinHeight="500"
         MinWidth="800"
         WindowStartupLocation="CenterScreen"
+        SourceInitialized="Window_SourceInitialized"
         Loaded="Window_Loaded"
         ContentRendered="Window_ContentRendered"
         Closing="Window_Closing"
@@ -154,7 +155,7 @@
                                 <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Primary}" />
                             </Trigger>
                             <Trigger Property="IsKeyboardFocusWithin" Value="True">
-                                <Setter TargetName="ItemBorder" Property="BorderBrush" Value="{DynamicResource Theme.Accent.Primary}" />
+                                <Setter TargetName="ItemBorder" Property="BorderBrush" Value="{DynamicResource Theme.Border.Focus}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Foreground" Value="{DynamicResource Theme.Text.Secondary}" />
@@ -193,9 +194,9 @@
         </Style>
 
         <Style x:Key="ToolbarIconViewboxStyle" TargetType="Viewbox">
-            <Setter Property="Width" Value="13" />
-            <Setter Property="Height" Value="13" />
-            <Setter Property="Margin" Value="0,0,4,0" />
+            <Setter Property="Width" Value="16" />
+            <Setter Property="Height" Value="16" />
+            <Setter Property="Margin" Value="0,0,5,0" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
 
@@ -216,6 +217,7 @@
             <Setter Property="HorizontalContentAlignment" Value="Center" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
             <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{StaticResource IdeButtonFocusVisualStyle}" />
             <Setter Property="Content" Value="×" />
             <Setter Property="Template">
                 <Setter.Value>
@@ -236,6 +238,10 @@
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="CloseButtonBorder" Property="Background" Value="{DynamicResource Theme.Surface.Tertiary}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="CloseButtonBorder" Property="BorderBrush" Value="{DynamicResource Theme.Border.Focus}" />
+                                <Setter TargetName="CloseButtonBorder" Property="BorderThickness" Value="0,0,0,2" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.5" />
@@ -550,8 +556,11 @@
             </MenuItem>
         </Menu>
 
-        <ToolBarTray DockPanel.Dock="Top" help:ContextHelp.Key="App.Overview">
-            <ToolBar x:Name="MainToolbar">
+        <ToolBarTray DockPanel.Dock="Top"
+                     HorizontalAlignment="Stretch"
+                     help:ContextHelp.Key="App.Overview">
+            <ToolBar x:Name="MainToolbar"
+                     HorizontalContentAlignment="Left">
                 <!-- File/document group -->
                 <Button Command="{Binding NewScriptCommand}"
                         help:ContextHelp.Key="Command.NewScript"
@@ -851,7 +860,12 @@
             </ToolBar>
         </ToolBarTray>
 
-        <StatusBar DockPanel.Dock="Bottom" help:ContextHelp.Key="Status.General">
+        <StatusBar DockPanel.Dock="Bottom"
+                   Style="{StaticResource IdeModernStatusBarStyle}"
+                   help:ContextHelp.Key="Status.General">
+            <StatusBar.Resources>
+                <Style TargetType="TextBlock" BasedOn="{StaticResource IdeStatusBarTextStyle}" />
+            </StatusBar.Resources>
             <StatusBarItem help:ContextHelp.Key="Status.Version">
                 <TextBlock Text="{Binding VersionText}" />
             </StatusBarItem>
@@ -873,7 +887,8 @@
                            ToolTip="{Binding SessionRestoreNoticeToolTip}" />
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.Caret">
+            <StatusBarItem Style="{StaticResource IdeStatusBarGroupStartItemStyle}"
+                           help:ContextHelp.Key="Status.Caret">
                 <TextBlock Text="{Binding SelectedTab.CaretDisplayText, TargetNullValue='Ln 1, Col 1'}" />
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
@@ -889,22 +904,27 @@
                 <TextBlock Text="{Binding SelectedTab.BreakpointDisplayText, TargetNullValue=Breakpoints: None}" />
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.Runtime">
-                <TextBlock Text="{Binding RuntimeText}" />
+            <StatusBarItem Style="{StaticResource IdeStatusBarGroupStartItemStyle}"
+                           help:ContextHelp.Key="Status.Runtime">
+                <TextBlock Text="{Binding RuntimeText}"
+                           Style="{StaticResource IdeStatusBarLongTextStyle}" />
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Workspace">
-                <TextBlock Text="{Binding WorkspaceText}" />
+                <TextBlock Text="{Binding WorkspaceText}"
+                           Style="{StaticResource IdeStatusBarLongTextStyle}" />
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
             <StatusBarItem help:ContextHelp.Key="Status.Git">
                 <TextBlock x:Name="GitStatusTextBlock"
+                           Style="{StaticResource IdeStatusBarLongTextStyle}"
                            Text="{Binding GitStatusText, NotifyOnTargetUpdated=True}"
                            TargetUpdated="GitStatusTextBlock_TargetUpdated"
                            ToolTip="{Binding GitRepositoryRootText}" />
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.Zoom">
+            <StatusBarItem Style="{StaticResource IdeStatusBarGroupStartItemStyle}"
+                           help:ContextHelp.Key="Status.Zoom">
                 <TextBlock Text="{Binding ZoomLevelText}" />
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
@@ -947,7 +967,8 @@
                 </Border>
             </StatusBarItem>
             <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Help.Context">
+            <StatusBarItem Style="{StaticResource IdeStatusBarGroupStartItemStyle}"
+                           help:ContextHelp.Key="Help.Context">
                 <ToggleButton Style="{StaticResource StatusBarHelpToggleButtonStyle}"
                               ToolTip="Turn advanced context help on or off"
                               IsChecked="{Binding IsContextHelpEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}">
@@ -1397,29 +1418,32 @@
                                             <RowDefinition Height="*" />
                                         </Grid.RowDefinitions>
 
-                                        <DockPanel Grid.Row="0"
-                                                   LastChildFill="False"
-                                                   Margin="0,0,0,4">
-                                            <TabPanel x:Name="HeaderPanel"
-                                                      DockPanel.Dock="Left"
-                                                      IsItemsHost="True"
-                                                      KeyboardNavigation.TabIndex="1"
-                                                      Background="Transparent"
-                                                      Panel.ZIndex="1" />
+                                        <Border Grid.Row="0"
+                                                Style="{StaticResource IdeEditorTabStripBorderStyle}"
+                                                Margin="0,0,0,4">
+                                            <DockPanel LastChildFill="False">
+                                                <TabPanel x:Name="HeaderPanel"
+                                                          DockPanel.Dock="Left"
+                                                          IsItemsHost="True"
+                                                          KeyboardNavigation.TabIndex="1"
+                                                          Background="Transparent"
+                                                          Panel.ZIndex="1" />
 
-                                            <Button DockPanel.Dock="Left"
-                                                    help:ContextHelp.Key="Editor.PlusTab"
-                                                    VerticalAlignment="Top"
-                                                    Width="22"
-                                                    Height="22"
-                                                    Margin="2,2,0,0"
-                                                    Padding="0"
-                                                    FontSize="14"
-                                                    FontWeight="Bold"
-                                                    ToolTip="Open a new blank tab"
-                                                    Command="{Binding DataContext.NewScriptCommand, RelativeSource={RelativeSource TemplatedParent}}"
-                                                    Content="+" />
-                                        </DockPanel>
+                                                <Button DockPanel.Dock="Left"
+                                                        Style="{StaticResource IdeEditorNewTabButtonStyle}"
+                                                        help:ContextHelp.Key="Editor.PlusTab"
+                                                        VerticalAlignment="Top"
+                                                        Width="22"
+                                                        Height="22"
+                                                        Margin="2,0,0,0"
+                                                        Padding="0"
+                                                        FontSize="14"
+                                                        FontWeight="Bold"
+                                                        ToolTip="Open a new blank tab"
+                                                        Command="{Binding DataContext.NewScriptCommand, RelativeSource={RelativeSource TemplatedParent}}"
+                                                        Content="+" />
+                                            </DockPanel>
+                                        </Border>
 
                                         <ContentPresenter Grid.Row="1"
                                                           x:Name="PART_SelectedContentHost"
@@ -1432,10 +1456,12 @@
                                 <DataTemplate>
                                     <StackPanel Orientation="Horizontal" help:ContextHelp.Key="Editor.TabStrip">
                                         <TextBlock Text="{Binding DisplayTitle}"
+                                                   Style="{StaticResource IdeEditorTabTitleStyle}"
                                                    VerticalAlignment="Center"
                                                    Margin="0,0,6,0"
                                                    ToolTip="{Binding EditorTabToolTip}" />
                                         <Button Content="x"
+                                                Style="{StaticResource IdeEditorTabCloseButtonStyle}"
                                                 help:ContextHelp.Key="Editor.CloseTabButton"
                                                 Width="16"
                                                 Height="16"
@@ -1566,26 +1592,30 @@
                                             </Grid.ColumnDefinitions>
 
                                             <TextBlock Grid.Column="0"
+                                                       Style="{StaticResource IdeEditorStatusTextStyle}"
                                                        Text="{Binding CaretDisplayText}"
-                                                       FontSize="{StaticResource Theme.FontSize.Caption}"
+                                                       FontSize="{StaticResource Theme.FontSize.StatusText}"
                                                        Foreground="{DynamicResource Theme.Text.Secondary}"
                                                        Margin="0,0,10,0" />
                                             <TextBlock Grid.Column="1"
+                                                       Style="{StaticResource IdeEditorStatusTextStyle}"
                                                        Text="{Binding EditorMetricsText}"
-                                                       FontSize="{StaticResource Theme.FontSize.Caption}"
+                                                       FontSize="{StaticResource Theme.FontSize.StatusText}"
                                                        Foreground="{DynamicResource Theme.Text.Secondary}"
                                                        Margin="0,0,10,0" />
                                             <TextBlock Grid.Column="2"
+                                                       Style="{StaticResource IdeEditorStatusTextStyle}"
                                                        Text="{Binding SelectionDisplayText}"
-                                                       FontSize="{StaticResource Theme.FontSize.Caption}"
+                                                       FontSize="{StaticResource Theme.FontSize.StatusText}"
                                                        Foreground="{DynamicResource Theme.Text.Secondary}"
                                                        TextWrapping="NoWrap"
                                                        TextTrimming="CharacterEllipsis"
                                                        ToolTip="{Binding SelectionDisplayText}"
                                                        Margin="0,0,10,0" />
                                             <TextBlock Grid.Column="3"
+                                                       Style="{StaticResource IdeEditorStatusTextStyle}"
                                                        Text="{Binding BreakpointDisplayText}"
-                                                       FontSize="{StaticResource Theme.FontSize.Caption}"
+                                                       FontSize="{StaticResource Theme.FontSize.StatusText}"
                                                        Foreground="{DynamicResource Theme.Text.Secondary}"
                                                        TextWrapping="NoWrap"
                                                        TextTrimming="CharacterEllipsis"
@@ -1630,7 +1660,11 @@
                         <RowDefinition x:Name="BottomToolWindowRowDefinition" Height="0" MinHeight="0" />
                     </Grid.RowDefinitions>
 
-                    <Grid Grid.Row="0" Margin="0,0,0,4">
+                    <Border Grid.Row="0"
+                            Style="{StaticResource IdeHeaderPanelStyle}"
+                            Padding="8,4"
+                            Margin="0,0,0,4">
+                        <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
@@ -1652,82 +1686,35 @@
                                     Orientation="Horizontal"
                                     VerticalAlignment="Center"
                                     HorizontalAlignment="Right">
-                            <Border Margin="0,0,8,0">
-                                <Border.Style>
-                                    <Style TargetType="Border" BasedOn="{StaticResource BottomPaneHeaderBadgeBorderStyle}">
-                                        <Setter Property="Visibility" Value="Collapsed" />
-                                        <Setter Property="Background" Value="{DynamicResource Theme.Status.Error.Background}" />
-                                        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Status.Error.Border}" />
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding SelectedTab.HasSyntaxErrors}" Value="True">
-                                                <Setter Property="Visibility" Value="Visible" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Border.Style>
-                                <TextBlock Text="{Binding SelectedTab.DiagnosticErrorCount, StringFormat={}{0} errors}"
-                                           Foreground="{DynamicResource Theme.Status.Error.Foreground}"
-                                           FontSize="11"
-                                           FontWeight="Bold" />
-                            </Border>
-
-                            <Border>
-                                <Border.Style>
-                                    <Style TargetType="Border" BasedOn="{StaticResource BottomPaneHeaderBadgeBorderStyle}">
-                                        <Setter Property="Visibility" Value="Collapsed" />
-                                        <Setter Property="Background" Value="{DynamicResource Theme.Status.Warning.Background}" />
-                                        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Status.Warning.Border}" />
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding SelectedTab.HasDiagnosticWarnings}" Value="True">
-                                                <Setter Property="Visibility" Value="Visible" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Border.Style>
-                                <TextBlock Text="{Binding SelectedTab.DiagnosticWarningCount, StringFormat={}{0} warnings}"
-                                           Foreground="{DynamicResource Theme.Status.Warning.Foreground}"
-                                           FontSize="11"
-                                           FontWeight="Bold" />
-                            </Border>
+                            <TextBlock x:Name="ConsoleRuntimeVersionTextBlock"
+                                       Text="{Binding EffectiveRuntimeInfo.VersionText, TargetNullValue=PowerShell 7}"
+                                       Style="{StaticResource IdeToolWindowMetaTextStyle}"
+                                       Margin="0,0,10,0"
+                                       ToolTip="Active PowerShell runtime version"
+                                       AutomationProperties.Name="PowerShell runtime version" />
+                            <TextBlock x:Name="ConsoleSessionStatusTextBlock"
+                                       Text="{Binding ConsoleSessionText, NotifyOnTargetUpdated=True}"
+                                       TargetUpdated="ConsoleSessionStatusTextBlock_TargetUpdated"
+                                       Visibility="Collapsed"
+                                       IsHitTestVisible="False" />
+                            <Button x:Name="ResetConsoleButton"
+                                    Content="Reset Console"
+                                    Command="{Binding RestartConsoleCommand}"
+                                    PreviewMouseLeftButtonDown="ResetConsoleButton_PreviewMouseLeftButtonDown"
+                                    Style="{StaticResource IdeSecondaryButtonStyle}"
+                                    MinWidth="110"
+                                    ToolTip="Start a fresh PowerShell session for the console. Editor tabs stay open."
+                                    help:ContextHelp.Key="Console.Reset" />
                         </StackPanel>
-                    </Grid>
+                        </Grid>
+                    </Border>
 
                     <Grid Grid.Row="1">
                         <Grid x:Name="ConsoleBottomPane"
                               Margin="0">
 
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="*" />
-                            </Grid.RowDefinitions>
-
-                            <!-- Console header: session status, Reset Console button -->
-                            <DockPanel Grid.Row="0" Margin="0,0,0,4">
-                                <TextBlock x:Name="ConsoleSessionStatusTextBlock"
-                                           Text="{Binding ConsoleSessionText, NotifyOnTargetUpdated=True}"
-                                           TargetUpdated="ConsoleSessionStatusTextBlock_TargetUpdated"
-                                           VerticalAlignment="Center"
-                                           Foreground="{DynamicResource Theme.Text.Secondary}"
-                                           help:ContextHelp.Key="Console.Area" />
-
-                                <StackPanel Orientation="Horizontal"
-                                            DockPanel.Dock="Right"
-                                            HorizontalAlignment="Right">
-                                    <Button x:Name="ResetConsoleButton"
-                                            Content="Reset Console"
-                                            Command="{Binding RestartConsoleCommand}"
-                                            PreviewMouseLeftButtonDown="ResetConsoleButton_PreviewMouseLeftButtonDown"
-                                            Style="{StaticResource IdeSecondaryButtonStyle}"
-                                            Margin="8,0,0,0"
-                                            MinWidth="110"
-                                            ToolTip="Start a fresh PowerShell session for the console. Editor tabs stay open."
-                                            help:ContextHelp.Key="Console.Reset" />
-                                </StackPanel>
-                            </DockPanel>
-
-                            <!-- xterm.js terminal — replaces the old TextBox + command-input row -->
                             <controls:TerminalControl x:Name="TerminalConsole"
-                                                      Grid.Row="1"
+                                                      Grid.Row="0"
                                                       help:ContextHelp.Key="Console.Output" />
                         </Grid>
                     </Grid>
@@ -1751,10 +1738,12 @@
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
 
-                        <DockPanel Grid.Row="0" Margin="0,0,0,4">
-                            <TextBlock Text="Problems / Debug Output / Activity"
-                                       VerticalAlignment="Center"
-                                       Style="{StaticResource IdeSectionHeaderTextStyle}" />
+                            <Border Grid.Row="0"
+                                    Style="{StaticResource IdeLowerToolWindowHeaderStyle}">
+                                <DockPanel>
+                                    <TextBlock Text="Problems / Debug Output / Activity"
+                                               VerticalAlignment="Center"
+                                               Style="{StaticResource IdeToolWindowHeaderTextStyle}" />
 
                             <StackPanel DockPanel.Dock="Right"
                                         Orientation="Horizontal"
@@ -1780,7 +1769,8 @@
                                         AutomationProperties.Name="Hide Problems, Debug Output, and Activity"
                                         Click="HideBottomToolWindowButton_Click" />
                             </StackPanel>
-                        </DockPanel>
+                                </DockPanel>
+                            </Border>
 
                         <Grid Grid.Row="1" Margin="0,0,0,4">
                             <Grid.ColumnDefinitions>
@@ -1845,12 +1835,15 @@
                                                TextWrapping="Wrap" />
                                 </StackPanel>
 
-                            </DockPanel>
+                                </DockPanel>
 
                             <TextBlock Grid.Row="1"
                                        Text="No problems for the active document."
                                        Margin="0,0,0,8"
-                                       Foreground="{DynamicResource Theme.Text.Secondary}">
+                                       Foreground="{DynamicResource Theme.Text.Secondary}"
+                                       FontSize="{StaticResource Theme.FontSize.Caption}"
+                                       HorizontalAlignment="Center"
+                                       TextAlignment="Center">
                                 <TextBlock.Style>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="Visibility" Value="Collapsed" />
@@ -1869,7 +1862,7 @@
                                 <ItemsControl ItemsSource="{Binding SelectedTab.SyntaxErrors}">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
-                                            <Button Style="{StaticResource DiagnosticsItemButtonStyle}"
+                                            <Button Style="{StaticResource IdeLowerToolProblemItemButtonStyle}"
                                                     Click="SyntaxDiagnosticItem_Click">
                                                 <Grid>
                                                     <Grid.ColumnDefinitions>
@@ -1953,7 +1946,7 @@
                             <DockPanel Grid.Row="0" Margin="0,0,0,4">
                                 <TextBlock Text="Debug Output"
                                            VerticalAlignment="Center"
-                                           Style="{StaticResource IdeSectionHeaderTextStyle}"
+                                           Style="{DynamicResource IdeToolWindowHeaderTextStyle}"
                                            help:ContextHelp.Key="Debug.Area" />
                                 <StackPanel DockPanel.Dock="Right"
                                             Orientation="Horizontal"
@@ -2072,16 +2065,9 @@
                                      VirtualizingPanel.IsVirtualizing="True"
                                      VirtualizingPanel.VirtualizationMode="Recycling"
                                      KeyboardNavigation.TabNavigation="Continue"
+                                     ItemContainerStyle="{StaticResource IdeLowerToolListBoxItemStyle}"
                                      ToolTip="Output from the separate PowerShell debugger process. Interactive PowerShell remains in Console."
                                      help:ContextHelp.Key="Debug.Area">
-                                <ListBox.ItemContainerStyle>
-                                    <Style TargetType="ListBoxItem">
-                                        <Setter Property="Padding" Value="2,0" />
-                                        <Setter Property="MinHeight" Value="0" />
-                                        <Setter Property="VerticalContentAlignment" Value="Center" />
-                                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                    </Style>
-                                </ListBox.ItemContainerStyle>
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <Border>
@@ -2145,6 +2131,7 @@
                             </ListBox>
                             <TextBlock x:Name="DebugOutputEmptyState"
                                        Text="No debugger output yet."
+                                       Style="{StaticResource IdeEmptyPaneTextStyle}"
                                        HorizontalAlignment="Center"
                                        VerticalAlignment="Center"
                                        Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
@@ -2174,6 +2161,7 @@
                                        Style="{StaticResource IdeSectionHeaderTextStyle}" />
 
                             <TextBox Grid.Row="1"
+                                     Style="{StaticResource IdeLowerToolActivityTextBoxStyle}"
                                      Text="{Binding ApplicationActivityText, Mode=OneWay}"
                                      IsReadOnly="True"
                                      AcceptsReturn="True"
@@ -2268,10 +2256,9 @@
                                 <Grid Margin="0,4,0,0">
                                     <TextBlock x:Name="DebugVariablesContextText"
                                                Text="Variables: no active frame"
+                                               Style="{StaticResource IdeEmptyPaneContextTextStyle}"
                                                Margin="4,2,4,0"
-                                               VerticalAlignment="Top"
-                                               FontWeight="SemiBold"
-                                               Foreground="{DynamicResource Theme.Text.Secondary}" />
+                                               />
                                     <DataGrid x:Name="DebugVariablesGrid"
                                               Margin="0,24,0,0"
                                               help:ContextHelp.Key="Debug.Variables"

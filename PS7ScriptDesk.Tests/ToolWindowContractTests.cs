@@ -55,6 +55,15 @@ public sealed class ToolWindowContractTests
         Assert.Contains("RemoveSelectedBreakpointRequested?.Invoke", debugCode, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void DebugPaneDoesNotUseDynamicResourceForStyleBasedOn()
+    {
+        var debug = Read("PS7ScriptDesk.Shell", "Debug", "DebugPaneWindow.xaml");
+
+        Assert.DoesNotContain("BasedOn=\"{DynamicResource", debug, StringComparison.Ordinal);
+        Assert.Contains("BasedOn=\"{StaticResource IdeEmptyPaneTextStyle}\"", debug, StringComparison.Ordinal);
+    }
+
     private static string Read(params string[] parts) => File.ReadAllText(Path.Combine(new[] { FindRoot() }.Concat(parts).ToArray()));
 
     private static int Count(string text, string value)
