@@ -52,8 +52,8 @@ public sealed class Phase4PaneSystemContractTests
         }
 
         Assert.Contains("Click=\"DockBackButton_Click\"", debug, StringComparison.Ordinal);
-        Assert.Contains("DockBackRequested?.Invoke(this, EventArgs.Empty);", Read("PS7ScriptDesk.Shell", "Debug", "DebugPaneWindow.xaml.cs"), StringComparison.Ordinal);
-        Assert.Contains("DockBackRequested?.Invoke(this, EventArgs.Empty);", Read("PS7ScriptDesk.Shell", "BottomToolWindow.xaml.cs"), StringComparison.Ordinal);
+        var dockableCode = Read("PS7ScriptDesk.Shell", "DockableToolWindow.cs");
+        Assert.Contains("DockBackRequested?.Invoke(this, EventArgs.Empty);", dockableCode, StringComparison.Ordinal);
         Assert.Contains("ToolContentHost", bottom, StringComparison.Ordinal);
     }
 

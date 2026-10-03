@@ -29,6 +29,8 @@ namespace PS7ScriptDesk.Shell.Debug
         private const string CallStackEndMarker = "__PSS_CALLSTACK_END__";
         private const string ScopeDiagnosticStartMarker = "__PSS_SCOPE_DIAGNOSTIC_BEGIN__";
         private const string ScopeDiagnosticEndMarker = "__PSS_SCOPE_DIAGNOSTIC_END__";
+        private const string RequestErrorPrefix = "__PSS_REQUEST_ERROR__";
+        private const string D4A4ForensicPrefix = "__PSS_D4A4_FORENSIC__";
         private const int DebugRequestTimeoutSeconds = 20;
         private const int OrphanedRequestOutputSuppressionMilliseconds = 30000;
         private static readonly TimeSpan ProcessStopTimeout = TimeSpan.FromSeconds(2);
@@ -87,6 +89,7 @@ namespace PS7ScriptDesk.Shell.Debug
         private bool _disposed;
         private long _lastLocationNotificationTicks;
         private string? _orphanedRequestOutputEndMarker;
+        private string? _orphanedRequestOutputStartMarker;
         private long _orphanedRequestOutputSuppressUntilTicks;
         private Action<DebugSessionState>? _stateChanged;
         private Action<string?, int>? _breakpointHit;
@@ -234,6 +237,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 _currentFrameQueryInProgress = 0;
                 _lastLocationNotificationTicks = 0;
                 _orphanedRequestOutputEndMarker = null;
+                _orphanedRequestOutputStartMarker = null;
                 _orphanedRequestOutputSuppressUntilTicks = 0;
                 _capturingBreakpointPayload = false;
                 _breakpointPayloadBuffer.Clear();
@@ -385,7 +389,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 return DebuggerVariableInspectionResult.UnavailableFor(frameIdentity, "The provider did not supply a stable thread and frame identity.");
             }
 
-            var callStack = await GetCallStackAsync().ConfigureAwait(false);
+            var callStack = await GetCallStackAsync(cancellationToken).ConfigureAwait(false);
             var currentFrame = callStack.SingleOrDefault(frame => frame.IsCurrentFrame);
             var threadMatches = currentFrame is not null && currentFrame.ThreadId == frameIdentity.ThreadId;
             var providerFrameMatches = currentFrame is not null && string.Equals(currentFrame.ProviderFrameId, frameIdentity.ProviderFrameId, StringComparison.Ordinal);
@@ -493,6 +497,7 @@ namespace PS7ScriptDesk.Shell.Debug
         private async Task<IReadOnlyList<DebugVariableInfo>> GetVariablesAsync(long threadId, string providerFrameId, CancellationToken cancellationToken)
         {
             EnsurePaused();
+            cancellationToken.ThrowIfCancellationRequested();
 
             lock (_syncRoot)
             {
@@ -504,7 +509,7 @@ namespace PS7ScriptDesk.Shell.Debug
             }
 
             var payload = await SendRequestAsync(
-                BuildVariablesRequestScript(threadId, providerFrameId),
+                (startMarker, endMarker) => BuildVariablesRequestScript(threadId, providerFrameId, startMarker, endMarker),
                 VariablesStartMarker,
                 VariablesEndMarker,
                 suppressNextDebugPrompt: true,
@@ -566,9 +571,13 @@ namespace PS7ScriptDesk.Shell.Debug
                 .ToArray();
         }
 
-        public async Task<IReadOnlyList<DebugCallStackFrame>> GetCallStackAsync()
+        public async Task<IReadOnlyList<DebugCallStackFrame>> GetCallStackAsync(CancellationToken cancellationToken = default)
         {
             EnsurePaused();
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var requestSessionId = SessionId;
+            var requestPauseGeneration = PauseGeneration;
 
             lock (_syncRoot)
             {
@@ -579,11 +588,19 @@ namespace PS7ScriptDesk.Shell.Debug
             }
 
             var payload = await SendRequestAsync(
-                BuildCallStackRequestScript(),
+                (startMarker, endMarker) => BuildCallStackRequestScript(startMarker, endMarker),
                 CallStackStartMarker,
                 CallStackEndMarker,
                 suppressNextDebugPrompt: true,
-                CancellationToken.None).ConfigureAwait(false);
+                cancellationToken).ConfigureAwait(false);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (CurrentState != DebugSessionState.Paused ||
+                SessionId != requestSessionId ||
+                PauseGeneration != requestPauseGeneration)
+            {
+                throw new OperationCanceledException("The call-stack request completed after its paused debugger context became stale.", cancellationToken);
+            }
 
             if (string.IsNullOrWhiteSpace(payload))
             {
@@ -648,7 +665,7 @@ namespace PS7ScriptDesk.Shell.Debug
         {
             EnsurePaused();
             var payload = await SendRequestAsync(
-                BuildScopeDiagnosticRequestScript(),
+                (startMarker, endMarker) => BuildScopeDiagnosticRequestScript(startMarker, endMarker),
                 ScopeDiagnosticStartMarker,
                 ScopeDiagnosticEndMarker,
                 suppressNextDebugPrompt: true,
@@ -745,6 +762,7 @@ namespace PS7ScriptDesk.Shell.Debug
             _currentFrameQueryInProgress = 0;
             _lastLocationNotificationTicks = 0;
             _orphanedRequestOutputEndMarker = null;
+            _orphanedRequestOutputStartMarker = null;
             _orphanedRequestOutputSuppressUntilTicks = 0;
             // The termination record is published after bounded process teardown so
             // process-exit and reader-drain evidence are available to the UI.
@@ -971,7 +989,7 @@ namespace PS7ScriptDesk.Shell.Debug
         }
 
         private async Task<string> SendRequestAsync(
-            string command,
+            Func<string, string, string> commandFactory,
             string startMarker,
             string endMarker,
             bool suppressNextDebugPrompt,
@@ -979,8 +997,27 @@ namespace PS7ScriptDesk.Shell.Debug
         {
             Trace("SendRequestAsync", $"Entry; startMarker='{startMarker}'; endMarker='{endMarker}'; suppressNextDebugPrompt={suppressNextDebugPrompt}; timeoutSeconds={DebugRequestTimeoutSeconds}; {DescribeSessionState()}");
             await _requestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            var request = new ActiveRequest(startMarker, endMarker);
+            var requestId = Guid.NewGuid();
+            var request = new ActiveRequest(
+                requestId,
+                $"{startMarker}{requestId:N}",
+                $"{endMarker}{requestId:N}",
+                suppressNextDebugPrompt);
             var completed = false;
+
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Inspection transport request created.",
+                new Dictionary<string, object?>
+                {
+                    ["requestId"] = request.RequestId,
+                    ["sessionId"] = SessionId,
+                    ["pauseGeneration"] = PauseGeneration,
+                    ["requestType"] = startMarker,
+                    ["markerBegin"] = request.StartMarker,
+                    ["markerEnd"] = request.EndMarker,
+                    ["suppressionCountBefore"] = _suppressNextDebugPromptCount
+                });
 
             try
             {
@@ -999,12 +1036,33 @@ namespace PS7ScriptDesk.Shell.Debug
                     _activeRequest = request;
                 }
 
-                await SendCommandAsync(command, cancellationToken).ConfigureAwait(false);
+                await SendCommandAsync(commandFactory(request.StartMarker, request.EndMarker), cancellationToken).ConfigureAwait(false);
 
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(DebugRequestTimeoutSeconds));
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
-                var payload = await request.CompletionSource.Task.WaitAsync(linked.Token).ConfigureAwait(false);
+                string payload;
+                try
+                {
+                    payload = await request.CompletionSource.Task.WaitAsync(linked.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeout.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"Inspection request did not produce its completion marker within {DebugRequestTimeoutSeconds} seconds.");
+                }
+
                 completed = true;
+                if (payload.StartsWith(RequestErrorPrefix, StringComparison.Ordinal))
+                {
+                    var errorMessage = payload[RequestErrorPrefix.Length..].Trim();
+                    Trace(
+                        "SendRequestAsync",
+                        $"Request-error envelope observed; requestType={startMarker}; errorLength={errorMessage.Length}; errorPreview={SummarizeDiagnosticText(errorMessage, 240)}; {DescribeSessionState()}");
+                    throw new InvalidOperationException(
+                        string.IsNullOrWhiteSpace(errorMessage)
+                            ? "The PowerShell inspection helper reported an error."
+                            : $"The PowerShell inspection helper reported an error: {errorMessage}");
+                }
+
                 Trace("SendRequestAsync", $"Completed; startMarker='{startMarker}'; endMarker='{endMarker}'; payloadLength={payload.Length}; {DescribeSessionState()}");
                 return payload;
             }
@@ -1016,12 +1074,36 @@ namespace PS7ScriptDesk.Shell.Debug
                     {
                         _activeRequest = null;
                     }
+
+                    if (request.SuppressNextDebugPrompt &&
+                        !request.PromptSuppressionConsumed &&
+                        _suppressNextDebugPromptCount > 0)
+                    {
+                        _suppressNextDebugPromptCount--;
+                    }
                 }
 
                 if (!completed)
                 {
-                    BeginOrphanedRequestOutputSuppression(endMarker, $"Request did not complete normally; startMarker='{startMarker}'");
+                    BeginOrphanedRequestOutputSuppression(request.StartMarker, request.EndMarker, $"Request did not complete normally; requestId='{request.RequestId}'");
                 }
+
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Inspection transport request cleaned up.",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = request.RequestId,
+                        ["sessionId"] = SessionId,
+                        ["pauseGeneration"] = PauseGeneration,
+                        ["requestType"] = startMarker,
+                        ["completed"] = completed,
+                        ["cancelled"] = cancellationToken.IsCancellationRequested,
+                        ["markerBegin"] = request.StartMarker,
+                        ["markerEnd"] = request.EndMarker,
+                        ["suppressionCountAfter"] = _suppressNextDebugPromptCount,
+                        ["cleanupReason"] = completed ? "Completed" : cancellationToken.IsCancellationRequested ? "Cancelled" : "TimeoutOrFailure"
+                    });
 
                 _requestGate.Release();
             }
@@ -1168,9 +1250,21 @@ namespace PS7ScriptDesk.Shell.Debug
             }
             if (isErrorStream)
             {
-                if (TryHandleObservedDebugPauseOutput(normalizedLine, "stderr"))
+                ActiveRequest? activeRequestForStderr;
+                lock (_syncRoot)
                 {
+                    activeRequestForStderr = _activeRequest;
+                }
+
+                if (activeRequestForStderr is null && TryHandleObservedDebugPauseOutput(normalizedLine, "stderr"))
+                {
+                    Trace("ProcessIncomingLine", $"Accepted stderr pause-location classification as native debugger output; requestActive=False; lineLength={normalizedLine.Length}; {DescribeSessionState()}");
                     return;
+                }
+
+                if (activeRequestForStderr is not null && DebugLocationOutputRegex.IsMatch(normalizedLine))
+                {
+                    Trace("ProcessIncomingLine", $"Rejected stderr pause-location classification because an inspection request owns the traffic; requestId={activeRequestForStderr.RequestId}; lineLength={normalizedLine.Length}; {DescribeSessionState()}");
                 }
 
                 PublishOutputLine(line, "ProcessIncomingLine", "stderr");
@@ -1227,35 +1321,42 @@ namespace PS7ScriptDesk.Shell.Debug
                 return;
             }
 
-            ActiveRequest? activeRequest;
+            ActiveRequest? activeRequestForStdout;
             lock (_syncRoot)
             {
-                activeRequest = _activeRequest;
+                activeRequestForStdout = _activeRequest;
             }
 
-            if (activeRequest is not null)
+            if (activeRequestForStdout is not null)
             {
-                if (!activeRequest.IsCapturing && LineContainsMarker(normalizedLine, activeRequest.StartMarker))
+                if (!activeRequestForStdout.IsCapturing && LineContainsMarker(normalizedLine, activeRequestForStdout.StartMarker))
                 {
-                    activeRequest.IsCapturing = true;
-                    activeRequest.Capture.Clear();
-                    Trace("ProcessIncomingLine", $"Active request capture started; startMarker='{activeRequest.StartMarker}'.");
+                    activeRequestForStdout.IsCapturing = true;
+                    activeRequestForStdout.Capture.Clear();
+                    Trace("ProcessIncomingLine", $"Active request capture started; startMarker='{activeRequestForStdout.StartMarker}'.");
                     return;
                 }
 
-                if (activeRequest.IsCapturing)
+                if (activeRequestForStdout.IsCapturing)
                 {
-                    if (LineContainsMarker(normalizedLine, activeRequest.EndMarker))
+                    if (LineContainsMarker(normalizedLine, activeRequestForStdout.EndMarker))
                     {
-                        activeRequest.IsCapturing = false;
-                        activeRequest.CompletionSource.TrySetResult(activeRequest.Capture.ToString().Trim());
-                        Trace("ProcessIncomingLine", $"Active request capture completed; endMarker='{activeRequest.EndMarker}'; payloadLength={activeRequest.Capture.Length}.");
+                        activeRequestForStdout.IsCapturing = false;
+                        activeRequestForStdout.CompletionSource.TrySetResult(activeRequestForStdout.Capture.ToString().Trim());
+                        Trace("ProcessIncomingLine", $"Active request capture completed; endMarker='{activeRequestForStdout.EndMarker}'; payloadLength={activeRequestForStdout.Capture.Length}.");
                         return;
                     }
 
                     if (!IsInternalDebuggerNoiseLine(normalizedLine))
                     {
-                        activeRequest.Capture.AppendLine(normalizedLine);
+                        if (normalizedLine.StartsWith(D4A4ForensicPrefix, StringComparison.Ordinal))
+                        {
+                            Trace("D4A4Forensic", normalizedLine[D4A4ForensicPrefix.Length..].TrimStart('|'));
+                        }
+                        else
+                        {
+                            activeRequestForStdout.Capture.AppendLine(normalizedLine);
+                        }
                     }
 
                     return;
@@ -1302,6 +1403,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 {
                     Trace("TrySuppressInternalRequestOutput", $"Expired orphaned request output suppression; endMarker='{orphanedEndMarker}'.");
                     _orphanedRequestOutputEndMarker = null;
+                    _orphanedRequestOutputStartMarker = null;
                     _orphanedRequestOutputSuppressUntilTicks = 0;
                     orphanedEndMarker = null;
                 }
@@ -1309,6 +1411,18 @@ namespace PS7ScriptDesk.Shell.Debug
 
             if (!string.IsNullOrWhiteSpace(orphanedEndMarker))
             {
+                string? orphanedStartMarker;
+                lock (_syncRoot)
+                {
+                    orphanedStartMarker = _orphanedRequestOutputStartMarker;
+                }
+
+                if (!string.IsNullOrWhiteSpace(orphanedStartMarker) && LineContainsMarker(normalizedLine, orphanedStartMarker))
+                {
+                    Trace("TrySuppressInternalRequestOutput", $"Suppressed orphaned request start marker; startMarker='{orphanedStartMarker}'; endMarker='{orphanedEndMarker}'.");
+                    return true;
+                }
+
                 if (LineContainsMarker(normalizedLine, orphanedEndMarker))
                 {
                     lock (_syncRoot)
@@ -1316,6 +1430,7 @@ namespace PS7ScriptDesk.Shell.Debug
                         if (string.Equals(_orphanedRequestOutputEndMarker, orphanedEndMarker, StringComparison.Ordinal))
                         {
                             _orphanedRequestOutputEndMarker = null;
+                            _orphanedRequestOutputStartMarker = null;
                             _orphanedRequestOutputSuppressUntilTicks = 0;
                         }
                     }
@@ -1334,7 +1449,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 if (LineContainsMarker(normalizedLine, startMarker))
                 {
                     var endMarker = InternalRequestEndMarkers[index];
-                    BeginOrphanedRequestOutputSuppression(endMarker, $"Observed internal request start marker without an active request; startMarker='{startMarker}'");
+                    BeginOrphanedRequestOutputSuppression(startMarker, endMarker, $"Observed internal request start marker without an active request");
                     Trace("TrySuppressInternalRequestOutput", $"Suppressed unmatched internal request start marker; startMarker='{startMarker}'; endMarker='{endMarker}'.");
                     return true;
                 }
@@ -1352,7 +1467,7 @@ namespace PS7ScriptDesk.Shell.Debug
             return false;
         }
 
-        private void BeginOrphanedRequestOutputSuppression(string endMarker, string reason)
+        private void BeginOrphanedRequestOutputSuppression(string startMarker, string endMarker, string reason)
         {
             if (string.IsNullOrWhiteSpace(endMarker))
             {
@@ -1362,6 +1477,7 @@ namespace PS7ScriptDesk.Shell.Debug
             var suppressUntil = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (OrphanedRequestOutputSuppressionMilliseconds / 1000.0));
             lock (_syncRoot)
             {
+                _orphanedRequestOutputStartMarker = startMarker;
                 _orphanedRequestOutputEndMarker = endMarker;
                 _orphanedRequestOutputSuppressUntilTicks = suppressUntil;
             }
@@ -1375,6 +1491,7 @@ namespace PS7ScriptDesk.Shell.Debug
                 new Dictionary<string, object?>
                 {
                     ["endMarker"] = endMarker,
+                    ["startMarker"] = startMarker,
                     ["durationMs"] = OrphanedRequestOutputSuppressionMilliseconds,
                     ["reason"] = reason
                 });
@@ -1459,6 +1576,10 @@ namespace PS7ScriptDesk.Shell.Debug
             if (_suppressNextDebugPromptCount > 0)
             {
                 _suppressNextDebugPromptCount--;
+                if (_activeRequest is not null && _activeRequest.SuppressNextDebugPrompt)
+                {
+                    _activeRequest.PromptSuppressionConsumed = true;
+                }
                 SetCurrentState(DebugSessionState.Paused, "DebugPromptMarker", streamSource);
                 AppLogger.Info("Debug", "DebugPausedDetected via suppressed prompt marker.");
                 Trace("HandleDebugPromptMarker", $"Suppressed helper prompt consumed without scheduling another helper query; wasPaused={wasPaused}; {DescribeSessionState()}");
@@ -1637,7 +1758,7 @@ namespace PS7ScriptDesk.Shell.Debug
             try
             {
                 var payload = await SendRequestAsync(
-                    BuildCurrentFrameRequestScript(),
+                    (startMarker, endMarker) => BuildCurrentFrameRequestScript(startMarker, endMarker),
                     CurrentFrameStartMarker,
                     CurrentFrameEndMarker,
                     suppressNextDebugPrompt: true,
@@ -2349,6 +2470,22 @@ namespace PS7ScriptDesk.Shell.Debug
             return trimmed.Length > 48 ? trimmed[..48] : trimmed;
         }
 
+        private static string SummarizeDiagnosticText(string text, int maximumLength)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return "(empty)";
+            }
+
+            var sanitized = text
+                .Replace('\r', ' ')
+                .Replace('\n', ' ')
+                .Replace('|', '/');
+            return sanitized.Length > maximumLength
+                ? sanitized[..maximumLength] + "..."
+                : sanitized;
+        }
+
         private static string BuildBootstrapScript()
         {
             var builder = new StringBuilder();
@@ -2437,7 +2574,7 @@ namespace PS7ScriptDesk.Shell.Debug
             return $"Set-PSBreakpoint -Script {scriptLiteral} -Line {breakpoint.LineNumber} | Out-Null";
         }
 
-        private static string BuildCurrentFrameRequestScript()
+        private static string BuildCurrentFrameRequestScript(string startMarker, string endMarker)
         {
             var builder = new StringBuilder();
             builder.AppendLine("$__pssInvocation = $null");
@@ -2445,14 +2582,14 @@ namespace PS7ScriptDesk.Shell.Debug
             builder.AppendLine("$__pssFrame = if ($null -eq $__pssInvocation) { Get-PSCallStack | Select-Object -First 1 } else { $null }");
             builder.AppendLine("$payload = if ($null -ne $__pssInvocation) { [pscustomobject]@{ ScriptPath = [string]$__pssInvocation.ScriptName; LineNumber = [int]$__pssInvocation.ScriptLineNumber } } elseif ($null -ne $__pssFrame) { [pscustomobject]@{ ScriptPath = [string]$__pssFrame.ScriptName; LineNumber = [int]$__pssFrame.ScriptLineNumber } } else { [pscustomobject]@{ ScriptPath = ''; LineNumber = 0 } }");
             builder.AppendLine("$json = $payload | ConvertTo-Json -Compress -Depth 4");
-            builder.Append("[Console]::Out.WriteLine('").Append(CurrentFrameStartMarker).AppendLine("')");
+            builder.Append("[Console]::Out.WriteLine('").Append(startMarker).AppendLine("')");
             builder.AppendLine("[Console]::Out.WriteLine($json)");
-            builder.Append("[Console]::Out.WriteLine('").Append(CurrentFrameEndMarker).AppendLine("')");
+            builder.Append("[Console]::Out.WriteLine('").Append(endMarker).AppendLine("')");
             builder.AppendLine("[Console]::Out.Flush()");
             return builder.ToString();
         }
 
-        private static string BuildVariablesRequestScript(long threadId, string providerFrameId)
+        private static string BuildVariablesRequestScript(long threadId, string providerFrameId, string startMarker, string endMarker)
         {
             var builder = new StringBuilder();
             builder.AppendLine("function __PSS_FormatDebugValueText {");
@@ -2492,49 +2629,75 @@ namespace PS7ScriptDesk.Shell.Debug
             builder.AppendLine("    })");
             builder.AppendLine("}");
             builder.AppendLine("$json = $items | ConvertTo-Json -Compress -Depth 5");
-            builder.Append("[Console]::Out.WriteLine('").Append(VariablesStartMarker).AppendLine("')");
+            builder.Append("[Console]::Out.WriteLine('").Append(startMarker).AppendLine("')");
             builder.AppendLine("[Console]::Out.WriteLine($json)");
-            builder.Append("[Console]::Out.WriteLine('").Append(VariablesEndMarker).AppendLine("')");
+            builder.Append("[Console]::Out.WriteLine('").Append(endMarker).AppendLine("')");
             builder.AppendLine("[Console]::Out.Flush()");
             return builder.ToString();
         }
 
-        private static string BuildCallStackRequestScript()
+        private static string BuildCallStackRequestScript(string startMarker, string endMarker)
         {
             var builder = new StringBuilder();
+            builder.Append("[Console]::Out.WriteLine('").Append(startMarker).AppendLine("')");
+            builder.AppendLine("$ErrorActionPreference = 'Stop'");
+            builder.AppendLine("try {");
+            builder.AppendLine("function __PSS_D4A4Emit { param([string]$Stage, [hashtable]$Fields) try { $parts = [System.Collections.Generic.List[string]]::new(); [void]$parts.Add($Stage); foreach ($key in ($Fields.Keys | Sort-Object)) { $text = if ($null -eq $Fields[$key]) { '<null>' } else { [string]$Fields[$key] }; $text = $text.Replace('|', '<pipe>').Replace([Environment]::NewLine, '<newline>'); [void]$parts.Add(($key + '=' + $text)) }; [Console]::Out.WriteLine('__PSS_D4A4_FORENSIC__|' + ($parts -join '|')); [Console]::Out.Flush() } catch { [Console]::Out.WriteLine('__PSS_D4A4_FORENSIC__|FORENSIC_EMIT_FAILURE|exceptionType=' + $_.Exception.GetType().FullName + '|message=' + $_.Exception.Message); [Console]::Out.Flush() } }");
+            builder.AppendLine("function __PSS_D4A4TypeNames { param($Value) try { if ($null -eq $Value) { return '<null>' }; return (($Value.PSObject.TypeNames | Select-Object -First 6) -join ',') } catch { return '<unavailable>' } }");
+            builder.AppendLine("function __PSS_D4A4Shape { param($Value, [int]$MaxArrayDepth = 8) try { if ($null -eq $Value) { return @{ dotnetType='<null>'; psTypes='<null>'; isArray=$false; rank=''; topLevelCount=''; scalarCount=0; scalarTypes='' } }; $type = $Value.GetType(); $isArray = $Value -is [System.Array]; $rank = if ($isArray) { $type.GetArrayRank() } else { '' }; $topLevelCount = if ($isArray) { $Value.Length } elseif ($Value -is [System.Collections.IDictionary] -or $Value -is [System.Collections.ICollection]) { $Value.Count } else { '' }; $scalarTypes = [System.Collections.Generic.HashSet[string]]::new(); $scalarCount = 0; $pending = [System.Collections.Generic.Queue[object]]::new(); [void]$pending.Enqueue($Value); while ($pending.Count -gt 0 -and $pending.Count -lt 1024) { $candidate = $pending.Dequeue(); if ($null -eq $candidate) { continue }; if ($candidate -is [System.Array] -and $MaxArrayDepth -gt 0) { foreach ($item in $candidate) { [void]$pending.Enqueue($item) }; $MaxArrayDepth--; continue }; $scalarCount++; [void]$scalarTypes.Add($candidate.GetType().FullName) }; return @{ dotnetType=$type.FullName; psTypes=(__PSS_D4A4TypeNames $Value); isArray=$isArray; rank=$rank; topLevelCount=$topLevelCount; scalarCount=$scalarCount; scalarTypes=(($scalarTypes | Sort-Object) -join ',') } } catch { return @{ dotnetType='<shape-error>'; psTypes='<shape-error>'; isArray=''; rank=''; topLevelCount=''; scalarCount=''; scalarTypes=($_.Exception.GetType().FullName + ':' + $_.Exception.Message) } } }");
+            builder.AppendLine("function __PSS_D4A4ExceptionChain { param($Exception) try { $parts = [System.Collections.Generic.List[string]]::new(); $current = $Exception; $depth = 0; while ($null -ne $current -and $depth -lt 8) { [void]$parts.Add(($current.GetType().FullName + ':' + ([string]$current.Message).Replace('|','<pipe>').Replace([Environment]::NewLine,'<newline>'))); $current = $current.InnerException; $depth++ }; return ($parts -join ' -> ') } catch { return '<exception-chain-unavailable>' } }");
+            builder.AppendLine("function __PSS_D4A4OuterErrorMetadata { param($ErrorRecord, [string]$Stage) try { $exception = $ErrorRecord.Exception; $invocation = $ErrorRecord.InvocationInfo; $target = $ErrorRecord.TargetObject; $targetShape = __PSS_D4A4Shape $target; $fields = @{ stage=$Stage; exceptionType=if ($null -ne $exception) { $exception.GetType().FullName } else { '<null>' }; message=if ($null -ne $exception) { [string]$exception.Message } else { [string]$ErrorRecord }; innerChain=__PSS_D4A4ExceptionChain $exception; fullyQualifiedErrorId=[string]$ErrorRecord.FullyQualifiedErrorId; category=[string]$ErrorRecord.CategoryInfo.Category; categoryReason=[string]$ErrorRecord.CategoryInfo.Reason; categoryTargetName=[string]$ErrorRecord.CategoryInfo.TargetName; categoryTargetType=[string]$ErrorRecord.CategoryInfo.TargetType; targetType=$targetShape.dotnetType; targetPsTypes=$targetShape.psTypes; targetIsArray=$targetShape.isArray; targetRank=$targetShape.rank; targetCount=$targetShape.topLevelCount; targetScalarCount=$targetShape.scalarCount; targetScalarTypes=$targetShape.scalarTypes; commandName=if ($null -ne $invocation) { [string]$invocation.MyCommand.Name } else { '' }; commandType=if ($null -ne $invocation) { [string]$invocation.MyCommand.CommandType } else { '' }; invocationName=if ($null -ne $invocation) { [string]$invocation.InvocationName } else { '' }; scriptPath=if ($null -ne $invocation) { [string]$invocation.ScriptName } else { '' }; scriptLine=if ($null -ne $invocation) { [string]$invocation.ScriptLineNumber } else { '' }; offsetInLine=if ($null -ne $invocation) { [string]$invocation.OffsetInLine } else { '' }; positionMessage=if ($null -ne $invocation) { [string]$invocation.PositionMessage } else { '' }; scriptStackTrace=[string]$ErrorRecord.ScriptStackTrace; errorDetails=if ($null -ne $ErrorRecord.ErrorDetails) { [string]$ErrorRecord.ErrorDetails } else { '' } }; __PSS_D4A4Emit 'HOST_EXECUTION_ERROR' $fields } catch { __PSS_D4A4Emit 'HOST_EXECUTION_ERROR_METADATA_FAILURE' @{ stage=$Stage; exceptionType=$_.Exception.GetType().FullName; message=$_.Exception.Message } } }");
             builder.AppendLine("function __PSS_FormatDebugValueText { param($Value) try { if ($null -eq $Value) { return '' }; if ($Value -is [string]) { return $Value }; if ($Value -is [char]) { return [string]$Value }; if ($Value -is [bool]) { return [string]$Value }; if ($Value -is [datetime]) { return $Value.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture) }; if ($Value -is [System.Collections.IDictionary]) { return ('Dictionary Count=' + $Value.Count) }; if ($Value -is [System.Collections.ICollection]) { return ('Collection Count=' + $Value.Count + ' Type=' + $Value.GetType().Name) }; if ($Value -is [System.Collections.IEnumerable]) { return ('Enumerable Type=' + $Value.GetType().Name) }; return [string]$Value } catch { return '<unavailable>' } }");
+            builder.AppendLine("function __PSS_ConvertSingleFrameInt32 { param($Value, [string]$FieldName); $pending = [System.Collections.Generic.List[object]]::new(); $scalars = [System.Collections.Generic.List[object]]::new(); [void]$pending.Add($Value); for ($i = 0; $i -lt $pending.Count; $i++) { $candidate = $pending[$i]; if ($null -eq $candidate) { continue }; if ($candidate -is [System.Array]) { foreach ($item in $candidate) { [void]$pending.Add($item) }; continue }; [void]$scalars.Add($candidate) }; if ($scalars.Count -eq 0) { return 0 }; if ($scalars.Count -ne 1) { $preview = (($scalars | ForEach-Object { '[' + $_.GetType().FullName + ':' + [string]$_ + ']' }) -join ','); throw ('Frame field ' + $FieldName + ' contained ' + $scalars.Count + ' scalar values; values=' + $preview) }; return [System.Convert]::ToInt32($scalars[0], [System.Globalization.CultureInfo]::InvariantCulture) }");
             builder.AppendLine("$global:__PSS_DebugFrameStore = @{}");
             builder.AppendLine("$providerThreadId = [int64]1");
             builder.AppendLine("$isCurrent = $true");
-            builder.AppendLine("$__PSSCurrentScopeVariables = @((Get-Variable -Scope 0 | ForEach-Object { $value = $_.Value; $valueText = [string](__PSS_FormatDebugValueText $value); if ($valueText.Length -gt 500) { $valueText = $valueText.Substring(0, 500) + '...' }; [pscustomobject]@{ Name = [string]$_.Name; Type = if ($null -eq $value) { 'null' } else { [string]$value.GetType().Name }; Value = $valueText; Error = '' } }))");
-            builder.AppendLine("$items = @(Get-PSCallStack | ForEach-Object {");
+            builder.AppendLine("$frameOrdinal = 0");
+            builder.AppendLine("__PSS_D4A4Emit 'GET_PSCALLSTACK_BEGIN' @{}");
+            builder.AppendLine("__PSS_D4A4Emit 'CURRENT_SCOPE_VARIABLES_BEGIN' @{}");
+            builder.AppendLine("function __PSS_ProjectCurrentScopeVariable { param([System.Management.Automation.PSVariable]$Variable); $variableName = [string]$Variable.Name; $variableType = $Variable.GetType().FullName; __PSS_D4A4Emit 'CURRENT_SCOPE_VARIABLE_ITEM_BEGIN' @{ name=$variableName; variableType=$variableType }; try { $currentScopeValue = $Variable.Value; $currentScopeValueShape = __PSS_D4A4Shape $currentScopeValue; $currentScopeValueText = [string](__PSS_FormatDebugValueText $currentScopeValue); if ($currentScopeValueText.Length -gt 500) { $currentScopeValueText = $currentScopeValueText.Substring(0, 500) + '...' }; $currentScopeItem = [pscustomobject]@{ Name = $variableName; Type = if ($null -eq $currentScopeValue) { 'null' } else { [string]$currentScopeValue.GetType().Name }; Value = $currentScopeValueText; Error = '' }; __PSS_D4A4Emit 'CURRENT_SCOPE_VARIABLE_ITEM_END' @{ name=$variableName; variableType=$variableType; valueType=$currentScopeValueShape.dotnetType; valuePsTypes=$currentScopeValueShape.psTypes; valueIsArray=$currentScopeValueShape.isArray; valueRank=$currentScopeValueShape.rank; valueCount=$currentScopeValueShape.topLevelCount; valueScalarCount=$currentScopeValueShape.scalarCount; valueScalarTypes=$currentScopeValueShape.scalarTypes }; return $currentScopeItem } catch { __PSS_D4A4Emit 'CURRENT_SCOPE_VARIABLE_ITEM_THROW' @{ name=$variableName; variableType=$variableType; exceptionType=$_.Exception.GetType().FullName; message=$_.Exception.Message }; throw } }");
+            builder.AppendLine("$__PSSCurrentScopeVariables = @(Get-Variable -Scope 0 | ForEach-Object { __PSS_ProjectCurrentScopeVariable $_ })");
+            builder.AppendLine("__PSS_D4A4Emit 'CURRENT_SCOPE_VARIABLES_END' @{ outputType=$__PSSCurrentScopeVariables.GetType().FullName; outputCount=$__PSSCurrentScopeVariables.Count }");
+            builder.AppendLine("function __PSS_ProjectFrameVariable { param($Entry); $frameVariableValue = $Entry.Value.Value; $frameVariableText = [string](__PSS_FormatDebugValueText $frameVariableValue); if ($frameVariableText.Length -gt 500) { $frameVariableText = $frameVariableText.Substring(0, 500) + '...' }; return [pscustomobject]@{ Name = [string]$Entry.Key; Type = if ($null -eq $frameVariableValue) { 'null' } else { [string]$frameVariableValue.GetType().Name }; Value = $frameVariableText; Error = '' } }");
+            builder.AppendLine("$__PSSCallStackErrors = @()");
+            builder.AppendLine("try { $items = @(Get-PSCallStack -ErrorAction Stop -ErrorVariable __PSSCallStackErrors | ForEach-Object {");
+            builder.AppendLine("    $frameOrdinal++");
             builder.AppendLine("    $providerFrameId = [guid]::NewGuid().ToString('N')");
             builder.AppendLine("    $global:__PSS_DebugFrameStore[$providerFrameId] = $_");
-            builder.AppendLine("    $frameVariables = if ($isCurrent) { $_.GetFrameVariables() } else { $null }");
-            builder.AppendLine("    $serializedVariables = if ($null -ne $frameVariables) { @($frameVariables.GetEnumerator() | Sort-Object Key | ForEach-Object { $value = $_.Value.Value; $valueText = [string](__PSS_FormatDebugValueText $value); if ($valueText.Length -gt 500) { $valueText = $valueText.Substring(0, 500) + '...' }; [pscustomobject]@{ Name = [string]$_.Key; Type = if ($null -eq $value) { 'null' } else { [string]$value.GetType().Name }; Value = $valueText; Error = '' } }) } else { $null }");
-            builder.AppendLine("    [pscustomobject]@{");
+            builder.AppendLine("    __PSS_D4A4Emit 'FRAME_ACQUIRED' @{ frameOrdinal=$frameOrdinal; providerFrameId=$providerFrameId; frameType=$_.GetType().FullName; framePsTypes=(__PSS_D4A4TypeNames $_); isCurrent=$isCurrent; functionName=[string]$_.FunctionName }");
+            builder.AppendLine("    try { $scriptLineNumber = $_.ScriptLineNumber; $scriptLineShape = __PSS_D4A4Shape $scriptLineNumber; __PSS_D4A4Emit 'SCRIPT_LINE_METADATA_END' @{ frameOrdinal=$providerFrameId; dotnetType=$scriptLineShape.dotnetType; psTypes=$scriptLineShape.psTypes; isArray=$scriptLineShape.isArray; rank=$scriptLineShape.rank; topLevelCount=$scriptLineShape.topLevelCount; scalarCount=$scriptLineShape.scalarCount; scalarTypes=$scriptLineShape.scalarTypes } } catch { __PSS_D4A4Emit 'SCRIPT_LINE_METADATA_THROW' @{ frameOrdinal=$providerFrameId; exceptionType=$_.Exception.GetType().FullName; message=$_.Exception.Message }; throw }");
+            builder.AppendLine("    $frameVariables = $null");
+            builder.AppendLine("    if ($isCurrent) { __PSS_D4A4Emit 'GET_FRAME_VARIABLES_BEGIN' @{ frameOrdinal=$providerFrameId }; try { $frameVariables = $_.GetFrameVariables(); $variableShape = __PSS_D4A4Shape $frameVariables; $variableArrayRank = ''; if ($frameVariables -is [System.Array]) { $variableArrayRank = $frameVariables.GetType().GetArrayRank() }; __PSS_D4A4Emit 'GET_FRAME_VARIABLES_END' @{ frameOrdinal=$providerFrameId; returnedDotnetType=$variableShape.dotnetType; returnedPsTypes=$variableShape.psTypes; isEnumerable=($frameVariables -is [System.Collections.IEnumerable]); isDictionary=($frameVariables -is [System.Collections.IDictionary]); isArray=($frameVariables -is [System.Array]); arrayRank=$variableArrayRank; topLevelCount=$variableShape.topLevelCount; elementTypes=$variableShape.scalarTypes } } catch { $innerType = '<null>'; $innerMessage = '<null>'; if ($null -ne $_.Exception.InnerException) { $innerType = $_.Exception.InnerException.GetType().FullName; $innerMessage = $_.Exception.InnerException.Message }; __PSS_D4A4Emit 'GET_FRAME_VARIABLES_THROW' @{ frameOrdinal=$providerFrameId; exceptionType=$_.Exception.GetType().FullName; message=$_.Exception.Message; innerType=$innerType; innerMessage=$innerMessage }; throw } }");
+            builder.AppendLine("    try { $projectionInputType = if ($null -eq $frameVariables) { '<null>' } else { $frameVariables.GetType().FullName }; __PSS_D4A4Emit 'VARIABLE_PROJECTION_BEGIN' @{ frameOrdinal=$providerFrameId; inputType=$projectionInputType }; $serializedVariables = if ($null -ne $frameVariables) { @($frameVariables.GetEnumerator() | Sort-Object Key | ForEach-Object { __PSS_ProjectFrameVariable $_ }) } else { $null }; $projectionOutputType = if ($null -eq $serializedVariables) { '<null>' } else { $serializedVariables.GetType().FullName }; $projectionOutputCount = if ($null -eq $serializedVariables) { 0 } else { @($serializedVariables).Count }; __PSS_D4A4Emit 'VARIABLE_PROJECTION_END' @{ frameOrdinal=$providerFrameId; outputType=$projectionOutputType; outputCount=$projectionOutputCount } } catch { __PSS_D4A4Emit 'VARIABLE_PROJECTION_THROW' @{ frameOrdinal=$providerFrameId; exceptionType=$_.Exception.GetType().FullName; message=$_.Exception.Message }; throw }");
+            builder.AppendLine("    try { $scriptLineShape = __PSS_D4A4Shape $scriptLineNumber; __PSS_D4A4Emit 'SCRIPT_LINE_NORMALIZE_BEGIN' @{ frameOrdinal=$providerFrameId; inputType=$scriptLineShape.dotnetType }; $normalizedLineNumber = __PSS_ConvertSingleFrameInt32 $scriptLineNumber 'ScriptLineNumber'; $normalizedLineType = if ($null -eq $normalizedLineNumber) { '<null>' } else { $normalizedLineNumber.GetType().FullName }; __PSS_D4A4Emit 'SCRIPT_LINE_NORMALIZE_END' @{ frameOrdinal=$providerFrameId; outputType=$normalizedLineType } } catch { __PSS_D4A4Emit 'SCRIPT_LINE_NORMALIZE_THROW' @{ frameOrdinal=$providerFrameId; exceptionType=$_.Exception.GetType().FullName; message=$_.Exception.Message }; throw }");
+            builder.AppendLine("    try { __PSS_D4A4Emit 'OBJECT_CONSTRUCTION_BEGIN' @{ frameOrdinal=$providerFrameId }; $framePayload = [pscustomobject]@{");
             builder.AppendLine("        ThreadId = $providerThreadId");
             builder.AppendLine("        ProviderFrameId = $providerFrameId");
             builder.AppendLine("        IsCurrentFrame = $isCurrent");
             builder.AppendLine("        FunctionName = [string]$_.FunctionName");
             builder.AppendLine("        ScriptName = [string]$_.ScriptName");
-            builder.AppendLine("        LineNumber = [int]$_.ScriptLineNumber");
+            builder.AppendLine("        LineNumber = $normalizedLineNumber");
             builder.AppendLine("        InvocationName = [string]$_.InvocationInfo.MyCommand.Name");
             builder.AppendLine("        RunspaceInstanceId = if ($null -ne $host.Runspace) { [string]$host.Runspace.InstanceId } else { '' }");
             builder.AppendLine("        Variables = if ($isCurrent) { $__PSSCurrentScopeVariables } else { $null }");
             builder.AppendLine("        RawFrameVariables = $serializedVariables");
-            builder.AppendLine("    }");
+            builder.AppendLine("    }; __PSS_D4A4Emit 'OBJECT_CONSTRUCTION_END' @{ frameOrdinal=$providerFrameId; outputType=$framePayload.GetType().FullName } } catch { __PSS_D4A4Emit 'OBJECT_CONSTRUCTION_THROW' @{ frameOrdinal=$providerFrameId; exceptionType=$_.Exception.GetType().FullName; message=$_.Exception.Message }; throw }");
+            builder.AppendLine("    $framePayload");
             builder.AppendLine("    $isCurrent = $false");
-            builder.AppendLine("})");
-            builder.AppendLine("$json = $items | ConvertTo-Json -Compress -Depth 5");
-            builder.Append("[Console]::Out.WriteLine('").Append(CallStackStartMarker).AppendLine("')");
-            builder.AppendLine("[Console]::Out.WriteLine($json)");
-            builder.Append("[Console]::Out.WriteLine('").Append(CallStackEndMarker).AppendLine("')");
+            builder.AppendLine("}); if ($__PSSCallStackErrors.Count -gt 0) { __PSS_D4A4Emit 'GET_PSCALLSTACK_ERROR_RECORD' @{ errorCount=$__PSSCallStackErrors.Count; errorTypes=(($__PSSCallStackErrors | ForEach-Object { if ($null -ne $_.Exception) { $_.Exception.GetType().FullName } else { '<null>' } }) -join ','); errorRecordTypes=(($__PSSCallStackErrors | ForEach-Object { $_.GetType().FullName }) -join ',') }; throw ($__PSSCallStackErrors[0].Exception) }; __PSS_D4A4Emit 'GET_PSCALLSTACK_END' @{ resultType=$items.GetType().FullName; count=$frameOrdinal } } catch { [Console]::Out.WriteLine('__PSS_D4A4_FORENSIC__|GET_PSCALLSTACK_CATCH_ENTER|frameCount=' + $frameOrdinal); [Console]::Out.Flush(); __PSS_D4A4Emit 'GET_PSCALLSTACK_THROW' @{ exceptionType=$_.Exception.GetType().FullName; message=$_.Exception.Message; frameCount=$frameOrdinal; errorRecordCount=$__PSSCallStackErrors.Count }; throw }");
+            builder.AppendLine("try { __PSS_D4A4Emit 'MATERIALIZATION_BEGIN' @{ inputType=$items.GetType().FullName; inputCount=$items.Count }; $materializedItems = @($items); __PSS_D4A4Emit 'MATERIALIZATION_END' @{ outputType=$materializedItems.GetType().FullName; outputCount=$materializedItems.Count } } catch { __PSS_D4A4Emit 'MATERIALIZATION_THROW' @{ exceptionType=$_.Exception.GetType().FullName; message=$_.Exception.Message }; throw }");
+            builder.AppendLine("try { __PSS_D4A4Emit 'JSON_BEGIN' @{ inputType=$materializedItems.GetType().FullName; inputCount=$materializedItems.Count }; $json = $materializedItems | ConvertTo-Json -Compress -Depth 5; __PSS_D4A4Emit 'JSON_END' @{ outputType=$json.GetType().FullName; outputLength=$json.Length }; [Console]::Out.WriteLine($json); __PSS_D4A4Emit 'ENVELOPE_OUTPUT_END' @{ outputType=$json.GetType().FullName; outputLength=$json.Length } } catch { __PSS_D4A4Emit 'JSON_OR_ENVELOPE_THROW' @{ exceptionType=$_.Exception.GetType().FullName; message=$_.Exception.Message }; throw }");
+            builder.AppendLine("} catch {");
+            builder.AppendLine("    __PSS_D4A4OuterErrorMetadata $_ '<stage-marker-before-failure>'");
+            builder.Append("    [Console]::Out.WriteLine('").Append(RequestErrorPrefix).AppendLine("' + $_.Exception.Message.Replace([Environment]::NewLine, ' '))");
+            builder.AppendLine("} finally {");
+            builder.Append("    [Console]::Out.WriteLine('").Append(endMarker).AppendLine("')");
+            builder.AppendLine("}");
             builder.AppendLine("[Console]::Out.Flush()");
             return builder.ToString();
         }
 
-        private static string BuildScopeDiagnosticRequestScript()
+        private static string BuildScopeDiagnosticRequestScript(string startMarker, string endMarker)
         {
             var builder = new StringBuilder();
             builder.AppendLine("$__pssScopeFrame = @(Get-PSCallStack) | Select-Object -First 1");
@@ -2552,9 +2715,9 @@ namespace PS7ScriptDesk.Shell.Debug
             builder.AppendLine("    DirectBreakHerePresent = $null -ne (Get-Variable -Name BreakHere -ErrorAction SilentlyContinue)");
             builder.AppendLine("}");
             builder.AppendLine("$__pssScopeJson = $__pssScopePayload | ConvertTo-Json -Compress -Depth 5");
-            builder.Append("[Console]::Out.WriteLine('").Append(ScopeDiagnosticStartMarker).AppendLine("')");
+            builder.Append("[Console]::Out.WriteLine('").Append(startMarker).AppendLine("')");
             builder.AppendLine("[Console]::Out.WriteLine($__pssScopeJson)");
-            builder.Append("[Console]::Out.WriteLine('").Append(ScopeDiagnosticEndMarker).AppendLine("')");
+            builder.Append("[Console]::Out.WriteLine('").Append(endMarker).AppendLine("')");
             builder.AppendLine("[Console]::Out.Flush()");
             return builder.ToString();
         }
@@ -2617,14 +2780,19 @@ namespace PS7ScriptDesk.Shell.Debug
 
         private sealed class ActiveRequest
         {
-            public ActiveRequest(string startMarker, string endMarker)
+            public ActiveRequest(Guid requestId, string startMarker, string endMarker, bool suppressNextDebugPrompt)
             {
+                RequestId = requestId;
                 StartMarker = startMarker;
                 EndMarker = endMarker;
+                SuppressNextDebugPrompt = suppressNextDebugPrompt;
             }
 
+            public Guid RequestId { get; }
             public string StartMarker { get; }
             public string EndMarker { get; }
+            public bool SuppressNextDebugPrompt { get; }
+            public bool PromptSuppressionConsumed { get; set; }
             public bool IsCapturing { get; set; }
             public StringBuilder Capture { get; } = new();
             public TaskCompletionSource<string> CompletionSource { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

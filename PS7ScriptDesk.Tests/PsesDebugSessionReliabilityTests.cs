@@ -302,6 +302,286 @@ public sealed class PsesDebugSessionReliabilityTests
         Assert.Equal(0L, (long)GetField(session, "_lastLocationNotificationTicks")!);
     }
 
+    [Fact]
+    public void ActiveInspectionStderrLocation_IsNotPublishedAsBreakpointHit()
+    {
+        var session = CreateSession();
+        var hits = 0;
+        AddEventHandler(session, "BreakpointHit", (Action<string?, int>)((_, _) => hits++));
+
+        var requestType = SessionType.GetNestedType("ActiveRequest", BindingFlags.NonPublic)!;
+        var requestConstructor = requestType.GetConstructor(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: new[] { typeof(Guid), typeof(string), typeof(string), typeof(bool) },
+            modifiers: null)!;
+        var request = requestConstructor.Invoke(new object?[] { Guid.NewGuid(), "__BEGIN__", "__END__", true });
+        SetField(session, "_activeRequest", request);
+
+        Invoke(session, "ProcessIncomingLine", "At C:\\Users\\rbarn\\Downloads\\TestDebug.ps1:1 char:1", true);
+
+        Assert.Equal(0, hits);
+    }
+
+    [Fact]
+    public void StderrLocationWithoutInspectionRequest_RemainsAValidBreakpointSource()
+    {
+        var session = CreateSession();
+        var hits = 0;
+        AddEventHandler(session, "BreakpointHit", (Action<string?, int>)((_, _) => hits++));
+
+        Invoke(session, "ProcessIncomingLine", "At C:\\Users\\rbarn\\Downloads\\TestDebug.ps1:5 char:1", true);
+
+        Assert.Equal(1, hits);
+    }
+
+    [Fact]
+    public void CallStackHelper_UsesScalarLineNumberAndAlwaysClosesItsOwnedMarker()
+    {
+        var method = SessionType.GetMethod("BuildCallStackRequestScript", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var script = (string)method.Invoke(null, new object?[] { "__BEGIN_REQUEST__", "__END_REQUEST__" })!;
+
+        Assert.Contains("function __PSS_ConvertSingleFrameInt32", script, StringComparison.Ordinal);
+        Assert.Contains("Frame field ' + $FieldName + ' contained '", script, StringComparison.Ordinal);
+        Assert.Contains("$normalizedLineNumber = __PSS_ConvertSingleFrameInt32 $scriptLineNumber 'ScriptLineNumber'", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("[int]@($_.ScriptLineNumber)", script, StringComparison.Ordinal);
+        Assert.Contains("$ErrorActionPreference = 'Stop'", script, StringComparison.Ordinal);
+        Assert.Contains("__PSS_REQUEST_ERROR__", script, StringComparison.Ordinal);
+        Assert.Contains("} finally {", script, StringComparison.Ordinal);
+        Assert.Contains("[Console]::Out.WriteLine('__END_REQUEST__')", script, StringComparison.Ordinal);
+        Assert.Contains("GET_PSCALLSTACK_BEGIN", script, StringComparison.Ordinal);
+        Assert.Contains("CURRENT_SCOPE_VARIABLES_BEGIN", script, StringComparison.Ordinal);
+        Assert.Contains("CURRENT_SCOPE_VARIABLE_ITEM_BEGIN", script, StringComparison.Ordinal);
+        Assert.Contains("CURRENT_SCOPE_VARIABLE_ITEM_THROW", script, StringComparison.Ordinal);
+        Assert.Contains("CURRENT_SCOPE_VARIABLE_ITEM_END", script, StringComparison.Ordinal);
+        Assert.Contains("CURRENT_SCOPE_VARIABLES_END", script, StringComparison.Ordinal);
+        Assert.Contains("HOST_EXECUTION_ERROR", script, StringComparison.Ordinal);
+        Assert.Contains("__PSS_D4A4ExceptionChain", script, StringComparison.Ordinal);
+        Assert.Contains("Get-PSCallStack -ErrorAction Stop -ErrorVariable __PSSCallStackErrors", script, StringComparison.Ordinal);
+        Assert.Contains("GET_PSCALLSTACK_ERROR_RECORD", script, StringComparison.Ordinal);
+        Assert.Contains("GET_PSCALLSTACK_CATCH_ENTER", script, StringComparison.Ordinal);
+        Assert.Contains("FRAME_ACQUIRED", script, StringComparison.Ordinal);
+        Assert.Contains("GET_FRAME_VARIABLES_BEGIN", script, StringComparison.Ordinal);
+        Assert.Contains("GET_FRAME_VARIABLES_THROW", script, StringComparison.Ordinal);
+        Assert.Contains("VARIABLE_PROJECTION_BEGIN", script, StringComparison.Ordinal);
+        Assert.Contains("SCRIPT_LINE_NORMALIZE_BEGIN", script, StringComparison.Ordinal);
+        Assert.Contains("OBJECT_CONSTRUCTION_BEGIN", script, StringComparison.Ordinal);
+        Assert.Contains("MATERIALIZATION_BEGIN", script, StringComparison.Ordinal);
+        Assert.Contains("JSON_BEGIN", script, StringComparison.Ordinal);
+        Assert.Contains("ENVELOPE_OUTPUT_END", script, StringComparison.Ordinal);
+        Assert.Contains("__PSS_D4A4_FORENSIC__", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallStackHelper_HandlesObservedSingleElementObjectArrayFrameLineNumber()
+    {
+        var method = SessionType.GetMethod("BuildCallStackRequestScript", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var helper = (string)method.Invoke(null, new object?[] { "__BEGIN_REQUEST__", "__END_REQUEST__" })!;
+        var harness = """
+            $rawLineNumber = New-Object object[] 1
+            $rawLineNumber[0] = 83
+            $frame = [pscustomobject]@{
+                ScriptLineNumber = $rawLineNumber
+                FunctionName = 'Invoke-Level2'
+                ScriptName = 'C:\Users\rbarn\Downloads\TestDebug.ps1'
+                InvocationInfo = $null
+            }
+            $frame | Add-Member -MemberType ScriptMethod -Name GetFrameVariables -Value { @{} }
+            function Get-PSCallStack { ,$frame }
+            """ + Environment.NewLine + helper;
+        var harnessPath = Path.Combine(Path.GetTempPath(), $"ps7scriptdesk-d4a2-{Guid.NewGuid():N}.ps1");
+        await File.WriteAllTextAsync(harnessPath, harness);
+
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = @"C:\Program Files\PowerShell\7\pwsh.exe",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                }
+            };
+            process.StartInfo.ArgumentList.Add("-NoLogo");
+            process.StartInfo.ArgumentList.Add("-NoProfile");
+            process.StartInfo.ArgumentList.Add("-File");
+            process.StartInfo.ArgumentList.Add(harnessPath);
+
+            Assert.True(process.Start());
+            var stdout = await process.StandardOutput.ReadToEndAsync();
+            var stderr = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(process.ExitCode == 0, $"pwsh exit={process.ExitCode}; stdout={stdout}; stderr={stderr}");
+            Assert.True(!stdout.Contains("__PSS_REQUEST_ERROR__", StringComparison.Ordinal), $"Unexpected helper error output: {stdout}");
+            Assert.Contains("\"LineNumber\":83", stdout, StringComparison.Ordinal);
+            Assert.Contains("__END_REQUEST__", stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain("Cannot convert", stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(harnessPath);
+        }
+    }
+
+    [Fact]
+    public async Task CallStackHelper_IsolatesScopeProjectionFromTypedUserValueParameter()
+    {
+        var method = SessionType.GetMethod("BuildCallStackRequestScript", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var helper = (string)method.Invoke(null, new object?[] { "__BEGIN_REQUEST__", "__END_REQUEST__" })!;
+        var harness = """
+            function Invoke-Level2 {
+                param([int]$Value)
+            """ + Environment.NewLine + helper + Environment.NewLine + """
+            }
+            Invoke-Level2 -Value 5
+            """;
+        var harnessPath = Path.Combine(Path.GetTempPath(), $"ps7scriptdesk-scope-collision-{Guid.NewGuid():N}.ps1");
+        await File.WriteAllTextAsync(harnessPath, harness);
+
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = @"C:\Program Files\PowerShell\7\pwsh.exe",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                }
+            };
+            process.StartInfo.ArgumentList.Add("-NoLogo");
+            process.StartInfo.ArgumentList.Add("-NoProfile");
+            process.StartInfo.ArgumentList.Add("-File");
+            process.StartInfo.ArgumentList.Add(harnessPath);
+
+            Assert.True(process.Start());
+            var stdout = await process.StandardOutput.ReadToEndAsync();
+            var stderr = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(process.ExitCode == 0, $"pwsh exit={process.ExitCode}; stdout={stdout}; stderr={stderr}");
+            Assert.Contains("CURRENT_SCOPE_VARIABLES_END", stdout, StringComparison.Ordinal);
+            Assert.Contains("CURRENT_SCOPE_VARIABLE_ITEM_END|name=args", stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain("Cannot convert the \"System.Object[]\" value", stdout, StringComparison.Ordinal);
+            Assert.False(stdout.Contains("__PSS_REQUEST_ERROR__", StringComparison.Ordinal), $"Unexpected helper error. stdout={stdout}; stderr={stderr}");
+            Assert.DoesNotContain("ParserError", stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(harnessPath);
+        }
+    }
+
+    [Fact]
+    public async Task CallStackHelper_RecordsGetPsCallStackFailureBoundary()
+    {
+        var method = SessionType.GetMethod("BuildCallStackRequestScript", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var helper = (string)method.Invoke(null, new object?[] { "__BEGIN_REQUEST__", "__END_REQUEST__" })!;
+        var harness = """
+            function Get-PSCallStack {
+                [CmdletBinding()]
+                param()
+                Write-Error 'synthetic Get-PSCallStack failure'
+            }
+            """ + Environment.NewLine + helper;
+        var harnessPath = Path.Combine(Path.GetTempPath(), $"ps7scriptdesk-d4a2-failure-{Guid.NewGuid():N}.ps1");
+        await File.WriteAllTextAsync(harnessPath, harness);
+
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = @"C:\Program Files\PowerShell\7\pwsh.exe",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                }
+            };
+            process.StartInfo.ArgumentList.Add("-NoLogo");
+            process.StartInfo.ArgumentList.Add("-NoProfile");
+            process.StartInfo.ArgumentList.Add("-File");
+            process.StartInfo.ArgumentList.Add(harnessPath);
+
+            Assert.True(process.Start());
+            var stdout = await process.StandardOutput.ReadToEndAsync();
+            var stderr = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(process.ExitCode == 0, $"pwsh exit={process.ExitCode}; stdout={stdout}; stderr={stderr}");
+            Assert.Contains("GET_PSCALLSTACK_BEGIN", stdout, StringComparison.Ordinal);
+            Assert.Contains("GET_PSCALLSTACK_CATCH_ENTER", stdout, StringComparison.Ordinal);
+            Assert.Contains("GET_PSCALLSTACK_THROW", stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain("GET_PSCALLSTACK_END", stdout, StringComparison.Ordinal);
+            Assert.Contains("__PSS_REQUEST_ERROR__", stdout, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(harnessPath);
+        }
+    }
+
+    [Fact]
+    public async Task CallStackHelper_CapturesOuterExecutionErrorMetadataForPreambleFailure()
+    {
+        var method = SessionType.GetMethod("BuildCallStackRequestScript", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var helper = (string)method.Invoke(null, new object?[] { "__BEGIN_REQUEST__", "__END_REQUEST__" })!;
+        var harness = """
+            function Get-Variable {
+                [CmdletBinding()]
+                param([int]$Scope)
+                throw [InvalidOperationException]::new('synthetic scope snapshot failure')
+            }
+            """ + Environment.NewLine + helper;
+        var harnessPath = Path.Combine(Path.GetTempPath(), $"ps7scriptdesk-d4a7-preamble-{Guid.NewGuid():N}.ps1");
+        await File.WriteAllTextAsync(harnessPath, harness);
+
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = @"C:\Program Files\PowerShell\7\pwsh.exe",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                }
+            };
+            process.StartInfo.ArgumentList.Add("-NoLogo");
+            process.StartInfo.ArgumentList.Add("-NoProfile");
+            process.StartInfo.ArgumentList.Add("-File");
+            process.StartInfo.ArgumentList.Add(harnessPath);
+
+            Assert.True(process.Start());
+            var stdout = await process.StandardOutput.ReadToEndAsync();
+            var stderr = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(process.ExitCode == 0, $"pwsh exit={process.ExitCode}; stdout={stdout}; stderr={stderr}");
+            Assert.Contains("CURRENT_SCOPE_VARIABLES_BEGIN", stdout, StringComparison.Ordinal);
+            Assert.Contains("HOST_EXECUTION_ERROR", stdout, StringComparison.Ordinal);
+            Assert.Contains("stage=<stage-marker-before-failure>", stdout, StringComparison.Ordinal);
+            Assert.Contains("System.InvalidOperationException", stdout, StringComparison.Ordinal);
+            Assert.Contains("synthetic scope snapshot failure", stdout, StringComparison.Ordinal);
+            Assert.Contains("__PSS_REQUEST_ERROR__", stdout, StringComparison.Ordinal);
+            Assert.Contains("__END_REQUEST__", stdout, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(harnessPath);
+        }
+    }
+
     private static object CreateSession()
         => Activator.CreateInstance(SessionType, nonPublic: true)!;
 

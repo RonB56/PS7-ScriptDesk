@@ -1,5 +1,4 @@
 using System;
-using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -7,16 +6,12 @@ using PS7ScriptDesk.Shell.Help;
 
 namespace PS7ScriptDesk.Shell.Debug
 {
-    public partial class DebugPaneWindow : Window
+    public partial class DebugPaneWindow : DockableToolWindow
     {
-        private bool _allowClose;
-
         public DebugPaneWindow()
         {
             InitializeComponent();
         }
-
-        public event EventHandler? DockBackRequested;
 
         public event EventHandler<DebugPaneTabChangedEventArgs>? SelectedTabIndexChanged;
 
@@ -57,21 +52,9 @@ namespace PS7ScriptDesk.Shell.Debug
             }
         }
 
-        public void CloseForDockBack()
-        {
-            _allowClose = true;
-            Close();
-        }
-
-        public void CloseForOwnerShutdown()
-        {
-            _allowClose = true;
-            Close();
-        }
-
         private void DockBackButton_Click(object sender, RoutedEventArgs e)
         {
-            DockBackRequested?.Invoke(this, EventArgs.Empty);
+            RequestDockBackFromControl();
         }
 
         private void DebugTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -97,17 +80,6 @@ namespace PS7ScriptDesk.Shell.Debug
             RemoveSelectedBreakpointRequested?.Invoke(this, EventArgs.Empty);
         }
 
-        protected override void OnClosing(CancelEventArgs e)
-        {
-            if (!_allowClose)
-            {
-                e.Cancel = true;
-                DockBackRequested?.Invoke(this, EventArgs.Empty);
-                return;
-            }
-
-            base.OnClosing(e);
-        }
     }
 
     public sealed class DebugPaneTabChangedEventArgs : EventArgs

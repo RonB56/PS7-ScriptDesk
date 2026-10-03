@@ -33,7 +33,7 @@ namespace PS7ScriptDesk.Shell.Debug
         Task<DebuggerVariableInspectionResult> GetFrameVariablesAsync(
             DebuggerFrameInspectionIdentity frameIdentity,
             CancellationToken cancellationToken = default);
-        Task<IReadOnlyList<DebugCallStackFrame>> GetCallStackAsync();
+        Task<IReadOnlyList<DebugCallStackFrame>> GetCallStackAsync(CancellationToken cancellationToken = default);
         Task<bool> StopAsync(CancellationToken cancellationToken = default);
     }
 }

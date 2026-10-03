@@ -72,6 +72,7 @@ public sealed class BottomToolWindowRefinementTests
         var mainCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
         var floatingWindowXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "BottomToolWindow.xaml");
         var floatingWindowCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "BottomToolWindow.xaml.cs");
+        var dockableWindowCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "DockableToolWindow.cs");
 
         Assert.Contains("x:Name=\"ShowBottomToolWindowMenuItem\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Click=\"ShowBottomToolWindow_Click\"", mainXaml, StringComparison.Ordinal);
@@ -88,8 +89,9 @@ public sealed class BottomToolWindowRefinementTests
         Assert.Contains("private void HideBottomToolWindow(string reason)", mainCode, StringComparison.Ordinal);
         Assert.Contains("private void PopOutBottomToolWindow(string reason)", mainCode, StringComparison.Ordinal);
         Assert.Contains("private void DockBottomToolWindow(string reason)", mainCode, StringComparison.Ordinal);
-        Assert.Contains("CloseForDockBack()", floatingWindowCode, StringComparison.Ordinal);
-        Assert.Contains("DockBackRequested?.Invoke(this, EventArgs.Empty);", floatingWindowCode, StringComparison.Ordinal);
+        Assert.Contains(": DockableToolWindow", floatingWindowCode, StringComparison.Ordinal);
+        Assert.Contains("CloseForDockBack()", dockableWindowCode, StringComparison.Ordinal);
+        Assert.Contains("DockBackRequested?.Invoke(this, EventArgs.Empty);", dockableWindowCode, StringComparison.Ordinal);
         Assert.Contains("<ContentControl x:Name=\"ToolContentHost\"", floatingWindowXaml, StringComparison.Ordinal);
     }
 

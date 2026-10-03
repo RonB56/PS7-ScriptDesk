@@ -68,15 +68,17 @@ public sealed class Phase7LowerToolWindowContractTests
     {
         var bottom = Read("PS7ScriptDesk.Shell", "BottomToolWindow.xaml");
         var code = Read("PS7ScriptDesk.Shell", "BottomToolWindow.xaml.cs");
+        var dockableCode = Read("PS7ScriptDesk.Shell", "DockableToolWindow.cs");
 
         Assert.Contains("Style=\"{DynamicResource IdeToolWindowStyle}\"", bottom, StringComparison.Ordinal);
         Assert.Contains("Style=\"{DynamicResource IdeLowerToolWindowHeaderStyle}\"", bottom, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.Name=\"Problems, Debug Output, and Activity\"", bottom, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.Name=\"Floating tool window content\"", bottom, StringComparison.Ordinal);
         Assert.Contains("SetToolContent", code, StringComparison.Ordinal);
-        Assert.Contains("CloseForDockBack", code, StringComparison.Ordinal);
-        Assert.Contains("DockBackRequested?.Invoke(this, EventArgs.Empty);", code, StringComparison.Ordinal);
-        Assert.Contains("CloseForOwnerShutdown", code, StringComparison.Ordinal);
+        Assert.Contains(": DockableToolWindow", code, StringComparison.Ordinal);
+        Assert.Contains("CloseForDockBack", dockableCode, StringComparison.Ordinal);
+        Assert.Contains("DockBackRequested?.Invoke(this, EventArgs.Empty);", dockableCode, StringComparison.Ordinal);
+        Assert.Contains("CloseForOwnerShutdown", dockableCode, StringComparison.Ordinal);
     }
 
     private static string ExtractElement(string source, string marker)

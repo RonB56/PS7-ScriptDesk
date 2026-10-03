@@ -313,6 +313,7 @@ namespace PS7ScriptDesk.Shell
         private bool _lastFindUseRegex;
         private readonly ThemeService _themeService = new();
         private IDebugSession? _debugSession;
+        private readonly DebuggerExecutionControlGate _debugExecutionControlGate = new();
         private Action<DebugSessionState>? _debugSessionStateChangedHandler;
         private Action<DebuggerEvent>? _debugSessionTypedEventHandler;
         private Action<DebugTerminationInfo>? _debugSessionTerminatedHandler;
@@ -4370,6 +4371,7 @@ namespace PS7ScriptDesk.Shell
         private void PopOutBottomToolWindow(string reason)
         {
             using var layoutTransition = _layoutCoordinator.BeginTransition($"BottomToolsPopOut:{reason}");
+            LogDebuggerPopOutForensics($"BottomPopOut:Before:{reason}");
             CaptureDockedBottomToolWindowHeight();
             _isBottomToolWindowVisible = true;
             _isBottomToolWindowFloating = true;
@@ -4410,12 +4412,13 @@ namespace PS7ScriptDesk.Shell
                 "UI",
                 "BottomToolWindowPoppedOut",
                 "Problems / Debug Output / Activity tool group popped out.",
-                BuildBottomToolWindowDiagnostics(reason));
+                MergeDiagnostics(BuildBottomToolWindowDiagnostics(reason), BuildDebuggerPopOutForensics($"BottomPopOut:After:{reason}")));
         }
 
         private void DockBottomToolWindow(string reason)
         {
             using var layoutTransition = _layoutCoordinator.BeginTransition($"BottomToolsDock:{reason}");
+            LogDebuggerPopOutForensics($"BottomDock:Before:{reason}");
             CaptureBottomToolWindowBounds();
 
             var bottomToolWindow = _bottomToolWindow;
@@ -4441,7 +4444,7 @@ namespace PS7ScriptDesk.Shell
                 "UI",
                 "BottomToolWindowDocked",
                 "Problems / Debug Output / Activity tool group docked below the console.",
-                BuildBottomToolWindowDiagnostics(reason));
+                MergeDiagnostics(BuildBottomToolWindowDiagnostics(reason), BuildDebuggerPopOutForensics($"BottomDock:After:{reason}")));
         }
 
         private void SelectBottomToolTab(BottomToolTab selectedTab, string reason)
@@ -4764,6 +4767,84 @@ namespace PS7ScriptDesk.Shell
                 ["errorCount"] = ViewModel?.SelectedTab?.DiagnosticErrorCount ?? 0,
                 ["warningCount"] = ViewModel?.SelectedTab?.DiagnosticWarningCount ?? 0
             };
+        }
+
+        private void LogDebuggerPopOutForensics(string boundary)
+        {
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            DeveloperDiagnostics.LogInfo("Debugger", "Debugger pop-out forensic boundary snapshot.", BuildDebuggerPopOutForensics(boundary));
+        }
+
+        private Dictionary<string, object?> BuildDebuggerPopOutForensics(string boundary)
+        {
+            var selectedFrame = _debugInspectionContext.SelectedInspectionFrame;
+            var currentFrame = _debugInspectionContext.CurrentExecutionFrame;
+            var debugSession = _debugSession;
+
+            return new Dictionary<string, object?>
+            {
+                ["forensicBoundary"] = boundary,
+                ["uiThreadId"] = Environment.CurrentManagedThreadId,
+                ["mainWindowIdentity"] = DescribeObjectIdentity(this),
+                ["mainWindowDataContextIdentity"] = DescribeObjectIdentity(DataContext),
+                ["viewModelIdentity"] = DescribeObjectIdentity(ViewModel),
+                ["debugSessionId"] = debugSession?.SessionId,
+                ["debugSessionIdentity"] = DescribeObjectIdentity(debugSession),
+                ["debugSessionState"] = debugSession?.CurrentState.ToString(),
+                ["debugSessionPauseGeneration"] = debugSession?.PauseGeneration,
+                ["inspectionContextIdentity"] = DescribeObjectIdentity(_debugInspectionContext),
+                ["inspectionLifecycleState"] = _debugInspectionContext.LifecycleState.ToString(),
+                ["inspectionPauseGeneration"] = _debugInspectionContext.PauseGeneration,
+                ["selectedFrameId"] = selectedFrame?.FrameId,
+                ["selectedFramePauseGeneration"] = selectedFrame?.PauseGeneration,
+                ["currentFrameId"] = currentFrame?.FrameId,
+                ["currentFramePauseGeneration"] = currentFrame?.PauseGeneration,
+                ["dockedDebugTabControlIdentity"] = DescribeObjectIdentity(DebugPaneTabControl),
+                ["floatingDebugWindowIdentity"] = DescribeObjectIdentity(_debugPaneWindow),
+                ["floatingDebugWindowDataContextIdentity"] = DescribeObjectIdentity(_debugPaneWindow?.DataContext),
+                ["bottomToolWindowIdentity"] = DescribeObjectIdentity(_bottomToolWindow),
+                ["bottomToolWindowDataContextIdentity"] = DescribeObjectIdentity(_bottomToolWindow?.DataContext),
+                ["bottomToolWindowContentIdentity"] = DescribeObjectIdentity(BottomToolWindowContent),
+                ["bottomToolWindowContentDataContextIdentity"] = DescribeObjectIdentity(BottomToolWindowContent.DataContext),
+                ["debugOutputListIdentity"] = DescribeObjectIdentity(DebugOutputList),
+                ["debugOutputListDataContextIdentity"] = DescribeObjectIdentity(DebugOutputList.DataContext),
+                ["debugOutputListIsLoaded"] = DebugOutputList.IsLoaded,
+                ["debugOutputPresentationIdentity"] = DescribeObjectIdentity(_debugOutputPresentation),
+                ["debugOutputVisibleItemsIdentity"] = DescribeObjectIdentity(_debugOutputPresentation.VisibleItems),
+                ["debugPaneIsFloating"] = _debugPaneWindow is not null,
+                ["bottomToolWindowIsFloating"] = _isBottomToolWindowFloating,
+                ["bottomToolWindowIsVisible"] = _isBottomToolWindowVisible,
+                ["selectedDebugTabIndex"] = _selectedDebugTabIndex,
+                ["selectedBottomToolTab"] = _selectedBottomToolTab.ToString(),
+                ["continueCanExecute"] = ContinueMenuItem.IsEnabled,
+                ["stepOverCanExecute"] = StepOverMenuItem.IsEnabled,
+                ["stepIntoCanExecute"] = StepIntoMenuItem.IsEnabled,
+                ["stepOutCanExecute"] = StepOutMenuItem.IsEnabled,
+                ["stopCanExecute"] = StopDebugMenuItem.IsEnabled
+            };
+        }
+
+        private static string? DescribeObjectIdentity(object? value)
+        {
+            return value is null
+                ? null
+                : $"{value.GetType().FullName}#{RuntimeHelpers.GetHashCode(value):X8}";
+        }
+
+        private static Dictionary<string, object?> MergeDiagnostics(
+            Dictionary<string, object?> primary,
+            Dictionary<string, object?> additions)
+        {
+            foreach (var pair in additions)
+            {
+                primary[pair.Key] = pair.Value;
+            }
+
+            return primary;
         }
 
 
@@ -7773,7 +7854,7 @@ namespace PS7ScriptDesk.Shell
 
         private void ContinueDebugCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
         {
-            e.CanExecute = _debugSession?.CurrentState == DebugSessionState.Paused;
+            e.CanExecute = CanExecuteDebugExecutionControl();
             e.Handled = true;
         }
 
@@ -7785,19 +7866,19 @@ namespace PS7ScriptDesk.Shell
 
         private void StepOverCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
         {
-            e.CanExecute = _debugSession?.CurrentState == DebugSessionState.Paused;
+            e.CanExecute = CanExecuteDebugExecutionControl();
             e.Handled = true;
         }
 
         private void StepIntoCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
         {
-            e.CanExecute = _debugSession?.CurrentState == DebugSessionState.Paused;
+            e.CanExecute = CanExecuteDebugExecutionControl();
             e.Handled = true;
         }
 
         private void StepOutCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
         {
-            e.CanExecute = _debugSession?.CurrentState == DebugSessionState.Paused;
+            e.CanExecute = CanExecuteDebugExecutionControl();
             e.Handled = true;
         }
 
@@ -7828,6 +7909,182 @@ namespace PS7ScriptDesk.Shell
         private void ToggleBreakpointCommand_Executed(object sender, ExecutedRoutedEventArgs e) =>
             ToggleBreakpoint_Click(sender, e);
 
+        private bool CanExecuteDebugExecutionControl()
+        {
+            var debugSession = _debugSession;
+            return debugSession is not null &&
+                   debugSession.CurrentState == DebugSessionState.Paused &&
+                   IsDebugInspectionContextStable(debugSession) &&
+                   !_debugExecutionControlGate.IsBusy;
+        }
+
+        private bool IsDebugInspectionContextStable(IDebugSession debugSession)
+            => _debugInspectionContext.SessionId == debugSession.SessionId &&
+               _debugInspectionContext.PauseGeneration == debugSession.PauseGeneration &&
+               _debugInspectionContext.LifecycleState == DebuggerInspectionLifecycleState.Paused;
+
+        private bool TryBeginDebugExecutionControl(
+            IDebugSession? debugSession,
+            string command,
+            out DebuggerExecutionControlGate.Lease lease)
+        {
+            lease = null!;
+            var busyBeforeAcquire = _debugExecutionControlGate.IsBusy;
+            var sessionState = debugSession?.CurrentState.ToString() ?? "(null)";
+
+            if (debugSession is null)
+            {
+                LogDebugExecutionControlRejected(command, "NoActiveSession", busyBeforeAcquire, null, sessionState);
+                return false;
+            }
+
+            if (debugSession.CurrentState != DebugSessionState.Paused)
+            {
+                LogDebugExecutionControlRejected(command, "SessionNotPaused", busyBeforeAcquire, debugSession, sessionState);
+                return false;
+            }
+
+            if (!IsDebugInspectionContextStable(debugSession))
+            {
+                LogDebugExecutionControlRejected(command, "InspectionContextNotStable", busyBeforeAcquire, debugSession, sessionState);
+                return false;
+            }
+
+            if (!_debugExecutionControlGate.TryAcquire(debugSession, command, out lease))
+            {
+                LogDebugExecutionControlRejected(command, "CommandInFlight", busyBeforeAcquire, debugSession, sessionState);
+                return false;
+            }
+
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Execution-control gate acquired.",
+                new Dictionary<string, object?>
+                {
+                    ["command"] = command,
+                    ["operationId"] = lease.OperationId,
+                    ["sessionId"] = debugSession.SessionId,
+                    ["sessionState"] = sessionState,
+                    ["pauseGeneration"] = debugSession.PauseGeneration,
+                    ["busyBeforeAcquire"] = busyBeforeAcquire,
+                    ["gateAcquired"] = true
+                });
+            TraceDebugShell(
+                "ExecutionControlGate",
+                $"Acquired; command={command}; operationId={lease.OperationId}; sessionId={debugSession.SessionId}; pauseGeneration={debugSession.PauseGeneration}; {DescribeDebugUiState()}");
+            RefreshDebugCommandAvailability(false);
+            return true;
+        }
+
+        private void LogDebugExecutionControlRejected(
+            string command,
+            string reason,
+            bool busyBeforeAcquire,
+            IDebugSession? debugSession,
+            string sessionState)
+        {
+            var message = $"ExecutionControlRejected: reason={reason}; command={command}; busyBeforeAcquire={busyBeforeAcquire}; sessionState={sessionState}.";
+            TraceDebugShell("ExecutionControlRejected", message);
+            DeveloperDiagnostics.LogDecision(
+                "Debugger",
+                "ExecutionControlRejected",
+                message,
+                reason,
+                new Dictionary<string, object?>
+                {
+                    ["command"] = command,
+                    ["reason"] = reason,
+                    ["busyBeforeAcquire"] = busyBeforeAcquire,
+                    ["sessionId"] = debugSession?.SessionId,
+                    ["sessionState"] = sessionState,
+                    ["pauseGeneration"] = debugSession?.PauseGeneration,
+                    ["gateAcquired"] = false
+                });
+        }
+
+        private void HandleDebugExecutionControlSetupFailure(
+            IDebugSession debugSession,
+            DebuggerExecutionControlGate.Lease lease,
+            string command,
+            Exception exception)
+        {
+            DeveloperDiagnostics.LogException(
+                "Debugger",
+                exception,
+                "Execution-control setup failed before dispatch.",
+                new Dictionary<string, object?>
+                {
+                    ["command"] = command,
+                    ["operationId"] = lease.OperationId,
+                    ["sessionId"] = debugSession.SessionId,
+                    ["sessionState"] = debugSession.CurrentState.ToString(),
+                    ["pauseGeneration"] = debugSession.PauseGeneration
+                });
+            ReleaseDebugExecutionControl(lease, $"SetupFailure:{command}", stableCompletion: false);
+            if (ReferenceEquals(_debugSession, debugSession) && ViewModel is not null)
+            {
+                ViewModel.StatusText = $"{command} failed: {exception.Message}";
+            }
+        }
+
+        private void ReleaseDebugExecutionControl(
+            DebuggerExecutionControlGate.Lease lease,
+            string reason,
+            bool stableCompletion)
+        {
+            if (!_debugExecutionControlGate.Release(lease))
+            {
+                return;
+            }
+
+            var debugSession = _debugSession;
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Execution-control gate released.",
+                new Dictionary<string, object?>
+                {
+                    ["command"] = lease.Command,
+                    ["operationId"] = lease.OperationId,
+                    ["reason"] = reason,
+                    ["stableCompletion"] = stableCompletion,
+                    ["sessionId"] = debugSession?.SessionId,
+                    ["sessionState"] = debugSession?.CurrentState.ToString(),
+                    ["pauseGeneration"] = debugSession?.PauseGeneration,
+                    ["gateReleased"] = true
+                });
+            TraceDebugShell(
+                "ExecutionControlGate",
+                $"Released; command={lease.Command}; operationId={lease.OperationId}; reason={reason}; stableCompletion={stableCompletion}; {DescribeDebugUiState()}");
+            RefreshDebugCommandAvailability(debugSession?.CurrentState == DebugSessionState.Paused);
+        }
+
+        private void ReleaseDebugExecutionControlForSession(IDebugSession debugSession, string reason, bool stableCompletion)
+        {
+            if (!_debugExecutionControlGate.TryReleaseForSession(debugSession, out var lease) || lease is null)
+            {
+                return;
+            }
+
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Execution-control gate cleared for session teardown or stable pause.",
+                new Dictionary<string, object?>
+                {
+                    ["command"] = lease.Command,
+                    ["operationId"] = lease.OperationId,
+                    ["reason"] = reason,
+                    ["stableCompletion"] = stableCompletion,
+                    ["sessionId"] = debugSession.SessionId,
+                    ["sessionState"] = debugSession.CurrentState.ToString(),
+                    ["pauseGeneration"] = debugSession.PauseGeneration,
+                    ["gateReleased"] = true
+                });
+            TraceDebugShell(
+                "ExecutionControlGate",
+                $"Released for session; command={lease.Command}; operationId={lease.OperationId}; reason={reason}; stableCompletion={stableCompletion}; sessionId={debugSession.SessionId}; {DescribeDebugUiState()}");
+            RefreshDebugCommandAvailability(debugSession.CurrentState == DebugSessionState.Paused);
+        }
+
         private bool TryExecuteDebuggerShortcut(
             RoutedCommand command,
             string commandName,
@@ -7851,6 +8108,18 @@ namespace PS7ScriptDesk.Shell
                     ["canExecute"] = canExecute,
                     ["handled"] = handled
                 });
+
+            if (!handled &&
+                _debugExecutionControlGate.IsBusy &&
+                commandName is "Continue" or "StepOver" or "StepInto" or "StepOut")
+            {
+                LogDebugExecutionControlRejected(
+                    commandName,
+                    "CommandInFlight",
+                    busyBeforeAcquire: true,
+                    debugSession: _debugSession,
+                    sessionState: _debugSession?.CurrentState.ToString() ?? "(null)");
+            }
 
             if (!handled)
             {
@@ -8254,15 +8523,24 @@ namespace PS7ScriptDesk.Shell
             using var scope = DeveloperDiagnostics.BeginScope(operationId: $"StepInto-{Guid.NewGuid():N}");
             DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Step Into requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("StepInto_Click", $"Entry; {DescribeDebugUiState()}");
-            if (_debugSession?.CurrentState == DebugSessionState.Paused)
+            var debugSession = _debugSession;
+            if (!TryBeginDebugExecutionControl(debugSession, "StepInto", out var lease))
             {
-                RefreshDebugCommandAvailability(false);
+                return;
+            }
+
+            try
+            {
                 ClearDebugCurrentLine();
                 _debugInspectionContext.BeginExecution();
                 InvalidateDebugPanelRefresh("StepInto requested");
                 ClearLiveDebugVariableCache("StepInto requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping in...";
-                await ExecuteDebugControlAsync(_debugSession, session => session.StepIntoAsync(), "Step Into failed").ConfigureAwait(true);
+                await ExecuteDebugControlAsync(debugSession!, session => session.StepIntoAsync(), "Step Into failed", lease).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                HandleDebugExecutionControlSetupFailure(debugSession!, lease, "Step Into", ex);
             }
         }
 
@@ -8272,15 +8550,24 @@ namespace PS7ScriptDesk.Shell
             using var scope = DeveloperDiagnostics.BeginScope(operationId: $"StepOver-{Guid.NewGuid():N}");
             DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Step Over requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("StepOver_Click", $"Entry; {DescribeDebugUiState()}");
-            if (_debugSession?.CurrentState == DebugSessionState.Paused)
+            var debugSession = _debugSession;
+            if (!TryBeginDebugExecutionControl(debugSession, "StepOver", out var lease))
             {
-                RefreshDebugCommandAvailability(false);
+                return;
+            }
+
+            try
+            {
                 ClearDebugCurrentLine();
                 _debugInspectionContext.BeginExecution();
                 InvalidateDebugPanelRefresh("StepOver requested");
                 ClearLiveDebugVariableCache("StepOver requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping over...";
-                await ExecuteDebugControlAsync(_debugSession, session => session.StepOverAsync(), "Step Over failed").ConfigureAwait(true);
+                await ExecuteDebugControlAsync(debugSession!, session => session.StepOverAsync(), "Step Over failed", lease).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                HandleDebugExecutionControlSetupFailure(debugSession!, lease, "Step Over", ex);
             }
         }
 
@@ -8289,18 +8576,26 @@ namespace PS7ScriptDesk.Shell
             using var scope = DeveloperDiagnostics.BeginScope(operationId: $"StepOut-{Guid.NewGuid():N}");
             DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Step Out requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("StepOut_Click", $"Entry; {DescribeDebugUiState()}");
-            if (_debugSession?.CurrentState == DebugSessionState.Paused)
+            var debugSession = _debugSession;
+            if (!TryBeginDebugExecutionControl(debugSession, "StepOut", out var lease))
             {
-                var debugSession = _debugSession;
-                var previousPauseGeneration = debugSession.PauseGeneration;
-                RefreshDebugCommandAvailability(false);
+                return;
+            }
+
+            try
+            {
+                var previousPauseGeneration = debugSession!.PauseGeneration;
                 ClearDebugCurrentLine();
                 _debugInspectionContext.BeginExecution();
                 InvalidateDebugPanelRefresh("StepOut requested");
                 ClearLiveDebugVariableCache("StepOut requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Stepping out...";
-                await ExecuteDebugControlAsync(debugSession, session => session.StepOutAsync(), "Step Out failed").ConfigureAwait(true);
+                await ExecuteDebugControlAsync(debugSession, session => session.StepOutAsync(), "Step Out failed", lease).ConfigureAwait(true);
                 _ = EnsureStepOutLocationAsync(debugSession, previousPauseGeneration);
+            }
+            catch (Exception ex)
+            {
+                HandleDebugExecutionControlSetupFailure(debugSession!, lease, "Step Out", ex);
             }
         }
 
@@ -8309,15 +8604,24 @@ namespace PS7ScriptDesk.Shell
             using var scope = DeveloperDiagnostics.BeginScope(operationId: $"Continue-{Guid.NewGuid():N}");
             DeveloperDiagnostics.LogUserAction("Debugger", "DebuggerCommand", "Continue requested.", BuildDebugActionProperties(sender));
             TraceDebugShell("ContinueDebug_Click", $"Entry; {DescribeDebugUiState()}");
-            if (_debugSession?.CurrentState == DebugSessionState.Paused)
+            var debugSession = _debugSession;
+            if (!TryBeginDebugExecutionControl(debugSession, "Continue", out var lease))
             {
-                RefreshDebugCommandAvailability(false);
+                return;
+            }
+
+            try
+            {
                 ClearDebugCurrentLine();
                 _debugInspectionContext.BeginExecution();
                 InvalidateDebugPanelRefresh("Continue requested");
                 ClearLiveDebugVariableCache("Continue requested");
                 if (ViewModel is not null) ViewModel.StatusText = "Continuing...";
-                await ExecuteDebugControlAsync(_debugSession, session => session.ContinueAsync(), "Continue failed").ConfigureAwait(true);
+                await ExecuteDebugControlAsync(debugSession!, session => session.ContinueAsync(), "Continue failed", lease).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                HandleDebugExecutionControlSetupFailure(debugSession!, lease, "Continue", ex);
             }
         }
 
@@ -8603,6 +8907,7 @@ namespace PS7ScriptDesk.Shell
             var sessionState = _debugSession?.CurrentState;
             var hasSession = _debugSession is not null && sessionState != DebugSessionState.Stopped;
             var isPaused = hasSession && sessionState == DebugSessionState.Paused;
+            var canExecuteControl = isPaused && CanExecuteDebugExecutionControl();
             var canStart = !hasSession && CanStartDebugSession();
 
             if (paused != isPaused)
@@ -8645,10 +8950,12 @@ namespace PS7ScriptDesk.Shell
                         ["hasSession"] = hasSession,
                         ["canStart"] = canStart,
                         ["startCanExecute"] = canStart,
-                        ["stepIntoCanExecute"] = isPaused,
-                        ["stepOverCanExecute"] = isPaused,
-                        ["stepOutCanExecute"] = isPaused,
-                        ["continueCanExecute"] = isPaused,
+                        ["executionControlBusy"] = _debugExecutionControlGate.IsBusy,
+                        ["executionControlCanExecute"] = canExecuteControl,
+                        ["stepIntoCanExecute"] = canExecuteControl,
+                        ["stepOverCanExecute"] = canExecuteControl,
+                        ["stepOutCanExecute"] = canExecuteControl,
+                        ["continueCanExecute"] = canExecuteControl,
                         ["stopCanExecute"] = hasSession
                     });
             }
@@ -8662,19 +8969,48 @@ namespace PS7ScriptDesk.Shell
         private async Task ExecuteDebugControlAsync(
             IDebugSession? debugSession,
             Func<IDebugSession, Task> debugAction,
-            string failureStatusPrefix)
+            string failureStatusPrefix,
+            DebuggerExecutionControlGate.Lease lease)
         {
             if (debugSession is null || !ReferenceEquals(_debugSession, debugSession))
             {
                 TraceDebugShell("ExecuteDebugControlAsync", $"Skipped because session mismatch/null. activeMatches={ReferenceEquals(_debugSession, debugSession)}; {DescribeDebugUiState()}");
+                if (debugSession is not null)
+                {
+                    ReleaseDebugExecutionControl(lease, "SessionMismatchBeforeDispatch", stableCompletion: false);
+                }
                 return;
             }
 
             try
             {
-                TraceDebugShell("ExecuteDebugControlAsync", $"Dispatching control action; failureStatusPrefix='{failureStatusPrefix}'; sessionStateBefore={debugSession.CurrentState}; {DescribeDebugUiState()}");
+                TraceDebugShell("ExecuteDebugControlAsync", $"Dispatching control action; failureStatusPrefix='{failureStatusPrefix}'; operationId={lease.OperationId}; command={lease.Command}; sessionStateBefore={debugSession.CurrentState}; pauseGeneration={debugSession.PauseGeneration}; {DescribeDebugUiState()}");
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Execution-control dispatch started.",
+                    new Dictionary<string, object?>
+                    {
+                        ["command"] = lease.Command,
+                        ["operationId"] = lease.OperationId,
+                        ["sessionId"] = debugSession.SessionId,
+                        ["sessionState"] = debugSession.CurrentState.ToString(),
+                        ["pauseGeneration"] = debugSession.PauseGeneration,
+                        ["gateBusy"] = _debugExecutionControlGate.IsBusy
+                    });
                 await debugAction(debugSession).ConfigureAwait(true);
-                TraceDebugShell("ExecuteDebugControlAsync", $"Control action completed without exception; failureStatusPrefix='{failureStatusPrefix}'; sessionStateAfter={debugSession.CurrentState}; {DescribeDebugUiState()}");
+                TraceDebugShell("ExecuteDebugControlAsync", $"Control action completed without exception; failureStatusPrefix='{failureStatusPrefix}'; operationId={lease.OperationId}; command={lease.Command}; sessionStateAfter={debugSession.CurrentState}; pauseGeneration={debugSession.PauseGeneration}; gateReleaseDeferred=true; {DescribeDebugUiState()}");
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Execution-control dispatch completed; gate release deferred until stable debugger completion.",
+                    new Dictionary<string, object?>
+                    {
+                        ["command"] = lease.Command,
+                        ["operationId"] = lease.OperationId,
+                        ["sessionId"] = debugSession.SessionId,
+                        ["sessionState"] = debugSession.CurrentState.ToString(),
+                        ["pauseGeneration"] = debugSession.PauseGeneration,
+                        ["gateReleaseDeferred"] = true
+                    });
             }
             catch (Exception ex)
             {
@@ -8691,6 +9027,7 @@ namespace PS7ScriptDesk.Shell
                 }
 
                 TraceDebugShell("ExecuteDebugControlAsync", $"Control action failed; failureStatusPrefix='{failureStatusPrefix}'; exceptionType={ex.GetType().Name}; message={ex.Message}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
+                ReleaseDebugExecutionControl(lease, $"DispatchException:{failureStatusPrefix}", stableCompletion: false);
             }
         }
 
@@ -8803,6 +9140,7 @@ namespace PS7ScriptDesk.Shell
 
             if (actualState == DebugSessionState.Stopped)
             {
+                ReleaseDebugExecutionControlForSession(debugSession, "StoppedState", stableCompletion: true);
                 ViewModel?.AppendDebugOutput("Debugger session ended.");
                 await TearDownDebugSessionAsync(DebugTeardownReason.SessionStoppedState).ConfigureAwait(true);
                 if (ViewModel is not null)
@@ -8821,7 +9159,28 @@ namespace PS7ScriptDesk.Shell
             {
                 _debugInspectionContext.PreparePaused(debugSession.SessionId, debugSession.PauseGeneration);
                 ViewModel.StatusText = "Debug session paused — choose Continue, Step Over, Step Into, Step Out, or Stop Debug";
-                ScheduleDebugPanelRefresh("StateChangedPaused");
+                var refreshOutcome = await ScheduleDebugPanelRefresh("StateChangedPaused").ConfigureAwait(true);
+                var releaseReason = refreshOutcome switch
+                {
+                    DebugPanelRefreshOutcome.Completed => "PausedContextRefreshCompleted",
+                    DebugPanelRefreshOutcome.StaleCancelled => "PausedContextInspectionStaleCancelled",
+                    DebugPanelRefreshOutcome.FailedRecoverable => "PausedContextInspectionFailedRecoverable",
+                    DebugPanelRefreshOutcome.UnresolvedProtocol => "PausedContextInspectionUnresolvedRecovered",
+                    _ => "PausedContextInspectionUnknown"
+                };
+                var stableCompletion = refreshOutcome == DebugPanelRefreshOutcome.Completed;
+                ReleaseDebugExecutionControlForSession(debugSession, releaseReason, stableCompletion);
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    "HandleDebugSessionStateChanged",
+                    "Paused-state inspection reached an explicit terminal outcome before execution control was released.",
+                    refreshOutcome.ToString(),
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = releaseReason,
+                        ["stableCompletion"] = stableCompletion,
+                        ["pauseGeneration"] = debugSession.PauseGeneration
+                    });
             }
             else
             {
@@ -8919,6 +9278,11 @@ namespace PS7ScriptDesk.Shell
                     ["operationId"] = operationId,
                     ["terminalMutationRequested"] = false
                 });
+
+            if (debugSession is not null)
+            {
+                ReleaseDebugExecutionControlForSession(debugSession, $"Teardown:{reason}", stableCompletion: false);
+            }
 
             if (debugSession is not null && _debugSessionStateChangedHandler is not null)
             {
@@ -13513,6 +13877,7 @@ namespace PS7ScriptDesk.Shell
         private void PopOutDebugPane(string reason)
         {
             using var layoutTransition = _layoutCoordinator.BeginTransition($"DebugPopOut:{reason}");
+            LogDebuggerPopOutForensics($"DebugPopOut:Before:{reason}");
             DeveloperDiagnostics.LogUserAction(
                 "Debugger",
                 "DebugPanePopOutRequested",
@@ -13563,16 +13928,17 @@ namespace PS7ScriptDesk.Shell
             DeveloperDiagnostics.LogInfo(
                 "Debugger",
                 "Floating Debug pane window shown.",
-                new Dictionary<string, object?>
+                MergeDiagnostics(BuildDebuggerPopOutForensics($"DebugPopOut:After:{reason}"), new Dictionary<string, object?>
                 {
                     ["reason"] = reason,
                     ["selectedTabIndex"] = _selectedDebugTabIndex
-                });
+                }));
         }
 
         private void DockDebugPane(string reason)
         {
             using var layoutTransition = _layoutCoordinator.BeginTransition($"DebugDock:{reason}");
+            LogDebuggerPopOutForensics($"DebugDock:Before:{reason}");
             DeveloperDiagnostics.LogUserAction(
                 "Debugger",
                 "DebugPaneDockBackRequested",
@@ -13592,11 +13958,13 @@ namespace PS7ScriptDesk.Shell
 
             CaptureDebugPaneWindowBounds(debugPaneWindow);
             SyncDebugPaneTabSelection(debugPaneWindow.SelectedTabIndex, "DockBack");
+            DetachDebugPaneWindowHandlers(debugPaneWindow);
             _debugPaneWindow = null;
             _layoutCoordinator.SetDebugDockState(LayoutDockState.Docked);
             SetDebugPanelVisible(true);
             ApplyDebugPaneItemsSources("DockBack");
             debugPaneWindow.CloseForDockBack();
+            LogDebuggerPopOutForensics($"DebugDock:After:{reason}");
         }
 
         private void DebugPaneWindow_DockBackRequested(object? sender, EventArgs e)
@@ -13633,13 +14001,24 @@ namespace PS7ScriptDesk.Shell
 
             if (ReferenceEquals(_debugPaneWindow, debugPaneWindow))
             {
-                debugPaneWindow.CallStackFrameSelectionChanged -= DebugPaneWindow_CallStackFrameSelectionChanged;
+                DetachDebugPaneWindowHandlers(debugPaneWindow);
                 _debugPaneWindow = null;
                 ApplyDebugPanePresentationState();
                 ApplyDebugPaneItemsSources("FloatingWindowClosed");
             }
 
             DeveloperDiagnostics.LogInfo("Debugger", "Floating Debug pane window closed.", new Dictionary<string, object?> { ["selectedTabIndex"] = _selectedDebugTabIndex });
+        }
+
+        private void DetachDebugPaneWindowHandlers(DebugPaneWindow debugPaneWindow)
+        {
+            debugPaneWindow.DockBackRequested -= DebugPaneWindow_DockBackRequested;
+            debugPaneWindow.SelectedTabIndexChanged -= DebugPaneWindow_SelectedTabIndexChanged;
+            debugPaneWindow.CallStackFrameSelectionChanged -= DebugPaneWindow_CallStackFrameSelectionChanged;
+            debugPaneWindow.RemoveSelectedBreakpointRequested -= DebugPaneWindow_RemoveSelectedBreakpointRequested;
+            debugPaneWindow.Closed -= DebugPaneWindow_Closed;
+            debugPaneWindow.LocationChanged -= DebugPaneWindow_LocationChanged;
+            debugPaneWindow.SizeChanged -= DebugPaneWindow_SizeChanged;
         }
 
         private void DebugPaneWindow_LocationChanged(object? sender, EventArgs e)
@@ -13978,21 +14357,21 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        private void ScheduleDebugPanelRefresh(string reason)
+        private Task<DebugPanelRefreshOutcome> ScheduleDebugPanelRefresh(string reason)
         {
             var debugSession = _debugSession;
             if (debugSession is null)
             {
                 TraceDebugShell("ScheduleDebugPanelRefresh", $"Skipped because debug session is null; reason={reason}; {DescribeDebugUiState()}");
                 DeveloperDiagnostics.LogDecision("Debugger", "ScheduleDebugPanelRefresh", "Debug panel refresh was skipped because the debug session was null.", "SkippedNoSession", new Dictionary<string, object?> { ["reason"] = reason });
-                return;
+                return Task.FromResult(DebugPanelRefreshOutcome.StaleCancelled);
             }
 
             if (debugSession.CurrentState != DebugSessionState.Paused)
             {
                 TraceDebugShell("ScheduleDebugPanelRefresh", $"Skipped because session is not paused; reason={reason}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
                 DeveloperDiagnostics.LogDecision("Debugger", "ScheduleDebugPanelRefresh", "Debug panel refresh was skipped because the debug session was not paused.", "SkippedNotPaused", new Dictionary<string, object?> { ["reason"] = reason, ["sessionState"] = debugSession.CurrentState.ToString() });
-                return;
+                return Task.FromResult(DebugPanelRefreshOutcome.StaleCancelled);
             }
 
             var refreshVersion = Interlocked.Increment(ref _debugPanelRefreshVersion);
@@ -14005,7 +14384,7 @@ namespace PS7ScriptDesk.Shell
             catch (InvalidOperationException ex)
             {
                 DeveloperDiagnostics.LogDecision("Debugger", "ScheduleDebugPanelRefresh", "Debug panel refresh was skipped because no paused inspection context was available.", "SkippedNoInspectionContext", new Dictionary<string, object?> { ["reason"] = reason, ["message"] = ex.Message });
-                return;
+                return Task.FromResult(DebugPanelRefreshOutcome.StaleCancelled);
             }
 
             TraceDebugShell("ScheduleDebugPanelRefresh", $"Scheduled; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
@@ -14020,7 +14399,8 @@ namespace PS7ScriptDesk.Shell
                     ["hasCurrentDebugLocation"] = HasActiveDebugCurrentLocation()
                 });
 
-            _ = RefreshDebugPanelsAsync(debugSession, refreshVersion, reason, request).ContinueWith(
+            var refreshTask = RefreshDebugPanelsAsync(debugSession, refreshVersion, reason, request);
+            _ = refreshTask.ContinueWith(
                 task =>
                 {
                     if (task.Exception is not null)
@@ -14032,6 +14412,7 @@ namespace PS7ScriptDesk.Shell
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted,
                 TaskScheduler.Default);
+            return refreshTask;
         }
 
         private int InvalidateDebugPanelRefresh(string reason)
@@ -14040,6 +14421,14 @@ namespace PS7ScriptDesk.Shell
             TraceDebugShell("InvalidateDebugPanelRefresh", $"Invalidated; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
             DeveloperDiagnostics.LogInfo("Debugger", "Debug panel refresh invalidated.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion });
             return refreshVersion;
+        }
+
+        private enum DebugPanelRefreshOutcome
+        {
+            Completed,
+            StaleCancelled,
+            FailedRecoverable,
+            UnresolvedProtocol
         }
 
         private sealed record DebugPanelRefreshSnapshot(
@@ -14124,7 +14513,7 @@ namespace PS7ScriptDesk.Shell
         /// Queries variables and call stack from the live debug session and populates
         /// the Variables and Call Stack grids when the session remains paused.
         /// </summary>
-        private async Task RefreshDebugPanelsAsync(IDebugSession debugSession, int refreshVersion, string reason, DebuggerInspectionRequest request)
+        private async Task<DebugPanelRefreshOutcome> RefreshDebugPanelsAsync(IDebugSession debugSession, int refreshVersion, string reason, DebuggerInspectionRequest request)
         {
             try
             {
@@ -14135,20 +14524,20 @@ namespace PS7ScriptDesk.Shell
                 if (preQuerySnapshot is null)
                 {
                     DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was skipped because the UI-thread snapshot could not be captured.", "SkippedSnapshotFailure", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["stage"] = "AfterDelay" });
-                    return;
+                    return DebugPanelRefreshOutcome.FailedRecoverable;
                 }
 
                 if (!CanRefreshDebugPanels(preQuerySnapshot, refreshVersion, out var skipReason))
                 {
                     TraceDebugShell("RefreshDebugPanelsAsync", $"Skipped after delay; reason={reason}; skipReason={skipReason}; refreshVersion={refreshVersion}; currentVersion={preQuerySnapshot.CurrentVersion}; {DescribeDebugUiState()}");
                     DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was skipped after the debounce delay.", "SkippedAfterDelay", new Dictionary<string, object?> { ["reason"] = reason, ["skipReason"] = skipReason, ["refreshVersion"] = refreshVersion, ["currentVersion"] = preQuerySnapshot.CurrentVersion });
-                    return;
+                    return DebugPanelRefreshOutcome.StaleCancelled;
                 }
 
                 if (!_debugInspectionContext.IsCurrent(request.Identity))
                 {
                     DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was skipped because its inspection request was stale before querying.", "SkippedStaleInspectionRequest", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
-                    return;
+                    return DebugPanelRefreshOutcome.StaleCancelled;
                 }
 
                 DeveloperDiagnostics.LogInfo("Debugger", "Debug call stack query starting for frame-targeted inspection.", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
@@ -14202,7 +14591,7 @@ namespace PS7ScriptDesk.Shell
 
                 if (inspectionFrame is null)
                 {
-                    return;
+                    return DebugPanelRefreshOutcome.StaleCancelled;
                 }
 
                 DeveloperDiagnostics.LogInfo("Debugger", "Debug variable query starting for selected frame.", new Dictionary<string, object?>
@@ -14266,20 +14655,20 @@ namespace PS7ScriptDesk.Shell
                 if (postVariablesSnapshot is null)
                 {
                     DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was skipped because the post-variables UI-thread snapshot could not be captured.", "SkippedSnapshotFailure", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["stage"] = "AfterVariables" });
-                    return;
+                    return DebugPanelRefreshOutcome.FailedRecoverable;
                 }
 
                 if (!CanRefreshDebugPanels(postVariablesSnapshot, refreshVersion, out skipReason))
                 {
                     TraceDebugShell("RefreshDebugPanelsAsync", $"Skipped after variables; reason={reason}; skipReason={skipReason}; refreshVersion={refreshVersion}; currentVersion={postVariablesSnapshot.CurrentVersion}; {DescribeDebugUiState()}");
                     DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh became stale after the variables query.", "SkippedAfterVariables", new Dictionary<string, object?> { ["reason"] = reason, ["skipReason"] = skipReason, ["refreshVersion"] = refreshVersion, ["currentVersion"] = postVariablesSnapshot.CurrentVersion, ["variableCount"] = variables.Count });
-                    return;
+                    return DebugPanelRefreshOutcome.StaleCancelled;
                 }
 
                 if (!_debugInspectionContext.IsCurrent(request.Identity))
                 {
                     DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was skipped because its inspection request became stale after variables were queried.", "SkippedStaleInspectionRequest", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
-                    return;
+                    return DebugPanelRefreshOutcome.StaleCancelled;
                 }
 
                 await Dispatcher.InvokeAsync(() =>
@@ -14412,13 +14801,14 @@ namespace PS7ScriptDesk.Shell
                         ["callStackCount"] = callStack.Count
                     });
                 });
+                return DebugPanelRefreshOutcome.Completed;
             }
             catch (Exception ex)
             {
                 if (ex is OperationCanceledException)
                 {
                     DeveloperDiagnostics.LogDecision("Debugger", "RefreshDebugPanelsAsync", "Debug panel refresh was cancelled because its inspection context was invalidated.", "CancelledStaleInspectionRequest", new Dictionary<string, object?> { ["reason"] = reason, ["refreshVersion"] = refreshVersion, ["requestGeneration"] = request.Identity.RequestGeneration });
-                    return;
+                    return DebugPanelRefreshOutcome.StaleCancelled;
                 }
 
                 TraceDebugShell("RefreshDebugPanelsAsync", $"Failed; reason={reason}; exceptionType={ex.GetType().Name}; message={ex.Message}; refreshVersion={refreshVersion}; currentVersion={Volatile.Read(ref _debugPanelRefreshVersion)}; {DescribeDebugUiState()}");
@@ -14439,6 +14829,9 @@ namespace PS7ScriptDesk.Shell
                         RefreshDebugCommandAvailability(debugSession.CurrentState == DebugSessionState.Paused);
                     }
                 });
+                return ex is TimeoutException
+                    ? DebugPanelRefreshOutcome.UnresolvedProtocol
+                    : DebugPanelRefreshOutcome.FailedRecoverable;
             }
         }
 

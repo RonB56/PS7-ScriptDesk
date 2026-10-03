@@ -234,6 +234,52 @@ namespace PS7ScriptDesk.Tests
         }
 
         [Fact]
+        public void ExecutionTransitionCancelsOldInspectionAndNewPauseOwnsTheNextRequest()
+        {
+            var sessionId = Guid.NewGuid();
+            using var context = new DebuggerInspectionContext();
+            context.BeginSession(sessionId);
+            context.PreparePaused(sessionId, 11);
+            var oldFrames = CreateFrames(sessionId, 11);
+            Assert.True(context.PublishCallStack(oldFrames));
+            var oldRequest = context.BeginRequest(oldFrames[0].FrameId);
+
+            context.BeginExecution();
+
+            Assert.True(oldRequest.CancellationToken.IsCancellationRequested);
+            Assert.False(context.IsCurrent(oldRequest.Identity));
+            Assert.Equal(DebuggerInspectionLifecycleState.Executing, context.LifecycleState);
+
+            context.PreparePaused(sessionId, 12);
+            var newFrames = CreateFrames(sessionId, 12);
+            Assert.True(context.PublishCallStack(newFrames));
+            var newRequest = context.BeginRequest(newFrames[0].FrameId);
+
+            Assert.NotEqual(oldRequest.Identity.RequestGeneration, newRequest.Identity.RequestGeneration);
+            Assert.False(context.IsCurrent(oldRequest.Identity));
+            Assert.True(context.IsCurrent(newRequest.Identity));
+        }
+
+        [Fact]
+        public void LateCompletionFromOldFrameCannotBecomeCurrentAfterSelectionChanges()
+        {
+            var sessionId = Guid.NewGuid();
+            using var context = new DebuggerInspectionContext();
+            context.BeginSession(sessionId);
+            context.PreparePaused(sessionId, 13);
+            var frames = CreateFrames(sessionId, 13);
+            Assert.True(context.PublishCallStack(frames));
+            var oldRequest = context.BeginRequest(frames[0].FrameId);
+
+            Assert.True(context.TrySelectFrame(frames[1], out _));
+
+            Assert.True(oldRequest.CancellationToken.IsCancellationRequested);
+            Assert.False(context.IsCurrent(oldRequest.Identity));
+            Assert.Equal(frames[1].FrameId, context.SelectedInspectionFrame?.FrameId);
+            Assert.Equal(frames[0].FrameId, context.CurrentExecutionFrame?.FrameId);
+        }
+
+        [Fact]
         public void CompletedRequestCanBeInvalidatedBySelectionWithoutDisposedCancellationSource()
         {
             var sessionId = Guid.NewGuid();

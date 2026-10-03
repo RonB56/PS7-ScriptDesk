@@ -276,6 +276,42 @@ public sealed class LiveDebuggerIntegrationTests
     }
 
     [Fact(Timeout = 60000)]
+    public async Task RealPowerShellDebugger_TestDebugLine83ScopeProjectionCompletes()
+    {
+        var scriptPath = @"C:\Users\rbarn\Downloads\TestDebug.ps1";
+        if (!File.Exists(scriptPath))
+        {
+            throw SkipException.ForSkip("The local TestDebug.ps1 reproduction is not available.");
+        }
+
+        var runtime = FindRuntime();
+        if (runtime is null)
+        {
+            throw SkipException.ForSkip("No validated PowerShell 7 runtime was discovered.");
+        }
+
+        using var session = new PsesDebugSession();
+        var recorder = new EventRecorder(session);
+        await session.StartAsync(runtime, scriptPath, new[] { new DebugBreakpointInfo(scriptPath, 83) });
+        await recorder.WaitForStateAsync(DebugSessionState.Paused);
+
+        var callStack = await session.GetCallStackAsync();
+        var current = Assert.Single(callStack, frame => frame.FunctionName == "Invoke-Level2" && frame.IsCurrentFrame);
+        var variables = await session.GetFrameVariablesAsync(
+            new DebuggerFrameInspectionIdentity(session.SessionId, session.PauseGeneration, 1, current.FrameId, current.FrameIndex)
+            {
+                ThreadId = current.ThreadId,
+                ProviderFrameId = current.ProviderFrameId
+            });
+
+        Assert.Equal(DebuggerVariableAvailability.Available, variables.Availability);
+        Assert.Contains(variables.Variables, variable => variable.Name == "Value");
+        Assert.Contains(variables.Variables, variable => variable.Name == "args");
+        Assert.Equal(DebugSessionState.Paused, session.CurrentState);
+        Assert.True(await session.StopAsync());
+    }
+
+    [Fact(Timeout = 60000)]
     public async Task RealPowerShellDebugger_InspectsDistinctNestedFrameVariables()
     {
         var runtime = FindRuntime();

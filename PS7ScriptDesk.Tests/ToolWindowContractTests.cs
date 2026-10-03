@@ -33,9 +33,11 @@ public sealed class ToolWindowContractTests
         Assert.Contains("AutomationProperties.Name=\"Floating tool window content\"", bottom, StringComparison.Ordinal);
 
         var bottomCode = Read("PS7ScriptDesk.Shell", "BottomToolWindow.xaml.cs");
-        Assert.Contains("CloseForDockBack", bottomCode, StringComparison.Ordinal);
-        Assert.Contains("CloseForOwnerShutdown", bottomCode, StringComparison.Ordinal);
-        Assert.Contains("DockBackRequested?.Invoke(this, EventArgs.Empty);", bottomCode, StringComparison.Ordinal);
+        var dockableCode = Read("PS7ScriptDesk.Shell", "DockableToolWindow.cs");
+        Assert.Contains(": DockableToolWindow", bottomCode, StringComparison.Ordinal);
+        Assert.Contains("CloseForDockBack", dockableCode, StringComparison.Ordinal);
+        Assert.Contains("CloseForOwnerShutdown", dockableCode, StringComparison.Ordinal);
+        Assert.Contains("DockBackRequested?.Invoke(this, EventArgs.Empty);", dockableCode, StringComparison.Ordinal);
         Assert.Contains("SetToolContent(UIElement content)", bottomCode, StringComparison.Ordinal);
         Assert.Contains("ClearToolContent()", bottomCode, StringComparison.Ordinal);
 
@@ -48,9 +50,7 @@ public sealed class ToolWindowContractTests
         Assert.Contains("AutomationProperties.Name=\"Dock debug pane back\"", debug, StringComparison.Ordinal);
 
         var debugCode = Read("PS7ScriptDesk.Shell", "Debug", "DebugPaneWindow.xaml.cs");
-        Assert.Contains("CloseForDockBack", debugCode, StringComparison.Ordinal);
-        Assert.Contains("CloseForOwnerShutdown", debugCode, StringComparison.Ordinal);
-        Assert.Contains("DockBackRequested?.Invoke(this, EventArgs.Empty);", debugCode, StringComparison.Ordinal);
+        Assert.Contains(": DockableToolWindow", debugCode, StringComparison.Ordinal);
         Assert.Contains("SelectedTabIndexChanged?.Invoke", debugCode, StringComparison.Ordinal);
         Assert.Contains("RemoveSelectedBreakpointRequested?.Invoke", debugCode, StringComparison.Ordinal);
     }

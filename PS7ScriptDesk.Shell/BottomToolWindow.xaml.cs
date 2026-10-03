@@ -1,21 +1,15 @@
-using System;
-using System.ComponentModel;
 using System.Windows;
 using System.Windows.Input;
 using PS7ScriptDesk.Shell.Help;
 
 namespace PS7ScriptDesk.Shell
 {
-    public partial class BottomToolWindow : Window
+public partial class BottomToolWindow : DockableToolWindow
     {
-        private bool _allowClose;
-
         public BottomToolWindow()
         {
             InitializeComponent();
         }
-
-        public event EventHandler? DockBackRequested;
 
         private void Window_Loaded(object sender, RoutedEventArgs e)
         {
@@ -43,28 +37,5 @@ namespace PS7ScriptDesk.Shell
             ToolContentHost.Content = null;
         }
 
-        public void CloseForDockBack()
-        {
-            _allowClose = true;
-            Close();
-        }
-
-        public void CloseForOwnerShutdown()
-        {
-            _allowClose = true;
-            Close();
-        }
-
-        protected override void OnClosing(CancelEventArgs e)
-        {
-            if (!_allowClose)
-            {
-                e.Cancel = true;
-                DockBackRequested?.Invoke(this, EventArgs.Empty);
-                return;
-            }
-
-            base.OnClosing(e);
-        }
     }
 }
