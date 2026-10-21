@@ -30,6 +30,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly IFileDocumentService _fileDocumentService;
         private readonly IRuntimeService _runtimeService;
         private readonly ILiveConsoleService _liveConsoleService;
+        private readonly IPowerShellRuntimeSessionCoordinator? _runtimeSessionCoordinator;
         private readonly IWorkspaceFolderService _workspaceFolderService;
         private readonly IGitService? _gitService;
         private readonly IGitSetupPromptService? _gitSetupPromptService;
@@ -210,7 +211,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             IGitService? gitService = null,
             IGitSetupPromptService? gitSetupPromptService = null,
             IGitWorkspaceCoordinator? gitWorkspaceCoordinator = null,
-            IEditorExecutionCoordinator? executionCoordinator = null)
+            IEditorExecutionCoordinator? executionCoordinator = null,
+            IPowerShellRuntimeSessionCoordinator? runtimeSessionCoordinator = null)
 
         {
             TerminalStartupTrace.Write("MAINWINDOW_VIEWMODEL_CONSTRUCTOR_ENTER", $"viewModelId={GetHashCode():X8}; liveConsoleServiceId={liveConsoleService.GetHashCode():X8}");
@@ -225,6 +227,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 _gitWorkspaceCoordinator.RefreshRequested += GitWorkspaceCoordinator_RefreshRequested;
             _userPromptService = userPromptService;
             _liveConsoleService = liveConsoleService;
+            _runtimeSessionCoordinator = runtimeSessionCoordinator;
             _exeExportService = exeExportService;
             _documentRecoveryService = documentRecoveryService ?? new NoOpDocumentRecoveryService();
             _exeExportWizardService = exeExportWizardService;
@@ -2248,7 +2251,18 @@ namespace PS7ScriptDesk.UI.ViewModels
                     _terminalOutputMultiplexer.SetInteractiveState(inputState, "User input was forwarded to the interactive terminal.");
                 }
                 AppLogger.Debug("Console", $"ViewModel forwarding raw terminal input to LiveConsoleService. Length={data.Length}.");
-                await _liveConsoleService.WriteRawInputAsync(data).ConfigureAwait(false);
+                if (_runtimeSessionCoordinator is not null)
+                {
+                    var session = _runtimeSessionCoordinator.Snapshot;
+                    await _runtimeSessionCoordinator.WriteRawInputAsync(
+                        session.SessionId,
+                        session.Generation,
+                        data).ConfigureAwait(false);
+                }
+                else
+                {
+                    await _liveConsoleService.WriteRawInputAsync(data).ConfigureAwait(false);
+                }
             }
             catch (Exception ex)
             {
@@ -4829,7 +4843,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             StatusText = structured
-                ? $"Running {displayName} through structured PowerShell broker..."
+                ? $"Running {displayName} through the authoritative PSES session..."
                 : $"Sending {displayName} to the live PowerShell console...";
             AppLogger.Info("Console", $"Coordinator dispatching '{displayName}'. RequestId={request.RequestId:N}; Backend={decision.SelectedBackend}; Reason={decision.SelectionReason}; Downgrade={decision.FallbackOrDowngradeReason ?? "(none)"}.");
 
@@ -4843,7 +4857,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     StatusText = result.Status switch
                     {
                         EditorExecutionStatus.Completed => structured
-                            ? $"{displayName} completed through structured broker"
+                        ? $"{displayName} completed through the authoritative PSES session"
                             : $"{displayName} sent to the live PowerShell console",
                         EditorExecutionStatus.Cancelled => $"{displayName} cancelled",
                         EditorExecutionStatus.Rejected => result.ErrorMessage ?? "Editor execution was rejected",
@@ -5032,7 +5046,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _activeStructuredExecutionRequestId = requestId;
             _structuredExecutionCancellation?.Dispose();
             _structuredExecutionCancellation = new CancellationTokenSource();
-            StatusText = $"Running {dispatchTitle} through structured PowerShell broker...";
+            StatusText = $"Running {dispatchTitle} through the authoritative PSES session...";
 
             var request = new EditorExecutionRequest(
                 requestId,
@@ -5069,7 +5083,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 {
                     StatusText = result.Status switch
                     {
-                        EditorExecutionStatus.Completed => $"{dispatchTitle} completed through structured broker",
+                        EditorExecutionStatus.Completed => $"{dispatchTitle} completed through the authoritative PSES session",
                         EditorExecutionStatus.Cancelled => $"{dispatchTitle} cancelled",
                         EditorExecutionStatus.Rejected => result.ErrorMessage ?? "Structured editor execution rejected",
                         _ => result.ErrorMessage ?? "Structured editor execution failed"
@@ -5435,7 +5449,20 @@ namespace PS7ScriptDesk.UI.ViewModels
             // stray continuation prompt (">>").  Sending the same command the user
             // can type manually keeps PowerShell, PSReadLine, ConPTY, and xterm.js
             // in agreement: PowerShell performs the clear and redraws its own prompt.
-            if (_liveConsoleService.IsSessionRunning)
+            DeveloperDiagnostics.LogUserAction(
+                "Terminal",
+                "TerminalClearRequested",
+                "Clear requested through the authoritative terminal path.",
+                new Dictionary<string, object?>
+                {
+                    ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                    ["inputWritable"] = _liveConsoleService.IsInputWritable,
+                    ["commandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                    ["processId"] = _liveConsoleService.ProcessId,
+                    ["contentOmitted"] = true
+                });
+
+            if (_liveConsoleService.IsInputWritable)
             {
                 try
                 {
@@ -5455,6 +5482,17 @@ namespace PS7ScriptDesk.UI.ViewModels
                 catch (Exception ex)
                 {
                     AppLogger.Warning("Console", $"PowerShell cls clear failed; falling back to xterm display clear. Reason={ex.Message}");
+                    DeveloperDiagnostics.LogException(
+                        "Terminal",
+                        ex,
+                        "Authoritative terminal clear failed.",
+                        new Dictionary<string, object?>
+                        {
+                            ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                            ["inputWritable"] = _liveConsoleService.IsInputWritable,
+                            ["processId"] = _liveConsoleService.ProcessId,
+                            ["contentOmitted"] = true
+                        });
                 }
             }
 
@@ -5672,7 +5710,21 @@ namespace PS7ScriptDesk.UI.ViewModels
                     var startupDirectory = GetConsoleStartupDirectory();
                     AppLogger.Info("Console", $"Starting PowerShell terminal using {runtime.DisplayName}; StartupDirectory={startupDirectory}; ForceRestart={forceRestart}; LogOperation={logOperation}");
                     startupAttempted = true;
-                    await _liveConsoleService.StartSessionAsync(runtime, AppendExecutionOutput, startupDirectory).ConfigureAwait(false);
+                    if (_runtimeSessionCoordinator is not null)
+                    {
+                        if (forceRestart)
+                        {
+                            await _runtimeSessionCoordinator.RestartAsync(runtime, AppendExecutionOutput, startupDirectory).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await _runtimeSessionCoordinator.AcquireAsync(runtime, AppendExecutionOutput, startupDirectory).ConfigureAwait(false);
+                        }
+                    }
+                    else
+                    {
+                        await _liveConsoleService.StartSessionAsync(runtime, AppendExecutionOutput, startupDirectory).ConfigureAwait(false);
+                    }
                     TerminalStartupTrace.Write("SESSION_RUNNING_PUBLISHED", $"serviceId={_liveConsoleService.GetHashCode():X8}; sessionRunning={_liveConsoleService.IsSessionRunning}");
                     StartupLifecycleTrace.Write("MainWindowViewModel.EnsureConsoleSessionAsync", "StartSessionCompleted", $"sessionRunning={_liveConsoleService.IsSessionRunning}");
 
@@ -7534,6 +7586,17 @@ namespace PS7ScriptDesk.UI.ViewModels
         private void OnTerminalPromptReadyObserved(int generation, string path)
         {
             TerminalStartupTrace.Write("BACKEND_PROMPT_READY", $"generation={generation}; pathLength={path?.Length ?? 0}; uiThread={_uiSynchronizationContext is null || SynchronizationContext.Current == _uiSynchronizationContext}");
+            DeveloperDiagnostics.LogInfo(
+                "Phase2CProof",
+                "PSES_READY",
+                new Dictionary<string, object?>
+                {
+                    ["generation"] = generation,
+                    ["authoritativeProcessId"] = _runtimeSessionCoordinator?.Snapshot.ProcessId ?? _liveConsoleService.ProcessId,
+                    ["runtimeState"] = _runtimeSessionCoordinator?.Snapshot.State.ToString(),
+                    ["interactiveStateBefore"] = _interactiveTerminalCoordinator.State.ToString(),
+                    ["contentOmitted"] = true
+                });
             var currentGeneration = Volatile.Read(ref _currentTerminalGeneration);
             if (generation < currentGeneration)
             {

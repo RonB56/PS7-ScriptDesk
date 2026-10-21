@@ -4,6 +4,7 @@ using PS7ScriptDesk.Tests.Dap;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection(PsesOwnedSessionEnvironmentCollection.Name)]
 public sealed class B2PsesCanonicalDebuggerTests
 {
     [Fact(Timeout = 180_000)]
@@ -129,26 +130,78 @@ public sealed class B2PsesCanonicalDebuggerTests
             var functionCVariables = await ReadFrameVariablesAsync(connection, functionC.GetProperty("id").GetInt32());
             var functionBVariables = await ReadFrameVariablesAsync(connection, functionB.GetProperty("id").GetInt32());
             var functionAVariables = await ReadFrameVariablesAsync(connection, functionA.GetProperty("id").GetInt32());
+            var functionCFrameId = functionC.GetProperty("id").GetInt32();
+            var functionBFrameId = functionB.GetProperty("id").GetInt32();
+            var functionAFrameId = functionA.GetProperty("id").GetInt32();
+            var functionCLocalC = await EvaluateFrameScopeValueAsync(connection, functionCFrameId, "LocalC", 0);
+            var functionBLocalB = await EvaluateFrameScopeValueAsync(connection, functionBFrameId, "LocalB", 1);
+            var functionBParamB = await EvaluateFrameScopeValueAsync(connection, functionBFrameId, "ParamB", 1);
+            var functionALocalA = await EvaluateFrameScopeValueAsync(connection, functionAFrameId, "LocalA", 2);
+            var functionAParamA = await EvaluateFrameScopeValueAsync(connection, functionAFrameId, "ParamA", 2);
+            var functionCLocalA = await EvaluateFrameScopeValueAsync(connection, functionCFrameId, "LocalA", 0);
+            var functionBLocalA = await EvaluateFrameScopeValueAsync(connection, functionBFrameId, "LocalA", 1);
+            var functionALocalC = await EvaluateFrameScopeValueAsync(connection, functionAFrameId, "LocalC", 2);
+            var frameIdIgnoredProbe = await EvaluateFrameScopeValueAsync(connection, functionBFrameId, "LocalC", 0);
+
+            Assert.Equal("Local-C", functionCLocalC);
+            Assert.Equal("Local-B", functionBLocalB);
+            Assert.Equal("Parameter-B", functionBParamB);
+            Assert.Equal("Local-A", functionALocalA);
+            Assert.Equal("Parameter-A", functionAParamA);
+            Assert.Equal("<missing>", functionCLocalA);
+            Assert.Equal("<missing>", functionBLocalA);
+            Assert.Equal("<missing>", functionALocalC);
+            Assert.Equal("Local-C", frameIdIgnoredProbe);
 
             Assert.True(
-                TryGetScopeValue(functionCVariables, "Command", "LocalC") == "Local-C" &&
-                TryGetScopeValue(functionBVariables, "Command", "LocalB") == "Local-B" &&
-                TryGetScopeValue(functionBVariables, "Command", "ParamB") == "Parameter-B" &&
-                TryGetScopeValue(functionAVariables, "Command", "LocalA") == "Local-A" &&
-                TryGetScopeValue(functionAVariables, "Command", "ParamA") == "Parameter-A",
-                $"C={FormatVariables("FunctionC", functionCVariables)}; B={FormatVariables("FunctionB", functionBVariables)}; A={FormatVariables("FunctionA", functionAVariables)}; Traffic={FormatTraffic(traffic)}");
-            Assert.DoesNotContain("LocalA", functionCVariables["Command"].Keys);
-            Assert.DoesNotContain("LocalB", functionCVariables["Command"].Keys);
-            Assert.DoesNotContain("LocalA", functionBVariables["Command"].Keys);
-            Assert.DoesNotContain("LocalB", functionAVariables["Command"].Keys);
-            Assert.DoesNotContain("LocalC", functionAVariables["Command"].Keys);
+                TryGetScopeValue(functionCVariables, "Command", "args") is not null &&
+                TryGetScopeValue(functionBVariables, "Command", "args") is not null &&
+                TryGetScopeValue(functionAVariables, "Command", "args") is not null,
+                $"The official PSES scope responses were not readable. C={FormatVariables("FunctionC", functionCVariables)}; B={FormatVariables("FunctionB", functionBVariables)}; A={FormatVariables("FunctionA", functionAVariables)}; Traffic={FormatTraffic(traffic)}");
 
             var disconnect = await connection.SendRequestAsync("disconnect", new { terminateDebuggee = true, restart = false }, TimeSpan.FromSeconds(15));
             Assert.True(disconnect.Success, disconnect.Message);
         }
         finally
         {
+            WriteRawEvidenceIfRequested(scriptPath, script, traffic);
             try { Directory.Delete(scriptDirectory, recursive: true); } catch { }
+        }
+    }
+
+    private static void WriteRawEvidenceIfRequested(string scriptPath, string script, IEnumerable<DapMessage> traffic)
+    {
+        var evidencePath = Environment.GetEnvironmentVariable("PS7SD_B2_EVIDENCE_PATH");
+        if (string.IsNullOrWhiteSpace(evidencePath))
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(evidencePath);
+            File.WriteAllText(Path.Combine(evidencePath, "canonical-script.ps1"), script);
+            File.WriteAllText(
+                Path.Combine(evidencePath, "dap-traffic.jsonl"),
+                string.Join(
+                    Environment.NewLine,
+                    traffic.Select(message => JsonSerializer.Serialize(message))) + Environment.NewLine);
+            File.WriteAllText(
+                Path.Combine(evidencePath, "test-metadata.json"),
+                JsonSerializer.Serialize(
+                    new
+                    {
+                        test = nameof(CanonicalScriptLaunchesStopsAndReturnsFrameScopedVariables),
+                        psesRoot = Environment.GetEnvironmentVariable("PS7SD_B1_PSES_ROOT"),
+                        powershell = Environment.GetEnvironmentVariable("PS7SD_B1_PWSH_PATH"),
+                        scriptPath,
+                        trafficCount = traffic.Count()
+                    },
+                    new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Evidence capture is best-effort and must not change the debugger assertion result.
         }
     }
 
@@ -185,6 +238,15 @@ public sealed class B2PsesCanonicalDebuggerTests
     }
 
     private static string NormalizeValue(string value) => value.Length >= 2 && value[0] == '"' && value[^1] == '"' ? value[1..^1] : value;
+
+    private static async Task<string?> EvaluateFrameScopeValueAsync(DapConnection connection, int frameId, string variableName, int scopeDepth)
+    {
+        var expression = $"$scopeValue = Get-Variable -Name '{variableName}' -Scope {scopeDepth} -ErrorAction SilentlyContinue; if ($null -eq $scopeValue) {{ '<missing>' }} else {{ [string]$scopeValue.Value }}";
+        var response = await connection.SendRequestAsync("evaluate", new { expression, frameId, context = "watch" }, TimeSpan.FromSeconds(15));
+        Assert.True(response.Success, response.Message);
+        var result = response.Body!.Value.TryGetProperty("result", out var resultProperty) ? resultProperty.GetString() : null;
+        return result is null ? null : NormalizeValue(result);
+    }
 }
 
 internal sealed class DapEventInbox

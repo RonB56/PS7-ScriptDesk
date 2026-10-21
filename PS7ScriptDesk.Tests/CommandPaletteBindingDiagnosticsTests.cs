@@ -8,6 +8,7 @@ using PS7ScriptDesk.Shell.Editor;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection("WpfUi")]
 public sealed class CommandPaletteBindingDiagnosticsTests
 {
     [Fact]

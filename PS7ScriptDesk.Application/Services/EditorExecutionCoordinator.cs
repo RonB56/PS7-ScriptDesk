@@ -12,7 +12,7 @@ namespace PS7ScriptDesk.Application.Services;
 public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
 {
     public const string LegacyBackendId = "legacy-live-console";
-    public const string StructuredBackendId = "structured-session-broker";
+    public const string StructuredBackendId = "authoritative-pses-session";
     public const string RollbackEnvironmentVariableName = "PS7SCRIPTDESK_C2_ROUTING_ROLLBACK";
 
     private static readonly ExecutionBackendCapabilities EmptyCapabilities = new(

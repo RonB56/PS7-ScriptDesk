@@ -100,6 +100,28 @@ public sealed class TerminalLifecycleViewModelTests
     }
 
     [Fact]
+    public async Task LateSessionStarted_DoesNotRegressPromptReadyStateOrDisableRun()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var coordinator = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+
+        console.RaisePromptReady(9, "C:\\");
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+
+        // PSES output can deliver the first prompt before the session-start
+        // lifecycle callback. The late callback must not regress this ready
+        // generation back to Starting.
+        console.RaiseSessionStarted(9);
+
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+        viewModel.Dispose();
+    }
+
+    [Fact]
     public async Task RendererReady_ProjectsAlreadyRunningBackendIntoVisibleSessionStateWithoutRestart()
     {
         var console = new RecordingLiveConsoleService();
@@ -556,7 +578,9 @@ public sealed class TerminalLifecycleViewModelTests
 
 internal sealed class RecordingLiveConsoleService : ILiveConsoleService
 {
+    public int? ProcessId => null;
     public bool IsSessionRunning { get; set; }
+    public bool IsInputWritable => IsSessionRunning;
     public bool IsCommandInProgress { get; set; }
     public bool IsHostAttached => true;
     public PowerShellRuntimeInfo? ActiveRuntime { get; private set; }

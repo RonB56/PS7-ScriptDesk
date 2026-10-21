@@ -136,6 +136,7 @@ namespace PS7ScriptDesk.Shell
         private readonly ConcurrentQueue<TerminalOutputEnvelope> _terminalOutputEnvelopeQueue = new();
         private readonly Dispatcher _terminalOutputDispatcher;
         private readonly ILiveConsoleService? _liveConsoleServiceForObservation;
+        private readonly IPowerShellRuntimeSessionCoordinator? _runtimeSessionCoordinator;
         private readonly TerminalOutputObservationHub _terminalOutputObservationHub = new();
         private readonly IDisposable _terminalOutputObservationSubscription;
         private TerminalObserverLifetime? _terminalObserverLifetime;
@@ -293,6 +294,8 @@ namespace PS7ScriptDesk.Shell
         private readonly AdministratorModeBannerState _administratorModeBannerState;
         private bool _allowWindowClose;
         private bool _terminalShutdownInProgress;
+        private CancellationTokenSource? _phase2BProofCancellation;
+        private Task? _phase2BProofTask;
         private Task? _deferredInitializationTask;
         private bool _shellLayoutApplied;
         private double _lastKnownExplorerWidth = 220;
@@ -460,7 +463,7 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        public MainWindow(IApplicationSettingsService applicationSettingsService, ApplicationSettings loadedSettings, IUiScaleService? uiScaleService = null, ILiveConsoleService? liveConsoleServiceForObservation = null)
+        public MainWindow(IApplicationSettingsService applicationSettingsService, ApplicationSettings loadedSettings, IUiScaleService? uiScaleService = null, ILiveConsoleService? liveConsoleServiceForObservation = null, IPowerShellRuntimeSessionCoordinator? runtimeSessionCoordinator = null)
         {
             TerminalStartupTrace.Write("MAINWINDOW_CONSTRUCTOR_ENTER", $"windowId={GetHashCode():X8}");
             StartupLifecycleTrace.Write("MainWindow.Constructor", "ENTER");
@@ -468,6 +471,7 @@ namespace PS7ScriptDesk.Shell
             _terminalOutputDispatcher = Dispatcher;
             _applicationSettingsService = applicationSettingsService;
             _liveConsoleServiceForObservation = liveConsoleServiceForObservation;
+            _runtimeSessionCoordinator = runtimeSessionCoordinator;
             _terminalOutputObservationSubscription = _terminalOutputObservationHub.Subscribe(new TerminalOutputCorrelationObserver());
             _loadedSettings = loadedSettings ?? new ApplicationSettings();
             _layoutCoordinator = new WorkspaceLayoutCoordinator(WorkspaceLayoutSettingsAdapter.FromSettings(_loadedSettings));
@@ -1657,6 +1661,7 @@ namespace PS7ScriptDesk.Shell
                     TerminalConsole.ApplyAppTheme(_themeService.CurrentTheme);
                     ViewModel?.NotifyTerminalRendererReady();
                     RequestConsoleWarmStart("TerminalReadyFallback");
+                    StartPhase2BProofHarnessIfEnabled();
                 };
 
                 AttachTerminalObserver();
@@ -1891,6 +1896,22 @@ namespace PS7ScriptDesk.Shell
                     ["dispatcherCheckAccess"] = Dispatcher.CheckAccess(),
                     ["elapsedMs"] = stopwatch.ElapsedMilliseconds
                 });
+                if (_liveConsoleServiceForObservation is IAuthoritativePsesDebugEndpoint authoritativeEndpoint)
+                {
+                    viewModel.StatusText = $"Authoritative PSES activation failed: {ex.Message}";
+                    DeveloperDiagnostics.LogDecision(
+                        "Startup",
+                        "AuthoritativePsesActivation",
+                        "Authoritative PSES startup failed; legacy terminal fallback was intentionally not selected.",
+                        "ExplicitFailure",
+                        new Dictionary<string, object?>
+                        {
+                            ["exceptionType"] = ex.GetType().Name,
+                            ["processId"] = authoritativeEndpoint.ProcessId,
+                            ["sessionGeneration"] = authoritativeEndpoint.SessionGeneration,
+                            ["fallbackSelected"] = false
+                        });
+                }
                 StartupTimingLogger.Log("MainWindow", $"Console warm-start failed after {stopwatch.ElapsedMilliseconds} ms. Reason={reason}; Error={ex}");
             }
         }
@@ -8266,7 +8287,23 @@ namespace PS7ScriptDesk.Shell
                         ["selectedTabDirty"] = selectedTab.IsDirty
                     });
                 TraceDebugShell("StartDebug_Click", $"Launch plan prepared; tab='{selectedTab.Title}'; launchPath='{Path.GetFileName(launchScriptPath)}'; breakpointCount={breakpoints.Count}; before session creation; {DescribeDebugUiState()}");
-                var debugSession = new PsesDebugSession();
+                var authoritativeDebugEndpoint = _liveConsoleServiceForObservation as IAuthoritativePsesDebugEndpoint;
+                DeveloperDiagnostics.LogInfo(
+                    "Debugger",
+                    "Debugger backend selection resolved before session creation.",
+                    new Dictionary<string, object?>
+                    {
+                        ["selectedDebuggerBackend"] = authoritativeDebugEndpoint is not null ? "PsesDapDebugSession" : "PsesDebugSession",
+                        ["authoritativeSessionSelected"] = authoritativeDebugEndpoint is not null,
+                        ["authoritativeSessionRunning"] = authoritativeDebugEndpoint?.IsSessionRunning,
+                        ["authoritativeProcessId"] = authoritativeDebugEndpoint?.ProcessId,
+                        ["authoritativeSessionGeneration"] = authoritativeDebugEndpoint?.SessionGeneration,
+                        ["debugServicePipePublished"] = !string.IsNullOrWhiteSpace(authoritativeDebugEndpoint?.DebugServicePipeName),
+                        ["silentFallbackAllowed"] = authoritativeDebugEndpoint is null
+                    });
+                IDebugSession debugSession = authoritativeDebugEndpoint is not null
+                    ? new PsesDapDebugSession(authoritativeDebugEndpoint)
+                    : new PsesDebugSession();
                 _debugSession = debugSession;
                 _debugInspectionContext.BeginSession(debugSession.SessionId);
                 _activeDebugTab = selectedTab;
@@ -8276,9 +8313,11 @@ namespace PS7ScriptDesk.Shell
                 _debugOutputPresentation.Clear();
                 _debugOutputPresentation.BeginSession(debugSession.SessionId, launchScriptPath);
                 ViewModel.ClearDebugOutput();
-                SelectDebugOutputBottomPane("Debug session started; showing output from the separate debugger process.");
-                TraceDebugShell("StartDebug_Click", $"Created PsesDebugSession; sessionHash={debugSession.GetHashCode()}; {DescribeDebugUiState()}");
-                DeveloperDiagnostics.LogInfo("Debugger", "PsesDebugSession object created.", new Dictionary<string, object?> { ["sessionHash"] = debugSession.GetHashCode() });
+                SelectDebugOutputBottomPane(debugSession is PsesDapDebugSession
+                    ? "Debug session started through the authoritative PSES debug service."
+                    : "Debug session started; showing output from the legacy debugger process.");
+                TraceDebugShell("StartDebug_Click", $"Created debugger session; type={debugSession.GetType().Name}; sessionHash={debugSession.GetHashCode()}; {DescribeDebugUiState()}");
+                DeveloperDiagnostics.LogInfo("Debugger", "Debugger session object created.", new Dictionary<string, object?> { ["sessionHash"] = debugSession.GetHashCode(), ["sessionType"] = debugSession.GetType().Name });
                 _debugSessionStateChangedHandler = state => Dispatcher.BeginInvoke(new Action(() =>
                 {
                     _ = HandleDebugSessionStateChangedAsync(debugSession, state);
@@ -8348,7 +8387,8 @@ namespace PS7ScriptDesk.Shell
                     }
 
                     var currentState = debugSession.CurrentState;
-                    TraceDebugShell("DebugSession.BreakpointHit", $"scriptPathPresent={!string.IsNullOrWhiteSpace(scriptPath)}; lineNumber={lineNumber}; sessionState={currentState}; {DescribeDebugUiState()}");
+                    var pauseReason = debugSession.CurrentPauseReason;
+                    TraceDebugShell("DebugSession.BreakpointHit", $"scriptPathPresent={!string.IsNullOrWhiteSpace(scriptPath)}; lineNumber={lineNumber}; pauseReason={pauseReason}; sessionState={currentState}; pauseGeneration={debugSession.PauseGeneration}; {DescribeDebugUiState()}");
                     if (currentState != DebugSessionState.Paused)
                     {
                         TraceDebugShell("DebugSession.BreakpointHit", $"Ignored stale breakpoint notification because the session is no longer paused; currentState={currentState}; {DescribeDebugUiState()}");
@@ -8361,6 +8401,7 @@ namespace PS7ScriptDesk.Shell
                             {
                                 ["scriptPath"] = scriptPath,
                                 ["lineNumber"] = lineNumber,
+                                ["pauseReason"] = pauseReason.ToString(),
                                 ["currentState"] = currentState.ToString()
                             });
                         RefreshDebugCommandAvailability(false);
@@ -8376,10 +8417,14 @@ namespace PS7ScriptDesk.Shell
                         new Dictionary<string, object?>
                         {
                             ["scriptPath"] = scriptPath,
-                            ["lineNumber"] = lineNumber
+                            ["lineNumber"] = lineNumber,
+                            ["pauseReason"] = pauseReason.ToString(),
+                            ["pauseGeneration"] = debugSession.PauseGeneration
                         });
                     TryMapDebugLocation(scriptPath, lineNumber, out var mapped, out _);
-                    ViewModel.StatusText = DebuggerCoordinatePresentation.FormatBreakpointStatus(lineNumber, mapped.Status);
+                    ViewModel.StatusText = pauseReason == DebuggerPauseReason.Breakpoint
+                        ? DebuggerCoordinatePresentation.FormatBreakpointStatus(lineNumber, mapped.Status)
+                        : $"Debugger paused after {pauseReason.ToString().ToLowerInvariant()} at runtime line {lineNumber}.";
                     DeveloperDiagnostics.LogDecision(
                         "Debugger",
                         "BreakpointPresentation",
@@ -8395,7 +8440,6 @@ namespace PS7ScriptDesk.Shell
 
                     SetDebugCurrentLocation(scriptPath, lineNumber);
                     RefreshDebugCommandAvailability(true);
-                    ScheduleDebugPanelRefresh("BreakpointHit");
                     RefreshBreakpointsList();
                 }));
 
@@ -9248,6 +9292,7 @@ namespace PS7ScriptDesk.Shell
             }
 
             ApplyDebugVariablesItemsSource(null, $"FrameSelected:{source}", null);
+            SetDebugVariablesLoadingState($"FrameSelected:{source}", null);
             ClearLiveDebugVariableCache($"Selected inspection frame changed: {selectedFrame.FrameId}");
             UpdateDebugVariablesContext(selectedFrame.Identity, "Loading");
             ScheduleDebugPanelRefresh($"FrameSelected:{source}");
@@ -9854,6 +9899,12 @@ namespace PS7ScriptDesk.Shell
                     ViewModel.Dispose();
                 }
 
+                if (_runtimeSessionCoordinator is not null)
+                {
+                    try { await _runtimeSessionCoordinator.DisposeAsync(); }
+                    catch (Exception ex) { DeveloperDiagnostics.LogException("RuntimeBroker", ex, "Runtime session coordinator shutdown failed during window close."); }
+                }
+
                 _terminalObserverLifetime?.Dispose();
                 _terminalObserverLifetime = null;
 
@@ -10191,11 +10242,115 @@ namespace PS7ScriptDesk.Shell
 
         private void Window_Closed(object? sender, EventArgs e)
         {
+            _phase2BProofCancellation?.Cancel();
+            _phase2BProofCancellation?.Dispose();
+            _phase2BProofCancellation = null;
             _terminalOutputObservationSubscription.Dispose();
             _terminalOutputObservationHub.Dispose();
             _terminalObserverLifetime?.Dispose();
             _terminalObserverLifetime = null;
             _uiScaleService.ScaleChanged -= UiScaleService_ScaleChanged;
+        }
+
+        private void StartPhase2BProofHarnessIfEnabled()
+        {
+            if (!string.Equals(Environment.GetEnvironmentVariable("PS7_SCRIPT_DESK_PHASE2B_PROOF"), "1", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var directory = Environment.GetEnvironmentVariable("PS7_SCRIPT_DESK_PHASE2B_PROOF_DIR");
+            if (string.IsNullOrWhiteSpace(directory) || ViewModel is null || _phase2BProofTask is not null)
+            {
+                DeveloperDiagnostics.LogWarning("Terminal", "Phase 2B proof harness was requested but its directory or view model was unavailable.");
+                return;
+            }
+
+            directory = Path.GetFullPath(directory);
+            Directory.CreateDirectory(directory);
+            var markerPath = Path.Combine(directory, "terminal-marker.txt");
+            var readbackRequestPath = Path.Combine(directory, "terminal-readback.request");
+            var readbackPath = Path.Combine(directory, "terminal-readback.txt");
+            var stopRequestPath = Path.Combine(directory, "terminal-stop.request");
+            File.Delete(markerPath);
+            File.Delete(readbackRequestPath);
+            File.Delete(readbackPath);
+            File.Delete(stopRequestPath);
+
+            _phase2BProofCancellation = new CancellationTokenSource();
+            var cancellationToken = _phase2BProofCancellation.Token;
+            _phase2BProofTask = RunPhase2BProofHarnessAsync(
+                directory,
+                markerPath,
+                readbackRequestPath,
+                readbackPath,
+                stopRequestPath,
+                cancellationToken);
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Phase 2B proof harness enabled; marker and read-back commands will use the existing terminal input path.",
+                new Dictionary<string, object?>
+                {
+                    ["directory"] = directory,
+                    ["markerPath"] = markerPath,
+                    ["readbackPath"] = readbackPath,
+                    ["contentOmitted"] = true
+                });
+        }
+
+        private async Task RunPhase2BProofHarnessAsync(
+            string directory,
+            string markerPath,
+            string readbackRequestPath,
+            string readbackPath,
+            string stopRequestPath,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(true);
+                if (ViewModel is null)
+                {
+                    return;
+                }
+
+                var markerCommand = "$global:PS7SameRuntimeProof = [guid]::NewGuid().ToString(); Set-Content -LiteralPath '" + EscapePowerShellSingleQuotedPath(markerPath) + "' -Value $global:PS7SameRuntimeProof\r";
+                await ViewModel.WriteRawInputAsync(markerCommand).ConfigureAwait(true);
+                DeveloperDiagnostics.LogInfo("Terminal", "Phase 2B terminal marker command submitted through the live input path.", new Dictionary<string, object?> { ["length"] = markerCommand.Length, ["contentOmitted"] = true });
+
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    if (File.Exists(stopRequestPath))
+                    {
+                        File.Delete(stopRequestPath);
+                        const string stopCommand = "Wait-Debugger\r";
+                        await ViewModel.WriteRawInputAsync(stopCommand).ConfigureAwait(true);
+                        DeveloperDiagnostics.LogInfo("Terminal", "Phase 2B controlled debugger stop command submitted through the live input path.", new Dictionary<string, object?> { ["length"] = stopCommand.Length, ["contentOmitted"] = true });
+                    }
+
+                    if (File.Exists(readbackRequestPath))
+                    {
+                        File.Delete(readbackRequestPath);
+                        var readbackCommand = "Set-Content -LiteralPath '" + EscapePowerShellSingleQuotedPath(readbackPath) + "' -Value $global:PS7SameRuntimeProof\r";
+                        await ViewModel.WriteRawInputAsync(readbackCommand).ConfigureAwait(true);
+                        DeveloperDiagnostics.LogInfo("Terminal", "Phase 2B terminal read-back command submitted through the live input path.", new Dictionary<string, object?> { ["length"] = readbackCommand.Length, ["contentOmitted"] = true });
+                    }
+
+                    await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(true);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("Terminal", ex, "Phase 2B proof harness failed.");
+            }
+        }
+
+        private static string EscapePowerShellSingleQuotedPath(string path)
+        {
+            return path.Replace("'", "''", StringComparison.Ordinal);
         }
 
         private void ViewModel_ExeExportProgressChanged(object? sender, ExeExportProgressUpdate update)
@@ -11522,6 +11677,10 @@ namespace PS7ScriptDesk.Shell
         {
             var selectedTab = ViewModel?.SelectedTab;
             var activeTabIndex = selectedTab is null || ViewModel is null ? (int?)null : ViewModel.OpenTabs.IndexOf(selectedTab);
+            var runtime = _runtimeSessionCoordinator?.Snapshot;
+            var terminalReady = _terminalIsReady && runtime is not null &&
+                runtime.State is PowerShellRuntimeSessionState.Ready or PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging &&
+                runtime.ProcessId.HasValue && runtime.InputWritable;
             return new DeveloperDiagnosticsStateSnapshot
             {
                 ActiveDocumentPath = selectedTab?.FilePath,
@@ -11530,9 +11689,9 @@ namespace PS7ScriptDesk.Shell
                 OpenTabCount = ViewModel?.OpenTabs.Count,
                 IsDebugSessionActive = ViewModel?.IsDebugSessionActive,
                 DebugSessionState = _debugSession?.CurrentState.ToString(),
-                TerminalState = _terminalIsReady
+                TerminalState = terminalReady
                     ? (_terminalIsActive ? "ReadyActive" : "ReadyInactive")
-                    : "Initializing",
+                    : runtime?.State.ToString() ?? "Initializing",
                 PowerShellExecutablePath = ViewModel?.EffectiveRuntimeInfo?.ExecutablePath,
                 SelectedRuntimeDisplayName = ViewModel?.EffectiveRuntimeInfo?.DisplayName
             };
@@ -13900,10 +14059,7 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            var debugPaneWindow = new DebugPaneWindow
-            {
-                Owner = this
-            };
+            var debugPaneWindow = new DebugPaneWindow();
 
             _debugPaneWindow = debugPaneWindow;
             debugPaneWindow.DockBackRequested += DebugPaneWindow_DockBackRequested;
@@ -13922,6 +14078,15 @@ namespace PS7ScriptDesk.Shell
 
             DeveloperDiagnostics.LogInfo("Debugger", "Floating Debug pane window created.", new Dictionary<string, object?> { ["reason"] = reason });
             debugPaneWindow.Show();
+            if (IsVisible && IsLoaded)
+            {
+                debugPaneWindow.Owner = this;
+                DeveloperDiagnostics.LogInfo("Debugger", "Floating Debug pane owner attached after the owner window was shown.");
+            }
+            else
+            {
+                DeveloperDiagnostics.LogInfo("Debugger", "Floating Debug pane owner attachment was deferred because the main window is not shown.");
+            }
             ReleaseDockedDebugPanelAllocation("PopOut");
             _layoutCoordinator.SetDebugDockState(LayoutDockState.Floating);
             ValidateLayoutState($"DebugPopOut:{reason}");
@@ -14251,22 +14416,34 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        private void UpdateDebugVariablesAvailability(DebuggerVariableInspectionResult result, string reason, int? refreshVersion)
+        private void SetDebugVariablesEmptyStateText(string text)
         {
-            var emptyStateText = result.Availability switch
-            {
-                DebuggerVariableAvailability.Unavailable => "Variables unavailable for the selected frame.",
-                DebuggerVariableAvailability.Stale => "Variables request is stale; waiting for the active pause.",
-                DebuggerVariableAvailability.Failed => "Variables unavailable because the debugger query failed.",
-                DebuggerVariableAvailability.Cancelled => "Variables request was cancelled.",
-                _ => "No variables available."
-            };
-
-            DebugVariablesEmptyStateText.Text = emptyStateText;
+            DebugVariablesEmptyStateText.Text = text;
             if (_debugPaneWindow is not null)
             {
-                _debugPaneWindow.DebugVariablesEmptyStateText.Text = emptyStateText;
+                _debugPaneWindow.DebugVariablesEmptyStateText.Text = text;
             }
+        }
+
+        private void SetDebugVariablesLoadingState(string reason, int? refreshVersion)
+        {
+            SetDebugVariablesEmptyStateText(DebuggerVariablePresentation.EmptyStateText(DebuggerVariableAvailability.Loading, 0));
+            DeveloperDiagnostics.LogInfo(
+                "Debugger",
+                "Debug variable inspection entered loading presentation state.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["refreshVersion"] = refreshVersion,
+                    ["floatingVisible"] = _debugPaneWindow is not null
+                });
+        }
+
+        private void UpdateDebugVariablesAvailability(DebuggerVariableInspectionResult result, string reason, int? refreshVersion)
+        {
+            var emptyStateText = DebuggerVariablePresentation.EmptyStateText(result.Availability, result.Variables.Count);
+
+            SetDebugVariablesEmptyStateText(emptyStateText);
 
             DeveloperDiagnostics.LogInfo(
                 "Debugger",
@@ -14386,6 +14563,8 @@ namespace PS7ScriptDesk.Shell
                 DeveloperDiagnostics.LogDecision("Debugger", "ScheduleDebugPanelRefresh", "Debug panel refresh was skipped because no paused inspection context was available.", "SkippedNoInspectionContext", new Dictionary<string, object?> { ["reason"] = reason, ["message"] = ex.Message });
                 return Task.FromResult(DebugPanelRefreshOutcome.StaleCancelled);
             }
+
+            SetDebugVariablesLoadingState(reason, refreshVersion);
 
             TraceDebugShell("ScheduleDebugPanelRefresh", $"Scheduled; reason={reason}; refreshVersion={refreshVersion}; {DescribeDebugUiState()}");
             DeveloperDiagnostics.LogInfo(
@@ -15136,11 +15315,7 @@ namespace PS7ScriptDesk.Shell
         {
             ClearLiveDebugVariableCache("ClearDebugPanels");
             UpdateDebugVariablesContext(null, "no active frame");
-            DebugVariablesEmptyStateText.Text = "No variables available.";
-            if (_debugPaneWindow is not null)
-            {
-                _debugPaneWindow.DebugVariablesEmptyStateText.Text = DebugVariablesEmptyStateText.Text;
-            }
+            SetDebugVariablesEmptyStateText("No active debug session.");
             ApplyDebugVariablesItemsSource(null, "ClearDebugPanels", null);
             ApplyDebugCallStackItemsSource(null, "ClearDebugPanels", null);
         }

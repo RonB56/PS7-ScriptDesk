@@ -80,7 +80,13 @@ public sealed class TerminalController : IDisposable
         lock (_syncRoot)
         {
             if (_disposed) return Task.FromResult(true);
-            _shutdownTask ??= ShutdownCoreAsync(cancellationToken);
+            if (_shutdownTask is { } existing)
+            {
+                if (!existing.IsCanceled && !existing.IsFaulted) return existing;
+                _shutdownTask = null;
+            }
+
+            _shutdownTask = ShutdownCoreAsync(cancellationToken);
             return _shutdownTask;
         }
     }

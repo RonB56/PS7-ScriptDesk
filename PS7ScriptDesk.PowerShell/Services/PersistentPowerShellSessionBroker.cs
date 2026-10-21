@@ -71,6 +71,20 @@ public sealed class PersistentPowerShellSessionBroker : IEditorExecutionBroker
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        DeveloperDiagnostics.LogInfo(
+            "Phase2CProof",
+            "Persistent editor broker entered; this path is in-process Runspace execution, not ILiveConsoleService/ConPTY transport.",
+            new Dictionary<string, object?>
+            {
+                ["requestId"] = request.RequestId,
+                ["sessionGeneration"] = request.SessionGeneration,
+                ["brokerType"] = GetType().FullName,
+                ["runspaceInstanceId"] = GetRunspaceInstanceId(),
+                ["applicationProcessId"] = Environment.ProcessId,
+                ["scriptLength"] = request.ScriptText?.Length ?? 0,
+                ["contentOmitted"] = true
+            });
+
         var startedAt = DateTimeOffset.UtcNow;
         if (request.RequestId == Guid.Empty)
         {
@@ -112,6 +126,18 @@ public sealed class PersistentPowerShellSessionBroker : IEditorExecutionBroker
             {
                 artifact = EditorExecutionArtifactStore.Prepare(request);
                 var invocation = await InvokeAsync(request, artifact, cancellationToken).ConfigureAwait(false);
+                DeveloperDiagnostics.LogInfo(
+                    "Phase2CProof",
+                    "Persistent editor broker invocation returned.",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = request.RequestId,
+                        ["runspaceInstanceId"] = GetRunspaceInstanceId(),
+                        ["applicationProcessId"] = Environment.ProcessId,
+                        ["outputCount"] = invocation.Outputs.Count,
+                        ["wasCancelled"] = invocation.WasCancelled,
+                        ["errorPresent"] = !string.IsNullOrWhiteSpace(invocation.ErrorMessage)
+                    });
                 var endedAt = DateTimeOffset.UtcNow;
                 var currentDirectory = TryGetCurrentWorkingDirectory();
 
@@ -754,6 +780,14 @@ public sealed class PersistentPowerShellSessionBroker : IEditorExecutionBroker
             {
                 throw new ObjectDisposedException(nameof(PersistentPowerShellSessionBroker));
             }
+        }
+    }
+
+    private Guid? GetRunspaceInstanceId()
+    {
+        lock (_syncRoot)
+        {
+            return _runspace?.InstanceId;
         }
     }
 

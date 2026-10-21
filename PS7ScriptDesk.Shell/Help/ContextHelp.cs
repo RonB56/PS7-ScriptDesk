@@ -7,6 +7,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Utilities;
 using MediaColor = System.Windows.Media.Color;
@@ -489,12 +490,20 @@ namespace PS7ScriptDesk.Shell.Help
 
         private static void RefreshAllAttachedHelp()
         {
-            if (System.Windows.Application.Current is null)
+            var application = System.Windows.Application.Current;
+            if (application is null)
             {
                 return;
             }
 
-            foreach (Window window in System.Windows.Application.Current.Windows)
+            if (!application.Dispatcher.CheckAccess())
+            {
+                application.Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(RefreshAllAttachedHelp));
+                DeveloperDiagnostics.LogInfo("Help", "Deferred attached-help refresh to the owning application dispatcher.");
+                return;
+            }
+
+            foreach (Window window in application.Windows)
             {
                 if (window is FrameworkElement frameworkElement)
                 {

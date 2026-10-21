@@ -415,7 +415,9 @@ internal sealed class FakeExeExportService : IExeExportService
 
 internal sealed class FakeLiveConsoleService : ILiveConsoleService
 {
+    public int? ProcessId => null;
     public bool IsSessionRunning { get; set; }
+    public bool IsInputWritable => IsSessionRunning;
     public bool IsCommandInProgress { get; set; }
     public bool IsHostAttached => false;
     public PowerShellRuntimeInfo? ActiveRuntime => null;

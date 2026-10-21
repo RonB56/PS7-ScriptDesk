@@ -12,6 +12,7 @@ using PS7ScriptDesk.UI.ViewModels;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection("WpfUi")]
 public sealed class GitWorkspaceWpfBindingTests
 {
     [Fact]

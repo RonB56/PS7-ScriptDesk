@@ -9,11 +9,17 @@ namespace PS7ScriptDesk.Application.Interfaces
     {
         bool IsSessionRunning { get; }
 
+        /// <summary>True only while the authoritative terminal process and its input transport can accept a write.</summary>
+        bool IsInputWritable { get; }
+
         bool IsCommandInProgress { get; }
 
         bool IsHostAttached { get; }
 
         PowerShellRuntimeInfo? ActiveRuntime { get; }
+
+        /// <summary>PID of the currently authoritative terminal-owned pwsh.exe, when running.</summary>
+        int? ProcessId { get; }
 
         string? CurrentWorkingDirectory { get; }
 

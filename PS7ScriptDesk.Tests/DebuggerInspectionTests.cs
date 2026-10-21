@@ -348,6 +348,21 @@ namespace PS7ScriptDesk.Tests
             Assert.Empty(result.Variables);
         }
 
+        [Theory]
+        [InlineData(DebuggerVariableAvailability.Loading, 0, "Loading...")]
+        [InlineData(DebuggerVariableAvailability.Available, 0, "No Variables Available")]
+        [InlineData(DebuggerVariableAvailability.Available, 2, "")]
+        [InlineData(DebuggerVariableAvailability.Failed, 0, "Variables unavailable because the debugger query failed.")]
+        [InlineData(DebuggerVariableAvailability.Cancelled, 0, "Variables request was cancelled.")]
+        [InlineData(DebuggerVariableAvailability.Stale, 0, "Variables request is stale; waiting for the active pause.")]
+        public void VariablePresentationMapsInspectionAvailabilityWithoutConflatingLoadingAndEmpty(
+            DebuggerVariableAvailability availability,
+            int variableCount,
+            string expected)
+        {
+            Assert.Equal(expected, DebuggerVariablePresentation.EmptyStateText(availability, variableCount));
+        }
+
         private static DebugCallStackFrame[] CreateFrames(Guid sessionId, long pauseGeneration)
         {
             return Enumerable.Range(0, 3)

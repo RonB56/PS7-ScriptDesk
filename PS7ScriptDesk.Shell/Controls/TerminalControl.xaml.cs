@@ -314,6 +314,7 @@ namespace PS7ScriptDesk.Shell.Controls
                     state.submissionId = msg && Number.isSafeInteger(msg.submissionId) ? msg.submissionId : 0;
                     state.promptBoundary = promptBoundary === true;
                     state.markerRows = scanMarkerRows();
+                    state.visibleRows = scanVisibleRows();
                     // DeveloperDiagnostics flattens nested objects through ToString;
                     // retain a JSON form so marker identities and row coordinates
                     // survive the host boundary without retaining terminal text.
@@ -324,6 +325,31 @@ namespace PS7ScriptDesk.Shell.Controls
                   } catch (snapshotErr) {
                     post({ type: 'xterm_screen_state_snapshot_error', reason: reason || 'unknown', message: String(snapshotErr), contentOmitted: true });
                   }
+                };
+
+                var stableRowHash = function (text) {
+                  var hash = 2166136261;
+                  for (var i = 0; i < text.length; i++) {
+                    hash ^= text.charCodeAt(i);
+                    hash = Math.imul(hash, 16777619);
+                  }
+                  return ('00000000' + (hash >>> 0).toString(16)).slice(-8);
+                };
+
+                var scanVisibleRows = function () {
+                  var buffer = term.buffer && term.buffer.active ? term.buffer.active : null;
+                  if (!buffer) return [];
+                  var start = Math.max(0, Number.isFinite(buffer.viewportY) ? buffer.viewportY : 0);
+                  var count = Math.min(term.rows + 2, 128);
+                  var rows = [];
+                  for (var i = 0; i < count; i++) {
+                    var rowIndex = start + i;
+                    var line = buffer.getLine(rowIndex);
+                    if (!line) continue;
+                    var text = line.translateToString(true);
+                    rows.push({ rowIndex: rowIndex, isWrapped: !!line.isWrapped, textHash: stableRowHash(text), preview: text.slice(0, 200) });
+                  }
+                  return rows;
                 };
 
                 var captureViewportAnchor = function () {
@@ -857,6 +883,7 @@ namespace PS7ScriptDesk.Shell.Controls
                     resizeRequested = false;
                     if (terminalElement.clientWidth <= 0 || terminalElement.clientHeight <= 0) return;
                     postTerminalState('ResizeObserver.Observed', 'resizeObserver');
+                    postScreenStateSnapshot('before-fit', null, false);
                     postTerminalState('Xterm.BeforeFit', 'resizeObserver', { fitCommitted: false });
                     var proposed = fitAddon.proposeDimensions ? fitAddon.proposeDimensions() : null;
                     if (!proposed || proposed.cols <= 0 || proposed.rows <= 0) {
@@ -868,6 +895,7 @@ namespace PS7ScriptDesk.Shell.Controls
                       proposedCols: proposed.cols,
                       proposedRows: proposed.rows
                     });
+                    postScreenStateSnapshot('after-fit-proposal', null, false);
                     if (proposed.cols === lastRequestedCols && proposed.rows === lastRequestedRows) return;
                     requestedResizeAnchor = {
                       cols: proposed.cols,
@@ -906,8 +934,13 @@ namespace PS7ScriptDesk.Shell.Controls
                     }
                   },
                   clear: function ()  {
-                    try { term.clear(); } catch (ignoreClear) { }
-                    try { term.write('\x1b[2J\x1b[3J\x1b[H'); } catch (ignoreErase) { }
+                    // Renderer-only clear is used only when no authoritative
+                    // ConPTY input path is available. Reset the xterm buffer as
+                    // one operation so screen, scrollback, viewport, and cursor
+                    // state cannot be left in different coordinate systems.
+                    try { term.reset(); } catch (ignoreReset) {
+                      try { term.clear(); } catch (ignoreClear) { }
+                    }
                     focusTerminal('termApi.clear');
                   },
                   focus: function ()  { focusTerminal('termApi.focus'); },
@@ -965,6 +998,23 @@ namespace PS7ScriptDesk.Shell.Controls
                     const generation = Number.isSafeInteger(msg.generation) ? msg.generation : null;
                     const sequence = Number.isSafeInteger(msg.sequence) ? msg.sequence : null;
                     const decodedOutput = decodeBase64Utf8(msg.data);
+                    if (msg.resizeForensicsEnabled === true) {
+                      post({
+                        type: 'resize_forensics_xterm_write',
+                        generation: generation,
+                        sequence: sequence,
+                        submissionId: Number.isSafeInteger(msg.submissionId) ? msg.submissionId : 0,
+                        rendererGeneration: Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : 0,
+                        resizeGeneration: Number.isSafeInteger(msg.resizeGeneration) ? msg.resizeGeneration : 0,
+                        cols: term.cols,
+                        rows: term.rows,
+                        cursorX: term.buffer && term.buffer.active ? term.buffer.active.cursorX : 0,
+                        cursorY: term.buffer && term.buffer.active ? term.buffer.active.cursorY : 0,
+                        baseY: term.buffer && term.buffer.active ? term.buffer.active.baseY : 0,
+                        viewportY: term.buffer && term.buffer.active ? term.buffer.active.viewportY : 0,
+                        payloadBase64: msg.data
+                      });
+                    }
                     const traceOutputCursor = msg.resizeAdjacent === true;
                     var outputControlSummary = null;
                     var beforeOutputWriteState = null;
@@ -1790,6 +1840,15 @@ namespace PS7ScriptDesk.Shell.Controls
         /// </summary>
         public void BeginTerminalOutputGeneration(int generation)
         {
+            // PSES can emit its initial prompt before its session-available
+            // notification reaches the UI. If the first output chunk already
+            // bootstrapped this generation, do not reset the flow controller or
+            // session-owned history and discard that startup output.
+            if (_outputFlowController.ActiveGeneration == generation)
+            {
+                return;
+            }
+
             CancelResizeTransaction("session-start");
             _firstInputObservedForDiagnostics = false;
             _firstOutputAfterInputLogged = false;
@@ -1825,6 +1884,23 @@ namespace PS7ScriptDesk.Shell.Controls
                     ["payloadCharacters"] = data.Length
                 });
             TerminalOutputCorrelationTrace.Record("TerminalControlWriteRaw", generation, data);
+
+            if (_outputFlowController.ActiveGeneration is null)
+            {
+                BeginTerminalOutputGeneration(generation);
+                TerminalStartupTrace.Write(
+                    "TERMINAL_OUTPUT_GENERATION_BOOTSTRAPPED_FROM_OUTPUT",
+                    $"generation={generation}; chars={data.Length}; reason=output-arrived-before-session-start-notification; contentOmitted=true");
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "Bootstrapped terminal output generation from the first authoritative session output because the session-start notification had not arrived yet.",
+                    new Dictionary<string, object?>
+                    {
+                        ["sessionGeneration"] = generation,
+                        ["length"] = data.Length,
+                        ["contentOmitted"] = true
+                    });
+            }
 
             TerminalCriticalTrace.LogStage(
                 "TerminalControl.WriteRaw.Begin",
@@ -2071,6 +2147,14 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             var enqueueResult = _outputFlowController.Enqueue(generation, data);
+            ResizeForensicsTrace.Record(
+                "BridgeEnqueue",
+                generation,
+                data,
+                parentSequence: null,
+                resizeGeneration: _terminalResizePolicy.ResizeGeneration,
+                rendererGeneration: _rendererInstanceGeneration,
+                file: "bridge-fingerprints.jsonl");
             TerminalOutputCorrelationTrace.Record(
                 "TerminalBridgeEnqueued",
                 generation,
@@ -2510,6 +2594,16 @@ namespace PS7ScriptDesk.Shell.Controls
                         outputDiagnostics.ControlSummary,
                         TerminalScreenStateDiagnostics.ContainsInterruptMarker(outputBatch.Data)));
                 TerminalStartupTrace.Write("JS_WRITE_INVOKED", $"sequence={outputBatch.Sequence}; submissionId={submissionId}; chars={outputBatch.Data.Length}; contentOmitted=true");
+                ResizeForensicsTrace.Record(
+                    "BridgeDispatch",
+                    outputBatch.Generation,
+                    outputBatch.Data,
+                    submissionId: submissionId,
+                    resizeGeneration: outputDiagnostics.ResizeGeneration,
+                    rendererGeneration: _rendererInstanceGeneration,
+                    cols: outputDiagnostics.ResizeColumns,
+                    rows: outputDiagnostics.ResizeRows,
+                    file: "bridge-fingerprints.jsonl");
                 TerminalOutputCorrelationTrace.Record(
                     "WebView2OutputSubmitted",
                     outputBatch.Generation,
@@ -2827,6 +2921,17 @@ namespace PS7ScriptDesk.Shell.Controls
                 cols,
                 rows,
                 _rendererInstanceGeneration);
+            ResizeForensicsTrace.RecordResizeEvent(
+                "ResizeRequest",
+                _outputFlowController.ActiveGeneration ?? 0,
+                resizeDecision.ResizeGeneration,
+                cols,
+                rows,
+                _rendererInstanceGeneration,
+                GetIntProperty(root, "cursorX", 0),
+                GetIntProperty(root, "cursorY", 0),
+                GetIntProperty(root, "baseY", 0),
+                GetIntProperty(root, "viewportY", 0));
 
             var metadata = CreateResizeTraceMetadata(root, source);
             metadata["resizeGeneration"] = resizeDecision.ResizeGeneration;
@@ -3396,9 +3501,14 @@ namespace PS7ScriptDesk.Shell.Controls
             metadata["numberedSequenceJson"] = markerSummary.NumberedSequenceJson;
             metadata["hasEnd"] = markerSummary.HasEnd;
             metadata["markerRowCount"] = markerSummary.MarkerRowCount;
+            metadata["visibleRowsJson"] = GetBoundedJsonArrayProperty(root, "visibleRows");
             metadata["contentOmitted"] = true;
             TerminalCriticalTrace.LogStage("TerminalScreenStateSnapshot", metadata);
             DeveloperDiagnostics.LogDebug("Terminal", "Captured bounded xterm screen-state snapshot.", metadata);
+            ResizeForensicsTrace.RecordScreenSnapshot(
+                GetStringProperty(root, "reason", "unknown"),
+                GetIntProperty(root, "terminalSessionGeneration", 0),
+                root.Clone());
         }
 
         private static string GetStringProperty(JsonElement root, string name, string fallback)
@@ -3729,6 +3839,36 @@ namespace PS7ScriptDesk.Shell.Controls
 
                     case "xterm_screen_state_snapshot":
                         LogXtermScreenStateSnapshot(root);
+                        break;
+
+                    case "resize_forensics_xterm_write":
+                        if (ResizeForensicsTrace.Enabled &&
+                            root.TryGetProperty("payloadBase64", out var payloadBase64) &&
+                            payloadBase64.ValueKind == JsonValueKind.String)
+                        {
+                            try
+                            {
+                                var payload = Encoding.UTF8.GetString(Convert.FromBase64String(payloadBase64.GetString() ?? string.Empty));
+                                ResizeForensicsTrace.Record(
+                                    "XtermWrite",
+                                    GetIntProperty(root, "generation", 0),
+                                    payload,
+                                    submissionId: GetLongProperty(root, "submissionId", 0),
+                                    resizeGeneration: GetLongProperty(root, "resizeGeneration", 0),
+                                    rendererGeneration: GetIntProperty(root, "rendererGeneration", 0),
+                                    cols: GetIntProperty(root, "cols", 0),
+                                    rows: GetIntProperty(root, "rows", 0),
+                                    cursorX: GetIntProperty(root, "cursorX", 0),
+                                    cursorY: GetIntProperty(root, "cursorY", 0),
+                                    baseY: GetIntProperty(root, "baseY", 0),
+                                    viewportY: GetIntProperty(root, "viewportY", 0),
+                                    file: "xterm-writes.jsonl");
+                            }
+                            catch (FormatException)
+                            {
+                                DeveloperDiagnostics.LogWarning("Terminal", "Resize forensics xterm payload was not valid base64.");
+                            }
+                        }
                         break;
 
                     case "xterm_screen_state_snapshot_error":

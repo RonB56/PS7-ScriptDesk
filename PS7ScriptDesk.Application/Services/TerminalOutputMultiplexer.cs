@@ -76,6 +76,17 @@ public sealed class TerminalOutputMultiplexer
                 return false;
             }
 
+            // The PSES output reader may observe the prompt before the
+            // session-start lifecycle event. Preserve the ready state for the
+            // same generation so the presentation model stays aligned with
+            // the execution-admission coordinator.
+            if (generation == _interactiveSnapshot.Generation &&
+                _interactiveSnapshot.State == InteractiveTerminalState.InteractiveIdleAtPrompt &&
+                state == InteractiveTerminalState.Starting)
+            {
+                return true;
+            }
+
             _interactiveSnapshot = new InteractiveTerminalSnapshot(
                 generation,
                 state,

@@ -1,5 +1,7 @@
 using PS7ScriptDesk.Application.Interfaces;
+using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Domain.Models;
+using PS7ScriptDesk.Application.Diagnostics;
 
 namespace PS7ScriptDesk.PowerShell.Services;
 
@@ -19,7 +21,7 @@ public sealed class StructuredEditorExecutionBackend : IEditorExecutionBackend
         _availabilityReason = availabilityReason;
     }
 
-    public string BackendId => "structured-session-broker";
+    public string BackendId => EditorExecutionCoordinator.StructuredBackendId;
 
     public ExecutionBackendCapabilities Capabilities { get; } = new(
         SupportsInteractiveInput: false,
@@ -49,7 +51,47 @@ public sealed class StructuredEditorExecutionBackend : IEditorExecutionBackend
 
     private async Task<EditorExecutionResult> ExecuteCoreAsync(EditorExecutionRequest request, CancellationToken cancellationToken)
     {
-        var result = await _adapter.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
-        return result with { BackendId = BackendId };
+        DeveloperDiagnostics.LogInfo(
+            "Phase2CProof",
+            "Structured editor backend entered.",
+            new Dictionary<string, object?>
+            {
+                ["requestId"] = request.RequestId,
+                ["backendId"] = BackendId,
+                ["adapterType"] = _adapter.GetType().FullName,
+                ["scriptLength"] = request.ScriptText?.Length ?? 0,
+                ["sessionGeneration"] = request.SessionGeneration,
+                ["contentOmitted"] = true
+            });
+
+        try
+        {
+            var result = await _adapter.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+            DeveloperDiagnostics.LogInfo(
+                "Phase2CProof",
+                "Structured editor backend exited.",
+                new Dictionary<string, object?>
+                {
+                    ["requestId"] = request.RequestId,
+                    ["backendId"] = BackendId,
+                    ["resultStatus"] = result.Status.ToString(),
+                    ["outputCount"] = result.Outputs.Count
+                });
+            return result with { BackendId = BackendId };
+        }
+        catch (Exception ex)
+        {
+            DeveloperDiagnostics.LogException(
+                "Phase2CProof",
+                ex,
+                "Structured editor backend threw.",
+                new Dictionary<string, object?>
+                {
+                    ["requestId"] = request.RequestId,
+                    ["backendId"] = BackendId,
+                    ["adapterType"] = _adapter.GetType().FullName
+                });
+            throw;
+        }
     }
 }

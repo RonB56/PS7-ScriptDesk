@@ -389,7 +389,7 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("AutomationProperties.Name=\"Pop out debug pane\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("ItemContainerStyle=\"{StaticResource IdeTabItemStyle}\"", mainXaml, StringComparison.Ordinal);
         Assert.Equal(3, CountOccurrences(mainXaml, "Style=\"{StaticResource IdeToolWindowDataGridStyle}\""));
-        Assert.Contains("Text=\"No variables available.\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"No Variables Available\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"No active call stack.\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"No breakpoints configured.\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Binding=\"{Binding HasItems, ElementName=DebugVariablesGrid}\" Value=\"True\"", mainXaml, StringComparison.Ordinal);

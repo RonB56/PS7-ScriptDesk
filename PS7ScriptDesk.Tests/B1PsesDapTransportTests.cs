@@ -107,6 +107,7 @@ public sealed class B1DapRequestTrackerTests
     }
 }
 
+[Collection(PsesOwnedSessionEnvironmentCollection.Name)]
 public sealed class B1PsesHostIntegrationTests
 {
     [Fact(Timeout = 180_000)]

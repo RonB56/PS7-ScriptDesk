@@ -77,12 +77,19 @@ namespace PS7ScriptDesk.PowerShell.Services
         private const int HistoryProbeWindowSize = 64;
         private const string DispatchControlOscPrefix = "\x1b]7777;PS7SD;";
         private const char DispatchControlOscTerminator = '\a';
+        private const string Phase2B3TerminalTransportEnvironmentVariable = "PS7_SCRIPT_DESK_PHASE2B3_TERMINAL_TRANSPORT";
+        private const string Phase2B3NoProfileEnvironmentVariable = "PS7_SCRIPT_DESK_PHASE2B3_NO_PROFILE";
+        private const int ExitForensicTailMaximumCharacters = 4096;
 
         private readonly object _syncRoot = new();
         private readonly SemaphoreSlim _sessionLifecycleGate = new(1, 1);
         private readonly TerminalInputRouter _terminalInputRouter = new();
         private readonly TerminalInputCoordinator _terminalInputCoordinator;
         private readonly bool _preferRedirectedTerminalSession;
+        private readonly bool _forensicNoProfile;
+        private readonly BoundedTerminalOutputTail _conPtyExitTail = new(ExitForensicTailMaximumCharacters);
+        private readonly BoundedTerminalOutputTail _standardOutputExitTail = new(ExitForensicTailMaximumCharacters);
+        private readonly BoundedTerminalOutputTail _standardErrorExitTail = new(ExitForensicTailMaximumCharacters);
         private bool _firstOutputLogged;
         private bool _firstAnsiOutputLogged;
         private int _rawOutputInfoLogCount;
@@ -130,15 +137,21 @@ namespace PS7ScriptDesk.PowerShell.Services
         private Task _pendingNativeTeardownTask = Task.CompletedTask;
 
         public LiveConsoleService()
-            : this(preferRedirectedTerminalSession: false)
+            : this(IsPhase2B3RedirectedTransportRequested(), IsPhase2B3NoProfileRequested())
         {
         }
 
         internal LiveConsoleService(bool preferRedirectedTerminalSession)
+            : this(preferRedirectedTerminalSession, forensicNoProfile: false)
+        {
+        }
+
+        private LiveConsoleService(bool preferRedirectedTerminalSession, bool forensicNoProfile)
         {
             _preferRedirectedTerminalSession = preferRedirectedTerminalSession;
+            _forensicNoProfile = forensicNoProfile;
             _terminalInputCoordinator = new TerminalInputCoordinator(_terminalInputRouter);
-            TerminalStartupTrace.Write("LIVE_CONSOLE_SERVICE_CONSTRUCTOR", $"serviceId={GetHashCode():X8}; mode={(_preferRedirectedTerminalSession ? "redirected" : "conpty")}");
+            TerminalStartupTrace.Write("LIVE_CONSOLE_SERVICE_CONSTRUCTOR", $"serviceId={GetHashCode():X8}; mode={(_preferRedirectedTerminalSession ? "redirected" : "conpty")}; forensicNoProfile={_forensicNoProfile}");
         }
 
         public bool IsSessionRunning
@@ -149,6 +162,19 @@ namespace PS7ScriptDesk.PowerShell.Services
                 {
                     return !_terminalSessionTeardownInProgress &&
                            _terminalReaderFaultedGeneration != _terminalSessionGeneration &&
+                           IsProcessRunningNoThrow(_process);
+                }
+            }
+        }
+
+        public bool IsInputWritable
+        {
+            get
+            {
+                lock (_syncRoot)
+                {
+                    return !_terminalSessionTeardownInProgress &&
+                           _terminalWriter is not null &&
                            IsProcessRunningNoThrow(_process);
                 }
             }
@@ -201,6 +227,17 @@ namespace PS7ScriptDesk.PowerShell.Services
         }
 
         public PowerShellRuntimeInfo? ActiveRuntime { get; private set; }
+
+        public int? ProcessId
+        {
+            get
+            {
+                lock (_syncRoot)
+                {
+                    return TryGetProcessId(_process);
+                }
+            }
+        }
 
         public string? CurrentWorkingDirectory { get; private set; }
 
@@ -403,9 +440,9 @@ namespace PS7ScriptDesk.PowerShell.Services
                 var workingDirectory = NormalizeWorkingDirectory(startupWorkingDirectory);
                 TerminalStartupTrace.Write("POWERSHELL_RUNTIME_RESOLVED", $"executable={runtime.LaunchExecutablePath}; displayPath={runtime.ExecutablePath}; workingDirectory={workingDirectory}");
                 var sessionGeneration = BeginTerminalSessionGeneration();
+                ResetExitForensicTails();
                 TerminalOutputCorrelationTrace.ResetForSession(sessionGeneration);
                 _terminalInputCoordinator.BeginSession(sessionGeneration);
-                NotifyTerminalSessionStarted(sessionGeneration);
 
                 if (_preferRedirectedTerminalSession)
                 {
@@ -466,7 +503,6 @@ namespace PS7ScriptDesk.PowerShell.Services
                         cancellationToken.ThrowIfCancellationRequested();
                         sessionGeneration = BeginTerminalSessionGeneration();
                         TerminalOutputCorrelationTrace.ResetForSession(sessionGeneration);
-                        NotifyTerminalSessionStarted(sessionGeneration);
                         try
                         {
                             StartRedirectedSession(runtime, workingDirectory, onOutput, sessionGeneration);
@@ -490,6 +526,16 @@ namespace PS7ScriptDesk.PowerShell.Services
                     CurrentWorkingDirectory = workingDirectory;
                     _handledTerminalExitProcessId = null;
                 }
+
+                if (!IsInputWritable)
+                {
+                    throw new InvalidOperationException("The PowerShell terminal process started without a writable input transport.");
+                }
+
+                // This is deliberately published only after the current generation has a
+                // process, writer, and active input router. Consumers must never infer
+                // readiness from a generation allocation alone.
+                NotifyTerminalSessionStarted(sessionGeneration);
 
                 DeveloperDiagnostics.LogStateTransition(
                     "Terminal",
@@ -881,7 +927,8 @@ namespace PS7ScriptDesk.PowerShell.Services
             // crashes can look like a frozen/silent script. Starting the hosted
             // terminal as STA keeps GUI scripts inside the process PS7 ScriptDesk
             // owns and monitors.
-            return "-NoLogo -NoExit -STA -ExecutionPolicy Bypass -Command " + QuoteCommandArgument(startupCommand);
+            var noProfile = IsPhase2B3NoProfileRequested() ? " -NoProfile" : string.Empty;
+            return "-NoLogo -NoExit -STA" + noProfile + " -ExecutionPolicy Bypass -Command " + QuoteCommandArgument(startupCommand);
         }
 
         private static string BuildTerminalStartupCommand()
@@ -1363,6 +1410,8 @@ namespace PS7ScriptDesk.PowerShell.Services
             NotifyTerminalSessionStopping(sessionGeneration);
             _terminalInputCoordinator.EndSession(sessionGeneration);
 
+            LogTerminationIntent(reason, processToStop, sessionGeneration, "StopConsoleCoreAsync");
+
             AppLogger.Info(
                 "LiveConsole",
                 $"Terminal teardown started. Reason={reason}, SessionGeneration={sessionGeneration}, ProcessId={TryGetProcessId(processToStop)?.ToString() ?? "(none)"}, PendingSnapshots={snapshotPathsToDelete.Count}.");
@@ -1408,6 +1457,12 @@ namespace PS7ScriptDesk.PowerShell.Services
                 {
                     if (!processToStop.HasExited)
                     {
+                        DeveloperDiagnostics.LogDecision(
+                            "Terminal",
+                            "TerminalTerminationIntent",
+                            "ScriptDesk is issuing Kill for an owned terminal process after input admission was revoked.",
+                            "KillOwnedProcess",
+                            CreateTerminationMetadata(reason, processToStop, sessionGeneration, "StopConsoleCoreAsync.Kill"));
                         processToStop.Kill(entireProcessTree: true);
 
                         // Cap the wait so Stop always feels immediate to the user.
@@ -2051,6 +2106,30 @@ namespace PS7ScriptDesk.PowerShell.Services
                 }
 
                 var exitCode = TryGetExitCode(exitedProcess);
+                var exitTails = CaptureExitForensicTails();
+                DeveloperDiagnostics.LogInfo(
+                    "Terminal",
+                    "Authoritative PowerShell process exit observed before centralized teardown.",
+                    CreateTerminationMetadata(
+                        "unexpected-process-exit",
+                        exitedProcess,
+                        sessionGeneration,
+                        "HandleTerminalProcessExitedAsync",
+                        new Dictionary<string, object?>
+                        {
+                            ["terminalMode"] = terminalMode,
+                            ["exitCode"] = exitCode,
+                            ["exitCodeHex"] = exitCode.HasValue ? $"0x{unchecked((uint)exitCode.Value):X8}" : null,
+                            ["commandInProgress"] = commandInProgress,
+                            ["currentCommandIsScript"] = currentCommandIsScript,
+                            ["pendingSnapshotCount"] = pendingSnapshotCount,
+                            ["processExitWasIgnored"] = false,
+                            ["forensicNoProfile"] = _forensicNoProfile,
+                            ["forensicTransport"] = _preferRedirectedTerminalSession ? "redirected" : "conpty",
+                            ["conptyTail"] = exitTails.ConPty.ToMetadata(),
+                            ["standardOutputTail"] = exitTails.StandardOutput.ToMetadata(),
+                            ["standardErrorTail"] = exitTails.StandardError.ToMetadata()
+                        }));
                 var exitCodeText = exitCode.HasValue ? $" Exit code: {exitCode.Value}." : string.Empty;
                 var activeWorkDescription = currentCommandIsScript ? "script" : "command";
                 var userMessage = commandInProgress
@@ -2175,6 +2254,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                         ? Interlocked.Increment(ref _nextConPtyReadId)
                         : null;
                     var readChunk = new string(buffer, 0, charsRead);
+                    _conPtyExitTail.Append(readChunk);
                     if (readId is { } performanceReadId)
                     {
                         TerminalOutputCorrelationTrace.RecordRawRead(sessionGeneration, readChunk, performanceReadId);
@@ -2324,6 +2404,8 @@ namespace PS7ScriptDesk.PowerShell.Services
                             });
                         break;
                     }
+
+                    CaptureRedirectedExitTail(streamKind, buffer, charsRead);
 
                     TerminalCriticalTrace.LogStage(
                         "RedirectedTerminal.ChunkReceived",
@@ -4736,6 +4818,64 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
         }
 
+        private static void LogTerminationIntent(string reason, Process? process, int sessionGeneration, string callSite)
+        {
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "TerminalTerminationIntent",
+                "A ScriptDesk lifecycle path began terminal teardown; any subsequent Kill or transport disposal is application-initiated.",
+                "TeardownRequested",
+                CreateTerminationMetadata(reason, process, sessionGeneration, callSite));
+        }
+
+        private static Dictionary<string, object?> CreateTerminationMetadata(
+            string reason,
+            Process? process,
+            int sessionGeneration,
+            string callSite,
+            Dictionary<string, object?>? additional = null)
+        {
+            var metadata = new Dictionary<string, object?>
+            {
+                ["reason"] = reason,
+                ["callSite"] = callSite,
+                ["processId"] = TryGetProcessId(process),
+                ["sessionGeneration"] = sessionGeneration,
+                ["processHasExited"] = TryGetProcessHasExited(process),
+                ["managedThreadId"] = Environment.CurrentManagedThreadId
+            };
+            if (additional is not null)
+            {
+                foreach (var entry in additional)
+                {
+                    metadata[entry.Key] = entry.Value;
+                }
+            }
+
+            return metadata;
+        }
+
+        private static bool? TryGetProcessHasExited(Process? process)
+        {
+            if (process is null)
+            {
+                return null;
+            }
+
+            try
+            {
+                return process.HasExited;
+            }
+            catch (ObjectDisposedException)
+            {
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return true;
+            }
+        }
+
         private static int? TryGetProcessId(Process? process)
         {
             try
@@ -4770,6 +4910,118 @@ namespace PS7ScriptDesk.PowerShell.Services
                 return null;
             }
         }
+
+        private static bool IsPhase2B3RedirectedTransportRequested()
+            => string.Equals(
+                Environment.GetEnvironmentVariable(Phase2B3TerminalTransportEnvironmentVariable),
+                "redirected",
+                StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsPhase2B3NoProfileRequested()
+            => string.Equals(
+                Environment.GetEnvironmentVariable(Phase2B3NoProfileEnvironmentVariable),
+                "1",
+                StringComparison.Ordinal);
+
+        private void ResetExitForensicTails()
+        {
+            _conPtyExitTail.Clear();
+            _standardOutputExitTail.Clear();
+            _standardErrorExitTail.Clear();
+        }
+
+        private void CaptureRedirectedExitTail(ExecutionOutputStreamKind streamKind, char[] buffer, int charsRead)
+        {
+            if (charsRead <= 0)
+            {
+                return;
+            }
+
+            var chunk = new string(buffer, 0, charsRead);
+            if (streamKind == ExecutionOutputStreamKind.StandardError)
+            {
+                _standardErrorExitTail.Append(chunk);
+            }
+            else
+            {
+                _standardOutputExitTail.Append(chunk);
+            }
+        }
+
+        private ExitForensicTailSet CaptureExitForensicTails()
+            => new(_conPtyExitTail.Snapshot(), _standardOutputExitTail.Snapshot(), _standardErrorExitTail.Snapshot());
+
+        private sealed class BoundedTerminalOutputTail
+        {
+            private readonly object _gate = new();
+            private readonly int _maximumCharacters;
+            private string _value = string.Empty;
+
+            public BoundedTerminalOutputTail(int maximumCharacters)
+            {
+                _maximumCharacters = maximumCharacters;
+            }
+
+            public void Append(string value)
+            {
+                if (string.IsNullOrEmpty(value))
+                {
+                    return;
+                }
+
+                lock (_gate)
+                {
+                    _value += value;
+                    if (_value.Length > _maximumCharacters)
+                    {
+                        _value = _value[^_maximumCharacters..];
+                    }
+                }
+            }
+
+            public void Clear()
+            {
+                lock (_gate)
+                {
+                    _value = string.Empty;
+                }
+            }
+
+            public ExitForensicTailSnapshot Snapshot()
+            {
+                lock (_gate)
+                {
+                    return new ExitForensicTailSnapshot(_value);
+                }
+            }
+        }
+
+        private sealed class ExitForensicTailSnapshot
+        {
+            private readonly string _value;
+
+            public ExitForensicTailSnapshot(string value)
+            {
+                _value = value;
+            }
+
+            public IReadOnlyDictionary<string, object?> ToMetadata()
+            {
+                return new Dictionary<string, object?>
+                {
+                    ["length"] = _value.Length,
+                    ["sha256"] = _value.Length == 0 ? null : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(_value))),
+                    ["containsExplicitExitToken"] = _value.IndexOf("exit", StringComparison.OrdinalIgnoreCase) >= 0,
+                    ["containsPowerShellErrorMarker"] = _value.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0,
+                    ["contentOmitted"] = true
+                };
+            }
+        }
+
+        private sealed record ExitForensicTailSet(
+            ExitForensicTailSnapshot ConPty,
+            ExitForensicTailSnapshot StandardOutput,
+            ExitForensicTailSnapshot StandardError);
 
         private static string NormalizeWorkingDirectory(string? path)
         {

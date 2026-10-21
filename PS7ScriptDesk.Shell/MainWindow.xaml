@@ -2273,11 +2273,12 @@
                                               FontSize="12">
                                         <DataGrid.Columns>
                                             <DataGridTextColumn Header="Name"  Binding="{Binding Name}"  Width="80" />
+                                            <DataGridTextColumn Header="Scope" Binding="{Binding Scope}" Width="95" />
                                             <DataGridTextColumn Header="Type"  Binding="{Binding Type}"  Width="70" />
                                             <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*" />
                                         </DataGrid.Columns>
                                     </DataGrid>
-                                    <TextBlock x:Name="DebugVariablesEmptyStateText" Text="No variables available.">
+                                    <TextBlock x:Name="DebugVariablesEmptyStateText" Text="No Variables Available">
                                         <TextBlock.Style>
                                             <Style TargetType="TextBlock" BasedOn="{StaticResource IdeEmptyPaneTextStyle}">
                                                 <Style.Triggers>

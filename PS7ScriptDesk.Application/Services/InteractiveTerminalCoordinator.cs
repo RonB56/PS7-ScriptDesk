@@ -71,6 +71,29 @@ public sealed class InteractiveTerminalCoordinator : IInteractiveTerminalCoordin
                 return false;
             }
 
+            // Output readers can observe the first prompt before the owning
+            // session-start lifecycle event is published. Do not regress an
+            // already-ready generation back to Starting; doing so leaves the
+            // editor execution command disabled until another prompt event
+            // (historically Ctrl+C) arrives.
+            if (generation == _snapshot.Generation &&
+                _snapshot.State == InteractiveTerminalState.InteractiveIdleAtPrompt &&
+                state == InteractiveTerminalState.Starting)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "PreservePromptReadyState",
+                    "Ignored a late session-start transition that would regress an already prompt-ready generation.",
+                    "PromptReadyAlreadyObserved",
+                    new Dictionary<string, object?>
+                    {
+                        ["generation"] = generation,
+                        ["currentState"] = _snapshot.State.ToString(),
+                        ["requestedState"] = state.ToString()
+                    });
+                return true;
+            }
+
             var previous = _snapshot;
             _snapshot = new InteractiveTerminalSnapshot(
                 generation,

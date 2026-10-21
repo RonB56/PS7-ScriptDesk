@@ -27,7 +27,25 @@ namespace PS7ScriptDesk.Shell.Composition
             var gitService = new GitService(gitCommandRunner, gitRepositoryLocator);
             var gitWorkspaceCoordinator = new GitWorkspaceCoordinator(gitService);
             var userPromptService = new UserPromptService();
-            var liveConsoleService = new LiveConsoleService();
+            var psesOwnedSessionFeatureGate = PsesOwnedInteractiveSessionFeatureGate.FromEnvironment();
+            var psesOwnedSessionGateValue = Environment.GetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName);
+            ILiveConsoleService liveConsoleService = psesOwnedSessionFeatureGate.IsEnabled
+                ? new PsesOwnedInteractiveSessionService()
+                : new LiveConsoleService();
+            DeveloperDiagnostics.LogInfo(
+                "Startup",
+                "Interactive session ownership path selected.",
+                new Dictionary<string, object?>
+                {
+                    ["psesOwnedInteractiveSession"] = psesOwnedSessionFeatureGate.IsEnabled,
+                    ["featureGate"] = PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName,
+                    ["featureGateSource"] = "process-environment",
+                    ["featureGateValuePresent"] = !string.IsNullOrWhiteSpace(psesOwnedSessionGateValue),
+                    ["provider"] = liveConsoleService.GetType().Name,
+                    ["expectedDebuggerBackend"] = psesOwnedSessionFeatureGate.IsEnabled ? "PsesDapDebugSession" : "PsesDebugSession",
+                    ["fallbackPolicy"] = psesOwnedSessionFeatureGate.IsEnabled ? "NoSilentLegacyFallback" : "LegacyByExplicitSelection"
+                });
+            var runtimeSessionCoordinator = new PowerShellRuntimeSessionCoordinator(liveConsoleService);
             TerminalStartupTrace.Write("LIVE_CONSOLE_SERVICE_CONSTRUCTED", $"serviceId={liveConsoleService.GetHashCode():X8}");
             var exeExportService = new ExeExportService();
             var exeExportWizardService = new ExportWizardService(applicationSettings);
@@ -39,20 +57,40 @@ namespace PS7ScriptDesk.Shell.Composition
                 ? ExecutionBackendAvailability.InitializationFailed
                 : ExecutionBackendAvailability.Unavailable;
             IEditorExecutionAdapter? editorExecutionAdapter = null;
+            IEditorExecutionBackend? structuredBackend = null;
             if (structuredExecutionFeatureGate.IsStructuredExecutionEnabled)
             {
-                var structuredStartup = TryInitializeStructuredExecution(() =>
+                StructuredExecutionStartupResult structuredStartup;
+                if (psesOwnedSessionFeatureGate.IsEnabled)
                 {
-                    var broker = PersistentPowerShellSessionBroker
-                        .CreateAsync("Structured editor PowerShell broker", startupRuntimeInfo)
-                        .GetAwaiter()
-                        .GetResult();
-                    return new StructuredEditorExecutionAdapter(broker, structuredExecutionFeatureGate);
-                });
+                    structuredStartup = TryInitializeStructuredExecution(() =>
+                    {
+                        if (liveConsoleService is not IAuthoritativeSessionStructuredExecution authoritativeSession)
+                        {
+                            throw new InvalidOperationException("The PSES-owned interactive service does not expose the authoritative structured execution contract.");
+                        }
+
+                        return new AuthoritativeSessionStructuredExecutionAdapter(authoritativeSession, structuredExecutionFeatureGate);
+                    });
+                }
+                else
+                {
+                    structuredStartup = TryInitializeStructuredExecution(() =>
+                    {
+                        var broker = PersistentPowerShellSessionBroker
+                            .CreateAsync("Structured editor PowerShell broker", startupRuntimeInfo)
+                            .GetAwaiter()
+                            .GetResult();
+                        return new StructuredEditorExecutionAdapter(broker, structuredExecutionFeatureGate);
+                    });
+                }
                 editorExecutionAdapter = structuredStartup.Adapter;
                 if (structuredStartup.IsAvailable)
                 {
                     structuredAvailability = ExecutionBackendAvailability.Available;
+                    structuredBackend = psesOwnedSessionFeatureGate.IsEnabled
+                        ? new AuthoritativeSessionStructuredExecutionBackend(editorExecutionAdapter!)
+                        : new StructuredEditorExecutionBackend(editorExecutionAdapter!);
                 }
                 else
                 {
@@ -79,9 +117,9 @@ namespace PS7ScriptDesk.Shell.Composition
             {
                 new LegacyLiveConsoleExecutionBackend(liveConsoleService)
             };
-            if (editorExecutionAdapter is not null)
+            if (structuredBackend is not null)
             {
-                executionBackends.Add(new StructuredEditorExecutionBackend(editorExecutionAdapter));
+                executionBackends.Add(structuredBackend);
             }
             var executionCoordinator = new EditorExecutionCoordinator(
                 executionBackends,
@@ -91,14 +129,14 @@ namespace PS7ScriptDesk.Shell.Composition
                 new PowerShellExecutionRequestClassifier());
             DeveloperDiagnostics.LogInfo(
                 "Startup",
-                "Canonical execution coordinator composed in shadow mode.",
+                    "Canonical execution coordinator composed with production dispatch enabled.",
                 new Dictionary<string, object?>
                 {
                     ["structuredExecutionEnabled"] = structuredExecutionFeatureGate.IsStructuredExecutionEnabled,
                     ["structuredExecutionEffective"] = effectiveExecutionFeatureGate.IsStructuredExecutionEnabled,
                     ["structuredExecutionAvailable"] = editorExecutionAdapter is not null,
                     ["backendCount"] = executionBackends.Count,
-                    ["shadowMode"] = true
+                    ["shadowMode"] = false
                 });
             DeveloperDiagnostics.ConfigureFromSettings(applicationSettings, "AppBootstrapper loaded settings");
             DeveloperDiagnostics.LogInfo(
@@ -131,10 +169,11 @@ namespace PS7ScriptDesk.Shell.Composition
                 gitService,
                 userPromptService,
                 gitWorkspaceCoordinator,
-                executionCoordinator);
+                executionCoordinator,
+                runtimeSessionCoordinator);
             StartupLifecycleTrace.Write("MainWindowViewModel", "CONSTRUCTED", $"terminalServiceId={liveConsoleService.GetHashCode():X8}; gitServiceId={gitService.GetHashCode():X8}");
 
-            var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService, liveConsoleService);
+            var window = new MainWindow(applicationSettingsService, applicationSettings, uiScaleService, liveConsoleService, runtimeSessionCoordinator);
             window.AttachViewModel(viewModel);
             TerminalStartupTrace.Write("BOOTSTRAPPER_CREATE_MAINWINDOW_EXIT", $"windowId={window.GetHashCode():X8}; viewModelId={viewModel.GetHashCode():X8}; serviceId={liveConsoleService.GetHashCode():X8}");
             StartupLifecycleTrace.Write("AppBootstrapper.CreateMainWindow", "EXIT", "ViewModel attached.");

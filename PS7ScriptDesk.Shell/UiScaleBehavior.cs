@@ -36,6 +36,16 @@ namespace PS7ScriptDesk.Shell
         {
             ArgumentNullException.ThrowIfNull(application);
 
+            if (!application.Dispatcher.CheckAccess())
+            {
+                if (!application.Dispatcher.HasShutdownStarted && !application.Dispatcher.HasShutdownFinished)
+                {
+                    application.Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(() => EnableForApplication(application)));
+                }
+                DeveloperDiagnostics.LogInfo("UI", "Deferred application UI Scale initialization to the owning dispatcher.");
+                return;
+            }
+
             if (!_applicationWindowHookRegistered)
             {
                 EventManager.RegisterClassHandler(

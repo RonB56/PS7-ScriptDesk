@@ -119,7 +119,23 @@ namespace PS7ScriptDesk.Shell.Debug
         Unavailable = 1,
         Failed = 2,
         Stale = 3,
-        Cancelled = 4
+        Cancelled = 4,
+        Loading = 5
+    }
+
+    public static class DebuggerVariablePresentation
+    {
+        public static string EmptyStateText(DebuggerVariableAvailability availability, int variableCount)
+            => availability switch
+            {
+                DebuggerVariableAvailability.Loading => "Loading...",
+                DebuggerVariableAvailability.Unavailable => "Variables unavailable for the selected frame.",
+                DebuggerVariableAvailability.Stale => "Variables request is stale; waiting for the active pause.",
+                DebuggerVariableAvailability.Failed => "Variables unavailable because the debugger query failed.",
+                DebuggerVariableAvailability.Cancelled => "Variables request was cancelled.",
+                _ when variableCount == 0 => "No Variables Available",
+                _ => string.Empty
+            };
     }
 
     public enum DebuggerVariableScopeKind
@@ -127,7 +143,8 @@ namespace PS7ScriptDesk.Shell.Debug
         CurrentFrameLocals = 0,
         SharedScriptOrGlobal = 1,
         InvocationMetadata = 2,
-        Unavailable = 3
+        Unavailable = 3,
+        CurrentFrameScopes = 4
     }
 
     /// <summary>

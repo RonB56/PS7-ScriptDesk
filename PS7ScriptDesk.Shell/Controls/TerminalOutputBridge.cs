@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
+using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Domain.Models;
 
@@ -72,6 +73,11 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             lock (_syncRoot)
             {
+                if (_activeGeneration == generation)
+                {
+                    return default;
+                }
+
                 var discardedCharacters = DiscardAllOutput();
                 _activeGeneration = generation;
                 return new TerminalOutputGenerationInvalidationResult(generation, discardedCharacters);
@@ -490,6 +496,8 @@ namespace PS7ScriptDesk.Shell.Controls
         private readonly int _maximumBufferedChunks;
         private readonly TimeSpan _maximumDuration;
         private ResizeTransaction? _active;
+        private long _nextDiagnosticInsertionId;
+        private long _nextDiagnosticReleaseId;
 
         public TerminalResizeOutputBarrier(
             int maximumBufferedCharacters = DefaultMaximumBufferedCharacters,
@@ -589,8 +597,19 @@ namespace PS7ScriptDesk.Shell.Controls
                         _active.BufferedCharacters);
                 }
 
-                _active.Chunks.Add(new TerminalResizeBufferedOutput(terminalSessionGeneration, source, data));
+                var buffered = new TerminalResizeBufferedOutput(terminalSessionGeneration, source, data)
+                {
+                    DiagnosticInsertionId = ResizeForensicsTrace.Enabled ? Interlocked.Increment(ref _nextDiagnosticInsertionId) : 0
+                };
+                _active.Chunks.Add(buffered);
                 _active.BufferedCharacters += data.Length;
+                ResizeForensicsTrace.RecordBarrier(
+                    "ResizeBarrierInsert",
+                    terminalSessionGeneration,
+                    buffered.DiagnosticInsertionId,
+                    0,
+                    data,
+                    _active.ResizeGeneration);
                 return new TerminalResizeBarrierCaptureResult(
                     TerminalResizeBarrierCaptureStatus.Buffered,
                     data.Length,
@@ -621,7 +640,18 @@ namespace PS7ScriptDesk.Shell.Controls
                     return TerminalResizeBarrierAcknowledgementResult.Rejected("stale-or-mismatched-ack");
                 }
 
+                var releaseId = ResizeForensicsTrace.Enabled ? Interlocked.Increment(ref _nextDiagnosticReleaseId) : 0;
                 var released = _active.Chunks.ToArray();
+                foreach (var buffered in released)
+                {
+                    ResizeForensicsTrace.RecordBarrier(
+                        "ResizeBarrierRelease",
+                        terminalSessionGeneration,
+                        buffered.DiagnosticInsertionId,
+                        releaseId,
+                        buffered.Data,
+                        _active.ResizeGeneration);
+                }
                 var result = new TerminalResizeBarrierAcknowledgementResult(
                     Accepted: true,
                     Reason: "acknowledged",
@@ -715,7 +745,10 @@ namespace PS7ScriptDesk.Shell.Controls
     internal readonly record struct TerminalResizeBufferedOutput(
         int TerminalSessionGeneration,
         string Source,
-        string Data);
+        string Data)
+    {
+        public long DiagnosticInsertionId { get; init; }
+    }
 
     internal readonly record struct TerminalResizeBarrierAcknowledgementResult(
         bool Accepted,
@@ -885,6 +918,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 outputCharacterLength = safeData.Length,
                 hostControlSummary = controlSummary,
                 markerCandidate,
+                resizeForensicsEnabled = ResizeForensicsTrace.Enabled,
                 contentOmitted = true,
                 data = Convert.ToBase64String(Encoding.UTF8.GetBytes(safeData))
             });

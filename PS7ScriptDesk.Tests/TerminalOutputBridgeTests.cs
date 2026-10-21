@@ -52,6 +52,23 @@ public sealed class TerminalOutputBridgeTests
     }
 
     [Fact]
+    public void FlowController_RepeatedGenerationActivationDoesNotDiscardBufferedStartupOutput()
+    {
+        var controller = new TerminalOutputFlowController(
+            maximumPendingCharacters: 64,
+            maximumBatchCharacters: 64);
+
+        controller.ActivateGeneration(7);
+        Assert.Equal(6, controller.Enqueue(7, "prompt").AcceptedCharacters);
+
+        controller.ActivateGeneration(7);
+        Assert.True(controller.SetRendererReady());
+
+        var batch = Assert.IsType<TerminalOutputBatch>(controller.TryBeginDelivery());
+        Assert.Equal("prompt", batch.Data);
+    }
+
+    [Fact]
     public void FlowController_BoundsPendingOutputAndDropsOnlyOverloadChunks()
     {
         var controller = new TerminalOutputFlowController(

@@ -21,7 +21,7 @@ public sealed class Phase9EmptyStatesCommandBarHostContractTests
         foreach (var message in new[]
         {
             "Variables: no active frame",
-            "No variables available.",
+            "No Variables Available",
             "No active call stack.",
             "No breakpoints configured.",
             "No problems for the active document.",
