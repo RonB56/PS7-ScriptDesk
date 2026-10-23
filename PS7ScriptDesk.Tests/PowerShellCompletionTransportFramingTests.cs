@@ -2,6 +2,7 @@ using PS7ScriptDesk.Shell.Editor;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection(ExternalPowerShellTestCollection.Name)]
 public sealed class PowerShellCompletionTransportFramingTests
 {
     private const string Start = "##PSSTUDIO_COMP_START_request##";

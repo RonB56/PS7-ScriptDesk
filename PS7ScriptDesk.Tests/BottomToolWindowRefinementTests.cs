@@ -61,7 +61,7 @@ public sealed class BottomToolWindowRefinementTests
         Assert.Equal(1, CountOccurrences(toolGroupXaml, "x:Name=\"BottomProblemsToolTab\""));
         Assert.Equal(1, CountOccurrences(toolGroupXaml, "x:Name=\"BottomDebugOutputToolTab\""));
         Assert.Equal(1, CountOccurrences(toolGroupXaml, "x:Name=\"BottomActivityToolTab\""));
-        Assert.Equal(3, CountOccurrences(toolGroupXaml, "Style=\"{StaticResource IdeBottomPaneTabToggleButtonStyle}\""));
+        Assert.Equal(4, CountOccurrences(toolGroupXaml, "Style=\"{StaticResource IdeBottomPaneTabToggleButtonStyle}\""));
         Assert.Equal(3, CountOccurrences(toolTabStripXaml, "<ColumnDefinition Width=\"*\" />"));
     }
 

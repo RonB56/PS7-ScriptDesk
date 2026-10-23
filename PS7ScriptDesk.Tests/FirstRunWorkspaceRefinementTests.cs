@@ -134,7 +134,9 @@ public sealed class FirstRunWorkspaceRefinementTests
         Assert.DoesNotContain("help:ContextHelp.Key=\"Editor.ActiveDocument\"", editorPaneXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Active Document:", editorPaneXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("StringFormat=Path: {0}", editorPaneXaml, StringComparison.Ordinal);
-        Assert.Contains("ToolTip=\"{Binding FilePath, TargetNullValue=Unsaved document}\"", editorPaneXaml, StringComparison.Ordinal);
+        Assert.Contains("Header=\"Open Tabs\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding ActiveDocumentText}\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip=\"{Binding ActiveDocumentText}\"", mainXaml, StringComparison.Ordinal);
 
         Assert.Contains("public string ActiveDocumentText =>", viewModelCode, StringComparison.Ordinal);
         Assert.Contains("OnPropertyChanged(nameof(ActiveDocumentText));", viewModelCode, StringComparison.Ordinal);

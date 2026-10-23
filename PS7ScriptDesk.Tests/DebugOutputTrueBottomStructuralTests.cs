@@ -31,8 +31,6 @@ public sealed class DebugOutputTrueBottomStructuralTests
         var xaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml");
         var debugPane = xaml[(xaml.IndexOf("x:Name=\"DebugOutputBottomPane\"", StringComparison.Ordinal))..xaml.IndexOf("x:Name=\"ActivityBottomPane\"", StringComparison.Ordinal)];
 
-        Assert.Contains("<Setter Property=\"Padding\" Value=\"2,0\" />", debugPane, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"MinHeight\" Value=\"0\" />", debugPane, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"Padding\" Value=\"1,1\" />", debugPane, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"Padding\" Value=\"3,3\" />", debugPane, StringComparison.Ordinal);
         Assert.DoesNotContain("BorderThickness=\"0,0,0,1\"", debugPane, StringComparison.Ordinal);

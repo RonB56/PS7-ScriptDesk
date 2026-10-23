@@ -5,6 +5,7 @@ using Xunit;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection(ExternalPowerShellTestCollection.Name)]
 public sealed class PSScriptAnalyzerServiceTests
 {
     [Fact]

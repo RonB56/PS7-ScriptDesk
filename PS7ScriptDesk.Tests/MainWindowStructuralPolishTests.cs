@@ -28,7 +28,7 @@ public sealed class MainWindowStructuralPolishTests
 
         Assert.Contains("Style=\"{StaticResource IdePaneBorderStyle}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Style=\"{StaticResource IdeCompactEditorStatusStripBorderStyle}\"", mainXaml, StringComparison.Ordinal);
-        Assert.Contains("Style=\"{StaticResource EditorSurfaceBorderStyle}\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("BasedOn=\"{StaticResource EditorSurfaceBorderStyle}\"", mainXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Style=\"{StaticResource SubtlePanelBorderStyle}\"", mainXaml, StringComparison.Ordinal);
     }
 
@@ -66,10 +66,11 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("private const double MinimumExplorerWidth = 190;", mainCode, StringComparison.Ordinal);
         Assert.Contains("private double _lastKnownExplorerWidth = 220;", mainCode, StringComparison.Ordinal);
         Assert.Contains("private const double DebugPanelWidth = 220;", mainCode, StringComparison.Ordinal);
-        Assert.Equal(6, CountOccurrences(mainXaml, "GridSplitter"));
+        Assert.Equal(7, CountOccurrences(mainXaml, "GridSplitter"));
         Assert.Contains("<Setter Property=\"ResizeDirection\" Value=\"Columns\" />", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"ResizeDirection\" Value=\"Rows\" />", appXaml, StringComparison.Ordinal);
-        Assert.Equal(3, CountOccurrences(mainXaml, "Style=\"{StaticResource IdeColumnSplitterStyle}\""));
+        Assert.Equal(4, CountOccurrences(mainXaml, "Style=\"{StaticResource IdeColumnSplitterStyle}\""));
+        Assert.Contains("x:Name=\"SideBySideDebugSplitter\"", mainXaml, StringComparison.Ordinal);
         Assert.Equal(3, CountOccurrences(mainXaml, "Style=\"{StaticResource IdeRowSplitterStyle}\""));
         Assert.Contains("ExplorerColumnDefinition.Width = new GridLength(Math.Max(_lastKnownExplorerWidth, MinimumExplorerWidth), GridUnitType.Pixel)", mainCode, StringComparison.Ordinal);
         Assert.Contains("if (IsUsableLength(_loadedSettings.ExplorerWidth, MinimumExplorerWidth))", mainCode, StringComparison.Ordinal);
@@ -115,7 +116,7 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("EditorColumnDefinition.Width = new GridLength(1, GridUnitType.Star);", mainCode, StringComparison.Ordinal);
         Assert.Contains("ApplyWorkspaceLayoutMode(WorkspaceLayoutMode.SideBySideSplit, \"ViewMenu\");", mainCode, StringComparison.Ordinal);
         Assert.Contains("ConsoleSideColumnDefinition.MinWidth = MinimumConsoleSideWidth;", mainCode, StringComparison.Ordinal);
-        Assert.Contains("Grid.SetColumn(ConsolePaneBorder, 4);", mainCode, StringComparison.Ordinal);
+        Assert.Contains("Grid.SetColumn(ConsolePaneBorder, 2);", mainCode, StringComparison.Ordinal);
         Assert.Contains("nameof(MainWindowViewModel.IsExplorerVisible)", mainCode, StringComparison.Ordinal);
         Assert.Contains("Dispatcher.BeginInvoke(new Action(ApplyExplorerVisibilityLayout));", mainCode, StringComparison.Ordinal);
         Assert.Contains("ShowDebugPanel_Click", mainCode, StringComparison.Ordinal);
@@ -169,11 +170,11 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("<Setter Property=\"Padding\" Value=\"8,3\" />", appXaml, StringComparison.Ordinal);
         Assert.Contains("x:Key=\"IdeCompactEditorStatusStripBorderStyle\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("x:Key=\"IdeCompactEditorTabItemStyle\"", appXaml, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"MinHeight\" Value=\"28\" />", appXaml, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"MinHeight\" Value=\"{StaticResource Theme.ControlHeight.Tab}\" />", appXaml, StringComparison.Ordinal);
 
         Assert.DoesNotContain("help:ContextHelp.Key=\"Editor.ActiveDocument\"", editorPaneXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Style=\"{StaticResource IdeCompactEditorHeaderPanelStyle}\"", editorPaneXaml, StringComparison.Ordinal);
-        Assert.DoesNotContain("Style=\"{StaticResource IdeHeaderPanelStyle}\"", mainXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Style=\"{StaticResource IdeHeaderPanelStyle}\"", editorPaneXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("StringFormat=Path: {0}", editorPaneXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Text=\"{Binding SelectedTab.SelectionDisplayText, TargetNullValue=Selection: None}\"", editorPaneXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Text=\"{Binding SelectedTab.BreakpointDisplayText, TargetNullValue=Breakpoints: None}\"", editorPaneXaml, StringComparison.Ordinal);
@@ -185,7 +186,7 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("Command=\"{Binding DataContext.NewScriptCommand, RelativeSource={RelativeSource TemplatedParent}}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Width=\"16\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Height=\"16\"", mainXaml, StringComparison.Ordinal);
-        Assert.Contains("ToolTip=\"{Binding FilePath, TargetNullValue=Unsaved document}\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip=\"{Binding ActiveDocumentText}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("ToolTip=\"Close tab\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.Name=\"Close tab\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding DataContext.CloseTabCommand, ElementName=RootWindow}\"", mainXaml, StringComparison.Ordinal);
@@ -217,8 +218,9 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("<Setter Property=\"MinHeight\" Value=\"26\" />", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"ToolTipService.InitialShowDelay\" Value=\"700\" />", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"ToolTipService.ShowDuration\" Value=\"12000\" />", appXaml, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"Width\" Value=\"13\" />", mainXaml, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"Height\" Value=\"13\" />", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Key=\"ToolbarIconViewboxStyle\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"Width\" Value=\"16\" />", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"Height\" Value=\"16\" />", mainXaml, StringComparison.Ordinal);
         Assert.Contains("<Trigger Property=\"IsMouseOver\" Value=\"True\">", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Trigger Property=\"IsPressed\" Value=\"True\">", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Trigger Property=\"IsKeyboardFocused\" Value=\"True\">", appXaml, StringComparison.Ordinal);
@@ -261,10 +263,10 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Equal(7, CountOccurrences(toolbarXaml, "Style=\"{StaticResource IdeToolbarTooltipHostStyle}\""));
         Assert.Contains("ToolTipService.ShowOnDisabled=\"True\"", toolbarXaml, StringComparison.Ordinal);
         Assert.Contains("ToolTip=\"Start Debug (F5). Stop Debug (Shift+F5).\"", toolbarXaml, StringComparison.Ordinal);
-        Assert.Contains("ToolTip=\"Continue (F5)\"", toolbarXaml, StringComparison.Ordinal);
-        Assert.Contains("ToolTip=\"Step Over (F10)\"", toolbarXaml, StringComparison.Ordinal);
-        Assert.Contains("ToolTip=\"Step Into (F11)\"", toolbarXaml, StringComparison.Ordinal);
-        Assert.Contains("ToolTip=\"Step Out (Shift+F11)\"", toolbarXaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip=\"Continue running until the next breakpoint or until the script finishes. (F5)\"", toolbarXaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip=\"Execute the current statement without entering called functions, then pause at the next statement in the current scope. (F10)\"", toolbarXaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip=\"Enter a called PowerShell function or script when it can be debugged. (F11)\"", toolbarXaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip=\"Continue until the current function or scope returns to its caller. (Shift+F11)\"", toolbarXaml, StringComparison.Ordinal);
         Assert.Contains("ToolTip=\"PS7 ScriptDesk Help\"", toolbarXaml, StringComparison.Ordinal);
 
         Assert.DoesNotContain("Text=\"New (Ctrl+N)\"", toolbarXaml, StringComparison.Ordinal);
@@ -362,7 +364,7 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("x:Key=\"IdeToolWindowDataGridStyle\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("x:Key=\"IdeToolWindowListBoxItemStyle\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"RowHeight\" Value=\"24\" />", appXaml, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"ColumnHeaderHeight\" Value=\"26\" />", appXaml, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"ColumnHeaderHeight\" Value=\"{StaticResource Theme.ControlHeight.Compact}\" />", appXaml, StringComparison.Ordinal);
 
         Assert.Contains("Text=\"Explorer\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Header=\"PowerShell Runtime\"", mainXaml, StringComparison.Ordinal);
@@ -371,7 +373,9 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("Header=\"Open Tabs\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Style=\"{StaticResource IdeToolWindowPrimaryTextStyle}\"", mainXaml, StringComparison.Ordinal);
         Assert.True(CountOccurrences(mainXaml, "Style=\"{StaticResource IdeToolWindowMetaTextStyle}\"") >= 7);
-        Assert.Equal(3, CountOccurrences(mainXaml, "ItemContainerStyle=\"{StaticResource IdeToolWindowListBoxItemStyle}\""));
+        Assert.Equal(2, CountOccurrences(mainXaml, "ItemContainerStyle=\"{StaticResource IdeToolWindowListBoxItemStyle}\""));
+        Assert.Contains("help:ContextHelp.Key=\"Runtime.List\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("help:ContextHelp.Key=\"Explorer.OpenTabs\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding RefreshRuntimesCommand}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding RefreshWorkspaceCommand}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding OpenWorkspaceFolderCommand}\"", mainXaml, StringComparison.Ordinal);

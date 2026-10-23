@@ -349,29 +349,7 @@ public sealed class StoreUpdateDetectionTests
     }
 
     private static void RunOnStaThread(Action action)
-    {
-        Exception? failure = null;
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                action();
-            }
-            catch (Exception ex)
-            {
-                failure = ex;
-            }
-        });
-
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (failure is not null)
-        {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
-        }
-    }
+        => WpfTestDispatcher.Run(action);
 
     private sealed class FakePackageEnvironmentProvider(StorePackageEnvironmentInfo packageEnvironment) : IStorePackageEnvironmentProvider
     {

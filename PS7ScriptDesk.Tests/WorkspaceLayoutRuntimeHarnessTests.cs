@@ -22,7 +22,14 @@ public sealed class WorkspaceLayoutRuntimeHarnessTests
             var window = new MainWindow(new InMemorySettingsService(), CreateSettings());
             try
             {
+                window.WindowStartupLocation = WindowStartupLocation.Manual;
+                window.Width = 1600;
+                window.Height = 1000;
+                window.Left = 0;
+                window.Top = 0;
+                window.ShowActivated = true;
                 window.Show();
+                window.Activate();
                 DrainLayout(window);
 
                 foreach (var mode in new[] { "Default", "HorizontalSplit", "SideBySideSplit", "EditorMaximized", "ConsoleMaximized" })
@@ -92,8 +99,9 @@ public sealed class WorkspaceLayoutRuntimeHarnessTests
             return;
         }
 
-        var workspaceBounds = workspace.TransformToAncestor(window).TransformBounds(new Rect(0, 0, workspace.ActualWidth, workspace.ActualHeight));
-        var paneBounds = pane.TransformToAncestor(window).TransformBounds(new Rect(0, 0, pane.ActualWidth, pane.ActualHeight));
+        var paneOrigin = pane.TranslatePoint(new Point(0, 0), workspace);
+        var workspaceBounds = new Rect(new Point(0, 0), new Size(workspace.ActualWidth, workspace.ActualHeight));
+        var paneBounds = new Rect(paneOrigin, new Size(pane.ActualWidth, pane.ActualHeight));
 
         Assert.True(paneBounds.Left >= workspaceBounds.Left - 1, $"{name} extends left of WorkspaceGrid.");
         Assert.True(paneBounds.Top >= workspaceBounds.Top - 1, $"{name} extends above WorkspaceGrid.");
@@ -111,32 +119,13 @@ public sealed class WorkspaceLayoutRuntimeHarnessTests
     private static void DrainLayout(Window window)
     {
         window.UpdateLayout();
+        window.Dispatcher.Invoke(DispatcherPriority.Loaded, new Action(window.UpdateLayout));
+        window.Dispatcher.Invoke(DispatcherPriority.Render, new Action(window.UpdateLayout));
+        window.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(window.UpdateLayout));
     }
 
     private static void RunOnStaThread(Action action)
-    {
-        Exception? failure = null;
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                action();
-            }
-            catch (Exception ex)
-            {
-                failure = ex;
-            }
-        });
-
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (failure is not null)
-        {
-            ExceptionDispatchInfo.Capture(failure).Throw();
-        }
-    }
+        => WpfTestDispatcher.Run(action);
 
     private static App EnsureShellApplication()
     {

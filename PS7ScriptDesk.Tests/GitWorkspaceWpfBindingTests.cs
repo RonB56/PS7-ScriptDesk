@@ -184,18 +184,6 @@ public sealed class GitWorkspaceWpfBindingTests
 
     private static void RunOnSta(Action<Dispatcher> action)
     {
-        Exception? failure = null;
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            try { action(dispatcher); }
-            catch (Exception ex) { failure = ex; }
-            finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Normal); }
-            Dispatcher.Run();
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (failure is not null) throw new Xunit.Sdk.XunitException(failure.ToString());
+        WpfTestDispatcher.Run(() => action(WpfTestDispatcher.Dispatcher));
     }
 }

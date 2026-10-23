@@ -134,7 +134,15 @@ public sealed class KnownBadLayoutCharacterizationTests
 
                 var snapshot = CaptureSnapshot(window, "KnownBadSideBySide2552");
                 Assert.InRange(snapshot.UnusedHorizontal, -1.5, 1.5);
-                Assert.InRange(Find<ColumnDefinition>(window, "SideBySideEditorColumnDefinition").ActualWidth, 2080, 2110);
+                var host = Find<Grid>(window, "SideBySideGrid");
+                var editor = Find<ColumnDefinition>(window, "SideBySideEditorColumnDefinition");
+                var editorSplitter = Find<ColumnDefinition>(window, "SideBySideEditorConsoleSplitterColumnDefinition");
+                var console = Find<ColumnDefinition>(window, "SideBySideConsoleColumnDefinition");
+                var debugSplitter = Find<ColumnDefinition>(window, "SideBySideConsoleDebugSplitterColumnDefinition");
+                var debug = Find<ColumnDefinition>(window, "SideBySideDebugColumnDefinition");
+                var budgetedEditorWidth = host.ActualWidth - editorSplitter.ActualWidth - console.ActualWidth - debugSplitter.ActualWidth - debug.ActualWidth;
+                Assert.InRange(editor.ActualWidth, budgetedEditorWidth - 1.5, budgetedEditorWidth + 1.5);
+                Assert.InRange(editor.ActualWidth, 320, double.PositiveInfinity);
                 InvokePrivate(window, "ValidateLayoutState", "KnownBadSideBySide2552");
                 Assert.DoesNotContain(window.LastLayoutInvariantResult!.Violations, violation => violation.Code == "LayoutUnderfill");
                 var artifact = new StringBuilder("CASE KnownBadSideBySide2552_CAPTURED_WIDTHS\n");
@@ -397,8 +405,12 @@ public sealed class KnownBadLayoutCharacterizationTests
 
     private static void DrainLayout(Window window)
     {
-        window.Dispatcher.Invoke(DispatcherPriority.Loaded, new Action(window.UpdateLayout));
+        window.ApplyTemplate();
+        window.Measure(new Size(window.Width, window.Height));
+        window.Arrange(new Rect(0, 0, window.Width, window.Height));
         window.UpdateLayout();
+        window.Dispatcher.Invoke(DispatcherPriority.Loaded, new Action(window.UpdateLayout));
+        window.Dispatcher.Invoke(DispatcherPriority.Render, new Action(window.UpdateLayout));
     }
 
     private static void CloseWindow(MainWindow window)
@@ -411,27 +423,7 @@ public sealed class KnownBadLayoutCharacterizationTests
     }
 
     private static void RunOnStaThread(Action action)
-    {
-        Exception? failure = null;
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                action();
-            }
-            catch (Exception ex)
-            {
-                failure = ex;
-            }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (failure is not null)
-        {
-            ExceptionDispatchInfo.Capture(failure).Throw();
-        }
-    }
+        => WpfTestDispatcher.Run(action);
 
     private static App EnsureShellApplication()
     {

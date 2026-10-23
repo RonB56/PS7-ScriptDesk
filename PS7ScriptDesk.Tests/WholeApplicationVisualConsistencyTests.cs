@@ -87,7 +87,7 @@ public sealed class WholeApplicationVisualConsistencyTests
         Assert.True(
             debugPaneXaml.Contains("Style=\"{DynamicResource IdeToolWindowHeaderTextStyle}\"", StringComparison.Ordinal) ||
             debugPaneXaml.Contains("Style=\"{DynamicResource IdeSectionHeaderTextStyle}\"", StringComparison.Ordinal));
-        Assert.Equal(3, CountOccurrences(debugPaneXaml, "Style=\"{DynamicResource IdeToolWindowDataGridStyle}\""));
+        Assert.Equal(3, CountOccurrences(debugPaneXaml, "Style=\"{DynamicResource IdeDebuggerDataGridStyle}\""));
         Assert.True(CountOccurrences(debugPaneXaml, "Style=\"{DynamicResource IdeDialogSecondaryButtonStyle}\"") >= 2);
     }
 
@@ -294,29 +294,7 @@ public sealed class WholeApplicationVisualConsistencyTests
         => ((System.Windows.Controls.ItemsControl)root.FindName(name)).Items.Cast<object>();
 
     private static void RunOnStaThread(Action action)
-    {
-        Exception? failure = null;
-        var thread = new System.Threading.Thread(() =>
-        {
-            try
-            {
-                action();
-            }
-            catch (Exception ex)
-            {
-                failure = ex;
-            }
-        });
-
-        thread.SetApartmentState(System.Threading.ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (failure is not null)
-        {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
-        }
-    }
+        => WpfTestDispatcher.Run(action);
 
     private static string FindRepositoryRoot()
     {

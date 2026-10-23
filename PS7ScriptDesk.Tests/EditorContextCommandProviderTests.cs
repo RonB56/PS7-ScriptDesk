@@ -7,6 +7,7 @@ using PS7ScriptDesk.Shell.Editor;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection("WpfUi")]
 public sealed class EditorContextCommandProviderTests
 {
     [Fact]
@@ -150,16 +151,5 @@ public sealed class EditorContextCommandProviderTests
         new(id, name, category, shortcut, Array.Empty<string>(), canExecute, execute, surfaces);
 
     private static void RunOnStaThread(Action action)
-    {
-        Exception? failure = null;
-        var thread = new Thread(() =>
-        {
-            try { action(); }
-            catch (Exception exception) { failure = exception; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
-    }
+        => WpfTestDispatcher.Run(action);
 }

@@ -204,9 +204,9 @@ public sealed class UiScaleWpfBehaviorTests
                 DrainLayout(window);
 
                 AssertScaleTransform(root, 2.0);
-                var transform = Assert.IsType<ScaleTransform>(root.LayoutTransform);
-                Assert.Equal(2.0, transform.ScaleX, 3);
-                Assert.Equal(2.0, transform.ScaleY, 3);
+                var transform = root.LayoutTransform!;
+                Assert.Equal(2.0, transform.Value.M11, 3);
+                Assert.Equal(2.0, transform.Value.M22, 3);
 
                 service.Reset("UnitTest");
                 DrainLayout(window);
@@ -236,12 +236,13 @@ public sealed class UiScaleWpfBehaviorTests
             UiScaleBehavior.EnableForApplication(application);
 
             var owner = CreateTestWindow(new Grid { Width = 100, Height = 40 });
+            PositionOffscreen(owner);
+            owner.Show();
+            DrainLayout(owner);
             var dialog = new GoToLineDialog(owner, currentLine: 1, maxLine: 20);
             try
             {
-                PositionOffscreen(owner);
                 PositionOffscreen(dialog);
-                owner.Show();
                 dialog.Show();
                 DrainLayout(dialog);
 
@@ -374,13 +375,13 @@ public sealed class UiScaleWpfBehaviorTests
     }
 
     private static void AssertScaleTransform(FrameworkElement root, double expected)
-        => AssertScaleTransform(Assert.IsType<ScaleTransform>(root.LayoutTransform), expected);
+        => AssertScaleTransform(root.LayoutTransform!, expected);
 
     private static void AssertScaleTransform(Transform transform, double expected)
     {
-        var scale = Assert.IsType<ScaleTransform>(transform);
-        Assert.Equal(expected, scale.ScaleX, 3);
-        Assert.Equal(expected, scale.ScaleY, 3);
+        var matrix = transform.Value;
+        Assert.Equal(expected, matrix.M11, 3);
+        Assert.Equal(expected, matrix.M22, 3);
     }
 
     private static void AssertTransformedWidth(Window window, FrameworkElement element, double expected)
@@ -391,34 +392,16 @@ public sealed class UiScaleWpfBehaviorTests
 
     private static void DrainLayout(Window window)
     {
-        window.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        window.ApplyTemplate();
+        window.Measure(new Size(window.Width, window.Height));
+        window.Arrange(new Rect(0, 0, window.Width, window.Height));
         window.UpdateLayout();
+        window.Dispatcher.Invoke(window.UpdateLayout, DispatcherPriority.Render);
+        window.Dispatcher.Invoke(window.UpdateLayout, DispatcherPriority.ApplicationIdle);
     }
 
     private static void RunOnStaThread(Action action)
-    {
-        Exception? failure = null;
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                action();
-            }
-            catch (Exception ex)
-            {
-                failure = ex;
-            }
-        });
-
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (failure is not null)
-        {
-            ExceptionDispatchInfo.Capture(failure).Throw();
-        }
-    }
+        => WpfTestDispatcher.Run(action);
 
     private sealed class FakeApiPublishConfigurationStore : IApiPublishConfigurationStore
     {

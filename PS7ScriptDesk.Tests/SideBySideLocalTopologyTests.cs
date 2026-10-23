@@ -491,8 +491,12 @@ public sealed class SideBySideLocalTopologyTests
 
     private static void Drain(Window window)
     {
-        window.Dispatcher.Invoke(DispatcherPriority.Loaded, new Action(window.UpdateLayout));
+        window.ApplyTemplate();
+        window.Measure(new Size(window.Width, window.Height));
+        window.Arrange(new Rect(0, 0, window.Width, window.Height));
         window.UpdateLayout();
+        window.Dispatcher.Invoke(DispatcherPriority.Loaded, new Action(window.UpdateLayout));
+        window.Dispatcher.Invoke(DispatcherPriority.Render, new Action(window.UpdateLayout));
     }
 
     private static void Close(MainWindow window)
@@ -505,21 +509,7 @@ public sealed class SideBySideLocalTopologyTests
     }
 
     private static void RunOnStaThread(Action action)
-    {
-        Exception? failure = null;
-        var thread = new Thread(() =>
-        {
-            try { action(); }
-            catch (Exception ex) { failure = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (failure is not null)
-        {
-            ExceptionDispatchInfo.Capture(failure).Throw();
-        }
-    }
+        => WpfTestDispatcher.Run(action);
 
     private static App EnsureShellApplication()
     {

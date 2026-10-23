@@ -5,6 +5,7 @@ using PS7ScriptDesk.Shell.Editor;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection("WpfUi")]
 public sealed class EditorNativeCommandTests
 {
     [Fact]
@@ -40,16 +41,5 @@ public sealed class EditorNativeCommandTests
     }
 
     private static void RunOnStaThread(Action action)
-    {
-        Exception? failure = null;
-        var thread = new Thread(() =>
-        {
-            try { action(); }
-            catch (Exception exception) { failure = exception; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
-    }
+        => WpfTestDispatcher.Run(action);
 }

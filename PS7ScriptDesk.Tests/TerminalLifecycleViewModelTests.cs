@@ -512,14 +512,17 @@ public sealed class TerminalLifecycleViewModelTests
         var runtime = CreateRuntime();
         var viewModel = await CreateViewModelAsync(console, runtime);
 
-        for (var i = 0; i < 5; i++)
+        for (var i = 0; i < 3; i++)
         {
             console.IsSessionRunning = false;
             console.IsCommandInProgress = false;
             console.RaiseSessionTerminated();
-            await Task.Delay(350);
+            await WaitUntilAsync(() => console.Operations.Count(operation => operation == "start") == i + 1 && viewModel.StatusText.Contains("restarted", StringComparison.OrdinalIgnoreCase));
         }
 
+        console.IsSessionRunning = false;
+        console.IsCommandInProgress = false;
+        console.RaiseSessionTerminated();
         await WaitUntilAsync(() => viewModel.StatusText.Contains("Automatic recovery paused", StringComparison.Ordinal));
 
         Assert.Equal(3, console.Operations.Count(operation => operation == "start"));

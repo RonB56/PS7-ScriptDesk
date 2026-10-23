@@ -15,6 +15,8 @@ public sealed class GitCommitWorkspaceFlowTests
         var root = CreateRepository("initial.ps1", "Write-Output initial");
         try
         {
+            File.WriteAllText(Path.Combine(root, "initial.ps1"), "Write-Output changed");
+            RunGit(root, "add", "--", "initial.ps1");
             var service = new GitService(new GitCommandRunner(), new GitRepositoryLocator(new GitCommandRunner()));
             var coordinator = new GitWorkspaceCoordinator(service);
             using var viewModel = CreateViewModel(service, coordinator);
@@ -30,6 +32,10 @@ public sealed class GitCommitWorkspaceFlowTests
             Assert.False(viewModel.CommitCommand.CanExecute(null));
             Assert.Equal("main", workspace.Branches!.SelectedBranch?.Name);
             Assert.Contains(workspace.Branches.SelectedBranch, workspace.Branches.Branches);
+            Assert.Empty(RunGit(root, "status", "--porcelain=v1"));
+            await WaitUntilAsync(
+                () => coordinator.CurrentState?.Changes.All(change => !change.IsStaged) == true,
+                "the Git Workspace state to publish the post-commit clean status");
             Assert.DoesNotContain(coordinator.CurrentState!.Changes, change => change.IsStaged);
         }
         finally
@@ -87,6 +93,7 @@ public sealed class GitCommitWorkspaceFlowTests
         RunGit(root, "config", "user.email", "scriptdesk@example.invalid");
         File.WriteAllText(Path.Combine(root, fileName), content);
         RunGit(root, "add", "--", fileName);
+        RunGit(root, "commit", "-m", "Initial test commit");
         return root;
     }
 
@@ -116,6 +123,17 @@ public sealed class GitCommitWorkspaceFlowTests
         try { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string description)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!condition() && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(25);
+        }
+
+        Assert.True(condition(), $"Timed out waiting for {description}.");
     }
 
     private sealed class FailingCommitRunner : IGitCommandRunner

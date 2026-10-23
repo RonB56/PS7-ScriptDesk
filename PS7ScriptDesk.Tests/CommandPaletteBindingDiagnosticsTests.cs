@@ -1,4 +1,5 @@
 using System.Threading;
+using System.Reflection;
 using System.Windows.Media;
 using System.Windows;
 using System.Windows.Controls;
@@ -15,29 +16,16 @@ public sealed class CommandPaletteBindingDiagnosticsTests
     public void PaletteDisplayTextBindingMustResolveOnTheActualResultObject()
     {
         string? visibleText = null;
-        Exception? failure = null;
-        var thread = new Thread(() =>
+        WpfTestDispatcher.Run(() =>
         {
-            try
-            {
-                var definition = new EditorCommandDefinition("test.visible", "TEST COMMAND VISIBLE", string.Empty, string.Empty, Array.Empty<string>(), () => true, () => { });
-                var item = new CommandPaletteItem(definition);
-                var textBlock = new TextBlock();
-                textBlock.SetBinding(TextBlock.TextProperty, new Binding("DisplayText"));
-                textBlock.DataContext = item;
-                Dispatcher.CurrentDispatcher.Invoke(DispatcherPriority.DataBind, new Action(() => { }));
-                visibleText = textBlock.Text;
-            }
-            catch (Exception exception)
-            {
-                failure = exception;
-            }
+            var definition = new EditorCommandDefinition("test.visible", "TEST COMMAND VISIBLE", string.Empty, string.Empty, Array.Empty<string>(), () => true, () => { });
+            var item = new CommandPaletteItem(definition);
+            var textBlock = new TextBlock();
+            textBlock.SetBinding(TextBlock.TextProperty, new Binding("DisplayText"));
+            textBlock.DataContext = item;
+            WpfTestDispatcher.Dispatcher.Invoke(DispatcherPriority.DataBind, new Action(() => { }));
+            visibleText = textBlock.Text;
         });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (failure is not null) throw failure;
         Assert.Equal("TEST COMMAND VISIBLE", visibleText);
     }
 
@@ -45,38 +33,42 @@ public sealed class CommandPaletteBindingDiagnosticsTests
     public void PaletteItemTemplateMustRenderThroughTheApplicationListBoxItemTemplate()
     {
         string? visibleText = null;
-        Exception? failure = null;
-        var thread = new Thread(() =>
+        WpfTestDispatcher.Run(() =>
         {
+            var definition = new EditorCommandDefinition("test.visible", "TEST COMMAND VISIBLE", string.Empty, string.Empty, Array.Empty<string>(), () => true, () => { });
+            var owner = new Window
+            {
+                Width = 800,
+                Height = 600,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Left = -2000,
+                Top = -2000,
+                ShowInTaskbar = false
+            };
+            CommandPaletteWindow? palette = null;
             try
             {
-                var app = System.Windows.Application.Current as PS7ScriptDesk.Shell.App ?? new PS7ScriptDesk.Shell.App();
-                app.InitializeComponent();
-                var definition = new EditorCommandDefinition("test.visible", "TEST COMMAND VISIBLE", string.Empty, string.Empty, Array.Empty<string>(), () => true, () => { });
-                var list = new ListBox { ItemsSource = new[] { new CommandPaletteItem(definition) } };
-                var itemText = new FrameworkElementFactory(typeof(TextBlock));
-                itemText.SetBinding(TextBlock.TextProperty, new Binding(nameof(CommandPaletteItem.DisplayText)));
-                list.ItemTemplate = new DataTemplate { VisualTree = itemText };
-                var host = new Window { Content = list, Width = 400, Height = 100 };
-                host.Show();
-                host.UpdateLayout();
-                visibleText = FindVisualChild<TextBlock>(list)?.Text;
-                host.Close();
-            }
-            catch (Exception exception)
-            {
-                failure = exception;
+                owner.Show();
+                var registry = new EditorCommandRegistry(new[] { definition });
+                palette = new CommandPaletteWindow(owner, registry);
+                var resultsField = typeof(CommandPaletteWindow).GetField("_results", BindingFlags.Instance | BindingFlags.NonPublic);
+                var results = Assert.IsType<ListBox>(resultsField?.GetValue(palette));
+                Assert.IsType<DataTemplate>(results.ItemTemplate);
+                palette.Show();
+                WpfTestDispatcher.Dispatcher.Invoke(() => { }, DispatcherPriority.DataBind);
+                WpfTestDispatcher.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+                palette.UpdateLayout();
+                var item = Assert.IsType<ListBoxItem>(results.ItemContainerGenerator.ContainerFromIndex(0));
+                visibleText = FindVisualChildren<TextBlock>(item)
+                    .Select(textBlock => textBlock.Text)
+                    .FirstOrDefault(text => text == "TEST COMMAND VISIBLE");
             }
             finally
             {
-                Dispatcher.CurrentDispatcher.InvokeShutdown();
+                if (palette?.IsVisible is true) palette.Close();
+                if (owner.IsVisible) owner.Close();
             }
         });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (failure is not null) throw failure;
         Assert.Equal("TEST COMMAND VISIBLE", visibleText);
     }
 
@@ -91,5 +83,15 @@ public sealed class CommandPaletteBindingDiagnosticsTests
         }
 
         return null;
+    }
+
+    private static IEnumerable<T> FindVisualChildren<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index);
+            if (child is T match) yield return match;
+            foreach (var descendant in FindVisualChildren<T>(child)) yield return descendant;
+        }
     }
 }

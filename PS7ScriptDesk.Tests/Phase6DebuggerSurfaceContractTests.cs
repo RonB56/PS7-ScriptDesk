@@ -13,6 +13,7 @@ public sealed class Phase6DebuggerSurfaceContractTests
         var app = Read("PS7ScriptDesk.Shell", "App.xaml");
         var debug = Read("PS7ScriptDesk.Shell", "Debug", "DebugPaneWindow.xaml");
         var debugCode = Read("PS7ScriptDesk.Shell", "Debug", "DebugPaneWindow.xaml.cs");
+        var dockableCode = Read("PS7ScriptDesk.Shell", "DockableToolWindow.cs");
         var main = Read("PS7ScriptDesk.Shell", "MainWindow.xaml");
 
         Assert.Contains("x:Key=\"IdeDebuggerTabItemStyle\"", app, StringComparison.Ordinal);
@@ -48,7 +49,9 @@ public sealed class Phase6DebuggerSurfaceContractTests
         {
             Assert.Contains(preserved, debug, StringComparison.Ordinal);
         }
-        Assert.Contains("DockBackRequested", debugCode, StringComparison.Ordinal);
+        Assert.Contains("Click=\"DockBackButton_Click\"", debug, StringComparison.Ordinal);
+        Assert.Contains("RequestDockBackFromControl", debugCode, StringComparison.Ordinal);
+        Assert.Contains("event EventHandler? DockBackRequested", dockableCode, StringComparison.Ordinal);
 
         Assert.Contains("Text=\"Debug Output\"", main, StringComparison.Ordinal);
         Assert.Contains("DebugOutputClear_Click", main, StringComparison.Ordinal);

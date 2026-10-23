@@ -7,6 +7,7 @@ using PS7ScriptDesk.PowerShell.Services;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection(ExternalPowerShellTestCollection.Name)]
 public sealed class PSScriptAnalyzerPhase3Tests
 {
     [Fact]

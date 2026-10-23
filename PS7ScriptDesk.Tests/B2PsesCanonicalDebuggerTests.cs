@@ -159,7 +159,10 @@ public sealed class B2PsesCanonicalDebuggerTests
                 TryGetScopeValue(functionAVariables, "Command", "args") is not null,
                 $"The official PSES scope responses were not readable. C={FormatVariables("FunctionC", functionCVariables)}; B={FormatVariables("FunctionB", functionBVariables)}; A={FormatVariables("FunctionA", functionAVariables)}; Traffic={FormatTraffic(traffic)}");
 
-            var disconnect = await connection.SendRequestAsync("disconnect", new { terminateDebuggee = true, restart = false }, TimeSpan.FromSeconds(15));
+            var continueResponse = await connection.SendRequestAsync("continue", new { threadId = stoppedThreadId, singleThread = false }, TimeSpan.FromSeconds(15));
+            Assert.True(continueResponse.Success, continueResponse.Message);
+
+            var disconnect = await connection.SendRequestAsync("disconnect", new { terminateDebuggee = false, restart = false }, TimeSpan.FromSeconds(15));
             Assert.True(disconnect.Success, disconnect.Message);
         }
         finally

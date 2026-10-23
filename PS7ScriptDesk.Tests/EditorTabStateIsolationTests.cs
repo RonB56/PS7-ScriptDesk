@@ -72,8 +72,8 @@ public sealed class EditorTabStateIsolationTests
         Assert.Contains("ReferenceEquals(editorTextEditor.Document, targetDocument)", main, StringComparison.Ordinal);
         Assert.Contains("focusRequestVersion != Volatile.Read", main, StringComparison.Ordinal);
         Assert.Contains("EnsureVisualLines", main, StringComparison.Ordinal);
-        var focusStart = main.IndexOf("private void FocusActiveEditorSoon()", StringComparison.Ordinal);
-        var focusEnd = main.IndexOf("private void OpenFile_Click", focusStart, StringComparison.Ordinal);
+        var focusStart = main.IndexOf("private void FocusActiveEditorSoon(", StringComparison.Ordinal);
+        var focusEnd = main.IndexOf("OpenFile_Click(", focusStart, StringComparison.Ordinal);
         Assert.True(focusStart >= 0 && focusEnd > focusStart);
         Assert.DoesNotContain("catch (ArgumentException", main[focusStart..focusEnd], StringComparison.Ordinal);
     }
@@ -82,7 +82,7 @@ public sealed class EditorTabStateIsolationTests
     public void FileOpenEntryPointUsesTheSharedDocumentOpenPathAndGuardedFocus()
     {
         var main = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
-        var openStart = main.IndexOf("private void OpenFile_Click", StringComparison.Ordinal);
+        var openStart = main.IndexOf("private void OpenFile_Click(", StringComparison.Ordinal);
         var openEnd = main.IndexOf("private void FileMenuItem_SubmenuOpened", openStart, StringComparison.Ordinal);
 
         Assert.True(openStart >= 0 && openEnd > openStart);

@@ -4,6 +4,7 @@ using PS7ScriptDesk.Shell.Editor;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection(ExternalPowerShellTestCollection.Name)]
 public sealed class PowerShellIntelliSenseStartupReadinessTests
 {
     [Theory]

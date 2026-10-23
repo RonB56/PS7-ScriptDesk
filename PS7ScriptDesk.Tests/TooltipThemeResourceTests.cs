@@ -81,9 +81,13 @@ public sealed class TooltipThemeResourceTests
                 Key = (string?)element.Attribute(xaml + "Key"),
                 Color = (string?)element.Attribute("Color")
             })
-            .Where(entry => !string.IsNullOrWhiteSpace(entry.Key) && !string.IsNullOrWhiteSpace(entry.Color))
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.Key) && IsHexColor(entry.Color))
             .ToDictionary(entry => entry.Key!, entry => ParseColor(entry.Color!), StringComparer.Ordinal);
     }
+
+    private static bool IsHexColor(string? value)
+        => !string.IsNullOrWhiteSpace(value)
+            && System.Text.RegularExpressions.Regex.IsMatch(value.Trim(), "^#[0-9A-Fa-f]{6}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private static Rgb ParseColor(string value)
     {

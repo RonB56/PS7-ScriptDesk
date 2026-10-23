@@ -1719,11 +1719,19 @@ namespace PS7ScriptDesk.Shell.Editor
         {
             var entered = false;
             var transportRequestId = $"GT-{Guid.NewGuid():N}";
+            bool requestStartedDuringColdGeneration;
+            lock (_syncRoot)
+            {
+                requestStartedDuringColdGeneration = _process is null ||
+                    _process.HasExited ||
+                    _completionWarmGeneration != _completionProcessGeneration;
+            }
             var gateWaitStarted = Stopwatch.GetTimestamp();
             EditorInputTrace.Log("CompletionGateWaitStarted", properties: new Dictionary<string, object?>
             {
                 ["transportRequestId"] = transportRequestId,
-                ["isCompletionRequest"] = isCompletionRequest
+                ["isCompletionRequest"] = isCompletionRequest,
+                ["requestStartedDuringColdGeneration"] = requestStartedDuringColdGeneration
             });
             try
             {
@@ -1751,12 +1759,12 @@ namespace PS7ScriptDesk.Shell.Editor
                 var effectiveTimeout = timeout;
                 lock (_syncRoot)
                 {
-                    if (_completionWarmGeneration != _completionProcessGeneration &&
+                    if ((requestStartedDuringColdGeneration || _completionWarmGeneration != _completionProcessGeneration) &&
                         timeout >= TimeSpan.FromMilliseconds(300) &&
                         timeout <= TimeSpan.FromMilliseconds(500))
                     {
                         effectiveTimeout = ColdCompletionResponseTimeout;
-                        AppLogger.Debug("EditorCompletion", $"Completion generation is cold. Applying measured cold response budget. Generation={_completionProcessGeneration}, ResponseBudgetMs={effectiveTimeout.TotalMilliseconds:N0}.");
+                        AppLogger.Debug("EditorCompletion", $"Completion generation is cold for this request. Applying measured cold response budget. Generation={_completionProcessGeneration}, RequestStartedDuringColdGeneration={requestStartedDuringColdGeneration}, ResponseBudgetMs={effectiveTimeout.TotalMilliseconds:N0}.");
                     }
                 }
 
