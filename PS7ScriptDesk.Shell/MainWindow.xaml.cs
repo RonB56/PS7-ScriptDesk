@@ -447,6 +447,39 @@ namespace PS7ScriptDesk.Shell
 
         public string AdministratorModeBannerDetail => _administratorModeBannerState.Detail;
 
+        internal void ShowStoreUpdateBanner(StoreUpdateService service, StoreUpdateCheckResult result)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(() => ShowStoreUpdateBanner(service, result));
+                return;
+            }
+
+            if (StoreUpdateBannerHost.Content is StoreUpdateBanner)
+            {
+                return;
+            }
+
+            var banner = new StoreUpdateBanner(service, result);
+            banner.DismissRequested += StoreUpdateBanner_DismissRequested;
+            StoreUpdateBannerHost.Content = banner;
+            StoreUpdateBannerHost.Visibility = Visibility.Visible;
+            DeveloperDiagnostics.LogDecision("StoreUpdate", "InlineBannerPresentation", "Displayed the optional Store update as a dedicated shell layout region.", "Shown",
+                new Dictionary<string, object?> { ["currentVersion"] = result.PackageVersion, ["updateCount"] = result.UpdateCount });
+        }
+
+        private void StoreUpdateBanner_DismissRequested(object? sender, EventArgs e)
+        {
+            if (sender is StoreUpdateBanner banner)
+            {
+                banner.DismissRequested -= StoreUpdateBanner_DismissRequested;
+            }
+
+            StoreUpdateBannerHost.Content = null;
+            StoreUpdateBannerHost.Visibility = Visibility.Collapsed;
+            DeveloperDiagnostics.LogDecision("StoreUpdate", "InlineBannerPresentation", "Collapsed the optional Store update banner after dismissal.", "Hidden");
+        }
+
         private static void OnIsContextHelpEnabledChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
         {
             if (d is not MainWindow window)

@@ -117,10 +117,11 @@ public sealed class WholeApplicationVisualConsistencyTests
         Assert.Contains("StoreUpdateStartupState.Read()", mainWindowCode, StringComparison.Ordinal);
         Assert.Contains("snapshot.CheckInProgress", mainWindowCode, StringComparison.Ordinal);
         Assert.Contains("ShowManualStoreUpdateWindow(snapshot.Service, checkResult)", mainWindowCode, StringComparison.Ordinal);
-        Assert.Contains("new StoreUpdateWindow(storeUpdateService, checkResult, isMandatory: checkResult.HasMandatoryUpdate)", mainWindowCode, StringComparison.Ordinal);
+        Assert.Contains("ShowManualStoreUpdateWindow(snapshot.Service, checkResult)", mainWindowCode, StringComparison.Ordinal);
 
         Assert.Contains("!storeUpdateCheckResult.ShouldShowAutomaticNotification", appCode, StringComparison.Ordinal);
         Assert.Contains("isMandatory: storeUpdateCheckResult.HasMandatoryUpdate", appCode, StringComparison.Ordinal);
+        Assert.Contains("ShowStoreUpdateBanner(storeUpdateService, storeUpdateCheckResult)", appCode, StringComparison.Ordinal);
     }
 
     [Fact]

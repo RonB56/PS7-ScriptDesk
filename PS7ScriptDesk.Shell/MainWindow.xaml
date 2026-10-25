@@ -860,6 +860,11 @@
             </ToolBar>
         </ToolBarTray>
 
+        <ContentControl x:Name="StoreUpdateBannerHost"
+                        DockPanel.Dock="Top"
+                        Visibility="Collapsed"
+                        AutomationProperties.Name="PowerShell update banner" />
+
         <StatusBar DockPanel.Dock="Bottom"
                    Style="{StaticResource IdeModernStatusBarStyle}"
                    help:ContextHelp.Key="Status.General">

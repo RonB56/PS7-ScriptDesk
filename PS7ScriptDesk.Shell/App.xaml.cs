@@ -582,6 +582,9 @@ namespace PS7ScriptDesk.Shell
             {
                 AppLogger.Info("StoreUpdate", "Startup Store/MSIX update check requested.");
                 var storeUpdateCheckResult = await storeUpdateService.CheckForUpdatesAsync(CancellationToken.None).ConfigureAwait(true);
+#if DEBUG
+                ApplyDebugUpdateBannerInjection(storeUpdateCheckResult);
+#endif
                 StoreUpdateStartupState.Complete(storeUpdateService, storeUpdateCheckResult);
                 ShowNonBlockingStoreUpdateNotificationIfNeeded(shellWindow, storeUpdateService, storeUpdateCheckResult);
             }
@@ -602,6 +605,29 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
+#if DEBUG
+        private static void ApplyDebugUpdateBannerInjection(StoreUpdateCheckResult result)
+        {
+            if (!string.Equals(Environment.GetEnvironmentVariable("PS7SCRIPTDESK_TEST_UPDATE_BANNER"), "1", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            result.PackagingKind = StoreUpdatePackagingKind.StoreInstalledManaged;
+            result.AvailabilityState = StoreUpdateAvailabilityState.ConfirmedUpdateAvailable;
+            result.StoreUpdateCheckAvailable = true;
+            result.PackageVersion = string.IsNullOrWhiteSpace(result.PackageVersion) ? "test-current" : result.PackageVersion;
+            result.UpdateCount = 1;
+            result.RawStoreContext ??= new object();
+            result.RawUpdatesCollection ??= new object();
+            result.Updates = new List<StoreUpdatePackageInfo>
+            {
+                new(result.PackageFamilyName, isMandatory: false, version: "test-available")
+            };
+            DeveloperDiagnostics.LogDecision("StoreUpdate", "DebugUpdateBannerInjection", "Injected a test-only optional update result for visual banner verification.", "Applied");
+        }
+#endif
+
         private static void ShowNonBlockingStoreUpdateNotificationIfNeeded(Window shellWindow, StoreUpdateService storeUpdateService, StoreUpdateCheckResult? storeUpdateCheckResult)
         {
             if (shellWindow is null || storeUpdateCheckResult is null || !storeUpdateCheckResult.ShouldShowAutomaticNotification)
@@ -613,12 +639,12 @@ namespace PS7ScriptDesk.Shell
             {
                 try
                 {
-                    var updateWindow = new StoreUpdateWindow(storeUpdateService, storeUpdateCheckResult, isMandatory: storeUpdateCheckResult.HasMandatoryUpdate)
-                    {
-                        Owner = shellWindow
-                    };
                     if (storeUpdateCheckResult.HasMandatoryUpdate)
                     {
+                        var updateWindow = new StoreUpdateWindow(storeUpdateService, storeUpdateCheckResult, isMandatory: true)
+                        {
+                            Owner = shellWindow
+                        };
                         AppLogger.Info("StoreUpdate", "Mandatory Store-managed update detected after startup. Showing modal update dialog.");
                         DeveloperDiagnostics.LogDecision("StoreUpdate", "StoreUpdateStartupGate", "Mandatory Store-managed update detected after startup.", "MandatoryUpdateDialog");
                         updateWindow.ShowDialog();
@@ -626,12 +652,15 @@ namespace PS7ScriptDesk.Shell
                         return;
                     }
 
-                    updateWindow.Show();
+                    if (shellWindow is MainWindow mainWindow)
+                    {
+                        mainWindow.ShowStoreUpdateBanner(storeUpdateService, storeUpdateCheckResult);
+                    }
 
                     AppLogger.Info(
                         "StoreUpdate",
                         storeUpdateCheckResult.HasConfirmedInstallableUpdate
-                            ? "Displayed non-blocking Microsoft Store update notification after main window load."
+                            ? "Displayed inline Microsoft Store update banner after main window load."
                             : "Skipped automatic Microsoft Store update dialog because no confirmed installable update was returned.");
                     DeveloperDiagnostics.LogDecision(
                         "StoreUpdate",

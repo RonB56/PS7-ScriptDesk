@@ -1,0 +1,51 @@
+<UserControl x:Class="PS7ScriptDesk.Shell.StoreUpdateBanner"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:help="clr-namespace:PS7ScriptDesk.Shell.Help"
+             AutomationProperties.Name="PowerShell update notification">
+    <Border Padding="12,8"
+            Background="{DynamicResource Theme.Status.Warning.Background}"
+            BorderBrush="{DynamicResource Theme.Status.Warning.Border}"
+            BorderThickness="0,1,0,1">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="TitleTextBlock"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource Theme.Status.Warning.Foreground}"
+                       VerticalAlignment="Center"
+                       Margin="0,0,12,0" />
+            <TextBlock x:Name="DetailsTextBlock"
+                       Grid.Column="1"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource Theme.Status.Warning.Foreground}"
+                       VerticalAlignment="Center" />
+            <WrapPanel Grid.Column="2"
+                       Margin="12,0,0,0"
+                       VerticalAlignment="Center">
+                <Button x:Name="InstallButton"
+                        Content="Install"
+                        Style="{DynamicResource IdeDialogPrimaryButtonStyle}"
+                        Margin="0,0,6,0"
+                        Click="InstallButton_Click"
+                        ToolTip="Start the Microsoft Store update"
+                        help:ContextHelp.Key="App.StoreUpdate" />
+                <Button Content="Store"
+                        Style="{DynamicResource IdeDialogSecondaryButtonStyle}"
+                        Margin="0,0,6,0"
+                        Click="OpenStoreButton_Click"
+                        ToolTip="Open Microsoft Store update instructions"
+                        help:ContextHelp.Key="App.StoreUpdate" />
+                <Button x:Name="DismissButton"
+                        Content="Dismiss"
+                        Style="{DynamicResource IdeDialogTertiaryButtonStyle}"
+                        Click="DismissButton_Click"
+                        ToolTip="Dismiss this update notification"
+                        help:ContextHelp.Key="App.StoreUpdate" />
+            </WrapPanel>
+        </Grid>
+    </Border>
+</UserControl>
