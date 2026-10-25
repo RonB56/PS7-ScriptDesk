@@ -142,7 +142,10 @@ namespace PS7ScriptDesk.Shell.Services
                 result.StoreUpdateCheckAvailable = true;
                 result.Updates = queryResult.Updates;
                 result.UpdateCount = queryResult.Updates.Count;
-                result.HasMandatoryUpdate = queryResult.Updates.Any(update => update.IsMandatory);
+                // StorePackageUpdate.Mandatory is Store metadata, not an application
+                // enforcement policy. ScriptDesk has no independently configured
+                // mandatory-update policy, so all detected updates remain optional.
+                result.HasMandatoryUpdate = false;
 
                 LogCheckStep(
                     "Store update query completed.",
@@ -153,7 +156,8 @@ namespace PS7ScriptDesk.Shell.Services
                         ["perPackageUpdateListReturned"] = result.PerPackageUpdateListReturned,
                         ["updateCount"] = result.UpdateCount,
                         ["packageFamilyNames"] = string.Join(", ", result.Updates.Select(update => update.PackageFamilyName)),
-                        ["mandatoryUpdatePresent"] = result.HasMandatoryUpdate
+                        ["storeReportedMandatoryUpdate"] = queryResult.Updates.Any(update => update.IsMandatory),
+                        ["mandatoryUpdateEnforced"] = result.HasMandatoryUpdate
                     });
 
                 foreach (var update in result.Updates)
@@ -171,11 +175,6 @@ namespace PS7ScriptDesk.Shell.Services
                 {
                     result.AvailabilityState = StoreUpdateAvailabilityState.NoUpdateAvailable;
                     result.StatusMessage = "No Microsoft Store updates were available.";
-                }
-                else if (result.HasMandatoryUpdate)
-                {
-                    result.AvailabilityState = StoreUpdateAvailabilityState.ConfirmedUpdateAvailable;
-                    result.StatusMessage = "A mandatory Microsoft Store update is required before using PS7 ScriptDesk.";
                 }
                 else
                 {

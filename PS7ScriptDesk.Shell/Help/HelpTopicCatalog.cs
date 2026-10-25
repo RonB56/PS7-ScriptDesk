@@ -211,7 +211,7 @@ namespace PS7ScriptDesk.Shell.Help
                     "Use it when PS7 ScriptDesk shows an automatic update notification or when you choose Help > Check for Updates.",
                     "The window can start a Microsoft Store update request or open the Store update page, but it does not replace Windows or Microsoft Store package management.",
                     Section("Automatic startup checks", false,
-                        "After startup, PS7 ScriptDesk shows a notification only when it confirms an installable Store-managed update or detects a mandatory update.",
+                        "After startup, PS7 ScriptDesk shows the inline banner only when it confirms an installable Store-managed update.",
                         "Startup stays quiet for no-update results, unpackaged or local builds, sideloaded or test packages, and routine manual Store instructions."),
                     Section("Manual checks", false,
                         "Help > Check for Updates runs the same safe update detection service on demand and opens this window with the result.",
@@ -222,8 +222,7 @@ namespace PS7ScriptDesk.Shell.Help
                         "Open Microsoft Store opens the Store updates page and provides the Library > Get updates route.",
                         "Open Logs Folder and Copy Logs Path help collect support information if update checking or installation reports a problem."),
                     Section("Close and restart", false,
-                        "For an optional update, Close dismisses the non-blocking window and you can keep working.",
-                        "For a mandatory update, closing the modal update window exits PS7 ScriptDesk. The app does not make a restart guarantee; follow the Store result and Windows prompts."),
+                        "Close dismisses the inline banner and you can keep working. Store updates are optional by default; ScriptDesk does not block startup for a detected update."),
                     related: new[] { "Help.Packaging", "Help.About", "Status.Version", "Help.Logs", "Help.Troubleshooting" },
                     keywords: new[] { "update", "Microsoft Store", "Store update", "install update", "package" }),
 

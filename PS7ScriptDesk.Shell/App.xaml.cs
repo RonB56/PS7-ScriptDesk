@@ -639,19 +639,6 @@ namespace PS7ScriptDesk.Shell
             {
                 try
                 {
-                    if (storeUpdateCheckResult.HasMandatoryUpdate)
-                    {
-                        var updateWindow = new StoreUpdateWindow(storeUpdateService, storeUpdateCheckResult, isMandatory: true)
-                        {
-                            Owner = shellWindow
-                        };
-                        AppLogger.Info("StoreUpdate", "Mandatory Store-managed update detected after startup. Showing modal update dialog.");
-                        DeveloperDiagnostics.LogDecision("StoreUpdate", "StoreUpdateStartupGate", "Mandatory Store-managed update detected after startup.", "MandatoryUpdateDialog");
-                        updateWindow.ShowDialog();
-                        System.Windows.Application.Current?.Shutdown(0);
-                        return;
-                    }
-
                     if (shellWindow is MainWindow mainWindow)
                     {
                         mainWindow.ShowStoreUpdateBanner(storeUpdateService, storeUpdateCheckResult);
@@ -665,7 +652,7 @@ namespace PS7ScriptDesk.Shell
                     DeveloperDiagnostics.LogDecision(
                         "StoreUpdate",
                         "ShowNonBlockingUpdateNotification",
-                        "Displayed Store update dialog after main window load only for a confirmed installable update.",
+                        "Displayed inline Store update banner after main window load only for a confirmed installable update.",
                         "Shown",
                         new Dictionary<string, object?>
                         {

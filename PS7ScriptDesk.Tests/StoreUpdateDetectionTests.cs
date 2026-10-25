@@ -172,6 +172,27 @@ public sealed class StoreUpdateDetectionTests
     }
 
     [Fact]
+    public async Task StoreReportedMandatoryMetadataRemainsOptionalWithoutScriptDeskPolicy()
+    {
+        var query = FakeStoreQuery.Returning(StoreUpdateQueryResult.UpdatesReturned(
+            new object(),
+            new object(),
+            new List<StoreUpdatePackageInfo>
+            {
+                new("31735RonBarnes.PowerShell7.xScriptDesk_wbw8xvvd4njnt", isMandatory: true, version: "1.0.72.0")
+            }));
+        var service = CreateService(StorePackage("Store", isDevelopmentMode: false), query);
+
+        var result = await service.CheckForUpdatesAsync(CancellationToken.None);
+
+        Assert.Equal(StoreUpdateAvailabilityState.ConfirmedUpdateAvailable, result.AvailabilityState);
+        Assert.True(result.HasConfirmedInstallableUpdate);
+        Assert.False(result.HasMandatoryUpdate);
+        Assert.True(result.ShouldShowAutomaticNotification);
+        Assert.Contains("optional", result.StatusMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task StoreApiUnavailableKeepsStorePackageClassificationButDisablesInstall()
     {
         var service = CreateService(

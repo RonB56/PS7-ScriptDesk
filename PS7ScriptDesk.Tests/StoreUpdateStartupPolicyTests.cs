@@ -28,6 +28,9 @@ public sealed class StoreUpdateStartupPolicyTests
         Assert.Contains("_ = CheckForStoreUpdatesAfterStartupAsync(shellWindow);", appSource, StringComparison.Ordinal);
         Assert.Contains("StoreUpdateStartupState.Begin", appSource, StringComparison.Ordinal);
         Assert.Contains("StoreUpdateStartupState.Complete", appSource, StringComparison.Ordinal);
+        Assert.Contains("result.HasMandatoryUpdate = false", serviceSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("queryResult.Updates.Any(update => update.IsMandatory)", serviceSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("Application.Current?.Shutdown(0)", appSource, StringComparison.Ordinal);
 
         Assert.Contains("StoreUpdateStartupState.Read()", mainWindowSource, StringComparison.Ordinal);
         Assert.DoesNotContain("Manual Store/MSIX update check requested from Help", mainWindowSource, StringComparison.Ordinal);

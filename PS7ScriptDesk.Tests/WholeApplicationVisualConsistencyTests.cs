@@ -120,7 +120,6 @@ public sealed class WholeApplicationVisualConsistencyTests
         Assert.Contains("ShowManualStoreUpdateWindow(snapshot.Service, checkResult)", mainWindowCode, StringComparison.Ordinal);
 
         Assert.Contains("!storeUpdateCheckResult.ShouldShowAutomaticNotification", appCode, StringComparison.Ordinal);
-        Assert.Contains("isMandatory: storeUpdateCheckResult.HasMandatoryUpdate", appCode, StringComparison.Ordinal);
         Assert.Contains("ShowStoreUpdateBanner(storeUpdateService, storeUpdateCheckResult)", appCode, StringComparison.Ordinal);
     }
 
