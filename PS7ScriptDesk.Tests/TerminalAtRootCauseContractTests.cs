@@ -31,8 +31,5 @@ public sealed class TerminalAtRootCauseContractTests
     }
 
     private static string ReadRepositoryFile(params string[] segments)
-    {
-        var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
-        return File.ReadAllText(Path.Combine(new[] { root }.Concat(segments).ToArray()));
-    }
+        => TestRepositoryPaths.ReadFile(segments);
 }

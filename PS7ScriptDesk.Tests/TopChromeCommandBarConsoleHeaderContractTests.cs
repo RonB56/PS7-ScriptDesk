@@ -69,8 +69,8 @@ public sealed class TopChromeCommandBarConsoleHeaderContractTests
         Assert.Contains("Property=\"IsPressed\"", app, StringComparison.Ordinal);
         Assert.Contains("Property=\"IsKeyboardFocused\"", app, StringComparison.Ordinal);
         Assert.Contains("Theme.Border.Focus", app, StringComparison.Ordinal);
-        Assert.Contains("Value=\"2,0\"", app, StringComparison.Ordinal);
-        Assert.Contains("Value=\"10,4\"", app, StringComparison.Ordinal);
+        Assert.Contains("Value=\"1,0\"", app, StringComparison.Ordinal);
+        Assert.Contains("Value=\"8,3\"", app, StringComparison.Ordinal);
     }
 
     [Fact]

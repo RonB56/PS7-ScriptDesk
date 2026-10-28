@@ -27,7 +27,7 @@
         <sys:Double x:Key="Spacing.Large">16</sys:Double>
         <sys:Double x:Key="Spacing.XLarge">24</sys:Double>
 
-        <sys:Double x:Key="Theme.ControlHeight.Toolbar">32</sys:Double>
+        <sys:Double x:Key="Theme.ControlHeight.Toolbar">28</sys:Double>
         <sys:Double x:Key="Theme.ControlHeight.PaneHeader">32</sys:Double>
         <sys:Double x:Key="Theme.ControlHeight.Standard">28</sys:Double>
         <sys:Double x:Key="Theme.ControlHeight.Compact">24</sys:Double>
@@ -49,7 +49,7 @@
 
         <Thickness x:Key="Padding.PaneHeader">12,6</Thickness>
         <Thickness x:Key="Padding.Tab">10,5</Thickness>
-        <Thickness x:Key="Padding.Toolbar">8,4</Thickness>
+        <Thickness x:Key="Padding.Toolbar">6,2</Thickness>
 
         <DropShadowEffect x:Key="CardShadowEffect"
                           BlurRadius="12"
@@ -1182,8 +1182,9 @@
             <Setter Property="Background" Value="{DynamicResource Theme.Surface.Secondary}" />
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="MinHeight" Value="30" />
             <Setter Property="Padding" Value="{StaticResource Padding.Toolbar}" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
         </Style>
 
         <Style x:Key="IdeToolbarButtonStyle" TargetType="Button">
@@ -1194,7 +1195,7 @@
             <Setter Property="Padding" Value="{StaticResource Padding.Toolbar}" />
             <Setter Property="MinHeight" Value="{StaticResource Theme.ControlHeight.Toolbar}" />
             <Setter Property="MinWidth" Value="0" />
-            <Setter Property="Margin" Value="2,0" />
+            <Setter Property="Margin" Value="1,0" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="FocusVisualStyle" Value="{StaticResource IdeButtonFocusVisualStyle}" />
             <Setter Property="ToolTipService.InitialShowDelay" Value="700" />
@@ -1245,7 +1246,7 @@
         </Style>
 
         <Style x:Key="IdeToolbarPrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource IdeToolbarButtonStyle}">
-            <Setter Property="Background" Value="{DynamicResource Theme.Button.SelectedBackground}" />
+            <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="FontWeight" Value="SemiBold" />
         </Style>
@@ -1257,8 +1258,8 @@
 
         <Style x:Key="IdeToolbarSeparatorStyle" TargetType="Separator">
             <Setter Property="Width" Value="1" />
-            <Setter Property="Height" Value="20" />
-            <Setter Property="Margin" Value="10,4" />
+            <Setter Property="Height" Value="18" />
+            <Setter Property="Margin" Value="8,3" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Separator">

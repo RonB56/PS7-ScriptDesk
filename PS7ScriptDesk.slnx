@@ -1,10 +1,7 @@
 <Solution>
   <Configurations>
-    <Platform Name="Any CPU" />
-    <Platform Name="ARM" />
     <Platform Name="ARM64" />
     <Platform Name="x64" />
-    <Platform Name="x86" />
   </Configurations>
   <Project Path="PS7ScriptDesk.Application/PS7ScriptDesk.Application.csproj" />
   <Project Path="PS7ScriptDesk.Domain/PS7ScriptDesk.Domain.csproj" />

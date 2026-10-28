@@ -270,7 +270,7 @@ namespace PS7ScriptDesk.Shell
         private readonly ApplicationSettings _loadedSettings;
         private readonly WorkspaceLayoutCoordinator _layoutCoordinator;
         private string? _nativeTitleBarTheme;
-        private readonly PowerShellIntelliSenseService _intelliSenseService = new();
+        private readonly PowerShellIntelliSenseService _intelliSenseService;
         private readonly InProcessPowerShellSyntaxDiagnosticsService _liveSyntaxDiagnosticsService = new();
         private readonly PowerShellDiagnosticsService _diagnosticsService = new();
         private readonly ScriptDiagnosticStore _scriptDiagnosticStore = new();
@@ -399,8 +399,14 @@ namespace PS7ScriptDesk.Shell
         private string? _lastScheduledEditorMetadataWarmupIdentity;
         private DateTimeOffset _lastScheduledEditorMetadataWarmupAtUtc = DateTimeOffset.MinValue;
         private PowerShellCompletionEnginePhase _lastCompletionEnginePhase = PowerShellCompletionEnginePhase.Idle;
+        private DispatcherTimer? _intelliSenseReadinessTimer;
+        private Stopwatch? _intelliSenseReadinessStopwatch;
+        private long _intelliSenseReadyElapsedMilliseconds;
+        private string _intelliSenseReadinessReason = "startup";
+        private bool _intelliSenseReconnecting;
         private EditorMetadataWarmupStatus? _pendingMetadataToastStatus;
         private EditorMetadataWarmupStatus? _visibleMetadataToastStatus;
+        private MetadataInitializationWindow? _metadataInitializationWindow;
         private bool _metadataToastVisible;
 
         private enum DebugTeardownReason
@@ -505,6 +511,8 @@ namespace PS7ScriptDesk.Shell
             _applicationSettingsService = applicationSettingsService;
             _liveConsoleServiceForObservation = liveConsoleServiceForObservation;
             _runtimeSessionCoordinator = runtimeSessionCoordinator;
+            _intelliSenseService = new PowerShellIntelliSenseService(
+                liveConsoleServiceForObservation as IAuthoritativeLiveCompletionProvider);
             _terminalOutputObservationSubscription = _terminalOutputObservationHub.Subscribe(new TerminalOutputCorrelationObserver());
             _loadedSettings = loadedSettings ?? new ApplicationSettings();
             _layoutCoordinator = new WorkspaceLayoutCoordinator(WorkspaceLayoutSettingsAdapter.FromSettings(_loadedSettings));
@@ -591,6 +599,13 @@ namespace PS7ScriptDesk.Shell
 
             _intelliSenseService.MetadataWarmupStatusChanged += IntelliSenseService_MetadataWarmupStatusChanged;
             _intelliSenseService.CompletionEngineStatusChanged += IntelliSenseService_CompletionEngineStatusChanged;
+            if (_liveConsoleServiceForObservation is not null)
+            {
+                _liveConsoleServiceForObservation.TerminalSessionStarted += IntelliSense_TerminalSessionStarted;
+                _liveConsoleServiceForObservation.TerminalSessionStopping += IntelliSense_TerminalSessionStopping;
+                _liveConsoleServiceForObservation.PromptReadyObserved += IntelliSense_PromptReadyObserved;
+                _liveConsoleServiceForObservation.SessionTerminated += IntelliSense_SessionTerminated;
+            }
 
             _editorHoverTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
             {
@@ -1603,6 +1618,7 @@ namespace PS7ScriptDesk.Shell
                 ContextHelp.ValidateWindowTopics(this);
                 ApplyExplorerVisibilityLayout();
                 RefreshDebugCommandAvailability(false);
+                BeginIntelliSenseReadinessIndicator();
                 StartEditorMetadataWarmup();
                 UpdateRefreshEditorMetadataCommandAvailability();
                 StartupTimingLogger.Log("MainWindow", $"View model hookup completed in {startupStopwatch.ElapsedMilliseconds} ms");
@@ -3238,13 +3254,35 @@ namespace PS7ScriptDesk.Shell
 
             var key = EditorShortcutRouting.ResolveKey(e.Key, e.SystemKey);
             var modifiers = Keyboard.Modifiers;
+            var inputTraceId = EditorInputTrace.IsEnabled
+                ? (_editorInputTraceByKeyEvent.TryGetValue(e, out var keyTrace)
+                    ? keyTrace.CorrelationId
+                    : EditorInputTrace.CreateCorrelationId())
+                : null;
 
-             if (_terminalIsActive)
+            EditorInputTrace.Log(
+                "EditorPreviewKeyDownRoutingDecision",
+                inputTraceId,
+                new Dictionary<string, object?>
+                {
+                    ["key"] = key.ToString(),
+                    ["modifiers"] = modifiers.ToString(),
+                    ["terminalActiveBeforeRouting"] = _terminalIsActive,
+                    ["editorFocused"] = editorTextEditor.IsKeyboardFocusWithin,
+                    ["documentIdentity"] = GetEditorInputDocumentIdentity(editorTextEditor)
+                });
+
+            if (_terminalIsActive && !editorTextEditor.IsKeyboardFocusWithin)
             {
                 AppLogger.Debug(
                     "EditorCompletion",
                     $"Editor preview key handler observed input while terminal is active. Key={e.Key}, Modifiers={Keyboard.Modifiers}, EditorFocused={editorTextEditor.IsKeyboardFocusWithin}.");
                 return;
+            }
+
+            if (_terminalIsActive)
+            {
+                SetTerminalActive(false, "EditorPreviewKeyDownFocusedEditor");
             }
 
             if (_activeCompletionWindow is not null && modifiers == ModifierKeys.None && key is Key.Tab or Key.Enter)
@@ -6413,12 +6451,20 @@ namespace PS7ScriptDesk.Shell
         {
             if (sender is DependencyObject dependencyObject)
             {
-                return FindAncestor<TextEditor>(dependencyObject);
+                var editorFromSender = FindAncestor<TextEditor>(dependencyObject);
+                if (editorFromSender is not null)
+                {
+                    return editorFromSender;
+                }
             }
 
             if (Keyboard.FocusedElement is DependencyObject focusedDependencyObject)
             {
-                return FindAncestor<TextEditor>(focusedDependencyObject);
+                var editorFromFocus = FindAncestor<TextEditor>(focusedDependencyObject);
+                if (editorFromFocus is not null)
+                {
+                    return editorFromFocus;
+                }
             }
 
             return FindActiveEditor();
@@ -9943,6 +9989,19 @@ namespace PS7ScriptDesk.Shell
 
                 _intelliSenseService.MetadataWarmupStatusChanged -= IntelliSenseService_MetadataWarmupStatusChanged;
                 _intelliSenseService.CompletionEngineStatusChanged -= IntelliSenseService_CompletionEngineStatusChanged;
+                if (_liveConsoleServiceForObservation is not null)
+                {
+                    _liveConsoleServiceForObservation.TerminalSessionStarted -= IntelliSense_TerminalSessionStarted;
+                    _liveConsoleServiceForObservation.TerminalSessionStopping -= IntelliSense_TerminalSessionStopping;
+                    _liveConsoleServiceForObservation.PromptReadyObserved -= IntelliSense_PromptReadyObserved;
+                    _liveConsoleServiceForObservation.SessionTerminated -= IntelliSense_SessionTerminated;
+                }
+                if (_intelliSenseReadinessTimer is not null)
+                {
+                    _intelliSenseReadinessTimer.Stop();
+                    _intelliSenseReadinessTimer.Tick -= IntelliSenseReadinessTimer_Tick;
+                }
+                _intelliSenseReadinessStopwatch?.Stop();
                 _scriptDiagnosticStore.Changed -= ScriptDiagnosticStore_Changed;
                 _bottomToolWindow?.CloseForOwnerShutdown();
                 _gitWorkspaceWindow?.Close();
@@ -10060,6 +10119,28 @@ namespace PS7ScriptDesk.Shell
             }
 
             return true;
+        }
+
+        internal bool TryPrepareForStoreUpdate()
+        {
+            var prepared = TryPrepareForWindowClose();
+            DeveloperDiagnostics.LogDecision(
+                "StoreUpdate",
+                "PrepareForRestart",
+                prepared
+                    ? "The main window accepted Store update restart preparation; editor state was saved or had no unsaved changes."
+                    : "The Store update restart was canceled because editor state was not approved for shutdown.",
+                prepared ? "Ready" : "Canceled");
+            return prepared;
+        }
+
+        internal void ShowStoreUpdateSuccessStatus()
+        {
+            if (ViewModel is not null)
+            {
+                ViewModel.StatusText = "PS7 ScriptDesk has been updated successfully";
+                DeveloperDiagnostics.LogInfo("StoreUpdate", "Displayed the post-relaunch update success status.");
+            }
         }
 
         private void ApplyShellLayoutFromSettings()
@@ -10275,6 +10356,8 @@ namespace PS7ScriptDesk.Shell
 
         private void Window_Closed(object? sender, EventArgs e)
         {
+            _metadataInitializationWindow?.Close();
+            _metadataInitializationWindow = null;
             _phase2BProofCancellation?.Cancel();
             _phase2BProofCancellation?.Dispose();
             _phase2BProofCancellation = null;
@@ -10450,6 +10533,132 @@ namespace PS7ScriptDesk.Shell
             Dispatcher.BeginInvoke(new Action(() => ApplyCompletionEngineStatus(e.Status)));
         }
 
+        private void BeginIntelliSenseReadinessIndicator()
+        {
+            _intelliSenseReadinessStopwatch?.Stop();
+            _intelliSenseReadinessStopwatch = Stopwatch.StartNew();
+            _intelliSenseReadyElapsedMilliseconds = 0;
+            _intelliSenseReadinessReason = "startup";
+            _intelliSenseReconnecting = false;
+            _intelliSenseReadinessTimer ??= new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+            {
+                Interval = TimeSpan.FromSeconds(1)
+            };
+            _intelliSenseReadinessTimer.Tick -= IntelliSenseReadinessTimer_Tick;
+            _intelliSenseReadinessTimer.Tick += IntelliSenseReadinessTimer_Tick;
+            _intelliSenseReadinessTimer.Start();
+            RenderIntelliSenseReadiness("startup");
+        }
+
+        private void IntelliSenseReadinessTimer_Tick(object? sender, EventArgs e)
+        {
+            RenderIntelliSenseReadiness("timer");
+        }
+
+        private void IntelliSense_TerminalSessionStarted(int generation)
+        {
+            _intelliSenseReconnecting = false;
+            Dispatcher.BeginInvoke(new Action(() => RenderIntelliSenseReadiness($"terminal-session-started:{generation}")));
+        }
+
+        private void IntelliSense_TerminalSessionStopping(int generation)
+        {
+            _intelliSenseReconnecting = true;
+            Dispatcher.BeginInvoke(new Action(() => RenderIntelliSenseReadiness($"terminal-session-stopping:{generation}")));
+        }
+
+        private void IntelliSense_PromptReadyObserved(int generation, string path)
+        {
+            _intelliSenseReconnecting = false;
+            Dispatcher.BeginInvoke(new Action(() => RenderIntelliSenseReadiness($"prompt-ready:{generation}")));
+        }
+
+        private void IntelliSense_SessionTerminated()
+        {
+            _intelliSenseReconnecting = true;
+            Dispatcher.BeginInvoke(new Action(() => RenderIntelliSenseReadiness("session-terminated")));
+        }
+
+        private void RenderIntelliSenseReadiness(string reason)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(() => RenderIntelliSenseReadiness(reason)));
+                return;
+            }
+
+            _intelliSenseReadinessReason = reason;
+            var provider = _liveConsoleServiceForObservation as IAuthoritativeLiveCompletionProvider;
+            var liveAvailable = provider?.IsLiveCompletionAvailable == true;
+            var sessionRunning = _liveConsoleServiceForObservation?.IsSessionRunning == true;
+            var elapsedMilliseconds = _intelliSenseReadyElapsedMilliseconds > 0
+                ? _intelliSenseReadyElapsedMilliseconds
+                : _intelliSenseReadinessStopwatch?.ElapsedMilliseconds ?? 0;
+            var elapsedClock = TimeSpan.FromMilliseconds(Math.Max(0, elapsedMilliseconds));
+            var activeElapsed = elapsedClock.ToString(@"mm\:ss", CultureInfo.InvariantCulture);
+            var readySeconds = Math.Max(0, (long)Math.Round(elapsedMilliseconds / 1000d, MidpointRounding.AwayFromZero));
+
+            string caption;
+            System.Windows.Media.Brush foreground;
+            if (_lastCompletionEnginePhase == PowerShellCompletionEnginePhase.Failed)
+            {
+                caption = "IntelliSense: Error";
+                foreground = GetFailureBadgeForegroundBrush();
+            }
+            else if (_lastCompletionEnginePhase == PowerShellCompletionEnginePhase.Idle)
+            {
+                caption = $"IntelliSense: Starting ({activeElapsed})";
+                foreground = GetLoadingBadgeForegroundBrush();
+            }
+            else if (_lastCompletionEnginePhase == PowerShellCompletionEnginePhase.Initializing)
+            {
+                caption = liveAvailable
+                    ? $"IntelliSense: Warming up ({activeElapsed})"
+                    : $"IntelliSense: Warming up · Live warming up ({activeElapsed})";
+                foreground = GetLoadingBadgeForegroundBrush();
+            }
+            else if (liveAvailable)
+            {
+                caption = $"IntelliSense: Fully ready ({readySeconds}s)";
+                foreground = GetReadyBadgeForegroundBrush();
+            }
+            else if (_intelliSenseReconnecting)
+            {
+                caption = $"IntelliSense: Reconnecting ({activeElapsed})";
+                foreground = GetRefreshBadgeForegroundBrush();
+            }
+            else if (sessionRunning)
+            {
+                caption = $"IntelliSense: Basic ready · Live warming up ({activeElapsed})";
+                foreground = GetLoadingBadgeForegroundBrush();
+            }
+            else
+            {
+                caption = "IntelliSense: Live completion unavailable";
+                foreground = GetWarningBadgeForegroundBrush();
+            }
+
+            EditorMetadataStatusItem.Visibility = Visibility.Visible;
+            EditorMetadataStatusGlyph.Text = _lastCompletionEnginePhase == PowerShellCompletionEnginePhase.Failed ? "!" : liveAvailable ? "✓" : "⏳";
+            EditorMetadataStatusTextBlock.Text = caption;
+            EditorMetadataStatusTextBlock.Foreground = foreground;
+            EditorMetadataStatusGlyph.Foreground = foreground;
+            EditorMetadataStatusBadge.ToolTip = $"{caption}{Environment.NewLine}Basic phase: {_lastCompletionEnginePhase}; Live available: {liveAvailable}; Session running: {sessionRunning}; Elapsed: {elapsedMilliseconds:N0} ms; Reason: {_intelliSenseReadinessReason}.";
+
+            DeveloperDiagnostics.LogInfo(
+                "EditorCompletion",
+                "IntelliSense readiness indicator rendered.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["caption"] = caption,
+                    ["basicPhase"] = _lastCompletionEnginePhase.ToString(),
+                    ["liveCompletionAvailable"] = liveAvailable,
+                    ["sessionRunning"] = sessionRunning,
+                    ["elapsedMilliseconds"] = elapsedMilliseconds
+                });
+        }
+
         private void ApplyCompletionEngineStatus(PowerShellCompletionEngineStatus status)
         {
             if (status is null)
@@ -10459,15 +10668,17 @@ namespace PS7ScriptDesk.Shell
 
             _lastCompletionEnginePhase = status.Phase;
 
-            var metadataIsActive = _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.Scheduled ||
-                                   _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.CoreReady ||
-                                   _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.BuildingCommandCatalog ||
-                                   _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.DiscoveringModules ||
-                                   _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.LoadingCommandMetadata ||
-                                   _lastEditorMetadataWarmupPhase == EditorMetadataWarmupPhase.RefreshingCachedMetadata;
-            if (metadataIsActive && status.Phase != PowerShellCompletionEnginePhase.Failed)
+            if (status.Phase == PowerShellCompletionEnginePhase.Initializing && _intelliSenseReadinessStopwatch is null)
             {
-                return;
+                _intelliSenseReadinessStopwatch = Stopwatch.StartNew();
+            }
+
+            if (status.Phase == PowerShellCompletionEnginePhase.Ready)
+            {
+                _intelliSenseReadyElapsedMilliseconds = status.ElapsedMilliseconds > 0
+                    ? status.ElapsedMilliseconds
+                    : _intelliSenseReadinessStopwatch?.ElapsedMilliseconds ?? 0;
+                _intelliSenseReadinessStopwatch?.Stop();
             }
 
             var detailText = string.IsNullOrWhiteSpace(status.DetailText)
@@ -10529,6 +10740,7 @@ namespace PS7ScriptDesk.Shell
             AppLogger.Debug(
                 "EditorCompletion",
                 $"Completion engine readiness applied. Phase={status.Phase}, Runtime='{status.RuntimePath ?? "(unknown)"}', MetadataPhase={_lastEditorMetadataWarmupPhase}, ElapsedMs={status.ElapsedMilliseconds:N0}.");
+            RenderIntelliSenseReadiness("completion-engine-status");
         }
 
         private void ApplyEditorMetadataWarmupStatus(EditorMetadataWarmupStatus status)
@@ -10653,6 +10865,7 @@ namespace PS7ScriptDesk.Shell
 
             UpdateMetadataToast(status);
             UpdateRefreshEditorMetadataCommandAvailability();
+            RenderIntelliSenseReadiness("metadata-status");
 
             AppLogger.Debug(
                 "EditorMetadata",
@@ -10805,18 +11018,15 @@ namespace PS7ScriptDesk.Shell
             _visibleMetadataToastStatus = status;
             var (title, body, phaseText, glyph, showProgress, backgroundResourceKey, borderResourceKey, foregroundResourceKey) = BuildMetadataToastVisual(status);
 
-            MetadataToastTitleTextBlock.Text = title;
-            MetadataToastBodyTextBlock.Text = body;
-            MetadataToastPhaseTextBlock.Text = phaseText;
-            MetadataToastGlyph.Text = glyph;
-            MetadataToastCard.SetResourceReference(Border.BackgroundProperty, backgroundResourceKey);
-            MetadataToastCard.SetResourceReference(Border.BorderBrushProperty, borderResourceKey);
-            MetadataToastTitleTextBlock.SetResourceReference(TextBlock.ForegroundProperty, foregroundResourceKey);
-            MetadataToastBodyTextBlock.SetResourceReference(TextBlock.ForegroundProperty, foregroundResourceKey);
-            MetadataToastPhaseTextBlock.SetResourceReference(TextBlock.ForegroundProperty, foregroundResourceKey);
-            MetadataToastGlyph.SetResourceReference(TextBlock.ForegroundProperty, foregroundResourceKey);
-            MetadataToastProgressBar.Visibility = showProgress ? Visibility.Visible : Visibility.Collapsed;
-            MetadataToastProgressBar.IsIndeterminate = showProgress;
+            _metadataInitializationWindow?.ApplyContent(
+                title,
+                body,
+                phaseText,
+                glyph,
+                showProgress,
+                backgroundResourceKey,
+                borderResourceKey,
+                foregroundResourceKey);
         }
 
         private static (string Title, string Body, string PhaseText, string Glyph, bool ShowProgress, string BackgroundResourceKey, string BorderResourceKey, string ForegroundResourceKey) BuildMetadataToastVisual(EditorMetadataWarmupStatus status)
@@ -10904,18 +11114,12 @@ namespace PS7ScriptDesk.Shell
             }
 
             _metadataToastVisible = true;
-            MetadataToastHost.Visibility = Visibility.Visible;
-            MetadataToastHost.BeginAnimation(UIElement.OpacityProperty, null);
-            var animation = new DoubleAnimation
-            {
-                From = MetadataToastHost.Opacity,
-                To = 1,
-                Duration = TimeSpan.FromMilliseconds(220),
-            };
-            MetadataToastHost.BeginAnimation(UIElement.OpacityProperty, animation);
+            _metadataInitializationWindow ??= new MetadataInitializationWindow();
+            ApplyMetadataToastContent(status);
+            _metadataInitializationWindow.ShowForOwner(this);
             AppLogger.Info(
                 "MainWindow",
-                $"Metadata toast shown. Reason={status.Reason}, Phase={status.Phase}, Runtime='{status.RuntimePath ?? "(unknown)"}', Detail='{logReason}'.");
+                $"Metadata initialization window shown as an owned top-level window. Reason={status.Reason}, Phase={status.Phase}, Runtime='{status.RuntimePath ?? "(unknown)"}', Detail='{logReason}'.");
         }
 
         private void HideMetadataToast(string dismissalReason)
@@ -10931,22 +11135,10 @@ namespace PS7ScriptDesk.Shell
 
             var status = _visibleMetadataToastStatus;
             _metadataToastVisible = false;
-            MetadataToastHost.BeginAnimation(UIElement.OpacityProperty, null);
-            var animation = new DoubleAnimation
-            {
-                From = MetadataToastHost.Opacity,
-                To = 0,
-                Duration = TimeSpan.FromMilliseconds(260),
-            };
-            animation.Completed += (_, _) =>
-            {
-                MetadataToastHost.Visibility = Visibility.Collapsed;
-                MetadataToastHost.Opacity = 0;
-            };
-            MetadataToastHost.BeginAnimation(UIElement.OpacityProperty, animation);
+            _metadataInitializationWindow?.HideForOwner();
             AppLogger.Info(
                 "MainWindow",
-                $"Metadata toast dismissed. Reason={status?.Reason ?? EditorMetadataWarmupReason.None}, Phase={status?.Phase.ToString() ?? "Unknown"}, Dismissal='{dismissalReason}'.");
+                $"Metadata initialization window hidden. Reason={status?.Reason ?? EditorMetadataWarmupReason.None}, Phase={status?.Phase.ToString() ?? "Unknown"}, Dismissal='{dismissalReason}'.");
             _visibleMetadataToastStatus = null;
         }
 

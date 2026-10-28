@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -9,6 +10,7 @@ using System.Threading.Tasks;
 using ICSharpCode.AvalonEdit;
 using ICSharpCode.AvalonEdit.CodeCompletion;
 using PS7ScriptDesk.Application.Diagnostics;
+using PS7ScriptDesk.Application.Interfaces;
 using PS7ScriptDesk.Domain.Models;
 
 namespace PS7ScriptDesk.Shell.Editor
@@ -25,9 +27,15 @@ namespace PS7ScriptDesk.Shell.Editor
     public sealed class PowerShellIntelliSenseService : IDisposable
     {
         private readonly PowerShellCompletionService _completionService = new();
+        private readonly IAuthoritativeLiveCompletionProvider? _authoritativeCompletionProvider;
         private readonly PowerShellSnippetProvider _snippetProvider = new();
         private int _firstCompletionRequestLogged;
         private int _firstUsableCompletionLogged;
+
+        public PowerShellIntelliSenseService(IAuthoritativeLiveCompletionProvider? authoritativeCompletionProvider = null)
+        {
+            _authoritativeCompletionProvider = authoritativeCompletionProvider;
+        }
 
         public event EventHandler<EditorMetadataWarmupStatusChangedEventArgs>? MetadataWarmupStatusChanged
         {
@@ -315,21 +323,66 @@ namespace PS7ScriptDesk.Shell.Editor
                 isParameterContextRequest,
                 HasUsableParameterMetadata(parameterCommandInfo),
                 isVariableContextRequest);
-            if (shouldQueryEngine)
+            var authoritativeCompletionAvailable = _authoritativeCompletionProvider is not null &&
+                                                    _authoritativeCompletionProvider.IsLiveCompletionAvailable;
+            var shouldQueryAuthoritative = ShouldQueryAuthoritative(
+                authoritativeCompletionAvailable,
+                shouldQueryEngine,
+                isVariableContextRequest,
+                memberContext is not null);
+            if (shouldQueryAuthoritative || shouldQueryEngine)
             {
                 var effectiveEngineWaitMilliseconds = memberContext is not null || staticMemberContext is not null
                     ? Math.Max(engineWaitMilliseconds, 450)
                     : engineWaitMilliseconds;
+                if (shouldQueryAuthoritative && effectiveEngineWaitMilliseconds <= 0)
+                {
+                    effectiveEngineWaitMilliseconds = 350;
+                }
+
+                DeveloperDiagnostics.LogInfo(
+                    "EditorCompletion",
+                    "Completion query routing decided.",
+                    new Dictionary<string, object?>
+                    {
+                        ["completionKind"] = completionKind,
+                        ["includeEngine"] = includeEngine,
+                        ["shouldQueryAuthoritative"] = shouldQueryAuthoritative,
+                        ["shouldQueryLegacyEngine"] = shouldQueryEngine,
+                        ["isVariableContext"] = isVariableContextRequest,
+                        ["isMemberContext"] = memberContext is not null,
+                        ["authoritativeProviderAvailable"] = authoritativeCompletionAvailable,
+                        ["engineWaitMilliseconds"] = effectiveEngineWaitMilliseconds
+                    });
 
                 try
                 {
-                    engineResult = await _completionService.GetCompletionsAsync(
-                            documentText,
-                            caretOffset,
-                            pwshExecutablePath!,
-                            cancellationToken,
-                            TimeSpan.FromMilliseconds(effectiveEngineWaitMilliseconds))
-                        .ConfigureAwait(true);
+                    if (shouldQueryAuthoritative)
+                    {
+                        var authoritativeResult = await GetAuthoritativeCompletionsAsync(
+                                editor,
+                                documentText,
+                                caretOffset,
+                                effectiveEngineWaitMilliseconds,
+                                cancellationToken)
+                            .ConfigureAwait(true);
+                        if (authoritativeResult is { HasItems: true })
+                        {
+                            engineResult = authoritativeResult;
+                            completionSource = "authoritative-live";
+                        }
+                    }
+
+                    if (engineResult is null && shouldQueryEngine)
+                    {
+                        engineResult = await _completionService.GetCompletionsAsync(
+                                documentText,
+                                caretOffset,
+                                pwshExecutablePath!,
+                                cancellationToken,
+                                TimeSpan.FromMilliseconds(effectiveEngineWaitMilliseconds))
+                            .ConfigureAwait(true);
+                    }
 
                     if (engineResult is { HasItems: true } && completionSource == "none")
                     {
@@ -386,6 +439,76 @@ namespace PS7ScriptDesk.Shell.Editor
             return window;
         }
 
+        private async Task<CompletionServiceResult?> GetAuthoritativeCompletionsAsync(
+            TextEditor editor,
+            string documentText,
+            int caretOffset,
+            int timeoutMilliseconds,
+            CancellationToken cancellationToken)
+        {
+            if (_authoritativeCompletionProvider is null || !_authoritativeCompletionProvider.IsLiveCompletionAvailable)
+            {
+                return null;
+            }
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(100, timeoutMilliseconds)));
+            var documentUri = BuildAuthoritativeDocumentUri(editor);
+            AuthoritativeCompletionResult? result;
+            try
+            {
+                result = await _authoritativeCompletionProvider.GetLiveCompletionsAsync(
+                        documentUri,
+                        documentText,
+                        caretOffset,
+                        timeout.Token)
+                    .ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+            if (result is null || result.Items.Count == 0)
+            {
+                return null;
+            }
+
+            return new CompletionServiceResult(
+                result.ReplacementIndex,
+                result.ReplacementLength,
+                result.Items.Select(item => new CompletionServiceItem(
+                    item.CompletionText,
+                    item.ListItemText,
+                    MapCompletionKind(item.Kind),
+                    item.Tooltip)).ToList());
+        }
+
+        private static string BuildAuthoritativeDocumentUri(TextEditor editor)
+        {
+            var fileName = editor.Document?.FileName;
+            if (!string.IsNullOrWhiteSpace(fileName))
+            {
+                return new Uri(Path.GetFullPath(fileName)).AbsoluteUri;
+            }
+
+            return $"untitled:ps7scriptdesk/{editor.GetHashCode():X8}.ps1";
+        }
+
+        private static CompletionItemKind MapCompletionKind(int lspKind)
+            => lspKind switch
+            {
+                2 => CompletionItemKind.Method,
+                3 => CompletionItemKind.Command,
+                5 => CompletionItemKind.Property,
+                6 => CompletionItemKind.Variable,
+                7 => CompletionItemKind.Type,
+                9 => CompletionItemKind.Namespace,
+                10 => CompletionItemKind.Property,
+                14 => CompletionItemKind.Keyword,
+                15 => CompletionItemKind.Text,
+                _ => CompletionItemKind.Command
+            };
+
         internal static bool ShouldQueryEngineForTesting(
             string documentText,
             int caretOffset,
@@ -408,6 +531,20 @@ namespace PS7ScriptDesk.Shell.Editor
                 isParameterContextRequest,
                 hasUsableParameterMetadata: false,
                 isVariableContextRequest);
+        }
+
+        internal static bool ShouldQueryAuthoritativeForTesting(
+            bool providerAvailable,
+            bool includeEngine,
+            bool isVariableContext,
+            bool isMemberContext,
+            bool engineWouldBeQueried)
+        {
+            return ShouldQueryAuthoritative(
+                providerAvailable,
+                engineWouldBeQueried && includeEngine,
+                isVariableContext,
+                isMemberContext);
         }
 
         internal static IReadOnlyList<PowerShellLocalCompletionCandidate> GetLocalVariableCompletionCandidatesForTesting(
@@ -1601,8 +1738,17 @@ namespace PS7ScriptDesk.Shell.Editor
             return includeEngine &&
                    engineWaitMilliseconds > 0 &&
                    !string.IsNullOrWhiteSpace(pwshExecutablePath) &&
-                   !isVariableContextRequest &&
                    (!isParameterContextRequest || !hasUsableParameterMetadata);
+        }
+
+        private static bool ShouldQueryAuthoritative(
+            bool providerAvailable,
+            bool shouldQueryLegacyEngine,
+            bool isVariableContext,
+            bool isMemberContext)
+        {
+            return providerAvailable &&
+                   (shouldQueryLegacyEngine || isVariableContext || isMemberContext);
         }
 
         private static ParameterCompletionContext? TryGetParameterCompletionContext(string documentText, CompletionContext context)

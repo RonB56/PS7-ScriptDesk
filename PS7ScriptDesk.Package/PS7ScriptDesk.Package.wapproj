@@ -62,9 +62,21 @@
     -->
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'x64'">win-x64</RuntimeIdentifier>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'ARM64'">win-arm64</RuntimeIdentifier>
+    <!-- Visual Studio's default solution platform is Any CPU/AnyCPU. The WPF
+         entry point is Windows App SDK self-contained and must use a concrete
+         architecture, so map that configuration to the supported x64 build. -->
+    <PlatformTarget Condition="'$(Platform)' == 'AnyCPU' or '$(Platform)' == 'Any CPU'">x64</PlatformTarget>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and ('$(Platform)' == 'AnyCPU' or '$(Platform)' == 'Any CPU')">win-x64</RuntimeIdentifier>
     <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
     <GenerateAppInstallerFile>False</GenerateAppInstallerFile>
     <PackageCertificateThumbprint>AD3F09EA63CAF912A582CC68B2C12029B6984F4B</PackageCertificateThumbprint>
+    <!-- The repository intentionally does not contain the private signing certificate.
+         Keep local Debug builds usable; Release signing remains an explicit release step. -->
+    <AppxPackageSigningEnabled Condition="'$(Configuration)' == 'Debug'">False</AppxPackageSigningEnabled>
+    <!-- A normal Debug solution build compiles the app but does not require the
+         machine's AppxPackaging COM registration or a Store package artifact. -->
+    <AppxPackage Condition="'$(Configuration)' == 'Debug'">False</AppxPackage>
+    <GenerateAppxPackageOnBuild Condition="'$(Configuration)' == 'Debug'">False</GenerateAppxPackageOnBuild>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <AppxBundle>Always</AppxBundle>
@@ -149,7 +161,7 @@
   </ItemGroup>
   <Import Project="$(WapProjPath)\Microsoft.DesktopBridge.targets" />
   <ItemGroup>
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" PrivateAssets="all" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\PS7ScriptDesk.Shell\PS7ScriptDesk.Shell.csproj" />

@@ -1,8 +1,9 @@
 namespace PS7ScriptDesk.Application.Services;
 
 /// <summary>
-/// Opt-in switch for the Phase 2C PSES-owned interactive session foundation.
-/// The legacy ConPTY path remains the default until the new path passes UAT.
+/// Production switch for the PSES-owned interactive session.
+/// The authoritative PSES path is enabled unless explicitly disabled with
+/// PS7SCRIPTDESK_PSES_OWNED_SESSION=0, false, or no.
 /// </summary>
 public sealed class PsesOwnedInteractiveSessionFeatureGate
 {
@@ -18,9 +19,9 @@ public sealed class PsesOwnedInteractiveSessionFeatureGate
     public static PsesOwnedInteractiveSessionFeatureGate FromEnvironment()
     {
         var value = Environment.GetEnvironmentVariable(EnvironmentVariableName);
-        return new PsesOwnedInteractiveSessionFeatureGate(
-            string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase));
+        var disabled = string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) ||
+                       string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) ||
+                       string.Equals(value, "no", StringComparison.OrdinalIgnoreCase);
+        return new PsesOwnedInteractiveSessionFeatureGate(!disabled);
     }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -43,7 +44,7 @@ public partial class StoreUpdateBanner : UserControl
         var currentText = string.IsNullOrWhiteSpace(_result.PackageVersion)
             ? string.Empty
             : $" Current: {_result.PackageVersion}.";
-        DetailsTextBlock.Text = $"A newer PS7 ScriptDesk package is ready.{currentText}{versionText}";
+        DetailsTextBlock.Text = $"A newer PS7 ScriptDesk package is ready.{currentText}{versionText} Installing it may close PS7 ScriptDesk and automatically restart it. You can postpone this update by dismissing this notification.";
         InstallButton.IsEnabled = _result.HasConfirmedInstallableUpdate;
     }
 
@@ -56,13 +57,19 @@ public partial class StoreUpdateBanner : UserControl
 
         _installInProgress = true;
         InstallButton.IsEnabled = false;
-        DetailsTextBlock.Text = "Starting Microsoft Store update request...";
+        DetailsTextBlock.Text = "Installing this update may close PS7 ScriptDesk and automatically restart it. Your editor changes will be saved through the normal close workflow. You can postpone the update by dismissing this notification.";
         DeveloperDiagnostics.LogUserAction("StoreUpdate", "BannerInstallClicked", "User requested the Microsoft Store update from the inline banner.",
             new Dictionary<string, object?> { ["updateCount"] = _result.UpdateCount, ["currentVersion"] = _result.PackageVersion });
 
         try
         {
             var owner = Window.GetWindow(this);
+            if (owner is not MainWindow mainWindow || !StoreUpdateRestartCoordinator.TryPrepareForStoreUpdate(mainWindow))
+            {
+                DetailsTextBlock.Text = "Update canceled so unsaved editor changes were not discarded.";
+                return;
+            }
+
             var ownerHwnd = owner is null ? IntPtr.Zero : new WindowInteropHelper(owner).Handle;
             var progress = new Progress<StoreUpdateInstallProgressInfo>(info =>
                 DetailsTextBlock.Text = $"Store update: {info.PackageUpdateState} {info.PackageDownloadProgress} {info.Status}".Trim());
@@ -74,6 +81,16 @@ public partial class StoreUpdateBanner : UserControl
             if (!string.IsNullOrWhiteSpace(installResult.ExceptionSummary))
             {
                 DetailsTextBlock.Text += $" {installResult.ExceptionSummary}";
+            }
+
+            if (installResult.IsSuccessfulInstallation)
+            {
+                DetailsTextBlock.Text = "Update installed successfully. PS7 ScriptDesk will restart automatically.";
+                await Task.Delay(StoreUpdateRestartCoordinator.RestartNotificationDisplayDuration).ConfigureAwait(true);
+                var restart = StoreUpdateRestartCoordinator.TryRestartAfterSuccessfulInstall(_result.PackageVersion);
+                DetailsTextBlock.Text = restart.RestartPending
+                    ? "Update installed successfully. PS7 ScriptDesk will restart automatically."
+                    : $"Update installed successfully, but automatic restart is unavailable. {restart.FailureMessage} Please reopen PS7 ScriptDesk to use the updated package.";
             }
         }
         catch (Exception ex)

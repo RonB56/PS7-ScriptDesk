@@ -36,6 +36,7 @@ namespace PS7ScriptDesk.Shell
             using var performanceScope = PerformanceTrace.Begin("Startup", "App.OnStartup");
             PerformanceTrace.Snapshot("Startup", "App", "begin");
             var startupArgs = e.Args ?? Array.Empty<string>();
+            var storeRestartStartup = StoreUpdateRestartCoordinator.ReadStartupState(startupArgs);
             StartupLifecycleTrace.ConfigureUiThreadSnapshotProvider(() => (Dispatcher.CheckAccess(), Dispatcher.Thread.ManagedThreadId));
             TerminalStartupTrace.ConfigureUiThreadSnapshotProvider(() => (Dispatcher.CheckAccess(), Dispatcher.Thread.ManagedThreadId));
             TerminalStartupTrace.Start($"argCount={startupArgs.Length}");
@@ -68,8 +69,19 @@ namespace PS7ScriptDesk.Shell
                 "App.OnStartup entered.",
                 new Dictionary<string, object?>
                 {
-                    ["args"] = Array.ConvertAll(startupArgs, arg => DeveloperDiagnostics.SanitizePreview(arg))
+                    ["args"] = Array.ConvertAll(startupArgs, arg => DeveloperDiagnostics.SanitizePreview(arg)),
+                    ["storeRestartRequested"] = storeRestartStartup.WasRestarted,
+                    ["storeRestartPackageName"] = storeRestartStartup.PackageName,
+                    ["storeRestartPackageVersion"] = storeRestartStartup.PackageVersion,
+                    ["storeRestartPackageVersionAdvanced"] = storeRestartStartup.PackageVersionAdvanced,
+                    ["storeRestartFailure"] = storeRestartStartup.FailureMessage
                 });
+            if (storeRestartStartup.WasRestarted)
+            {
+                AppLogger.Info(
+                    "StoreUpdate",
+                    $"Store update restart activation received. Package='{storeRestartStartup.PackageName}', Version='{storeRestartStartup.PackageVersion}', VersionAdvanced={storeRestartStartup.PackageVersionAdvanced}, Failure='{storeRestartStartup.FailureMessage}'.");
+            }
             AppLogger.Info("App", "Startup requested.");
             LogStartupBinaryIdentity();
             if (Editor.EditorMetadataBuilderHost.IsMetadataBuilderInvocation(startupArgs))
@@ -156,6 +168,10 @@ namespace PS7ScriptDesk.Shell
             AppLogger.Info("App", "Main window created.");
             DeveloperDiagnostics.LogInfo("Startup", "Main window created by AppBootstrapper.");
             shellWindow.Show();
+            if (storeRestartStartup.WasRestarted && storeRestartStartup.PackageVersionAdvanced)
+            {
+                shellWindow.ShowStoreUpdateSuccessStatus();
+            }
             StartupLifecycleTrace.Write("App.OnStartup", "MainWindowShown");
             PerformanceTrace.Record("milestone", "Startup", "WindowShown", result: "completed");
             AppLogger.Info("App", "Main window shown.");

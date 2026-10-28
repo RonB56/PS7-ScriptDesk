@@ -48,4 +48,15 @@ public sealed class IntelliSenseCompletionContractTests
         Assert.Contains("textArea.Document.Replace(segment, Text)", completionData, StringComparison.Ordinal);
         Assert.Contains("textArea.Caret.Offset = segment.StartOffset + Text.Length", completionData, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void CtrlSpaceIsNotSuppressedWhenTheEditorOwnsKeyboardFocus()
+    {
+        var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+
+        Assert.Contains("_terminalIsActive && !editorTextEditor.IsKeyboardFocusWithin", source, StringComparison.Ordinal);
+        Assert.Contains("SetTerminalActive(false, \"EditorPreviewKeyDownFocusedEditor\")", source, StringComparison.Ordinal);
+        Assert.Contains("EditorPreviewKeyDownRoutingDecision", source, StringComparison.Ordinal);
+        Assert.Contains("key == Key.Space", source, StringComparison.Ordinal);
+    }
 }

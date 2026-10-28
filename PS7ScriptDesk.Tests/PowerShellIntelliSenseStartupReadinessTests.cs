@@ -45,7 +45,7 @@ public sealed class PowerShellIntelliSenseStartupReadinessTests
     }
 
     [Fact]
-    public void VariableCompletionContext_DoesNotQueryLivePowerShellEngine()
+    public void VariableCompletionContext_CanQueryLivePowerShellEngine()
     {
         var shouldQueryEngine = PowerShellIntelliSenseService.ShouldQueryEngineForTesting(
             "$t",
@@ -54,7 +54,7 @@ public sealed class PowerShellIntelliSenseStartupReadinessTests
             engineWaitMilliseconds: 350,
             pwshExecutablePath: @"C:\Program Files\PowerShell\7\pwsh.exe");
 
-        Assert.False(shouldQueryEngine);
+        Assert.True(shouldQueryEngine);
     }
 
     [Fact]
@@ -78,6 +78,43 @@ public sealed class PowerShellIntelliSenseStartupReadinessTests
             pwshExecutablePath: @"C:\Program Files\PowerShell\7\pwsh.exe");
 
         Assert.True(shouldQueryEngine);
+    }
+
+    [Fact]
+    public void LiveVariableCompletion_BypassesOptionalLegacyEngineGate()
+    {
+        Assert.True(PowerShellIntelliSenseService.ShouldQueryAuthoritativeForTesting(
+            providerAvailable: true,
+            includeEngine: false,
+            isVariableContext: true,
+            isMemberContext: false,
+            engineWouldBeQueried: false));
+    }
+
+    [Fact]
+    public void OrdinaryAutoCompletion_DoesNotStartAuthoritativeQueryWithoutLiveContext()
+    {
+        Assert.False(PowerShellIntelliSenseService.ShouldQueryAuthoritativeForTesting(
+            providerAvailable: true,
+            includeEngine: false,
+            isVariableContext: false,
+            isMemberContext: false,
+            engineWouldBeQueried: false));
+    }
+
+    [Fact]
+    public void BottomStatusIndicator_DistinguishesBasicAndLiveReadinessWithElapsedTiming()
+    {
+        var source = File.ReadAllText(GetRepositoryPath("PS7ScriptDesk.Shell", "MainWindow.xaml.cs"));
+
+        Assert.Contains("IntelliSense: Starting (", source, StringComparison.Ordinal);
+        Assert.Contains("IntelliSense: Basic ready · Live warming up (", source, StringComparison.Ordinal);
+        Assert.Contains("IntelliSense: Fully ready (", source, StringComparison.Ordinal);
+        Assert.Contains("IntelliSense: Live completion unavailable", source, StringComparison.Ordinal);
+        Assert.Contains("IntelliSense: Reconnecting (", source, StringComparison.Ordinal);
+        Assert.Contains("IntelliSense: Error", source, StringComparison.Ordinal);
+        Assert.Contains("_liveConsoleServiceForObservation.TerminalSessionStarted", source, StringComparison.Ordinal);
+        Assert.Contains("_intelliSenseReadinessStopwatch", source, StringComparison.Ordinal);
     }
 
     [Fact]

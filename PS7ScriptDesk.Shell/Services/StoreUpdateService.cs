@@ -25,6 +25,7 @@ namespace PS7ScriptDesk.Shell.Services
         private readonly IStorePackageEnvironmentProvider _packageEnvironmentProvider;
         private readonly IStoreUpdateQuery _storeUpdateQuery;
         private readonly IStoreUpdateInstallAdapter _storeUpdateInstallAdapter;
+        private readonly IStoreUpdateRestartRegistration _restartRegistration;
 
         public StoreUpdateService()
             : this(new WindowsStorePackageEnvironmentProvider(), new DirectStoreUpdateQuery(), new DirectStoreUpdateInstallAdapter())
@@ -34,11 +35,13 @@ namespace PS7ScriptDesk.Shell.Services
         internal StoreUpdateService(
             IStorePackageEnvironmentProvider packageEnvironmentProvider,
             IStoreUpdateQuery storeUpdateQuery,
-            IStoreUpdateInstallAdapter? storeUpdateInstallAdapter = null)
+            IStoreUpdateInstallAdapter? storeUpdateInstallAdapter = null,
+            IStoreUpdateRestartRegistration? restartRegistration = null)
         {
             _packageEnvironmentProvider = packageEnvironmentProvider ?? throw new ArgumentNullException(nameof(packageEnvironmentProvider));
             _storeUpdateQuery = storeUpdateQuery ?? throw new ArgumentNullException(nameof(storeUpdateQuery));
             _storeUpdateInstallAdapter = storeUpdateInstallAdapter ?? new DirectStoreUpdateInstallAdapter();
+            _restartRegistration = restartRegistration ?? new WindowsStoreUpdateRestartRegistration();
         }
 
         public async Task<StoreUpdateCheckResult> CheckForUpdatesAsync(CancellationToken cancellationToken)
@@ -286,6 +289,19 @@ namespace PS7ScriptDesk.Shell.Services
 
                 cancellationToken.ThrowIfCancellationRequested();
 
+                if (!_restartRegistration.TryRegister(out var restartError))
+                {
+                    result.ExceptionSummary = restartError == unchecked((int)0x800704C7)
+                        ? "Windows Restart Manager requires PS7 ScriptDesk to have been running for at least 60 seconds before a Store update can start; update was not started."
+                        : $"Windows could not register PS7 ScriptDesk for an automatic restart after the Store update (HRESULT=0x{restartError:X8}). Update was not started.";
+                    LogCheckStep(result.ExceptionSummary);
+                    return result;
+                }
+
+                result.RestartRegistrationAttempted = true;
+                result.RestartRegistrationSucceeded = true;
+                LogCheckStep("Registered the current process with Windows Restart Manager before Store package installation.");
+
                 LogCheckStep(
                     "Initializing interactive StoreContext with the stable ScriptDesk owner HWND.",
                     new Dictionary<string, object?>
@@ -313,6 +329,12 @@ namespace PS7ScriptDesk.Shell.Services
                             ? "Store update install reported an exception after observable Store progress; preserving the partial operation state."
                             : "Store update install request failed before observable Store progress.",
                         attempt.Exception);
+                    _restartRegistration.Unregister();
+                }
+
+                if (!result.IsSuccessfulInstallation)
+                {
+                    _restartRegistration.Unregister();
                 }
 
                 LogCheckStep(
@@ -329,12 +351,14 @@ namespace PS7ScriptDesk.Shell.Services
             }
             catch (OperationCanceledException ex)
             {
+                _restartRegistration.Unregister();
                 result.ExceptionSummary = BuildExceptionSummary(ex);
                 LogCheckException("Store update install request was canceled.", ex);
                 return result;
             }
             catch (Exception ex)
             {
+                _restartRegistration.Unregister();
                 result.ExceptionSummary = BuildExceptionSummary(ex);
                 LogCheckException("Store update install request failed.", ex);
                 return result;
@@ -364,6 +388,63 @@ namespace PS7ScriptDesk.Shell.Services
                 IntPtr ownerHwnd,
                 IProgress<StoreUpdateInstallProgressInfo>? progress,
                 CancellationToken cancellationToken);
+        }
+
+        internal interface IStoreUpdateRestartRegistration
+        {
+            bool TryRegister(out int errorCode);
+
+            void Unregister();
+        }
+
+        private sealed class WindowsStoreUpdateRestartRegistration : IStoreUpdateRestartRegistration
+        {
+            private static readonly TimeSpan MinimumRestartLifetime = TimeSpan.FromSeconds(60);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+            private static extern int RegisterApplicationRestart(string? commandLine, RestartFlags flags);
+
+            [DllImport("kernel32.dll")]
+            private static extern int UnregisterApplicationRestart();
+
+            [Flags]
+            private enum RestartFlags
+            {
+                None = 0,
+                NoCrash = 1,
+                NoHang = 2,
+                NoPatch = 4,
+                NoReboot = 8
+            }
+
+            public bool TryRegister(out int errorCode)
+            {
+                try
+                {
+                    var lifetime = DateTime.Now - Process.GetCurrentProcess().StartTime;
+                    if (lifetime < MinimumRestartLifetime)
+                    {
+                        errorCode = unchecked((int)0x800704C7);
+                        return false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogCheckException("Could not establish the process lifetime required for automatic Windows restart; refusing to start the Store update.", ex);
+                    errorCode = unchecked((int)0x80004005);
+                    return false;
+                }
+
+                // Do not set NoPatch: Microsoft documents that flag as disabling
+                // restart when an application update requires termination.
+                errorCode = RegisterApplicationRestart(null, RestartFlags.None);
+                return errorCode == 0;
+            }
+
+            public void Unregister()
+            {
+                _ = UnregisterApplicationRestart();
+            }
         }
 
         internal sealed class StoreUpdateInstallAttempt
@@ -1423,11 +1504,18 @@ namespace PS7ScriptDesk.Shell.Services
 
         public bool PartialStartDetected { get; set; }
 
+        public bool RestartRegistrationAttempted { get; set; }
+
+        public bool RestartRegistrationSucceeded { get; set; }
+
         public string OverallState { get; set; } = string.Empty;
 
         public string ExceptionSummary { get; set; } = string.Empty;
 
         public List<StoreUpdateInstallStatusInfo> PackageStatuses { get; set; } = new();
+
+        public bool IsSuccessfulInstallation =>
+            string.Equals(OverallState, "Completed", StringComparison.OrdinalIgnoreCase);
     }
 
     public sealed class StoreUpdateInstallStatusInfo

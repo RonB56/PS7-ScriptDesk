@@ -23,7 +23,7 @@ public sealed class PsesProductionAdapterContractTests
         try
         {
             Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, null);
-            Assert.False(PsesOwnedInteractiveSessionFeatureGate.FromEnvironment().IsEnabled);
+            Assert.True(PsesOwnedInteractiveSessionFeatureGate.FromEnvironment().IsEnabled);
         }
         finally
         {

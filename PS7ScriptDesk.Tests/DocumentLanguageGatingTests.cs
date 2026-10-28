@@ -43,8 +43,7 @@ public sealed class DocumentLanguageGatingTests
     [Fact]
     public void ShellReactivatesPowerShellServicesWhenASelectedTabReturns()
     {
-        var shellPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
-        var shellSource = File.ReadAllText(Path.GetFullPath(shellPath));
+        var shellSource = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
 
         Assert.Contains("ActivatePowerShellEditorServices(activeEditor, selectedTab)", shellSource, StringComparison.Ordinal);
         Assert.Contains("StartCompletionEngineWarmup(runtimeInfo)", shellSource, StringComparison.Ordinal);

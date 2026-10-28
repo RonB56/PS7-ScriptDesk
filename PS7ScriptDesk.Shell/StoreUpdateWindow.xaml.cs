@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -234,7 +235,7 @@ namespace PS7ScriptDesk.Shell
 
             _installInProgress = true;
             InstallNowButton.IsEnabled = false;
-            StatusMessageTextBlock.Text = "Starting Microsoft Store update install request...";
+            StatusMessageTextBlock.Text = "Installing this update may close PS7 ScriptDesk and automatically restart it. Your editor changes will be saved through the normal close workflow. You can postpone the update by closing this window.";
 
             DeveloperDiagnostics.LogUserAction(
                 "StoreUpdate",
@@ -259,6 +260,12 @@ namespace PS7ScriptDesk.Shell
             try
             {
                 var ownerWindow = Owner is { IsLoaded: true } ? Owner : this;
+                if (ownerWindow is not MainWindow mainWindow || !StoreUpdateRestartCoordinator.TryPrepareForStoreUpdate(mainWindow))
+                {
+                    StatusMessageTextBlock.Text = "Update canceled so unsaved editor changes were not discarded.";
+                    return;
+                }
+
                 var ownerHwnd = new WindowInteropHelper(ownerWindow).Handle;
                 DeveloperDiagnostics.LogInfo(
                     "StoreUpdate",
@@ -301,6 +308,16 @@ namespace PS7ScriptDesk.Shell
                 StatusMessageTextBlock.Text = statusLines.Count == 0
                     ? "Microsoft Store update request completed."
                     : string.Join(Environment.NewLine, statusLines);
+
+                if (installResult.IsSuccessfulInstallation)
+                {
+                    StatusMessageTextBlock.Text = "Update installed successfully. PS7 ScriptDesk will restart automatically.";
+                    await Task.Delay(StoreUpdateRestartCoordinator.RestartNotificationDisplayDuration).ConfigureAwait(true);
+                    var restart = StoreUpdateRestartCoordinator.TryRestartAfterSuccessfulInstall(_checkResult.PackageVersion);
+                    StatusMessageTextBlock.Text = restart.RestartPending
+                        ? "Update installed successfully. PS7 ScriptDesk will restart automatically."
+                        : $"Update installed successfully, but automatic restart is unavailable. {restart.FailureMessage} Please reopen PS7 ScriptDesk to use the updated package.";
+                }
             }
             finally
             {

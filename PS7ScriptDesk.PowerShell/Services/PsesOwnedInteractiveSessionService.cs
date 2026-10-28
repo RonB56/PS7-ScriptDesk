@@ -13,7 +13,7 @@ namespace PS7ScriptDesk.PowerShell.Services;
 /// console-repl stdio is the terminal transport. This type intentionally does
 /// not create a second PowerShell process for debugging.
 /// </summary>
-public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IAuthoritativeSessionStructuredExecution, IAuthoritativePsesDebugEndpoint
+public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IAuthoritativeSessionStructuredExecution, IAuthoritativePsesDebugEndpoint, IAuthoritativeLiveCompletionProvider
 {
     private const string FallbackPsesHostVersion = "2025.4.0";
     private const int StartupOutputCaptureLimit = 32 * 1024;
@@ -49,6 +49,22 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     public string? SessionDetailsPath => _sessionDetailsPath;
     public string? LanguageServicePipeName => _languageServicePipeName;
     public string? DebugServicePipeName => _debugServicePipeName;
+    public bool IsLiveCompletionAvailable => _languageServiceClient is { IsInitialized: true } && IsSessionRunning;
+
+    public Task<AuthoritativeCompletionResult?> GetLiveCompletionsAsync(
+        string documentUri,
+        string documentText,
+        int cursorOffset,
+        CancellationToken cancellationToken = default)
+    {
+        var client = _languageServiceClient;
+        if (client is null || !IsLiveCompletionAvailable)
+        {
+            return Task.FromResult<AuthoritativeCompletionResult?>(null);
+        }
+
+        return client.GetLiveCompletionsAsync(documentUri, documentText, cursorOffset, cancellationToken);
+    }
 
     public event Action? ScriptExecutionCompleted;
     public event Action? CommandExecutionCompleted;

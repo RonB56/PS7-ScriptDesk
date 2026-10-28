@@ -8,10 +8,19 @@
     <IsTestProject>true</IsTestProject>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- The test project references the x64 Windows App SDK Shell. Keep the
+         default Visual Studio platform architecture aligned with that binary
+         instead of producing an MSIL-vs-AMD64 reference cascade. -->
+    <PlatformTarget Condition="'$(PlatformTarget)' == '' and ('$(Platform)' == 'AnyCPU' or '$(Platform)' == 'Any CPU' or '$(Platform)' == '')">x64</PlatformTarget>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and ('$(Platform)' == 'AnyCPU' or '$(Platform)' == 'Any CPU' or '$(Platform)' == '')">win-x64</RuntimeIdentifier>
+    <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
+    <WindowsAppSdkAutoInitialize>false</WindowsAppSdkAutoInitialize>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize>false</WindowsAppSdkUndockedRegFreeWinRTInitialize>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.5.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
       <PrivateAssets>all</PrivateAssets>
@@ -28,5 +37,18 @@
     <ProjectReference Include="..\PS7ScriptDesk.Shell\PS7ScriptDesk.Shell.csproj" />
     <ProjectReference Include="..\PS7ScriptDesk.UI\PS7ScriptDesk.UI.csproj" />
   </ItemGroup>
+
+  <!--
+    The .NET 10/VSTest apphost is copied without its runtimeconfig when this
+    project is built with a RID. VSTest selects testhost.exe and waits forever
+    before the host can connect unless the apphost has the test runtime config.
+  -->
+  <Target Name="ProvideTestHostRuntimeConfig" AfterTargets="Build">
+    <Copy
+      SourceFiles="$(TargetDir)$(AssemblyName).runtimeconfig.json"
+      DestinationFiles="$(TargetDir)testhost.runtimeconfig.json"
+      SkipUnchangedFiles="true"
+      Condition="Exists('$(TargetDir)$(AssemblyName).runtimeconfig.json') and Exists('$(TargetDir)testhost.exe')" />
+  </Target>
 
 </Project>

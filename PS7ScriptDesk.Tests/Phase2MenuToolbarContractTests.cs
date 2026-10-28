@@ -58,7 +58,7 @@ public sealed class Phase2MenuToolbarContractTests
     {
         var app = Read("PS7ScriptDesk.Shell", "App.xaml");
 
-        Assert.Contains("<Setter Property=\"MinHeight\" Value=\"36\" />", app, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"MinHeight\" Value=\"30\" />", app, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"Padding\" Value=\"{StaticResource Padding.Toolbar}\" />", app, StringComparison.Ordinal);
         Assert.Contains("Theme.Border.Separator", app, StringComparison.Ordinal);
         Assert.Contains("Theme.Border.Focus", app, StringComparison.Ordinal);

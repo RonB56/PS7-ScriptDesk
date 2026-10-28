@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -15,7 +14,6 @@ public static class ResizeForensicsTrace
     private const int PreviewLimit = 200;
     private const int ScreenSnapshotLimit = 128;
     private static readonly object Sync = new();
-    private static readonly long StartedTicks = Stopwatch.GetTimestamp();
     private static readonly string RunId = Guid.NewGuid().ToString("N");
     private static readonly string SessionGuid = Guid.NewGuid().ToString("N");
     private static readonly ConcurrentDictionary<string, StreamWriter> Writers = new(StringComparer.Ordinal);

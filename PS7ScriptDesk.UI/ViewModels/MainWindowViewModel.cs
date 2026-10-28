@@ -2566,7 +2566,10 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 try
                 {
-                    _documentRecoveryService.SaveSnapshot(snapshot);
+                    if (pendingWrite.TryClaimSave())
+                    {
+                        _documentRecoveryService.SaveSnapshot(snapshot);
+                    }
                 }
                 finally
                 {
@@ -2602,6 +2605,22 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (snapshot is null)
             {
                 return false;
+            }
+
+            if (_pendingRecoveryWrites.TryGetValue(tab.RecoveryId, out var pendingWrite) && !pendingWrite.TryClaimSave())
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "CrashRecovery",
+                    "RecoverySnapshotFlush",
+                    "Recovery snapshot flush observed an already-running scheduled write; duplicate persistence was suppressed.",
+                    "AlreadyInProgress",
+                    new Dictionary<string, object?>
+                    {
+                        ["recoveryId"] = tab.RecoveryId,
+                        ["reason"] = reason,
+                        ["contentLength"] = snapshot.Content.Length
+                    });
+                return true;
             }
 
             CancelPendingRecoveryWrite(tab.RecoveryId);
@@ -4751,7 +4770,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 Guid.NewGuid(),
                 _editorExecutionAdapter?.Snapshot.SessionGeneration ?? 0,
                 mode,
-                displayName,
+                displayName ?? string.Empty,
                 scriptText ?? string.Empty,
                 sourceFilePath,
                 IsSavedClean: sourceFilePath is not null,
@@ -8682,6 +8701,8 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private sealed class PendingRecoveryWrite
         {
+            private int _saveClaimed;
+
             public PendingRecoveryWrite(DocumentRecoverySnapshot snapshot)
             {
                 Snapshot = snapshot;
@@ -8690,6 +8711,9 @@ namespace PS7ScriptDesk.UI.ViewModels
             public DocumentRecoverySnapshot Snapshot { get; }
 
             public System.Timers.Timer? Timer { get; set; }
+
+            public bool TryClaimSave()
+                => Interlocked.CompareExchange(ref _saveClaimed, 1, 0) == 0;
         }
 
         private sealed class NoOpDocumentRecoveryService : IDocumentRecoveryService

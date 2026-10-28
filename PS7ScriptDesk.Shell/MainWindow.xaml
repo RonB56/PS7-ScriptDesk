@@ -196,7 +196,7 @@
         <Style x:Key="ToolbarIconViewboxStyle" TargetType="Viewbox">
             <Setter Property="Width" Value="16" />
             <Setter Property="Height" Value="16" />
-            <Setter Property="Margin" Value="0,0,5,0" />
+            <Setter Property="Margin" Value="0,0,4,0" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
 
@@ -2414,88 +2414,5 @@
         </Grid>
         </DockPanel>
 
-        <Border x:Name="MetadataToastHost"
-                Panel.ZIndex="400"
-                Visibility="Collapsed"
-                Opacity="0"
-                MaxWidth="440"
-                HorizontalAlignment="Right"
-                VerticalAlignment="Top"
-                Margin="0,104,20,0"
-                IsHitTestVisible="False">
-            <Border x:Name="MetadataToastCard"
-                    Style="{StaticResource IdeDialogPanelStyle}"
-                    Background="{DynamicResource Theme.Surface.Primary}"
-                    BorderBrush="{DynamicResource Theme.Border.Strong}"
-                    BorderThickness="1"
-                    Padding="16">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-
-                    <Border Grid.Row="0"
-                            Grid.RowSpan="2"
-                            Grid.Column="0"
-                            Width="36"
-                            Height="36"
-                            Margin="0,0,12,0"
-                            CornerRadius="4"
-                            Background="{DynamicResource Theme.Surface.Secondary}"
-                            BorderBrush="{DynamicResource Theme.Border.Subtle}"
-                            BorderThickness="1">
-                        <TextBlock x:Name="MetadataToastGlyph"
-                                   Text="⏳"
-                                   FontSize="18"
-                                   FontWeight="Bold"
-                                   Foreground="{DynamicResource Theme.Icon.Accent}"
-                                   HorizontalAlignment="Center"
-                                   VerticalAlignment="Center" />
-                    </Border>
-
-                    <TextBlock x:Name="MetadataToastTitleTextBlock"
-                               Grid.Row="0"
-                               Grid.Column="1"
-                               Text="Preparing PowerShell editor metadata"
-                               FontSize="16"
-                               FontWeight="SemiBold"
-                               TextWrapping="Wrap" />
-
-                    <TextBlock x:Name="MetadataToastBodyTextBlock"
-                               Grid.Row="1"
-                               Grid.Column="1"
-                               Margin="0,6,0,0"
-                               TextWrapping="Wrap"
-                               Foreground="{DynamicResource Theme.Text.Secondary}"
-                               Text="PS7 ScriptDesk is loading command, parameter, syntax, and help metadata for this PowerShell runtime." />
-
-                    <ProgressBar x:Name="MetadataToastProgressBar"
-                                 Grid.Row="2"
-                                 Grid.ColumnSpan="2"
-                                 Height="6"
-                                 Margin="0,14,0,0"
-                                 IsIndeterminate="True"
-                                 Minimum="0"
-                                 Maximum="1"
-                                 Value="0.5" />
-
-                    <TextBlock x:Name="MetadataToastPhaseTextBlock"
-                               Grid.Row="3"
-                               Grid.ColumnSpan="2"
-                               Margin="0,10,0,0"
-                               TextWrapping="Wrap"
-                               Foreground="{DynamicResource Theme.Text.Secondary}"
-                               FontSize="{StaticResource Theme.FontSize.Caption}"
-                               Text="You can keep using the editor while this runs." />
-                </Grid>
-            </Border>
-        </Border>
     </Grid>
 </Window>

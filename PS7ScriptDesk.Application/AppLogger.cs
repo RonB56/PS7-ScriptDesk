@@ -265,7 +265,7 @@ public static class AppLogger
         catch { }
     }
 
-    private static void PersistEmergencyEntry(string entry)
+    private static void PersistEmergencyEntry(string? entry)
     {
         using var performanceScope = PerformanceTrace.Begin(
             "SynchronousWait",
@@ -278,7 +278,7 @@ public static class AppLogger
         PersistEmergencyEntryAsync(entry).GetAwaiter().GetResult();
     }
 
-    private static async Task PersistEmergencyEntryAsync(string entry)
+    private static async Task PersistEmergencyEntryAsync(string? entry)
     {
         var text = (entry ?? string.Empty) + Environment.NewLine;
         var bytes = Encoding.UTF8.GetByteCount(text);

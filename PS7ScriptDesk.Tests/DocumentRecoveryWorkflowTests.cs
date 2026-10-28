@@ -271,6 +271,24 @@ public sealed class DocumentRecoveryWorkflowTests : IDisposable
     }
 
     [Fact]
+    public async Task RecoveryTimerAlreadySaving_DoesNotDuplicateExplicitFlush()
+    {
+        var service = new BlockingRecoveryService(_recoveryDirectory);
+        var (viewModel, _) = CreateViewModel(service);
+
+        viewModel.SelectedTab!.Content = "timer overlap";
+        Assert.True(service.FirstSaveEntered.Wait(TimeSpan.FromSeconds(5)));
+
+        var flushTask = Task.Run(viewModel.FlushPendingRecoveryWrites);
+        await flushTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, Volatile.Read(ref service.SaveAttempts));
+        service.ReleaseFirstSave.Set();
+        Assert.True(service.FirstSaveFinished.Wait(TimeSpan.FromSeconds(5)));
+
+        Assert.Equal(1, service.SaveAttempts);
+    }
+
+    [Fact]
     public void RecoveryStorageContainsOnlyRecoveryModelAndDocumentText()
     {
         var service = CreateRecoveryService();
@@ -397,6 +415,44 @@ public sealed class DocumentRecoveryWorkflowTests : IDisposable
         {
             SaveAttempts++;
             return false;
+        }
+
+        public bool DiscardRecovery(string recoveryId) => false;
+    }
+
+    private sealed class BlockingRecoveryService : IDocumentRecoveryService
+    {
+        public BlockingRecoveryService(string storageDirectory)
+        {
+            RecoveryStorageDirectory = storageDirectory;
+        }
+
+        public string RecoveryStorageDirectory { get; }
+
+        public TimeSpan RecoveryWriteDelay => TimeSpan.FromMilliseconds(250);
+
+        public ManualResetEventSlim FirstSaveEntered { get; } = new();
+
+        public ManualResetEventSlim ReleaseFirstSave { get; } = new();
+
+        public ManualResetEventSlim FirstSaveFinished { get; } = new();
+
+        public int SaveAttempts;
+
+        public IReadOnlyList<DocumentRecoveryCandidate> GetRecoverableDocuments()
+            => Array.Empty<DocumentRecoveryCandidate>();
+
+        public bool SaveSnapshot(DocumentRecoverySnapshot snapshot)
+        {
+            var attempt = Interlocked.Increment(ref SaveAttempts);
+            if (attempt == 1)
+            {
+                FirstSaveEntered.Set();
+                ReleaseFirstSave.Wait(TimeSpan.FromSeconds(5));
+                FirstSaveFinished.Set();
+            }
+
+            return true;
         }
 
         public bool DiscardRecovery(string recoveryId) => false;

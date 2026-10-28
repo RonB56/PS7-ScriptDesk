@@ -48,7 +48,7 @@ public sealed class LiveDebuggerIntegrationTests
             await firstRecorder.WaitForSessionEndedAsync();
 
             Assert.Equal(DebugTerminationReason.NormalCompletion, first.TerminationInfo?.Reason);
-            Assert.Equal(1, firstRecorder.Terminations.Count);
+            Assert.Single(firstRecorder.Terminations);
             Assert.Contains(firstRecorder.Output, value => value.Contains("LIVE_TYPED_OUTPUT", StringComparison.Ordinal));
             Assert.Contains(firstRecorder.Output, value => value.Contains("LIVE_TYPED_HOST", StringComparison.Ordinal));
             Assert.DoesNotContain(firstRecorder.Output, value => value.Contains("__PSS_DEBUG_", StringComparison.Ordinal));
@@ -114,7 +114,7 @@ public sealed class LiveDebuggerIntegrationTests
             await unhandledRecorder.WaitForSessionEndedAsync();
 
             Assert.Equal(DebugTerminationReason.TerminatingException, unhandled.TerminationInfo?.Reason);
-            var exceptionEvent = Assert.Single(unhandledRecorder.TypedEvents.Where(value => value.Category == DebuggerEventCategory.Exception));
+            var exceptionEvent = Assert.Single(unhandledRecorder.TypedEvents, value => value.Category == DebuggerEventCategory.Exception);
             Assert.False(unhandled.TerminationInfo!.Exception!.IsHandled);
             Assert.Contains("LIVE_UNHANDLED_SOURCE", exceptionEvent.DisplayText, StringComparison.Ordinal);
         }

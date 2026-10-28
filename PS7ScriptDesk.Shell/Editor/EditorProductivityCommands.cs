@@ -221,7 +221,6 @@ public static class EditorProductivityCommands
         {
             insertedText = GetPreferredLineEnding(document) + blockText;
         }
-        var blockLength = blockText.Length;
         var insertOffset = direction < 0 ? lines[0].Offset : lines[^1].Offset + lines[^1].TotalLength;
         using (BeginUndoGroup(document))
         {

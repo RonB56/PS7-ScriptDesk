@@ -68,6 +68,33 @@ public sealed class PsesAvDeterministicTransportTests
         Assert.Equal(0, fixture.Client.PendingRequestCount);
     }
 
+    [Fact]
+    public async Task LiveCompletionSynchronizesDocumentAndParsesLspItems()
+    {
+        await using var fixture = await ConnectedFixture.CreateAsync();
+        var completionTask = fixture.Client.GetLiveCompletionsAsync(
+            "untitled:ps7scriptdesk/probe.ps1",
+            "$ISEP",
+            5);
+
+        using var didOpen = await fixture.ServerReadTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("textDocument/didOpen", didOpen.RootElement.GetProperty("method").GetString());
+        Assert.Equal("$ISEP", didOpen.RootElement.GetProperty("params").GetProperty("textDocument").GetProperty("text").GetString());
+
+        using var completionRequest = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("textDocument/completion", completionRequest.RootElement.GetProperty("method").GetString());
+        Assert.Equal(0, completionRequest.RootElement.GetProperty("params").GetProperty("position").GetProperty("line").GetInt32());
+        Assert.Equal(5, completionRequest.RootElement.GetProperty("params").GetProperty("position").GetProperty("character").GetInt32());
+
+        await fixture.WriteCompletionResponseAsync(completionRequest.RootElement.GetProperty("id").GetInt32());
+        var result = await completionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.NotNull(result);
+        Assert.Equal(0, result!.ReplacementIndex);
+        Assert.Equal(5, result.ReplacementLength);
+        Assert.Contains(result.Items, item => item.CompletionText == "$ISEProbe");
+    }
+
     private sealed class ConnectedFixture : IAsyncDisposable
     {
         private readonly NamedPipeServerStream _server;
@@ -86,6 +113,15 @@ public sealed class PsesAvDeterministicTransportTests
         public Task<JsonDocument> ServerReadTask { get; }
 
         public Task<JsonDocument> ReadNextServerMessageAsync() => ReadFrameAsync(_server);
+
+        public async Task WriteCompletionResponseAsync(int id)
+        {
+            var body = Encoding.UTF8.GetBytes($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"isIncomplete\":false,\"items\":[{{\"label\":\"$ISEProbe\",\"insertText\":\"$ISEProbe\",\"kind\":6,\"detail\":\"live variable\",\"textEdit\":{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":5}}}},\"newText\":\"$ISEProbe\"}}}}]}}}}");
+            var header = Encoding.ASCII.GetBytes($"Content-Length: {body.Length}\r\n\r\n");
+            await _server.WriteAsync(header);
+            await _server.WriteAsync(body);
+            await _server.FlushAsync();
+        }
 
         public async Task SendNotificationAsync(string method, object parameters)
         {

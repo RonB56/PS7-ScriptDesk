@@ -7,13 +7,13 @@ namespace PS7ScriptDesk.Tests;
 public sealed class PsesOwnedInteractiveSessionFoundationTests
 {
     [Fact]
-    public void FeatureGate_IsDisabledByDefaultWhenEnvironmentIsUnset()
+    public void FeatureGate_IsEnabledByDefaultWhenEnvironmentIsUnset()
     {
         var original = Environment.GetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName);
         try
         {
             Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, null);
-            Assert.False(PsesOwnedInteractiveSessionFeatureGate.FromEnvironment().IsEnabled);
+            Assert.True(PsesOwnedInteractiveSessionFeatureGate.FromEnvironment().IsEnabled);
         }
         finally
         {
@@ -32,6 +32,24 @@ public sealed class PsesOwnedInteractiveSessionFoundationTests
         {
             Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, value);
             Assert.True(PsesOwnedInteractiveSessionFeatureGate.FromEnvironment().IsEnabled);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, original);
+        }
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("false")]
+    [InlineData("no")]
+    public void FeatureGate_RecognizesExplicitOptOut(string value)
+    {
+        var original = Environment.GetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName);
+        try
+        {
+            Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, value);
+            Assert.False(PsesOwnedInteractiveSessionFeatureGate.FromEnvironment().IsEnabled);
         }
         finally
         {

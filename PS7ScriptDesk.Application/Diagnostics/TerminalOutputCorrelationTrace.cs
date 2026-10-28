@@ -82,7 +82,6 @@ public static class TerminalOutputCorrelationTrace
                     });
             });
 
-        var containsMarker = payload.Contains(InterruptFixtureMarker, StringComparison.Ordinal);
         var containsPrompt = observation.PromptReadObserved;
         var properties = new Dictionary<string, object?>
         {

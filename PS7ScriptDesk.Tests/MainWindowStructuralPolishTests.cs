@@ -214,7 +214,12 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("x:Key=\"IdeToolbarTooltipHostStyle\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"Background\" Value=\"Transparent\" />", appXaml, StringComparison.Ordinal);
         Assert.Contains("x:Key=\"IdeToolbarSeparatorStyle\"", appXaml, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"Padding\" Value=\"6,2\" />", appXaml, StringComparison.Ordinal);
+        Assert.Contains("<Thickness x:Key=\"Padding.Toolbar\">6,2</Thickness>", appXaml, StringComparison.Ordinal);
+        Assert.Contains("<sys:Double x:Key=\"Theme.ControlHeight.Toolbar\">28</sys:Double>", appXaml, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"MinHeight\" Value=\"30\" />", appXaml, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"VerticalContentAlignment\" Value=\"Center\" />", appXaml, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"Margin\" Value=\"1,0\" />", appXaml, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"Background\" Value=\"Transparent\" />", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"MinHeight\" Value=\"26\" />", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"ToolTipService.InitialShowDelay\" Value=\"700\" />", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"ToolTipService.ShowDuration\" Value=\"12000\" />", appXaml, StringComparison.Ordinal);
@@ -531,9 +536,10 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("Background=\"{DynamicResource Theme.Status.Error.Background}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("BorderBrush=\"{DynamicResource Theme.Status.Error.Border}\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("Foreground=\"{DynamicResource Theme.Status.Error.Foreground}\"", mainXaml, StringComparison.Ordinal);
-        Assert.Contains("Style=\"{StaticResource IdeDialogPanelStyle}\"", mainXaml, StringComparison.Ordinal);
-        Assert.Contains("MetadataToastCard.SetResourceReference(Border.BackgroundProperty", mainCode, StringComparison.Ordinal);
-        Assert.Contains("MetadataToastTitleTextBlock.SetResourceReference(TextBlock.ForegroundProperty", mainCode, StringComparison.Ordinal);
+        Assert.Contains("MetadataInitializationWindow", mainCode, StringComparison.Ordinal);
+        Assert.Contains("_metadataInitializationWindow?.ApplyContent", mainCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("MetadataToastCard.SetResourceReference(Border.BackgroundProperty", mainCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("MetadataToastTitleTextBlock.SetResourceReference(TextBlock.ForegroundProperty", mainCode, StringComparison.Ordinal);
         Assert.Contains("ThemeStatusWarningBackgroundResourceKey", mainCode, StringComparison.Ordinal);
         Assert.Contains("ThemeStatusErrorBackgroundResourceKey", mainCode, StringComparison.Ordinal);
         Assert.DoesNotContain("CornerRadius=\"18\"", mainXaml, StringComparison.Ordinal);

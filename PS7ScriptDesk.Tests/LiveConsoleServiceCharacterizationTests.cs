@@ -6,6 +6,7 @@ using PS7ScriptDesk.PowerShell.Services;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection("DiagnosticReliability")]
 public sealed class LiveConsoleServiceCharacterizationTests
 {
     [Fact]

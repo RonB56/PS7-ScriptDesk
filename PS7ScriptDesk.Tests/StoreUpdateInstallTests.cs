@@ -87,8 +87,75 @@ public sealed class StoreUpdateInstallTests
         });
     }
 
-    private static StoreUpdateService CreateService(StoreUpdateService.IStoreUpdateInstallAdapter adapter)
-        => new(new FakePackageEnvironmentProvider(), new FakeStoreQuery(), adapter);
+    [Fact]
+    public void RestartRegistrationFailurePreventsStoreInstall()
+    {
+        RunOnStaThread(() =>
+        {
+            var adapter = new RecordingInstallAdapter();
+            var restart = new RecordingRestartRegistration { RegisterResult = false, ErrorCode = unchecked((int)0x80004005) };
+            var service = CreateService(adapter, restart);
+            var result = service.RequestInstallAsync(CreateInstallableCheckResult(), new IntPtr(42), null, CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.False(result.RequestStarted);
+            Assert.False(adapter.WasCalled);
+            Assert.True(restart.RegisterCalled);
+            Assert.Equal(0, restart.UnregisterCount);
+            Assert.Contains("automatic restart", result.ExceptionSummary, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Fact]
+    public void SuccessfulInstallKeepsRestartRegistrationForWindowsToRelaunchUpdatedPackage()
+    {
+        RunOnStaThread(() =>
+        {
+            var restart = new RecordingRestartRegistration();
+            var adapter = new RecordingInstallAdapter
+            {
+                Attempt = new StoreUpdateService.StoreUpdateInstallAttempt
+                {
+                    RequestInvoked = true,
+                    StoreContextInitialized = true,
+                    OverallState = "Completed"
+                }
+            };
+            var service = CreateService(adapter, restart);
+            var result = service.RequestInstallAsync(CreateInstallableCheckResult(), new IntPtr(42), null, CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.True(result.IsSuccessfulInstallation);
+            Assert.True(result.RestartRegistrationSucceeded);
+            Assert.Equal(0, restart.UnregisterCount);
+        });
+    }
+
+    [Fact]
+    public void CanceledInstallUnregistersRestartIntentAndDoesNotRequestRelaunch()
+    {
+        RunOnStaThread(() =>
+        {
+            var restart = new RecordingRestartRegistration();
+            var adapter = new RecordingInstallAdapter
+            {
+                Attempt = new StoreUpdateService.StoreUpdateInstallAttempt
+                {
+                    RequestInvoked = true,
+                    StoreContextInitialized = true,
+                    OverallState = "Canceled"
+                }
+            };
+            var service = CreateService(adapter, restart);
+            var result = service.RequestInstallAsync(CreateInstallableCheckResult(), new IntPtr(42), null, CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.False(result.IsSuccessfulInstallation);
+            Assert.Equal(1, restart.UnregisterCount);
+        });
+    }
+
+    private static StoreUpdateService CreateService(
+        StoreUpdateService.IStoreUpdateInstallAdapter adapter,
+        RecordingRestartRegistration? restart = null)
+        => new(new FakePackageEnvironmentProvider(), new FakeStoreQuery(), adapter, restart ?? new RecordingRestartRegistration());
 
     private static StoreUpdateCheckResult CreateInstallableCheckResult()
         => new()
@@ -136,5 +203,22 @@ public sealed class StoreUpdateInstallTests
             Events.Add("request");
             return Task.FromResult(Attempt);
         }
+    }
+
+    private sealed class RecordingRestartRegistration : StoreUpdateService.IStoreUpdateRestartRegistration
+    {
+        public bool RegisterResult { get; init; } = true;
+        public int ErrorCode { get; init; }
+        public bool RegisterCalled { get; private set; }
+        public int UnregisterCount { get; private set; }
+
+        public bool TryRegister(out int errorCode)
+        {
+            RegisterCalled = true;
+            errorCode = ErrorCode;
+            return RegisterResult;
+        }
+
+        public void Unregister() => UnregisterCount++;
     }
 }

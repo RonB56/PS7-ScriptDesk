@@ -677,7 +677,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 await _requestGate.WaitAsync(ownerCancellationTokenSource.Token).ConfigureAwait(false);
                 entered = true;
 
-                await EnsureProcessReadyAsync(pwshExecutablePath, ownerCancellationTokenSource.Token).ConfigureAwait(false);
+                await EnsureProcessReadyAsync(pwshExecutablePath, ownerCancellationTokenSource.Token, requireQuickInfoPreload: false).ConfigureAwait(false);
 
                 stopwatch.Stop();
                 lock (_syncRoot)
@@ -1602,7 +1602,7 @@ namespace PS7ScriptDesk.Shell.Editor
             }
         }
 
-        private async Task EnsureProcessReadyAsync(string pwshExecutablePath, CancellationToken cancellationToken)
+        private async Task EnsureProcessReadyAsync(string pwshExecutablePath, CancellationToken cancellationToken, bool requireQuickInfoPreload)
         {
             ThrowIfDisposed();
             var stopwatch = Stopwatch.StartNew();
@@ -1678,7 +1678,9 @@ namespace PS7ScriptDesk.Shell.Editor
             {
                 AppLogger.Debug("EditorCompletion", $"Completion readiness wait initiated. Pid={process.Id}, Generation={_completionProcessGeneration}.");
                 await SendCommandAsync(
-                    BuildQuickInfoPreloadAndReadinessCommand(quickInfoPreloadMarker, readyMarker),
+                    requireQuickInfoPreload
+                        ? BuildQuickInfoPreloadAndReadinessCommand(quickInfoPreloadMarker, readyMarker)
+                        : BuildReadinessCommand(readyMarker),
                     CancellationToken.None).ConfigureAwait(false);
             }
             catch { TeardownProcess(); throw; }
@@ -1688,8 +1690,11 @@ namespace PS7ScriptDesk.Shell.Editor
 
             try
             {
-                await quickInfoPreloadTcs.Task.WaitAsync(readinessCts.Token).ConfigureAwait(false);
-                AppLogger.Debug("EditorCompletion", $"Quick Info preload ready. Pid={process.Id}, Generation={_completionProcessGeneration}, ElapsedMs={stopwatch.ElapsedMilliseconds:N0}.");
+                if (requireQuickInfoPreload)
+                {
+                    await quickInfoPreloadTcs.Task.WaitAsync(readinessCts.Token).ConfigureAwait(false);
+                    AppLogger.Debug("EditorCompletion", $"Quick Info preload ready. Pid={process.Id}, Generation={_completionProcessGeneration}, ElapsedMs={stopwatch.ElapsedMilliseconds:N0}.");
+                }
                 var ready = await readyTcs.Task.WaitAsync(readinessCts.Token).ConfigureAwait(false);
                 if (!ready)
                 {
@@ -1708,6 +1713,31 @@ namespace PS7ScriptDesk.Shell.Editor
             if (stdin is null) throw new InvalidOperationException("Completion PS session not available.");
             await stdin.WriteLineAsync(command.AsMemory(), cancellationToken).ConfigureAwait(false);
             await stdin.FlushAsync().ConfigureAwait(false);
+        }
+
+        private async Task EnsureQuickInfoPreloadAsync(CancellationToken cancellationToken)
+        {
+            TaskCompletionSource<bool>? preloadCompletion;
+            string? preloadMarker;
+            lock (_syncRoot)
+            {
+                preloadCompletion = _quickInfoPreloadCompletionSource;
+                preloadMarker = _quickInfoPreloadMarker;
+                if (preloadCompletion is null || preloadCompletion.Task.IsCompleted)
+                {
+                    return;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(preloadMarker))
+            {
+                throw new InvalidOperationException("Completion quick-info preload marker was unavailable.");
+            }
+
+            await SendCommandAsync(BuildQuickInfoPreloadAndMarkerCommand(preloadMarker), cancellationToken).ConfigureAwait(false);
+            using var preloadTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            preloadTimeout.CancelAfter(TimeSpan.FromSeconds(8));
+            await preloadCompletion.Task.WaitAsync(preloadTimeout.Token).ConfigureAwait(false);
         }
 
         private async Task<string> ExecuteTransportRequestAsync(
@@ -1748,7 +1778,11 @@ namespace PS7ScriptDesk.Shell.Editor
                 {
                     ["transportRequestId"] = transportRequestId
                 });
-                await EnsureProcessReadyAsync(pwshExecutablePath, cancellationToken).ConfigureAwait(false);
+                await EnsureProcessReadyAsync(pwshExecutablePath, cancellationToken, requireQuickInfoPreload: !isCompletionRequest).ConfigureAwait(false);
+                if (!isCompletionRequest)
+                {
+                    await EnsureQuickInfoPreloadAsync(cancellationToken).ConfigureAwait(false);
+                }
                 EditorInputTrace.Log("CompletionHelperReadinessCompleted", properties: new Dictionary<string, object?>
                 {
                     ["transportRequestId"] = transportRequestId,
@@ -2230,6 +2264,21 @@ function Invoke-ScriptDeskQuickInfo {
                 "$qpm=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + preloadMarkerB64 + "')); " +
                 "$qrm=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + readyMarkerB64 + "')); " +
                 "[Console]::Out.Write($qpm); [Console]::Out.Flush(); [Console]::Out.Write($qrm); [Console]::Out.Flush()";
+        }
+
+        private static string BuildQuickInfoPreloadAndMarkerCommand(string preloadMarker)
+        {
+            var markerB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(preloadMarker));
+            return BuildQuickInfoPreloadCommand() +
+                "\nif (@(Get-Command Invoke-ScriptDeskQuickInfo -CommandType Function).Count -ne 1) { throw 'Quick Info preload function was not installed.' }; " +
+                "$qpm=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + markerB64 + "')); " +
+                "[Console]::Out.Write($qpm); [Console]::Out.Flush()";
+        }
+
+        private static string BuildReadinessCommand(string readyMarker)
+        {
+            var markerB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(readyMarker));
+            return "$qrm=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + markerB64 + "')); [Console]::Out.Write($qrm); [Console]::Out.Flush()";
         }
 
         internal static string BuildCommandQuickInfoCommand(string commandName, string startMarker, string endMarker, bool includeHelp)

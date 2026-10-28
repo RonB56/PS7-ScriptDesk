@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
@@ -15,7 +16,9 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
     private readonly ConcurrentDictionary<Guid, int> _requestIds = new();
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly SemaphoreSlim _evaluationGate = new(1, 1);
+    private readonly SemaphoreSlim _completionGate = new(1, 1);
     private readonly object _stateGate = new();
+    private readonly Dictionary<string, int> _openDocumentVersions = new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource? _lifetime;
     private Stream? _pipe;
     private Task? _readerTask;
@@ -118,6 +121,98 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         catch (Exception ex) when (ex is IOException or EndOfStreamException or ObjectDisposedException)
         { return new(EditorExecutionStatus.Failed, false, observedBusy || IsBusy, null, "The PSES language-service session was lost."); }
         finally { _evaluationGate.Release(); }
+    }
+
+    public async Task<AuthoritativeCompletionResult?> GetLiveCompletionsAsync(
+        string documentUri,
+        string documentText,
+        int cursorOffset,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(documentUri);
+        ArgumentNullException.ThrowIfNull(documentText);
+        ThrowIfDisposed();
+        if (!IsInitialized)
+        {
+            return null;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        await _completionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var requestId = Guid.NewGuid();
+        try
+        {
+            var version = _openDocumentVersions.TryGetValue(documentUri, out var priorVersion)
+                ? priorVersion + 1
+                : 1;
+            var normalizedCursor = Math.Clamp(cursorOffset, 0, documentText.Length);
+            var position = ToDocumentPosition(documentText, normalizedCursor);
+            if (priorVersion == 0)
+            {
+                await SendNotificationAsync(
+                    "textDocument/didOpen",
+                    new { textDocument = new { uri = documentUri, languageId = "powershell", version, text = documentText } },
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await SendNotificationAsync(
+                    "textDocument/didChange",
+                    new { textDocument = new { uri = documentUri, version }, contentChanges = new[] { new { text = documentText } } },
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            _openDocumentVersions[documentUri] = version;
+            DeveloperDiagnostics.LogInfo("PSES", "Authoritative live completion request sent.", Metadata(new()
+            {
+                ["requestId"] = requestId,
+                ["documentUri"] = DeveloperDiagnostics.SanitizePath(documentUri),
+                ["documentVersion"] = version,
+                ["documentLength"] = documentText.Length,
+                ["cursorOffset"] = normalizedCursor,
+                ["line"] = position.Line,
+                ["character"] = position.Character
+            }));
+
+            var response = await SendRequestAsync(
+                "textDocument/completion",
+                new
+                {
+                    textDocument = new { uri = documentUri },
+                    position = new { line = position.Line, character = position.Character },
+                    context = new { triggerKind = 1 }
+                },
+                cancellationToken,
+                requestId).ConfigureAwait(false);
+
+            var result = ParseCompletionResult(response, documentText, normalizedCursor);
+            DeveloperDiagnostics.LogInfo("PSES", "Authoritative live completion response received.", Metadata(new()
+            {
+                ["requestId"] = requestId,
+                ["documentUri"] = DeveloperDiagnostics.SanitizePath(documentUri),
+                ["documentVersion"] = version,
+                ["itemCount"] = result?.Items.Count ?? 0,
+                ["replacementIndex"] = result?.ReplacementIndex,
+                ["replacementLength"] = result?.ReplacementLength,
+                ["elapsedMs"] = stopwatch.ElapsedMilliseconds,
+                ["processId"] = Environment.ProcessId
+            }));
+            return result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            DeveloperDiagnostics.LogInfo("PSES", "Authoritative live completion request canceled.", Metadata(new() { ["requestId"] = requestId, ["elapsedMs"] = stopwatch.ElapsedMilliseconds }));
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or EndOfStreamException or ObjectDisposedException or InvalidOperationException or TimeoutException)
+        {
+            DeveloperDiagnostics.LogWarning("PSES", $"Authoritative live completion request failed: {ex.Message}", Metadata(new() { ["requestId"] = requestId, ["exceptionType"] = ex.GetType().Name, ["elapsedMs"] = stopwatch.ElapsedMilliseconds }));
+            return null;
+        }
+        finally
+        {
+            _completionGate.Release();
+        }
     }
 
     public async Task CancelRequestAsync(Guid requestId, CancellationToken cancellationToken = default)
@@ -283,6 +378,92 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
     }
 
     private void FailPending(Exception exception) { foreach (var pair in _pending) pair.Value.Completion.TrySetException(exception); _pending.Clear(); _requestIds.Clear(); }
+
+    private static AuthoritativeCompletionResult? ParseCompletionResult(JsonElement response, string documentText, int cursorOffset)
+    {
+        if (!response.TryGetProperty("result", out var result) || result.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        var itemsElement = result.ValueKind == JsonValueKind.Array
+            ? result
+            : result.TryGetProperty("items", out var listedItems) ? listedItems : default;
+        if (itemsElement.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var items = new List<AuthoritativeCompletionItem>();
+        var replacementIndex = cursorOffset;
+        var replacementLength = 0;
+        var replacementResolved = false;
+        foreach (var item in itemsElement.EnumerateArray())
+        {
+            if (!item.TryGetProperty("label", out var labelElement)) continue;
+            var label = labelElement.GetString() ?? string.Empty;
+            var completionText = item.TryGetProperty("insertText", out var insertTextElement)
+                ? insertTextElement.GetString() ?? label
+                : item.TryGetProperty("textEdit", out var textEditValue) && textEditValue.TryGetProperty("newText", out var newTextElement)
+                    ? newTextElement.GetString() ?? label
+                    : label;
+            var tooltip = item.TryGetProperty("detail", out var detailElement) ? detailElement.GetString() ?? string.Empty : string.Empty;
+            var kind = item.TryGetProperty("kind", out var kindElement) && kindElement.TryGetInt32(out var numericKind) ? numericKind : 1;
+
+            if (!replacementResolved && item.TryGetProperty("textEdit", out var textEdit) && textEdit.ValueKind == JsonValueKind.Object &&
+                textEdit.TryGetProperty("range", out var range) && TryGetRangeOffsets(range, documentText, out var rangeStart, out var rangeEnd))
+            {
+                replacementIndex = rangeStart;
+                replacementLength = Math.Max(0, rangeEnd - rangeStart);
+                replacementResolved = true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(completionText))
+                items.Add(new AuthoritativeCompletionItem(completionText, string.IsNullOrWhiteSpace(label) ? completionText : label, kind, tooltip));
+        }
+
+        return items.Count == 0 ? null : new AuthoritativeCompletionResult(replacementIndex, replacementLength, items);
+    }
+
+    private static bool TryGetRangeOffsets(JsonElement range, string documentText, out int start, out int end)
+    {
+        start = end = 0;
+        if (!TryGetPosition(range, "start", out var startPosition) || !TryGetPosition(range, "end", out var endPosition)) return false;
+        start = PositionToOffset(documentText, startPosition.Line, startPosition.Character);
+        end = PositionToOffset(documentText, endPosition.Line, endPosition.Character);
+        return true;
+    }
+
+    private static bool TryGetPosition(JsonElement parent, string name, out DocumentPosition position)
+    {
+        position = default;
+        if (!parent.TryGetProperty(name, out var element) || !element.TryGetProperty("line", out var lineElement) ||
+            !element.TryGetProperty("character", out var characterElement) || !lineElement.TryGetInt32(out var line) ||
+            !characterElement.TryGetInt32(out var character)) return false;
+        position = new DocumentPosition(Math.Max(0, line), Math.Max(0, character));
+        return true;
+    }
+
+    private static DocumentPosition ToDocumentPosition(string documentText, int offset)
+    {
+        var line = 0;
+        var lineStart = 0;
+        for (var index = 0; index < offset; index++)
+        {
+            if (documentText[index] == '\n') { line++; lineStart = index + 1; }
+        }
+        return new DocumentPosition(line, offset - lineStart);
+    }
+
+    private static int PositionToOffset(string documentText, int line, int character)
+    {
+        var currentLine = 0;
+        var offset = 0;
+        while (offset < documentText.Length && currentLine < line) if (documentText[offset++] == '\n') currentLine++;
+        return Math.Clamp(offset + character, 0, documentText.Length);
+    }
+
+    private readonly record struct DocumentPosition(int Line, int Character);
 
     public async ValueTask DisposeAsync()
     {
