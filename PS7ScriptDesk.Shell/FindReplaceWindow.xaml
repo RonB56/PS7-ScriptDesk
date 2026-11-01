@@ -15,6 +15,30 @@
         Style="{StaticResource IdeSecondaryWindowStyle}"
         PreviewKeyDown="Window_PreviewKeyDown"
         help:ContextHelp.Key="FindReplace.Dialog">
+    <Window.Resources>
+        <ContextMenu x:Key="FindReplaceTextBoxContextMenu" x:Shared="False">
+            <MenuItem Header="Undo"
+                      Command="{x:Static ApplicationCommands.Undo}"
+                      CommandTarget="{Binding PlacementTarget, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+            <Separator />
+            <MenuItem Header="Cut"
+                      Command="{x:Static ApplicationCommands.Cut}"
+                      CommandTarget="{Binding PlacementTarget, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+            <MenuItem Header="Copy"
+                      Command="{x:Static ApplicationCommands.Copy}"
+                      CommandTarget="{Binding PlacementTarget, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+            <MenuItem Header="Paste"
+                      Command="{x:Static ApplicationCommands.Paste}"
+                      CommandTarget="{Binding PlacementTarget, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+            <MenuItem Header="Delete"
+                      Command="{x:Static ApplicationCommands.Delete}"
+                      CommandTarget="{Binding PlacementTarget, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+            <Separator />
+            <MenuItem Header="Select All"
+                      Command="{x:Static ApplicationCommands.SelectAll}"
+                      CommandTarget="{Binding PlacementTarget, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+        </ContextMenu>
+    </Window.Resources>
     <Grid Margin="{StaticResource Padding.Card}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -61,8 +85,13 @@
                          Margin="0,0,0,10"
                          AutomationProperties.Name="Find text"
                          AutomationProperties.HelpText="Text to find in the active script"
+                         ContextMenu="{StaticResource FindReplaceTextBoxContextMenu}"
                          TextChanged="FindTextBox_TextChanged"
-                         help:ContextHelp.Key="FindReplace.FindText" />
+                         help:ContextHelp.Key="FindReplace.FindText">
+                    <TextBox.InputBindings>
+                        <KeyBinding Key="V" Modifiers="Control" Command="{x:Static ApplicationCommands.Paste}" />
+                    </TextBox.InputBindings>
+                </TextBox>
 
                 <TextBlock x:Name="ReplaceLabel"
                            Grid.Row="1"
@@ -79,7 +108,12 @@
                          Margin="0,0,0,10"
                          AutomationProperties.Name="Replace text"
                          AutomationProperties.HelpText="Replacement text for the active script"
-                         help:ContextHelp.Key="FindReplace.ReplaceText" />
+                         ContextMenu="{StaticResource FindReplaceTextBoxContextMenu}"
+                         help:ContextHelp.Key="FindReplace.ReplaceText">
+                    <TextBox.InputBindings>
+                        <KeyBinding Key="V" Modifiers="Control" Command="{x:Static ApplicationCommands.Paste}" />
+                    </TextBox.InputBindings>
+                </TextBox>
 
                 <StackPanel Grid.Row="2"
                             Grid.Column="1"
