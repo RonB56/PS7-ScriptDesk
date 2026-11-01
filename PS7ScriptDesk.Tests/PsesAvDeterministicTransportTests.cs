@@ -43,7 +43,9 @@ public sealed class PsesAvDeterministicTransportTests
         fixture.CloseServer();
         var result = await evaluation.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.Equal(EditorExecutionStatus.Failed, result.Status);
+        // The transport closed before PSES returned an outcome, so the script
+        // may have executed even though its response was lost.
+        Assert.Equal(EditorExecutionStatus.Unknown, result.Status);
         Assert.False(result.ResponseReceived);
         Assert.Equal(0, fixture.Client.PendingRequestCount);
         Assert.Equal(1, Volatile.Read(ref faultCount));

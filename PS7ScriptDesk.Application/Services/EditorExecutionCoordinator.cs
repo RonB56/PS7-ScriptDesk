@@ -238,19 +238,51 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "StructuredInitializationFailed", "Structured backend initialization failed during startup.");
         }
 
+        if (!_backends.TryGetValue(StructuredBackendId, out var structured) || structured.Availability != ExecutionBackendAvailability.Available)
+        {
+            return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "StructuredUnavailable", structured?.AvailabilityReason ?? "The structured backend is not composed or available.");
+        }
+
         if (classification.Classification == ExecutionRequestClassification.KnownInteractive)
         {
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "InteractiveCapabilityRequired", classification.Reason);
         }
 
+        if (classification.Classification == ExecutionRequestClassification.Unknown)
+        {
+            // Unknown means the classifier could not prove the script is in the
+            // small allow-list; it does not mean the script requires interactive
+            // terminal input.  The structured PSES backend is the safe default
+            // for these script-call requests because it preserves the owned
+            // session without typing the source through PSReadLine.  Explicitly
+            // interactive requests were handled above and still use the legacy
+            // terminal backend.
+            var unknownCapabilityFailure = GetCapabilityFailure(requiredCapabilities, structured.Capabilities);
+            if (unknownCapabilityFailure is null)
+            {
+                return new ExecutionRoutingDecision(
+                    request.RequestId,
+                    StructuredBackendId,
+                    structured.Capabilities,
+                    true,
+                    IsShadowMode,
+                    null,
+                    true,
+                    structured.Availability,
+                    structuredCompatibility,
+                    classification.Classification,
+                    requiredCapabilities,
+                    "StructuredEligibleUnknown",
+                    null,
+                    DateTimeOffset.UtcNow);
+            }
+
+            return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "CapabilityNotSupported", unknownCapabilityFailure);
+        }
+
         if (classification.Classification != ExecutionRequestClassification.KnownNonInteractive)
         {
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "CapabilityNotProven", classification.Reason);
-        }
-
-        if (!_backends.TryGetValue(StructuredBackendId, out var structured) || structured.Availability != ExecutionBackendAvailability.Available)
-        {
-            return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "StructuredUnavailable", structured?.AvailabilityReason ?? "The structured backend is not composed or available.");
         }
 
         var capabilityFailure = GetCapabilityFailure(requiredCapabilities, structured.Capabilities);
@@ -331,6 +363,7 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
                 ["selectedBackend"] = decision.SelectedBackend,
                 ["selectionReason"] = decision.SelectionReason,
                 ["fallbackOrDowngradeReason"] = decision.FallbackOrDowngradeReason,
+                ["structuredUnknownDefault"] = string.Equals(decision.SelectionReason, "StructuredEligibleUnknown", StringComparison.Ordinal),
                 ["sessionGeneration"] = request.SessionGeneration,
                 ["scriptLength"] = request.ScriptText?.Length ?? 0,
                 ["contentOmitted"] = true

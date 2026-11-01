@@ -1639,6 +1639,8 @@ namespace PS7ScriptDesk.Shell
                     terminalFocusRestoreReadiness: GetTerminalFocusRestoreReadiness,
                     restoreTerminalFocus: (generation, cancellationToken) =>
                         TerminalConsole.RestoreTerminalFocusAsync(generation, cancellationToken),
+                    reconcileAuthoritativeClear: () => Dispatcher.BeginInvoke(() =>
+                        TerminalConsole.ReconcileAuthoritativeClear()),
                     requestTerminalWarmStart: reason => RequestConsoleWarmStart(reason));
 
                 // Forward raw (ANSI-intact) ConPTY output to xterm.js.

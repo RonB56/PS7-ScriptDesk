@@ -1,6 +1,7 @@
 using PS7ScriptDesk.Application.Interfaces;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Domain.Models;
+using System.Diagnostics;
 
 namespace PS7ScriptDesk.Application.Services;
 
@@ -43,20 +44,24 @@ public sealed class InteractiveTerminalCoordinator : IInteractiveTerminalCoordin
     public void SetState(InteractiveTerminalState state, string? reason = null)
     {
         var stateChanged = false;
+        var previous = _snapshot;
+        var current = _snapshot;
         lock (_syncRoot)
         {
-            var previous = _snapshot;
+            previous = _snapshot;
             _snapshot = _snapshot with
             {
                 State = state,
                 Reason = reason,
                 Timestamp = DateTimeOffset.UtcNow
             };
+            current = _snapshot;
             stateChanged = previous.State != _snapshot.State || previous.Generation != _snapshot.Generation;
         }
 
         if (stateChanged)
         {
+            LogTransition(previous, current, reason);
             RaiseStateChanged();
         }
     }
@@ -64,6 +69,8 @@ public sealed class InteractiveTerminalCoordinator : IInteractiveTerminalCoordin
     public bool TryReplaceGeneration(int generation, InteractiveTerminalState state, string? reason = null)
     {
         var stateChanged = false;
+        var previous = _snapshot;
+        var current = _snapshot;
         lock (_syncRoot)
         {
             if (generation < _snapshot.Generation)
@@ -94,17 +101,19 @@ public sealed class InteractiveTerminalCoordinator : IInteractiveTerminalCoordin
                 return true;
             }
 
-            var previous = _snapshot;
+            previous = _snapshot;
             _snapshot = new InteractiveTerminalSnapshot(
                 generation,
                 state,
                 reason,
                 DateTimeOffset.UtcNow);
+            current = _snapshot;
             stateChanged = previous.State != _snapshot.State || previous.Generation != _snapshot.Generation;
         }
 
         if (stateChanged)
         {
+            LogTransition(previous, current, reason);
             RaiseStateChanged();
         }
 
@@ -133,5 +142,23 @@ public sealed class InteractiveTerminalCoordinator : IInteractiveTerminalCoordin
                     "Interactive terminal state notification subscriber failed; coordinator state was retained.");
             }
         }
+    }
+
+    private void LogTransition(InteractiveTerminalSnapshot previous, InteractiveTerminalSnapshot current, string? reason)
+    {
+        DeveloperDiagnostics.LogStateTransition(
+            "Terminal",
+            "InteractiveTerminalReadiness",
+            previous.State.ToString(),
+            current.State.ToString(),
+            reason ?? "Interactive terminal state changed.",
+            new Dictionary<string, object?>
+            {
+                ["generation"] = current.Generation,
+                ["previousGeneration"] = previous.Generation,
+                ["previousReason"] = previous.Reason,
+                ["nextReason"] = current.Reason,
+                ["monotonicTimestamp"] = Stopwatch.GetTimestamp()
+            });
     }
 }

@@ -10,6 +10,7 @@ using System.Runtime.CompilerServices;
 using System.Security;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -27,6 +28,9 @@ namespace PS7ScriptDesk.UI.ViewModels
     {
         private const int MaximumRecentFiles = 10;
         private const string GitDiagnosticsDocumentTitle = "Git Diagnostics.txt";
+        private static readonly Regex RenderedPromptReadinessRegex = new(
+            @"(?:^|\r?\n|={2,})[ \t]*PS[ \t]+(?<path>(?:[A-Za-z]:[\\/]|/)[^\r\n>]{0,240})>[ \t]*(?:\r?\n|$)",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
         private readonly IFileDocumentService _fileDocumentService;
         private readonly IRuntimeService _runtimeService;
         private readonly ILiveConsoleService _liveConsoleService;
@@ -110,6 +114,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private Action?         _focusTerminalSink;
         private Action<string>?  _terminalWarmStartRequestSink;
         private Action?         _normalizeTerminalInteractiveStateSink;
+        private Action?         _reconcileAuthoritativeClearSink;
         private Func<int, CancellationToken, Task<TerminalFocusRestoreResult>>? _restoreTerminalFocusSink;
         private Func<bool>?     _isTerminalFocusedSink;
         private Func<TerminalFocusRestoreReadiness>? _terminalFocusRestoreReadinessSink;
@@ -135,6 +140,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private bool _isRuntimeDiscoveryInProgress;
         private bool _isWorkspaceLoading;
         private bool _isExecutionRunning;
+        private string? _lastRunAvailabilityDiagnosticSignature;
         private bool _isStopInProgress;
         private bool _isExeExportInProgress;
         private bool _isRestApiWizardOpen;
@@ -2092,11 +2098,13 @@ namespace PS7ScriptDesk.UI.ViewModels
             Func<TerminalFocusRestoreReadiness>? terminalFocusRestoreReadiness = null,
             Func<int, CancellationToken, Task<TerminalFocusRestoreResult>>? restoreTerminalFocus = null,
             Action? normalizeTerminalInteractiveState = null,
+            Action? reconcileAuthoritativeClear = null,
             Action<string>? requestTerminalWarmStart = null)
         {
             _clearTerminalSink  = clearTerminal;
             _focusTerminalSink  = focusTerminal;
             _normalizeTerminalInteractiveStateSink = normalizeTerminalInteractiveState;
+            _reconcileAuthoritativeClearSink = reconcileAuthoritativeClear;
             _beginTerminalOutputGenerationSink = beginTerminalOutputGeneration;
             _invalidateTerminalOutputGenerationSink = invalidateTerminalOutputGeneration;
             _isTerminalFocusedSink = isTerminalFocused;
@@ -2195,6 +2203,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
+            TryPromoteRenderedPromptReadiness(generation, rawOutput);
+
             TerminalCriticalTrace.LogStage(
                 "MainWindowViewModel.PublishInteractiveTerminalOutput.Begin",
                 new Dictionary<string, object?>
@@ -2217,6 +2227,60 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ["outputCharacterLength"] = rawOutput.Length,
                     ["contentOmitted"] = true
                 });
+        }
+
+        private void TryPromoteRenderedPromptReadiness(int generation, string rawOutput)
+        {
+            if (!_liveConsoleService.IsSessionRunning ||
+                !_liveConsoleService.IsInputWritable ||
+                _liveConsoleService.IsCommandInProgress ||
+                IsExecutionRunning)
+            {
+                return;
+            }
+
+            var cleaned = Regex.Replace(rawOutput, @"\x1B\].*?(?:\x07|\x1B\\)", string.Empty, RegexOptions.Singleline);
+            cleaned = Regex.Replace(cleaned, @"\x1B\[[0-?]*[ -/]*[@-~]", string.Empty);
+            var match = RenderedPromptReadinessRegex.Match(cleaned);
+            if (!match.Success)
+            {
+                return;
+            }
+
+            var path = match.Groups["path"].Value.Trim();
+            if (path.Length == 0)
+            {
+                return;
+            }
+
+            var snapshot = _interactiveTerminalCoordinator.Snapshot;
+            var promoted = _interactiveTerminalCoordinator.TryReplaceGeneration(
+                generation,
+                InteractiveTerminalState.InteractiveIdleAtPrompt,
+                "Rendered ConPTY output contained a rooted PowerShell prompt while the session was writable and idle.");
+            _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
+                generation,
+                InteractiveTerminalState.InteractiveIdleAtPrompt,
+                "Rendered ConPTY output contained a rooted PowerShell prompt while the session was writable and idle.");
+            if (promoted && snapshot.State != InteractiveTerminalState.InteractiveIdleAtPrompt)
+            {
+                DeveloperDiagnostics.LogStateTransition(
+                    "Terminal",
+                    "InteractivePromptReady",
+                    snapshot.State.ToString(),
+                    InteractiveTerminalState.InteractiveIdleAtPrompt.ToString(),
+                    "Rendered prompt readiness recovery promoted the WPF execution state.",
+                    new Dictionary<string, object?>
+                    {
+                        ["generation"] = generation,
+                        ["previousGeneration"] = snapshot.Generation,
+                        ["pathLength"] = path.Length,
+                        ["backendSessionRunning"] = _liveConsoleService.IsSessionRunning,
+                        ["backendInputWritable"] = _liveConsoleService.IsInputWritable,
+                        ["backendCommandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                        ["contentOmitted"] = true
+                    });
+            }
         }
 
         /// <summary>
@@ -4863,7 +4927,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             StatusText = structured
                 ? $"Running {displayName} through the authoritative PSES session..."
-                : $"Sending {displayName} to the live PowerShell console...";
+                : $"Running {displayName} through the active PowerShell session...";
             AppLogger.Info("Console", $"Coordinator dispatching '{displayName}'. RequestId={request.RequestId:N}; Backend={decision.SelectedBackend}; Reason={decision.SelectionReason}; Downgrade={decision.FallbackOrDowngradeReason ?? "(none)"}.");
 
             try
@@ -4877,9 +4941,10 @@ namespace PS7ScriptDesk.UI.ViewModels
                     {
                         EditorExecutionStatus.Completed => structured
                         ? $"{displayName} completed through the authoritative PSES session"
-                            : $"{displayName} sent to the live PowerShell console",
+                            : $"{displayName} completed through the active PowerShell session",
                         EditorExecutionStatus.Cancelled => $"{displayName} cancelled",
                         EditorExecutionStatus.Rejected => result.ErrorMessage ?? "Editor execution was rejected",
+                        EditorExecutionStatus.Unknown => result.ErrorMessage ?? "Editor execution outcome is unknown",
                         _ => result.ErrorMessage ?? "Editor execution failed"
                     };
                     UpdateConsoleSessionPresentation();
@@ -4984,7 +5049,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return false;
             }
 
-            StatusText = $"Sending {dispatchTitle} to the live PowerShell console...";
+            StatusText = $"Running {dispatchTitle} through the active PowerShell session...";
 
             try
             {
@@ -5003,7 +5068,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 PostToUi(() =>
                 {
                     UpdateConsoleSessionPresentation();
-                    StatusText = $"{dispatchTitle} sent to the live PowerShell console";
+                    StatusText = $"{dispatchTitle} completed through the active PowerShell session";
                     // No terminal output here: the script is now executing inside the ConPTY
                     // session and any plain-text lifecycle messages written to xterm.js here
                     // would interleave with ANSI-formatted ConPTY output, corrupting both.
@@ -5105,6 +5170,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                         EditorExecutionStatus.Completed => $"{dispatchTitle} completed through the authoritative PSES session",
                         EditorExecutionStatus.Cancelled => $"{dispatchTitle} cancelled",
                         EditorExecutionStatus.Rejected => result.ErrorMessage ?? "Structured editor execution rejected",
+                        EditorExecutionStatus.Unknown => result.ErrorMessage ?? "Structured editor execution outcome is unknown",
                         _ => result.ErrorMessage ?? "Structured editor execution failed"
                     };
                     UpdateConsoleSessionPresentation();
@@ -5235,7 +5301,9 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
-            if (!_liveConsoleService.IsCommandInProgress)
+            var interactiveState = _interactiveTerminalCoordinator.State;
+            var interactiveOperationInProgress = interactiveState is InteractiveTerminalState.InteractiveInputEditing or InteractiveTerminalState.InteractiveCommandRunning;
+            if (!_liveConsoleService.IsCommandInProgress && !interactiveOperationInProgress)
             {
                 StatusText = "There is no running script or command to stop";
                 return;
@@ -5488,6 +5556,11 @@ namespace PS7ScriptDesk.UI.ViewModels
                     PostToUi(() => _focusTerminalSink?.Invoke());
 
                     await _liveConsoleService.WriteRawInputAsync("cls\r").ConfigureAwait(false);
+
+                    // PowerShell/ConPTY owns the clear operation. xterm.js still
+                    // owns viewport position, so reconcile it after the command
+                    // is accepted without resetting the session or scrollback.
+                    PostToUi(() => _reconcileAuthoritativeClearSink?.Invoke());
 
                     PostToUi(() =>
                     {
@@ -8568,9 +8641,12 @@ namespace PS7ScriptDesk.UI.ViewModels
                                            (activeCoordinatorExecution.Capabilities.SupportsTerminalInterrupt ||
                                             activeCoordinatorExecution.Capabilities.SupportsCancellation);
 
-            return (coordinatorCanInterrupt ||
+            return (activeCoordinatorExecution is not null ||
+                    coordinatorCanInterrupt ||
                     (_activeStructuredExecutionRequestId.HasValue && _structuredExecutionCancellation is not null) ||
-                    (_liveConsoleService.IsSessionRunning && _liveConsoleService.IsCommandInProgress)) &&
+                    IsExecutionRunning ||
+                    (_liveConsoleService.IsSessionRunning && (_liveConsoleService.IsCommandInProgress ||
+                        _interactiveTerminalCoordinator.State is InteractiveTerminalState.InteractiveInputEditing or InteractiveTerminalState.InteractiveCommandRunning))) &&
                    !IsStopInProgress &&
                    !IsRuntimeDiscoveryInProgress;
         }
@@ -8612,6 +8688,66 @@ namespace PS7ScriptDesk.UI.ViewModels
             OnPropertyChanged(nameof(RunSelectionDisabledReason));
             OnPropertyChanged(nameof(IsConsoleInputActive));
             OnPropertyChanged(nameof(ConsoleInputStatusText));
+            LogRunAvailabilityIfChanged();
+        }
+
+        private void LogRunAvailabilityIfChanged()
+        {
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            var tab = SelectedTab;
+            var terminal = _interactiveTerminalCoordinator.Snapshot;
+            var activeExecution = _executionCoordinator?.ActiveExecution;
+            var available = CanRunScript();
+            var signature = string.Join('|',
+                available,
+                terminal.Generation,
+                terminal.State,
+                tab?.GetHashCode(),
+                tab?.IsPowerShellDocument,
+                tab?.IsDirty,
+                SelectedRuntimeItem is not null || _preferredRuntimeItem is not null,
+                IsExecutionRunning,
+                _liveConsoleService.IsCommandInProgress,
+                IsStopInProgress,
+                IsRuntimeDiscoveryInProgress,
+                IsDebugSessionActive,
+                activeExecution?.RequestId);
+            if (signature == _lastRunAvailabilityDiagnosticSignature)
+            {
+                return;
+            }
+
+            _lastRunAvailabilityDiagnosticSignature = signature;
+            DeveloperDiagnostics.LogDecision(
+                "Execution",
+                "RunCommandAvailability",
+                "Editor Run and Run Selection availability changed.",
+                available ? "Available" : "Unavailable",
+                new Dictionary<string, object?>
+                {
+                    ["disabledReason"] = available ? null : GetRunDisabledReason(),
+                    ["hasSelectedTab"] = tab is not null,
+                    ["isPowerShellDocument"] = tab?.IsPowerShellDocument,
+                    ["isSavedDocument"] = tab?.FilePath is not null,
+                    ["isDirty"] = tab?.IsDirty,
+                    ["hasRuntime"] = SelectedRuntimeItem is not null || _preferredRuntimeItem is not null,
+                    ["terminalState"] = terminal.State.ToString(),
+                    ["terminalGeneration"] = terminal.Generation,
+                    ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                    ["inputWritable"] = _liveConsoleService.IsInputWritable,
+                    ["backendCommandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                    ["isExecutionRunning"] = IsExecutionRunning,
+                    ["isStopInProgress"] = IsStopInProgress,
+                    ["isRuntimeDiscoveryInProgress"] = IsRuntimeDiscoveryInProgress,
+                    ["isDebugSessionActive"] = IsDebugSessionActive,
+                    ["activeExecutionId"] = activeExecution?.RequestId,
+                    ["activeExecutionGeneration"] = activeExecution?.SessionGeneration,
+                    ["contentOmitted"] = true
+                });
         }
 
         private static string GetApplicationVersionText()

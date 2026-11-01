@@ -8,6 +8,50 @@ namespace PS7ScriptDesk.Tests;
 [Collection(PsesOwnedSessionEnvironmentCollection.Name)]
 public sealed class PsesLiveCompletionProductionIntegrationTests
 {
+    [Fact(Timeout = 90_000)]
+    public async Task StructuredTerminatingError_IsReportedFailedAndSessionRecovers()
+    {
+        var runtime = FindRuntime();
+        var psesRoot = Environment.GetEnvironmentVariable("PS7SCRIPTDESK_PSES_ROOT");
+        if (runtime is null || string.IsNullOrWhiteSpace(psesRoot) ||
+            !File.Exists(Path.Combine(psesRoot, "PowerShellEditorServices", "Start-EditorServices.ps1")))
+        {
+            throw Xunit.Sdk.SkipException.ForSkip("Structured error integration requires PowerShell 7 and the recovered PSES root.");
+        }
+
+        using var service = new PsesOwnedInteractiveSessionService();
+        var output = new ConcurrentQueue<string>();
+        await service.StartSessionAsync(runtime, record => output.Enqueue(record.Text), Environment.CurrentDirectory)
+            .WaitAsync(TimeSpan.FromSeconds(45));
+        try
+        {
+            var failure = await service.ExecuteStructuredScriptAsync(
+                Guid.NewGuid(), service.SessionGeneration, "terminating-error-fixture",
+                "throw 'PS7SD_EXPECTED_TERMINATING_ERROR'",
+                executeInCurrentScope: false,
+                record => output.Enqueue(record.Text))
+                .WaitAsync(TimeSpan.FromSeconds(20));
+
+            var recovery = await service.ExecuteStructuredScriptAsync(
+                Guid.NewGuid(), service.SessionGeneration, "after-error-fixture",
+                "$global:PS7SD_AfterErrorRecovery = 'ready'; Write-Output ('PS7SD_RECOVERY_' + 'SUCCESS')",
+                executeInCurrentScope: false,
+                record => output.Enqueue(record.Text))
+                .WaitAsync(TimeSpan.FromSeconds(20));
+
+            Assert.True(failure.Status == EditorExecutionStatus.Failed,
+                $"Expected the PSES structured operation to report Failed; got {failure.Status}. ErrorMessage={failure.ErrorMessage ?? "<none>"}; outputTail={string.Join(" | ", output.TakeLast(8))}");
+            Assert.True(recovery.Status == EditorExecutionStatus.Completed,
+                $"Expected same-session recovery to complete; got {recovery.Status}. ErrorMessage={recovery.ErrorMessage ?? "<none>"}; outputTail={string.Join(" | ", output.TakeLast(12))}");
+            Assert.True(service.IsSessionRunning);
+            Assert.True(service.IsInputWritable);
+        }
+        finally
+        {
+            await service.ShutdownAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        }
+    }
+
     [Fact(Timeout = 120_000)]
     public async Task ConsoleStateIsVisibleToAuthoritativeLiveCompletionAndPersistsAcrossExecution()
     {

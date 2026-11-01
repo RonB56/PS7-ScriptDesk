@@ -168,7 +168,10 @@ namespace PS7ScriptDesk.Shell.Controls
                   fontFamily:  "'Cascadia Code','Cascadia Mono',Consolas,'Courier New',monospace",
                   fontSize:     14,
                   lineHeight:   1.2,
-                  scrollback:   10000,
+                  // Keep the accessibility DOM bounded during high-volume output.
+                  // The authoritative session and its output diagnostics remain
+                  // independent of the renderer's retained visual history.
+                  scrollback:   500,
                   cursorBlink:  true,
                   cursorStyle:  'block',
                   cursorInactiveStyle: 'outline',
@@ -960,6 +963,19 @@ namespace PS7ScriptDesk.Shell.Controls
                   },
                   observePromptBoundary: function (msg) {
                     postScreenStateSnapshot('prompt-boundary', msg || {}, true);
+                  },
+                  reconcileAuthoritativeClear: function () {
+                    try {
+                      // PowerShell's cls clears/redraws the active screen through
+                      // ConPTY, but it does not own xterm.js's scroll position.
+                      // Bring the renderer back to the current screen without
+                      // resetting the session or discarding its scrollback.
+                      if (typeof term.scrollToBottom === 'function') term.scrollToBottom();
+                      try { term.refresh(0, Math.max(0, term.rows - 1)); } catch (ignoreRefresh) { }
+                      postScreenStateSnapshot('authoritative-clear-reconciled', {}, false);
+                    } catch (reconcileErr) {
+                      post({ type: 'xterm_authoritative_clear_reconcile_error', message: String(reconcileErr), contentOmitted: true });
+                    }
                   }
                 };
                 window.__ps7ScriptDeskFocusTerminal = function () {
@@ -1059,6 +1075,7 @@ namespace PS7ScriptDesk.Shell.Controls
                   else if (msg.type === 'output') { termApi.write(msg.data || ''); }
                   else if (msg.type === 'prompt_boundary') { postScreenStateSnapshot('prompt-boundary', msg, true); }
                   else if (msg.type === 'clear')  { termApi.clear(); }
+                  else if (msg.type === 'reconcile_authoritative_clear') { termApi.reconcileAuthoritativeClear(); }
                   else if (msg.type === 'resize_commit') {
                     var commitCols = Number.isSafeInteger(msg.cols) ? msg.cols : 0;
                     var commitRows = Number.isSafeInteger(msg.rows) ? msg.rows : 0;
@@ -2259,6 +2276,25 @@ namespace PS7ScriptDesk.Shell.Controls
                 "Terminal",
                 "Terminal interactive display normalization requested without changing focus.");
             PostToWebView("normalize_interactive_state", string.Empty);
+        }
+
+        /// <summary>
+        /// Reconciles xterm.js with a PowerShell/ConPTY clear without resetting
+        /// the session or removing the terminal's scrollback buffer.
+        /// </summary>
+        public void ReconcileAuthoritativeClear()
+        {
+            if (!_webView2Available) return;
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Reconciling xterm viewport after an authoritative PowerShell clear.",
+                new Dictionary<string, object?>
+                {
+                    ["preservesSession"] = true,
+                    ["preservesScrollback"] = true,
+                    ["contentOmitted"] = true
+                });
+            PostToWebView("reconcile_authoritative_clear", string.Empty);
         }
 
         /// <summary>Focuses the xterm.js terminal so keystrokes are captured immediately.</summary>

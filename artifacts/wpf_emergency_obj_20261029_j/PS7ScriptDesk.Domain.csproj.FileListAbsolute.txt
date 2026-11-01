@@ -1,0 +1,12 @@
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_build_20261029_j\PS7ScriptDesk.Domain.deps.json
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_build_20261029_j\PS7ScriptDesk.Domain.dll
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_build_20261029_j\PS7ScriptDesk.Domain.pdb
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_j\PS7ScriptDesk.Domain.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_j\PS7ScriptDesk.Domain.AssemblyInfoInputs.cache
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_j\PS7ScriptDesk.Domain.AssemblyInfo.cs
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_j\PS7ScriptDesk.Domain.csproj.CoreCompileInputs.cache
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_j\PS7ScriptDesk.Domain.sourcelink.json
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_j\PS7ScriptDesk.Domain.dll
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_j\refint\PS7ScriptDesk.Domain.dll
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_j\PS7ScriptDesk.Domain.pdb
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_j\ref\PS7ScriptDesk.Domain.dll

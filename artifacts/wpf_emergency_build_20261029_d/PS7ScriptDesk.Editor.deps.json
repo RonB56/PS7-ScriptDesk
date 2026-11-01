@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "PS7ScriptDesk.Editor/1.0.0": {
+        "runtime": {
+          "PS7ScriptDesk.Editor.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "PS7ScriptDesk.Editor/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

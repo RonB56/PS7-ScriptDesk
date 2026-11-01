@@ -15,7 +15,8 @@ public enum EditorExecutionStatus
     Completed,
     Cancelled,
     Failed,
-    Rejected
+    Rejected,
+    Unknown
 }
 
 public enum EditorExecutionEventKind

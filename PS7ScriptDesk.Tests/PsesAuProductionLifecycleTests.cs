@@ -70,11 +70,15 @@ public sealed class PsesAuProductionLifecycleTests
         var deadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
         while (Stopwatch.GetTimestamp() < deadline)
         {
-            if (output.Any(item => item.Contains(expected, StringComparison.Ordinal))) return;
+            // ConPTY delivery is chunked independently of logical PowerShell
+            // records. A marker may straddle two callbacks, so observe the
+            // accumulated stream rather than requiring one callback to contain
+            // the complete marker.
+            if (string.Concat(output).Contains(expected, StringComparison.Ordinal)) return;
             await Task.Delay(50);
         }
 
-        Assert.Contains(output, item => item.Contains(expected, StringComparison.Ordinal));
+        Assert.Contains(expected, string.Concat(output), StringComparison.Ordinal);
     }
 
     private static PowerShellRuntimeInfo? FindRuntime()

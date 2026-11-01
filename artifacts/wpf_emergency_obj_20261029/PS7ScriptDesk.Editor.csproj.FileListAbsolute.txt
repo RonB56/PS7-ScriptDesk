@@ -1,0 +1,12 @@
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_build_20261029\PS7ScriptDesk.Editor.deps.json
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_build_20261029\PS7ScriptDesk.Editor.dll
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_build_20261029\PS7ScriptDesk.Editor.pdb
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029\PS7ScriptDesk.Editor.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029\PS7ScriptDesk.Editor.AssemblyInfoInputs.cache
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029\PS7ScriptDesk.Editor.AssemblyInfo.cs
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029\PS7ScriptDesk.Editor.csproj.CoreCompileInputs.cache
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029\PS7ScriptDesk.Editor.sourcelink.json
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029\PS7ScriptDesk.Editor.dll
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029\refint\PS7ScriptDesk.Editor.dll
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029\PS7ScriptDesk.Editor.pdb
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029\ref\PS7ScriptDesk.Editor.dll

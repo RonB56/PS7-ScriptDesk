@@ -1,0 +1,14 @@
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_build_20261029_i\PS7ScriptDesk.UI.deps.json
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_build_20261029_i\PS7ScriptDesk.UI.dll
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_build_20261029_i\PS7ScriptDesk.UI.pdb
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\PS7ScriptDesk.UI.csproj.AssemblyReference.cache
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\PS7ScriptDesk.UI.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\PS7ScriptDesk.UI.AssemblyInfoInputs.cache
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\PS7ScriptDesk.UI.AssemblyInfo.cs
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\PS7ScriptDesk.UI.csproj.CoreCompileInputs.cache
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\PS7ScriptDesk.UI.sourcelink.json
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\PS7Scrip.E09E8BD1.Up2Date
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\PS7ScriptDesk.UI.dll
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\refint\PS7ScriptDesk.UI.dll
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\PS7ScriptDesk.UI.pdb
+C:\Users\rbarn\source\repos\PowerShellStudio\artifacts\wpf_emergency_obj_20261029_i\ref\PS7ScriptDesk.UI.dll

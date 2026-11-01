@@ -56,6 +56,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
         private static Action<string, string, Encoding> _writeAllText = File.WriteAllText;
         private static readonly ConcurrentQueue<HighLevelEventRecord> HighLevelEvents = new();
         private static volatile SessionRuntimeState? _sessionState;
+        private static volatile SessionRuntimeState? _lastCompletedSession;
         private static volatile DeveloperDiagnosticsConfiguration _configuration = DeveloperDiagnosticsConfiguration.Disabled;
         private static Func<DeveloperDiagnosticsStateSnapshot>? _summaryProvider;
         private static Func<bool?>? _uiThreadChecker;
@@ -397,8 +398,10 @@ namespace PS7ScriptDesk.Application.Diagnostics
         }
 
         public static string BuildSummaryText()
+            => BuildSummaryText(_sessionState ?? _lastCompletedSession);
+
+        private static string BuildSummaryText(SessionRuntimeState? session)
         {
-            var session = _sessionState;
             var snapshot = SafeGetSummarySnapshot();
             var builder = new StringBuilder(4096);
             builder.AppendLine($"App: {ApplicationBranding.PublicName} {TryGetAppVersion()}");
@@ -406,9 +409,10 @@ namespace PS7ScriptDesk.Application.Diagnostics
             builder.AppendLine($"Diagnostics Enabled: {IsEnabled}");
             builder.AppendLine($"Diagnostics Storage State: {session?.StorageState.ToString() ?? "(not active)"}");
             builder.AppendLine($"Disabled Secondary Artifacts: {session?.DisabledArtifactCount.ToString(CultureInfo.InvariantCulture) ?? "0"}");
-            builder.AppendLine($"Dropped Diagnostic Events: {Volatile.Read(ref _droppedEventCount)}");
+            builder.AppendLine($"Dropped Diagnostic Events: {session?.GeneralDroppedEvents ?? Volatile.Read(ref _droppedEventCount)}");
             builder.AppendLine($"General Diagnostic Events Accepted: {session?.GeneralAcceptedEvents ?? 0}");
             builder.AppendLine($"General Diagnostic Events Dropped: {session?.GeneralDroppedEvents ?? Volatile.Read(ref _droppedEventCount)}");
+            builder.AppendLine($"General Diagnostic Events Ignored After Session Completion: {session?.GeneralCompletionRaceEvents ?? 0}");
             builder.AppendLine($"Critical Forensic Events Accepted: {session?.CriticalAcceptedEvents ?? 0}");
             builder.AppendLine($"Critical Forensic Events Written: {session?.CriticalWrittenEvents ?? 0}");
             builder.AppendLine($"Critical Forensic Events Dropped: {session?.CriticalDroppedEvents ?? 0}");
@@ -640,12 +644,16 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 Path.Combine(sessionDirectory, "critical-ui-forensics.ndjson"),
                 CreateFilePathMap(sessionDirectory),
                 configuration,
-                Channel.CreateBounded<DeveloperDiagnosticEnvelope>(new BoundedChannelOptions(DiagnosticsQueueCapacity)
+                // General diagnostics are a durability contract, not a lossy
+                // telemetry stream. TryWrite is intentionally non-blocking, so
+                // a bounded channel can return false under suite-load bursts
+                // even when FullMode is Wait. Use an unbounded channel here and
+                // retain the bounded critical-forensics channel separately.
+                Channel.CreateUnbounded<DeveloperDiagnosticEnvelope>(new UnboundedChannelOptions
                 {
                     AllowSynchronousContinuations = false,
                     SingleReader = true,
-                    SingleWriter = false,
-                    FullMode = BoundedChannelFullMode.Wait
+                    SingleWriter = false
                 }),
                 Channel.CreateBounded<DeveloperDiagnosticEnvelope>(new BoundedChannelOptions(CriticalForensicsQueueCapacity)
                 {
@@ -689,6 +697,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
         {
             try
             {
+                state.MarkGeneralChannelCompleted();
                 state.Channel.Writer.TryComplete();
                 state.CriticalChannel.Writer.TryComplete();
             }
@@ -710,6 +719,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
             }
 
             TryRefreshSummaryFile(state);
+            _lastCompletedSession = state;
         }
 
         private static void WriteSettingChangedEvent(string reason, DeveloperDiagnosticsConfiguration configuration, SessionRuntimeState state)
@@ -865,7 +875,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
         {
             try
             {
-                _writeAllText(state.SummaryFilePath, BuildSummaryText(), Encoding.UTF8);
+                _writeAllText(state.SummaryFilePath, BuildSummaryText(state), Encoding.UTF8);
             }
             catch (Exception ex)
             {
@@ -994,12 +1004,24 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 state.IncrementGeneralAccepted();
                 if (!state.Channel.Writer.TryWrite(new DeveloperDiagnosticEnvelope(diagnosticEvent)))
                 {
+                    if (state.IsGeneralChannelCompleted)
+                    {
+                        state.IncrementGeneralCompletionRace();
+                        return;
+                    }
+
                     state.IncrementGeneralDropped();
                     Interlocked.Increment(ref _droppedEventCount);
                 }
             }
             catch
             {
+                if (state.IsGeneralChannelCompleted)
+                {
+                    state.IncrementGeneralCompletionRace();
+                    return;
+                }
+
                 state.IncrementGeneralDropped();
                 Interlocked.Increment(ref _droppedEventCount);
             }
@@ -1525,6 +1547,8 @@ namespace PS7ScriptDesk.Application.Diagnostics
             public long GeneralAcceptedEvents => Volatile.Read(ref _generalAcceptedEvents);
 
             public long GeneralDroppedEvents => Volatile.Read(ref _generalDroppedEvents);
+            public long GeneralCompletionRaceEvents => Volatile.Read(ref _generalCompletionRaceEvents);
+            public bool IsGeneralChannelCompleted => Volatile.Read(ref _generalChannelCompleted) != 0;
 
             public long CriticalAcceptedEvents => Volatile.Read(ref _criticalAcceptedEvents);
 
@@ -1535,6 +1559,8 @@ namespace PS7ScriptDesk.Application.Diagnostics
             public void IncrementGeneralAccepted() => Interlocked.Increment(ref _generalAcceptedEvents);
 
             public void IncrementGeneralDropped() => Interlocked.Increment(ref _generalDroppedEvents);
+            public void IncrementGeneralCompletionRace() => Interlocked.Increment(ref _generalCompletionRaceEvents);
+            public void MarkGeneralChannelCompleted() => Volatile.Write(ref _generalChannelCompleted, 1);
 
             public void IncrementCriticalAccepted() => Interlocked.Increment(ref _criticalAcceptedEvents);
 
@@ -1592,6 +1618,8 @@ namespace PS7ScriptDesk.Application.Diagnostics
             private int _storageState;
             private long _generalAcceptedEvents;
             private long _generalDroppedEvents;
+            private long _generalCompletionRaceEvents;
+            private int _generalChannelCompleted;
             private long _criticalAcceptedEvents;
             private long _criticalWrittenEvents;
             private long _criticalDroppedEvents;

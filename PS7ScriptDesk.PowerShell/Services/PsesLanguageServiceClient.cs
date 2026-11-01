@@ -1,6 +1,10 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using PS7ScriptDesk.Application.Diagnostics;
@@ -43,18 +47,118 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         if (IsInitialized) throw new InvalidOperationException("The PSES language-service client is already initialized.");
         var pipeName = languageServicePipePath[(languageServicePipePath.LastIndexOf('\\') + 1)..];
         if (string.IsNullOrWhiteSpace(pipeName)) throw new InvalidOperationException("PSES language-service pipe name was empty.");
+        WritePipeForensics(new
+        {
+            eventName = "client-connect-attempt",
+            utc = DateTimeOffset.UtcNow,
+            monotonicTimestamp = Stopwatch.GetTimestamp(),
+            clientProcessId = Environment.ProcessId,
+            serverProcessId = processId,
+            languageServicePipePath,
+            pipeName,
+            serverProcess = GetProcessForensics(processId)
+        });
         var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
         try
         {
             await pipe.ConnectAsync(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
             await InitializeConnectedAsync(pipe, processId, sessionGeneration, sendSyntheticTerminalInputAsync, cancellationToken).ConfigureAwait(false);
+            WritePipeForensics(new
+            {
+                eventName = "client-connect-success",
+                utc = DateTimeOffset.UtcNow,
+                monotonicTimestamp = Stopwatch.GetTimestamp(),
+                clientProcessId = Environment.ProcessId,
+                serverProcessId = processId,
+                languageServicePipePath,
+                pipeName
+            });
         }
-        catch
+        catch (Exception exception)
         {
+            var hresult = Marshal.GetHRForException(exception);
+            WritePipeForensics(new
+            {
+                eventName = "client-connect-failure",
+                utc = DateTimeOffset.UtcNow,
+                monotonicTimestamp = Stopwatch.GetTimestamp(),
+                clientProcessId = Environment.ProcessId,
+                serverProcessId = processId,
+                languageServicePipePath,
+                pipeName,
+                serverProcess = GetProcessForensics(processId),
+                exceptionType = exception.GetType().FullName,
+                exceptionMessage = exception.Message,
+                hresult = $"0x{hresult:X8}",
+                nativeErrorCode = hresult is unchecked((int)0x80070000) or unchecked((int)0x80004000) ? (int?)null : hresult & 0xFFFF,
+                nativeErrorMessage = hresult is unchecked((int)0x80070000) or unchecked((int)0x80004000) ? null : new Win32Exception(hresult & 0xFFFF).Message,
+                stack = exception.ToString()
+            });
+            if (int.TryParse(Environment.GetEnvironmentVariable("PS7SCRIPTDESK_PIPE_FORENSICS_HOLD_MS"), out var holdMilliseconds) && holdMilliseconds > 0)
+            {
+                Thread.Sleep(Math.Min(holdMilliseconds, 30000));
+            }
             // The stream is still local when ConnectAsync or the handshake fails.
             // Dispose it here so failed startup cannot strand a connected pipe.
             pipe.Dispose();
             throw;
+        }
+    }
+
+    private static object GetProcessForensics(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return new
+            {
+                alive = !process.HasExited,
+                processName = process.ProcessName,
+                sessionId = process.SessionId,
+                startTimeUtc = process.StartTime.ToUniversalTime(),
+                architecture = process.MainModule?.FileName,
+                clientIdentity = SafeIdentity(process),
+                clientProcessId = Environment.ProcessId
+            };
+        }
+        catch (Exception exception)
+        {
+            return new { alive = (bool?)null, error = exception.GetType().FullName + ": " + exception.Message };
+        }
+    }
+
+    private static string SafeIdentity(Process process)
+    {
+        if (!OperatingSystem.IsWindows()) return "<non-windows>";
+        return SafeWindowsIdentity(process);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string SafeWindowsIdentity(Process process)
+    {
+        try
+        {
+            using var identity = new WindowsIdentity(process.Handle);
+            return identity.Name ?? "<unnamed>";
+        }
+        catch (Exception exception)
+        {
+            return "<unavailable:" + exception.GetType().Name + ">";
+        }
+    }
+
+    private static void WritePipeForensics(object record)
+    {
+        var path = Environment.GetEnvironmentVariable("PS7SCRIPTDESK_PIPE_FORENSICS_PATH");
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try
+        {
+            var line = JsonSerializer.Serialize(record) + Environment.NewLine;
+            File.AppendAllText(path, line, Encoding.UTF8);
+        }
+        catch
+        {
+            // Forensic output is strictly opt-in and must never affect session startup.
         }
     }
 
@@ -105,21 +209,51 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
             if (observedBusy) await WaitForIdleAsync(cancellationToken).ConfigureAwait(false);
 
             var response = await SendRequestAsync("evaluate", new { expression }, cancellationToken, requestId).ConfigureAwait(false);
-            if (response.TryGetProperty("error", out var protocolError)) return new(EditorExecutionStatus.Failed, true, observedBusy || IsBusy, protocolError.GetRawText(), "PSES returned a protocol error.");
+            var hasResult = response.TryGetProperty("result", out var resultElement);
+            WritePipeForensics(new
+            {
+                eventName = "evaluate-response-shape",
+                utc = DateTimeOffset.UtcNow,
+                requestId,
+                sessionGeneration = SessionGeneration,
+                responseProperties = response.ValueKind == JsonValueKind.Object
+                    ? response.EnumerateObject().Select(property => property.Name).ToArray()
+                    : Array.Empty<string>(),
+                hasProtocolError = response.TryGetProperty("error", out _),
+                hasResult,
+                resultKind = hasResult ? resultElement.ValueKind.ToString() : null,
+                resultProperties = hasResult && resultElement.ValueKind == JsonValueKind.Object
+                    ? resultElement.EnumerateObject().Select(property => property.Name).ToArray()
+                    : Array.Empty<string>(),
+                nestedResultKind = hasResult && resultElement.ValueKind == JsonValueKind.Object && resultElement.TryGetProperty("result", out var nestedResult)
+                    ? nestedResult.ValueKind.ToString()
+                    : null,
+                nestedResultMetadata = hasResult && resultElement.ValueKind == JsonValueKind.Object && resultElement.TryGetProperty("result", out nestedResult) && nestedResult.ValueKind == JsonValueKind.String
+                    ? DeveloperDiagnostics.CreatePrivateTextMetadata(nestedResult.GetString())
+                    : null,
+                nestedResultPreview = hasResult && resultElement.ValueKind == JsonValueKind.Object && resultElement.TryGetProperty("result", out nestedResult) && nestedResult.ValueKind == JsonValueKind.String
+                    ? DeveloperDiagnostics.SanitizePreview(nestedResult.GetString(), 120)
+                    : null,
+                resultStringLength = hasResult && resultElement.ValueKind == JsonValueKind.String
+                    ? resultElement.GetString()?.Length
+                    : null,
+                contentOmitted = true
+            });
+            if (response.TryGetProperty("error", out var protocolError)) return new(EditorExecutionStatus.Unknown, true, observedBusy || IsBusy, protocolError.GetRawText(), "PSES returned a protocol error; script outcome is unknown.");
             var completed = await WaitForPostEvaluateIdleAsync(evaluationStartNotificationSequence, cancellationToken).ConfigureAwait(false);
             if (!completed)
             {
-                return new(EditorExecutionStatus.Failed, true, observedBusy || IsBusy, null,
-                    "PSES returned an evaluate response without a post-evaluate idle transition; execution completion was not proven.");
+                return new(EditorExecutionStatus.Unknown, true, observedBusy || IsBusy, null,
+                    "PSES returned an evaluate response without a post-evaluate idle transition; script outcome is unknown.");
             }
             return new(EditorExecutionStatus.Completed, true, observedBusy || IsBusy, null, null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         { throw; }
         catch (TimeoutException ex)
-        { return new(EditorExecutionStatus.Failed, false, observedBusy || IsBusy, null, ex.Message); }
+        { return new(EditorExecutionStatus.Unknown, false, observedBusy || IsBusy, null, "PSES evaluation timed out; script outcome is unknown. " + ex.Message); }
         catch (Exception ex) when (ex is IOException or EndOfStreamException or ObjectDisposedException)
-        { return new(EditorExecutionStatus.Failed, false, observedBusy || IsBusy, null, "The PSES language-service session was lost."); }
+        { return new(EditorExecutionStatus.Unknown, false, observedBusy || IsBusy, null, "The PSES language-service session was lost; script outcome is unknown."); }
         finally { _evaluationGate.Release(); }
     }
 
@@ -303,10 +437,10 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         }
         catch (Exception ex)
         {
-            FailPending(ex);
             IsInitialized = false;
             DeveloperDiagnostics.LogException("PSES", ex, "PSES language-service reader terminated; session generation is no longer usable.", Metadata());
             try { SessionFaulted?.Invoke(ex); } catch (Exception subscriberException) { DeveloperDiagnostics.LogException("PSES", subscriberException, "PSES session-fault subscriber failed."); }
+            FailPending(ex);
         }
     }
 
@@ -315,10 +449,10 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         try { await DispatchNotificationAsync(method, parameters, cancellationToken).ConfigureAwait(false); }
         catch (Exception ex) when (ex is IOException or EndOfStreamException or ObjectDisposedException or InvalidOperationException)
         {
-            FailPending(ex);
             IsInitialized = false;
             try { SessionFaulted?.Invoke(ex); } catch { }
             DeveloperDiagnostics.LogException("PSES", ex, "PSES notification dispatch failed; session generation is no longer usable.", Metadata());
+            FailPending(ex);
         }
     }
 

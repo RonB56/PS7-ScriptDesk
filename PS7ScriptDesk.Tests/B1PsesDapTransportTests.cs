@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using PS7ScriptDesk.Tests.Dap;
@@ -125,9 +126,12 @@ public sealed class B1PsesHostIntegrationTests
             throw Xunit.Sdk.SkipException.ForSkip(ex.Message);
         }
 
-        await using (host)
-        await using (var connection = await host.ConnectDebugPipeAsync(TimeSpan.FromSeconds(15)))
+        var traffic = new ConcurrentQueue<DapMessage>();
+        try
         {
+            await using (host)
+            await using (var connection = await host.ConnectDebugPipeAsync(TimeSpan.FromSeconds(15), messageSent: traffic.Enqueue, messageReceived: traffic.Enqueue))
+            {
             var response = await connection.SendRequestAsync(
                 "initialize",
                 new
@@ -154,6 +158,27 @@ public sealed class B1PsesHostIntegrationTests
                 TimeSpan.FromSeconds(15));
             Assert.True(disconnect.Success);
             Assert.Equal("disconnect", disconnect.Command);
+            }
+        }
+        finally
+        {
+            WriteB1EvidenceIfRequested(traffic);
+        }
+    }
+
+    private static void WriteB1EvidenceIfRequested(IEnumerable<DapMessage> traffic)
+    {
+        var evidencePath = Environment.GetEnvironmentVariable("PS7SD_B1_EVIDENCE_PATH");
+        if (string.IsNullOrWhiteSpace(evidencePath)) return;
+        try
+        {
+            Directory.CreateDirectory(evidencePath);
+            File.WriteAllText(Path.Combine(evidencePath, "dap-traffic.jsonl"), string.Join(Environment.NewLine, traffic.Select(message => JsonSerializer.Serialize(message))) + Environment.NewLine);
+            File.WriteAllText(Path.Combine(evidencePath, "test-metadata.json"), JsonSerializer.Serialize(new { test = nameof(StartsPsesValidatesSessionDetailsConnectsAndInitializesDap), trafficCount = traffic.Count() }, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Evidence capture is best-effort and must not alter the test result.
         }
     }
 }

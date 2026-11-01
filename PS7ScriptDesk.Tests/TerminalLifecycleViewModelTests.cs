@@ -122,6 +122,54 @@ public sealed class TerminalLifecycleViewModelTests
     }
 
     [Fact]
+    public async Task RenderedDriveRootPrompt_ReenablesRunAfterInteractiveCommand()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var coordinator = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+        console.RaiseSessionStarted(1);
+        coordinator.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "initial prompt");
+
+        await viewModel.WriteRawInputAsync("2 + 2\r");
+        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, coordinator.State);
+        Assert.False(viewModel.IsRunAvailable);
+
+        viewModel.PublishInteractiveTerminalOutput(1, "4\r\nPS C:\\>");
+
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+        Assert.Null(viewModel.RunDisabledReason);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task RenderedDriveRootPrompt_DoesNotAdmitBusyOrStaleSession()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var coordinator = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+        console.RaiseSessionStarted(1);
+        coordinator.SetState(InteractiveTerminalState.InteractiveCommandRunning, "command active");
+
+        console.IsCommandInProgress = true;
+        viewModel.PublishInteractiveTerminalOutput(1, "PS C:\\>");
+        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, coordinator.State);
+        Assert.False(viewModel.IsRunAvailable);
+
+        console.IsCommandInProgress = false;
+        console.RaiseSessionStarted(2);
+        viewModel.PublishInteractiveTerminalOutput(1, "PS C:\\>");
+        Assert.Equal(2, coordinator.Snapshot.Generation);
+        Assert.Equal(InteractiveTerminalState.Starting, coordinator.State);
+        Assert.False(viewModel.IsRunAvailable);
+
+        viewModel.PublishInteractiveTerminalOutput(2, "PS C:\\>");
+        Assert.True(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
+    [Fact]
     public async Task RendererReady_ProjectsAlreadyRunningBackendIntoVisibleSessionStateWithoutRestart()
     {
         var console = new RecordingLiveConsoleService();

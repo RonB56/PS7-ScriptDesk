@@ -65,7 +65,7 @@ public sealed class EditorExecutionCoordinatorTests
     }
 
     [Fact]
-    public async Task GateOn_UnknownSelectsLegacy()
+    public async Task GateOn_UnknownUsesStructuredBackendWhenNoInteractiveCapabilityIsRequired()
     {
         var legacy = new FakeBackend(EditorExecutionCoordinator.LegacyBackendId, LegacyCapabilities);
         var structured = new FakeBackend(EditorExecutionCoordinator.StructuredBackendId, StructuredCapabilities);
@@ -73,8 +73,8 @@ public sealed class EditorExecutionCoordinatorTests
 
         var decision = await coordinator.ObserveAsync(CreateRequest());
 
-        Assert.Equal(EditorExecutionCoordinator.LegacyBackendId, decision.SelectedBackend);
-        Assert.Equal("CapabilityNotProven", decision.SelectionReason);
+        Assert.Equal(EditorExecutionCoordinator.StructuredBackendId, decision.SelectedBackend);
+        Assert.Equal("StructuredEligibleUnknown", decision.SelectionReason);
     }
 
     [Fact]

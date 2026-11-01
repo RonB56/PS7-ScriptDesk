@@ -422,8 +422,53 @@ internal sealed class PsesHostProcess : IAsyncDisposable
         TryKill(_process);
         try { await Task.WhenAll(_stdoutTask, _stderrTask).WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { }
         try { await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { }
+        PreserveEvidenceIfRequested();
         _process.Dispose();
         TryDelete(_rootDirectory);
+    }
+
+    private void PreserveEvidenceIfRequested()
+    {
+        var destination = Environment.GetEnvironmentVariable("PS7SD_PSES_LIFECYCLE_EVIDENCE_PATH");
+        if (string.IsNullOrWhiteSpace(destination))
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(destination);
+            File.WriteAllText(Path.Combine(destination, "session-details.json"), JsonSerializer.Serialize(Details, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(Path.Combine(destination, "process-state.json"), JsonSerializer.Serialize(new
+            {
+                processId = _process.Id,
+                hasExited = _process.HasExited,
+                exitCode = _process.HasExited ? _process.ExitCode : (int?)null,
+                rootDirectory = _rootDirectory,
+                capturedAtUtc = DateTimeOffset.UtcNow
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(Path.Combine(destination, "stdout.txt"), _stdoutTask.Status == TaskStatus.RanToCompletion ? _stdoutTask.Result : string.Empty);
+            File.WriteAllText(Path.Combine(destination, "stderr.txt"), _stderrTask.Status == TaskStatus.RanToCompletion ? _stderrTask.Result : string.Empty);
+            CopyDirectory(Path.Combine(_rootDirectory, "logs"), Path.Combine(destination, "pses-logs"));
+        }
+        catch
+        {
+            // Evidence capture is best-effort and must never change the test result.
+        }
+    }
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        if (!Directory.Exists(source))
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(destination);
+        foreach (var file in Directory.EnumerateFiles(source))
+        {
+            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: true);
+        }
     }
 
     private static void TryKill(Process process) { try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { } }

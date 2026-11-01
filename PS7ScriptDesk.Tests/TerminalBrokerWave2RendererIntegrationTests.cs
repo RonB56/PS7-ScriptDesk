@@ -234,13 +234,14 @@ public sealed class TerminalBrokerWave2RendererIntegrationTests
     }
 
     [Theory]
-    [InlineData(null, false)]
+    [InlineData(null, true)]
     [InlineData("0", false)]
     [InlineData("false", false)]
     [InlineData("1", true)]
     [InlineData("true", true)]
     [InlineData("yes", true)]
-    public void FeatureGate_DefaultsOffAndCanBeEnabledOnlyExplicitly(string? value, bool expected)
+    [InlineData("no", false)]
+    public void FeatureGate_DefaultsOnAndCanBeDisabledOnlyExplicitly(string? value, bool expected)
     {
         var previous = Environment.GetEnvironmentVariable(EditorExecutionFeatureGate.EnvironmentVariableName);
         try
