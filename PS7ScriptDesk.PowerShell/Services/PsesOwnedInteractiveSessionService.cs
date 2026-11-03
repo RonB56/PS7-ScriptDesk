@@ -478,6 +478,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         var startedAt = DateTimeOffset.UtcNow;
         PsesStructuredEvaluationResult? protocolResult = null;
         var scriptOutcomeVerified = false;
+        var foregroundRequested = false;
+        var foregroundCompletionVerified = false;
         var executionGateAcquired = false;
         StructuredEchoFilter? requestEchoFilter = null;
         StructuredExecutionState? requestState = null;
@@ -576,7 +578,13 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                         ["invocationLength"] = invocation.Length,
                         ["contentOmitted"] = true
                     });
+<<<<<<< Updated upstream
                     var foregroundCompleted = await RestoreInteractivePromptAsync(sessionGeneration, invocation, statusPath, cancellationToken).ConfigureAwait(false);
+=======
+                    foregroundRequested = true;
+                    var foregroundCompleted = await RestoreInteractivePromptAsync(sessionGeneration, invocation, invocationEchoFilter, statusPath, cancellationToken).ConfigureAwait(false);
+                    foregroundCompletionVerified = foregroundCompleted;
+>>>>>>> Stashed changes
                     if (!foregroundCompleted)
                     {
                         DeveloperDiagnostics.LogWarning("PSES", "Foreground editor execution did not reach a post-script ConPTY prompt boundary.", new Dictionary<string, object?>
@@ -587,6 +595,9 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                         });
                         status = EditorExecutionStatus.Unknown;
                         errorMessage = "PSES did not complete foreground editor execution with an observable interactive prompt.";
+                        // A lost response or prompt cannot release ownership while pwsh
+                        // might still be executing the foreground invocation.
+                        await ShutdownAsync().ConfigureAwait(false);
                     }
                 }
                 if (status == EditorExecutionStatus.Completed)
@@ -635,28 +646,51 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 ["processId"] = ProcessId,
                 ["sessionGeneration"] = sessionGeneration,
                 ["status"] = status.ToString(),
-                ["completionObserved"] = protocolResult.ResponseReceived,
+                ["dapStageResponseReceived"] = protocolResult.ResponseReceived,
                 ["protocolError"] = protocolResult.ProtocolError,
                 ["scriptOutcomeVerified"] = scriptOutcomeVerified,
+                ["foregroundRequested"] = foregroundRequested,
+                ["foregroundCompletionVerified"] = foregroundCompletionVerified,
                 ["durationMs"] = (DateTimeOffset.UtcNow - startedAt).TotalMilliseconds
             });
-            return new AuthoritativeStructuredExecutionResult(status, CurrentWorkingDirectory, errorMessage, protocolResult.ResponseReceived);
+            return new AuthoritativeStructuredExecutionResult(status, CurrentWorkingDirectory, errorMessage, foregroundCompletionVerified);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            var interruptSent = await StopConsoleForGenerationAsync(sessionGeneration).ConfigureAwait(false);
-            DeveloperDiagnostics.LogInfo("PSES", "Private DAP cancellation settled or timed out; terminal interrupt sent as recovery escalation.", new Dictionary<string, object?>
+            var promptRecovered = await StopConsoleForGenerationAsync(sessionGeneration, requirePromptRecovery: true).ConfigureAwait(false);
+            var sessionTerminated = false;
+            if (!promptRecovered)
+            {
+                // A sent Ctrl+C does not prove that the foreground pipeline stopped.
+                // Dispose the owned session before releasing structured execution.
+                await ShutdownAsync().ConfigureAwait(false);
+                sessionTerminated = !IsSessionRunning;
+            }
+            DeveloperDiagnostics.LogInfo("PSES", "Structured cancellation recovery settled before execution ownership was released.", new Dictionary<string, object?>
             {
                 ["requestId"] = requestId,
                 ["sessionGeneration"] = sessionGeneration,
-                ["interruptSent"] = interruptSent,
-                ["pipelineInterruptionProven"] = false
+                ["promptRecovered"] = promptRecovered,
+                ["sessionTerminated"] = sessionTerminated,
+                ["pipelineInterruptionProven"] = promptRecovered || sessionTerminated
             });
-            return new AuthoritativeStructuredExecutionResult(EditorExecutionStatus.Cancelled, CurrentWorkingDirectory,
-                interruptSent ? "Execution canceled; terminal interrupt sent, pipeline interruption not yet proven." : "Execution canceled; terminal interrupt could not be sent.", false);
+            return new AuthoritativeStructuredExecutionResult(promptRecovered || sessionTerminated ? EditorExecutionStatus.Cancelled : EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
+                promptRecovered ? "Execution canceled; the interactive prompt recovered." : sessionTerminated ? "Execution canceled; the owned session was terminated after prompt recovery failed." : "Execution cancellation could not be verified.", false);
         }
         catch (Exception ex)
         {
+            if (foregroundRequested && !foregroundCompletionVerified)
+            {
+                try { await ShutdownAsync().ConfigureAwait(false); }
+                catch (Exception shutdownException)
+                {
+                    DeveloperDiagnostics.LogException("PSES", shutdownException, "Owned session termination after an unverified foreground failure failed.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["sessionGeneration"] = sessionGeneration
+                    });
+                }
+            }
             DeveloperDiagnostics.LogException("Phase2CProof", ex, "Authoritative structured execution failed.", new Dictionary<string, object?>
             {
                 ["requestId"] = requestId,
@@ -711,7 +745,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         return await StopConsoleForGenerationAsync(generation).ConfigureAwait(false);
     }
 
-    private async Task<bool> StopConsoleForGenerationAsync(int expectedGeneration)
+    private async Task<bool> StopConsoleForGenerationAsync(int expectedGeneration, bool requirePromptRecovery = false)
     {
         ConPtyProcess? expectedConPty;
         TaskCompletionSource<long> promptRecoveryWaiter;
@@ -731,9 +765,11 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         try
         {
             await WriteInputCoreAsync("\u0003", CancellationToken.None, expectedConPty, expectedGeneration).ConfigureAwait(false);
+            var promptRecovered = false;
             try
             {
                 var observed = await promptRecoveryWaiter.Task.WaitAsync(PromptRecoveryTimeout).ConfigureAwait(false);
+                promptRecovered = true;
                 DeveloperDiagnostics.LogInfo("PSES", "PSES console-repl interrupt reached a post-interrupt prompt boundary.", new Dictionary<string, object?>
                 {
                     ["sessionGeneration"] = expectedGeneration,
@@ -752,7 +788,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     ["recoveryTimeoutMilliseconds"] = (int)PromptRecoveryTimeout.TotalMilliseconds
                 });
             }
-            return true;
+            return !requirePromptRecovery || promptRecovered;
         }
         catch (Exception ex)
         {
@@ -775,6 +811,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     private async Task<bool> RestoreInteractivePromptAsync(int expectedGeneration, string invocation, string statusPath, CancellationToken cancellationToken)
     {
         PsesLanguageServiceClient? client;
+<<<<<<< Updated upstream
         var promptWaiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var postScriptPromptObserved = false;
         var invocationObserved = false;
@@ -790,28 +827,44 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 invocationTail = scan.Length >= invocation.Length ? scan[^(invocation.Length - 1)..] : scan;
             }
         };
+=======
+        var promptSignal = new PromptRestorationSignal(expectedGeneration);
+>>>>>>> Stashed changes
         Action<int, string> promptHandler = (generation, _) =>
         {
             // The foreground invocation itself is printed after a prompt. A
             // chunk ending there can look like a ready prompt, so only accept
             // one after the script's private completion file has been written.
-            if (generation != expectedGeneration || !File.Exists(statusPath)) return;
             bool cursorVisible;
+            bool statusFileExists = File.Exists(statusPath);
+            bool invocationEchoRemoved;
+            bool acceptedPrompt;
             lock (_syncRoot)
             {
+<<<<<<< Updated upstream
                 if (!invocationObserved) return;
                 postScriptPromptObserved = true;
+=======
+>>>>>>> Stashed changes
                 cursorVisible = _cursorVisible;
+                invocationEchoRemoved = invocationEchoFilter.EchoRemoved;
+                acceptedPrompt = promptSignal.ObservePrompt(generation, statusFileExists, invocationEchoRemoved, cursorVisible);
             }
-            if (cursorVisible) promptWaiter.TrySetResult(true);
+            if (acceptedPrompt && generation == expectedGeneration && invocationEchoRemoved && !statusFileExists)
+            {
+                DeveloperDiagnostics.LogInfo("PSES", "Foreground prompt boundary observed before the script status file; retaining it for completion verification.", new Dictionary<string, object?>
+                {
+                    ["sessionGeneration"] = expectedGeneration,
+                    ["processId"] = ProcessId,
+                    ["cursorVisibleAtPrompt"] = cursorVisible,
+                    ["promptObservation"] = Interlocked.Read(ref _promptReadyObservation),
+                    ["contentOmitted"] = true
+                });
+            }
         };
         Action<int, bool> cursorHandler = (generation, visible) =>
         {
-            if (generation != expectedGeneration || !visible) return;
-            lock (_syncRoot)
-            {
-                if (postScriptPromptObserved) promptWaiter.TrySetResult(true);
-            }
+            lock (_syncRoot) promptSignal.ObserveCursor(generation, visible);
         };
         long observationBeforeHandoff;
         lock (_syncRoot)
@@ -832,10 +885,44 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             // PSES owns the foreground transition and writes the invocation before
             // user output. Its REPL then writes the next prompt at the new cursor.
             var handoff = await client.EvaluateAsync(Guid.NewGuid(), invocation, cancellationToken).ConfigureAwait(false);
-            if (!handoff.ResponseReceived)
-                return false;
-
-            await promptWaiter.Task.WaitAsync(PromptRecoveryTimeout, cancellationToken).ConfigureAwait(false);
+            if (!File.Exists(statusPath))
+            {
+                DeveloperDiagnostics.LogWarning("PSES", "Foreground evaluate response arrived before the script status boundary; execution ownership remains active.", new Dictionary<string, object?>
+                {
+                    ["sessionGeneration"] = expectedGeneration,
+                    ["processId"] = ProcessId,
+                    ["handoffStatus"] = handoff.Status.ToString(),
+                    ["handoffResponseReceived"] = handoff.ResponseReceived,
+                    ["executionBusyObserved"] = handoff.ExecutionBusyObserved,
+                    ["protocolErrorLength"] = handoff.ProtocolError?.Length,
+                    ["errorMessageLength"] = handoff.ErrorMessage?.Length,
+                    ["contentOmitted"] = true
+                });
+            }
+            // PSES can respond after its own long request interval while the
+            // foreground PowerShell command continues. Its response is not the
+            // script completion boundary; the private status file is written
+            // only after the user script exits. Cancellation or session failure
+            // ends this wait without inventing another execution deadline.
+            while (!File.Exists(statusPath))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!IsSessionRunning || expectedGeneration != SessionGeneration) return false;
+                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+            }
+            if (promptSignal.ObserveStatusFileVisible())
+            {
+                bool cursorVisibleAtStatus;
+                lock (_syncRoot) cursorVisibleAtStatus = _cursorVisible;
+                DeveloperDiagnostics.LogInfo("PSES", "Foreground status file appeared after a qualified prompt boundary; restoration signal is now eligible.", new Dictionary<string, object?>
+                {
+                    ["sessionGeneration"] = expectedGeneration,
+                    ["processId"] = ProcessId,
+                    ["cursorVisibleAtStatus"] = cursorVisibleAtStatus,
+                    ["contentOmitted"] = true
+                });
+            }
+            await promptSignal.Completion.WaitAsync(PromptRecoveryTimeout, cancellationToken).ConfigureAwait(false);
             long observationAfterHandoff;
             lock (_syncRoot) observationAfterHandoff = _promptReadyObservation;
             DeveloperDiagnostics.LogInfo("PSES", "Structured execution completed on the foreground PSES host and restored the interactive prompt.", new Dictionary<string, object?>

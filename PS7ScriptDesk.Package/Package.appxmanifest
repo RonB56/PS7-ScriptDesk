@@ -9,7 +9,11 @@
   <Identity
     Name="31735RonBarnes.PowerShell7.xScriptDesk"
     Publisher="CN=DC11FB54-7A68-4F81-A768-029B373EBC5A"
+<<<<<<< Updated upstream
     Version="1.0.103.0" />
+=======
+    Version="1.0.107.0" />
+>>>>>>> Stashed changes
 
   <Properties>
     <DisplayName>PS7 ScriptDesk</DisplayName>

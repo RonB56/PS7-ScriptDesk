@@ -71,6 +71,73 @@ public sealed class PsesAvDeterministicTransportTests
     }
 
     [Fact]
+    public async Task ForegroundEvaluationOutlivesShortRequestDeadlineUntilResponseAndIdle()
+    {
+        await using var fixture = await ConnectedFixture.CreateAsync();
+        fixture.Client.ShortRequestTimeout = TimeSpan.FromMilliseconds(100);
+
+        var evaluation = fixture.Client.EvaluateAsync(Guid.NewGuid(), "Start-Sleep -Seconds 40");
+        using var request = await fixture.ServerReadTask.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(250);
+
+        Assert.False(evaluation.IsCompleted);
+        Assert.Equal(1, fixture.Client.PendingRequestCount);
+
+        await fixture.SendNotificationAsync("powerShell/executionBusyStatus", true);
+        await fixture.WriteResponseAsync(request.RootElement.GetProperty("id").GetInt32());
+        await fixture.SendNotificationAsync("powerShell/executionBusyStatus", false);
+        var result = await evaluation.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(EditorExecutionStatus.Completed, result.Status);
+        Assert.True(result.ResponseReceived);
+        Assert.Equal(0, fixture.Client.PendingRequestCount);
+    }
+
+    [Fact]
+    public async Task LiveCompletionStillUsesShortRequestDeadline()
+    {
+        await using var fixture = await ConnectedFixture.CreateAsync();
+        fixture.Client.ShortRequestTimeout = TimeSpan.FromMilliseconds(100);
+        var completion = fixture.Client.GetLiveCompletionsAsync("untitled:ps7scriptdesk/timeout.ps1", "$foo", 4);
+
+        using var didOpen = await fixture.ServerReadTask.WaitAsync(TimeSpan.FromSeconds(5));
+        using var request = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("textDocument/completion", request.RootElement.GetProperty("method").GetString());
+        using var cancel = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("$/cancelRequest", cancel.RootElement.GetProperty("method").GetString());
+        Assert.Null(await completion.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(0, fixture.Client.PendingRequestCount);
+    }
+
+    [Fact]
+    public async Task LateCancelledResponseCannotSettleTheNextEvaluation()
+    {
+        await using var fixture = await ConnectedFixture.CreateAsync();
+        using var cancellation = new CancellationTokenSource();
+        var first = fixture.Client.EvaluateAsync(Guid.NewGuid(), "Start-Sleep -Seconds 60", cancellation.Token);
+        using var firstRequest = await fixture.ServerReadTask.WaitAsync(TimeSpan.FromSeconds(5));
+        var firstId = firstRequest.RootElement.GetProperty("id").GetInt32();
+
+        cancellation.Cancel();
+        using var cancel = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("$/cancelRequest", cancel.RootElement.GetProperty("method").GetString());
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+
+        var second = fixture.Client.EvaluateAsync(Guid.NewGuid(), "Write-Host 'next'");
+        using var secondRequest = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var secondId = secondRequest.RootElement.GetProperty("id").GetInt32();
+        await fixture.WriteResponseAsync(firstId);
+        await Task.Delay(100);
+        Assert.False(second.IsCompleted);
+        Assert.Equal(1, fixture.Client.PendingRequestCount);
+
+        await fixture.WriteResponseAsync(secondId);
+        await fixture.SendNotificationAsync("powerShell/executionBusyStatus", false);
+        Assert.Equal(EditorExecutionStatus.Completed, (await second.WaitAsync(TimeSpan.FromSeconds(5))).Status);
+        Assert.Equal(0, fixture.Client.PendingRequestCount);
+    }
+
+    [Fact]
     public async Task LiveCompletionSynchronizesDocumentAndParsesLspItems()
     {
         await using var fixture = await ConnectedFixture.CreateAsync();
@@ -124,6 +191,8 @@ public sealed class PsesAvDeterministicTransportTests
             await _server.WriteAsync(body);
             await _server.FlushAsync();
         }
+
+        public Task WriteResponseAsync(int id) => WriteResponseAsync(_server, id);
 
         public async Task SendNotificationAsync(string method, object parameters)
         {

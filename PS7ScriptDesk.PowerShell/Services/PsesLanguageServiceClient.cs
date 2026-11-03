@@ -208,7 +208,9 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
             var evaluationStartNotificationSequence = BusyNotificationSequence;
             if (observedBusy) await WaitForIdleAsync(cancellationToken).ConfigureAwait(false);
 
-            var response = await SendRequestAsync("evaluate", new { expression }, cancellationToken, requestId).ConfigureAwait(false);
+            // A foreground evaluation can legitimately outlive a language-service request timeout.
+            // Its owner supplies cancellation, and a lost pipe faults the pending response.
+            var response = await SendRequestAsync("evaluate", new { expression }, cancellationToken, requestId, waitForForegroundCompletion: true).ConfigureAwait(false);
             var hasResult = response.TryGetProperty("result", out var resultElement);
             WritePipeForensics(new
             {
@@ -250,8 +252,6 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         { throw; }
-        catch (TimeoutException ex)
-        { return new(EditorExecutionStatus.Unknown, false, observedBusy || IsBusy, null, "PSES evaluation timed out; script outcome is unknown. " + ex.Message); }
         catch (Exception ex) when (ex is IOException or EndOfStreamException or ObjectDisposedException)
         { return new(EditorExecutionStatus.Unknown, false, observedBusy || IsBusy, null, "The PSES language-service session was lost; script outcome is unknown."); }
         finally { _evaluationGate.Release(); }
@@ -377,9 +377,12 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
     private bool IsBusy { get { lock (_stateGate) return _busy; } }
     private long BusyNotificationSequence { get { lock (_stateGate) return _busyNotificationSequence; } }
 
-    private async Task<JsonElement> SendRequestAsync(string method, object parameters, CancellationToken cancellationToken, Guid? requestId = null)
+    internal TimeSpan ShortRequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    private async Task<JsonElement> SendRequestAsync(string method, object parameters, CancellationToken cancellationToken, Guid? requestId = null, bool waitForForegroundCompletion = false)
     {
         var protocolId = Interlocked.Increment(ref _nextRequestId); var pending = new PendingRequest();
+        var stopwatch = DeveloperDiagnostics.IsEnabled ? Stopwatch.StartNew() : null;
         if (!_pending.TryAdd(protocolId, pending)) throw new InvalidOperationException("Duplicate PSES request identifier.");
         if (requestId is { } requestKey) _requestIds[requestKey] = protocolId;
         try
@@ -387,7 +390,18 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
             await SendMessageAsync(new { jsonrpc = "2.0", id = protocolId, method, @params = parameters }, cancellationToken).ConfigureAwait(false);
             try
             {
-                return await pending.Completion.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+                if (DeveloperDiagnostics.IsEnabled)
+                    DeveloperDiagnostics.LogInfo("PSES", "PSES request response wait started.", Metadata(new()
+                    {
+                        ["method"] = method,
+                        ["protocolId"] = protocolId,
+                        ["requestId"] = requestId,
+                        ["timeoutPolicy"] = waitForForegroundCompletion ? "foreground-cancellation-or-session-failure" : "bounded-short-request",
+                        ["timeoutMilliseconds"] = waitForForegroundCompletion ? null : ShortRequestTimeout.TotalMilliseconds
+                    }));
+                return waitForForegroundCompletion
+                    ? await pending.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false)
+                    : await pending.Completion.Task.WaitAsync(ShortRequestTimeout, cancellationToken).ConfigureAwait(false);
             }
             catch (TimeoutException) when (requestId is not null)
             {
@@ -404,7 +418,22 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
                 throw;
             }
         }
-        finally { _pending.TryRemove(protocolId, out _); if (requestId is { } requestKey2) _requestIds.TryRemove(requestKey2, out _); }
+        finally
+        {
+            _pending.TryRemove(protocolId, out _);
+            if (requestId is { } requestKey2) _requestIds.TryRemove(requestKey2, out _);
+            if (stopwatch is not null)
+                DeveloperDiagnostics.LogInfo("PSES", "PSES request response wait ended.", Metadata(new()
+                {
+                    ["method"] = method,
+                    ["protocolId"] = protocolId,
+                    ["requestId"] = requestId,
+                    ["foregroundExecution"] = waitForForegroundCompletion,
+                    ["elapsedMs"] = stopwatch.ElapsedMilliseconds,
+                    ["responseCompleted"] = pending.Completion.Task.IsCompletedSuccessfully,
+                    ["cancellationRequested"] = cancellationToken.IsCancellationRequested
+                }));
+        }
     }
 
     private Task SendNotificationAsync(string method, object parameters, CancellationToken cancellationToken) => SendMessageAsync(new { jsonrpc = "2.0", method, @params = parameters }, cancellationToken);
@@ -476,7 +505,14 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         }
     }
 
-    private async Task WaitForIdleAsync(CancellationToken cancellationToken) { while (IsBusy) await Task.Delay(25, cancellationToken).ConfigureAwait(false); }
+    private async Task WaitForIdleAsync(CancellationToken cancellationToken)
+    {
+        while (IsBusy)
+        {
+            if (!IsInitialized) throw new IOException("The PSES language-service session was lost while waiting for an idle runspace.");
+            await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+        }
+    }
 
     private async Task<bool> WaitForPostEvaluateIdleAsync(long evaluationStartNotificationSequence, CancellationToken cancellationToken)
     {
