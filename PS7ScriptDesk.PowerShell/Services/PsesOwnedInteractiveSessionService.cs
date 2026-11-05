@@ -21,6 +21,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     private const int StartupOutputCaptureLimit = 32 * 1024;
     private static readonly TimeSpan PromptRecoveryTimeout = TimeSpan.FromSeconds(5);
     private static readonly Regex AnsiSequenceRegex = new("\\x1B\\[[0-?]*[ -/]*[@-~]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex CursorColumnOneRegex = new("\\x1B\\[[0-9]+;1[Hf]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     // PSES can emit its startup banner and first prompt in one decoded read:
     // "...PowerShell Editor Services <=====PS C:\\...>". Treat the banner's
     // repeated '=' boundary as a valid prompt boundary, while requiring a
@@ -48,13 +49,17 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     private bool _sessionFaulted;
     private bool _commandInProgress;
     private CancellationTokenSource? _activeCommandCancellation;
+    private InputOutputProbe? _pendingInputOutputProbe;
     private StructuredEchoFilter? _activeStructuredEchoFilter;
     private StructuredExecutionState? _activeStructuredExecutionState;
     private long _promptReadyObservation;
+    private readonly PromptRecoveryFrameDiagnostics _promptFrameDiagnostics = new();
     private int _promptRecoveryGeneration;
     private TaskCompletionSource<long>? _promptRecoveryWaiter;
     private string _promptRecognitionBuffer = string.Empty;
+    private string _promptAnsiCarry = string.Empty;
     private string _cursorVisibilitySequenceTail = string.Empty;
+    private bool _interactiveReadinessUnverified;
     private bool _cursorVisible;
     private event Action<int, bool>? CursorVisibilityChanged;
     private FileStream? _rawConPtyCapture;
@@ -63,7 +68,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     private Guid _rawConPtyCorrelationId;
 
     public bool IsSessionRunning => _conPty is { HasExited: false } && !_sessionFaulted;
-    public bool IsInputWritable => IsSessionRunning;
+    public bool IsInputWritable => IsSessionRunning && !_shutdownRequested && !_interactiveReadinessUnverified;
     public bool IsCommandInProgress
     {
         get
@@ -107,6 +112,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     public event Action<int>? TerminalSessionStopping;
     public event Action<int, string>? PromptReadyObserved;
     public event Action<int, string>? RawOutputReceived;
+    internal event Action<int, string>? OutputObservedBeforeDisplayFiltering;
 
     public void AttachHost(IntPtr hostHandle, int width, int height) { }
     public void ResizeHost(int width, int height) { }
@@ -189,8 +195,11 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             _promptRecoveryGeneration = _generation;
             _promptRecoveryWaiter = null;
             _promptRecognitionBuffer = string.Empty;
+            _promptAnsiCarry = string.Empty;
             _cursorVisibilitySequenceTail = string.Empty;
+            _interactiveReadinessUnverified = false;
             _cursorVisible = false;
+            _pendingInputOutputProbe = null;
         }
 
         var generation = _generation;
@@ -307,7 +316,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 ["processId"] = process.Id,
                 ["replayedAfterSessionStarted"] = true
             });
-            PromptReadyObserved?.Invoke(generation, _workingDirectory ?? string.Empty);
+            NotifyPromptReadyObserved(generation, _workingDirectory ?? string.Empty);
         }
         }
         finally
@@ -319,8 +328,16 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     public Task WriteRawInputAsync(string data, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        if (!IsInputWritable) throw new InvalidOperationException("The PSES console-repl input is not writable.");
-        return WriteInputCoreAsync(data, cancellationToken);
+        ConPtyProcess owner;
+        int generation;
+        lock (_syncRoot)
+        {
+            if (!IsInputWritable || _conPty is null)
+                throw new InvalidOperationException("The PSES console-repl input is not writable.");
+            owner = _conPty;
+            generation = _generation;
+        }
+        return WriteInputCoreAsync(data, cancellationToken, owner, generation);
     }
 
     private Task SendSyntheticTerminalInputAsync(int generation, string data, CancellationToken cancellationToken)
@@ -480,7 +497,11 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         var scriptOutcomeVerified = false;
         var foregroundRequested = false;
         var foregroundCompletionVerified = false;
+        var foregroundHandoffStarted = false;
+        var foregroundTerminationVerified = false;
         var executionGateAcquired = false;
+        string? snapshotPath = null;
+        var snapshotCreated = false;
         StructuredEchoFilter? requestEchoFilter = null;
         StructuredExecutionState? requestState = null;
         var statusMarkerId = requestId.ToString("N", CultureInfo.InvariantCulture);
@@ -488,12 +509,6 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         var stagedScriptVariable = "__ps7sd_editor_" + statusMarkerId;
         var statusPath = Path.Combine(Path.GetTempPath(), "PS7ScriptDesk-" + statusMarkerId + ".status");
         var quotedStatusPath = QuotePowerShellSingleQuotedString(statusPath);
-        // Capture $? inside this operation. A later operation can observe a
-        // different PowerShell status than the editor script produced.
-        var evaluatedExpression = $"${statusVariable} = $true\ntry {{\n" + scriptContent +
-            $"\n${statusVariable} = $?\n}} catch {{\n${statusVariable} = $false\nthrow\n}} finally {{\n" +
-            $"if (${statusVariable}) {{ [System.IO.File]::WriteAllText({quotedStatusPath}, 'OK') }} else {{ [System.IO.File]::WriteAllText({quotedStatusPath}, 'ERROR') }}\n" +
-            $"Remove-Variable -Name '{statusVariable}' -ErrorAction SilentlyContinue\n}}";
 
         try
         {
@@ -521,6 +536,29 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 if (sessionGeneration != _generation || _languageServiceClient is null)
                     return new AuthoritativeStructuredExecutionResult(EditorExecutionStatus.Rejected, CurrentWorkingDirectory, "The authoritative PSES session generation changed before execution admission.", false);
             }
+            cancellationToken.ThrowIfCancellationRequested();
+            // The user text is an intact file-level PowerShell execution unit. In
+            // particular, #Requires and advanced-script headers stay at the top.
+            var snapshotDirectory = Path.Combine(Path.GetTempPath(), "PS7ScriptDesk", "EditorExecution");
+            Directory.CreateDirectory(snapshotDirectory);
+            snapshotPath = Path.Combine(snapshotDirectory, "editor-" + statusMarkerId + ".ps1");
+            await using (var snapshotStream = new FileStream(snapshotPath, FileMode.CreateNew, FileAccess.Write,
+                FileShare.Read, 4096, FileOptions.Asynchronous))
+            {
+                snapshotCreated = true;
+                await using var writer = new StreamWriter(snapshotStream, new UTF8Encoding(false));
+                await writer.WriteAsync(scriptContent.AsMemory(), cancellationToken).ConfigureAwait(false);
+            }
+            var quotedSnapshotPath = QuotePowerShellSingleQuotedString(snapshotPath);
+            DeveloperDiagnostics.LogInfo("PSES", "Request-owned editor snapshot created for foreground execution.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = sessionGeneration,
+                ["snapshotPath"] = DeveloperDiagnostics.SanitizePath(snapshotPath),
+                ["scriptLength"] = scriptContent.Length,
+                ["executeInCurrentScope"] = executeInCurrentScope,
+                ["contentOmitted"] = true
+            });
             DeveloperDiagnostics.LogInfo("PSES", "Editor operation admitted for private DAP staging and foreground execution.", new Dictionary<string, object?>
             {
                 ["requestId"] = requestId,
@@ -543,8 +581,21 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             // without moving PSReadLine's retained input anchor. The foreground
             // LSP evaluation then cancels that read before executing the script.
             var debugPipe = _debugServicePipeName ?? throw new InvalidOperationException("The PSES debug-service endpoint is unavailable for private editor execution.");
-            var stagedExpression = "$global:" + stagedScriptVariable + " = {\ntry {\n" + evaluatedExpression +
-                "\n} finally { Remove-Variable -Name '" + stagedScriptVariable + "' -Scope Global -ErrorAction SilentlyContinue }\n}";
+            // Only this generated launcher is staged through DAP. Keep the
+            // foreground command short so prompt matching and R34 echo filtering
+            // continue to recognize the same request-specific invocation.
+            var innerInvocation = (executeInCurrentScope ? ". " : "& ") + quotedSnapshotPath;
+            var stagedExpression = "$global:" + stagedScriptVariable + " = {\n" +
+                $"${statusVariable} = $true\ntry {{\n" +
+                $"if (-not [System.IO.File]::Exists({quotedSnapshotPath})) {{ throw 'The staged editor snapshot is missing.' }}\n" +
+                innerInvocation + "\n" +
+                $"${statusVariable} = $?\n}} catch {{\n${statusVariable} = $false\nthrow\n}} finally {{\n" +
+                "try {\n" +
+                $"if (${statusVariable}) {{ [System.IO.File]::WriteAllText({quotedStatusPath}, 'OK') }} else {{ [System.IO.File]::WriteAllText({quotedStatusPath}, 'ERROR') }}\n" +
+                "} finally {\n" +
+                $"Remove-Variable -Name '{statusVariable}' -ErrorAction SilentlyContinue\n" +
+                $"Remove-Variable -Name '{stagedScriptVariable}' -Scope Global -ErrorAction SilentlyContinue\n" +
+                "}\n}\n}";
             protocolResult = await PsesDapEvaluationClient.EvaluateAsync(debugPipe, requestId, sessionGeneration, stagedExpression, cancellationToken).ConfigureAwait(false);
             DeveloperDiagnostics.LogInfo("PSES", "Private DAP script staging returned before foreground host execution.", new Dictionary<string, object?>
             {
@@ -567,7 +618,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                         errorMessage = "The authoritative PSES session changed before script outcome verification; the script outcome is unknown.";
                     }
                 }
-                if (status == EditorExecutionStatus.Completed)
+                // DAP staging must be acknowledged before requesting foreground
+                // evaluation. The private status file is produced by executing
+                // the staged script and cannot be an admission prerequisite.
+                if (status == EditorExecutionStatus.Completed && protocolResult.ResponseReceived)
                 {
                     var invocation = (executeInCurrentScope ? ". " : "& ") + "$global:" + stagedScriptVariable;
                     DeveloperDiagnostics.LogInfo("PSES", "Foreground PSES editor invocation requested after DAP staging.", new Dictionary<string, object?>
@@ -578,29 +632,75 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                         ["invocationLength"] = invocation.Length,
                         ["contentOmitted"] = true
                     });
-<<<<<<< Updated upstream
-                    var foregroundCompleted = await RestoreInteractivePromptAsync(sessionGeneration, invocation, statusPath, cancellationToken).ConfigureAwait(false);
-=======
                     foregroundRequested = true;
-                    var foregroundCompleted = await RestoreInteractivePromptAsync(sessionGeneration, invocation, invocationEchoFilter, statusPath, cancellationToken).ConfigureAwait(false);
+                    var invocationEchoForms = BuildInvocationEchoForms(invocation, executeInCurrentScope);
+                    requestEchoFilter = new StructuredEchoFilter(requestId, preservePromptPrefix: true, invocationEchoForms);
+                    var echoFilterInstalled = false;
+                    lock (_syncRoot)
+                    {
+                        if (_shutdownRequested || _sessionFaulted || sessionGeneration != _generation)
+                        {
+                            requestEchoFilter = null;
+                            status = EditorExecutionStatus.Unknown;
+                            errorMessage = "The authoritative PSES session changed before foreground execution; the script outcome is unknown.";
+                        }
+                        else
+                        {
+                            _activeStructuredEchoFilter = requestEchoFilter;
+                            echoFilterInstalled = true;
+                        }
+                    }
+                    DeveloperDiagnostics.LogInfo("PSES", "Request-scoped generated invocation echo filter registration evaluated before foreground evaluation.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["sessionGeneration"] = sessionGeneration,
+                        ["processId"] = ProcessId,
+                        ["executeInCurrentScope"] = executeInCurrentScope,
+                        ["echoFormCount"] = invocationEchoForms.Length,
+                        ["installed"] = echoFilterInstalled,
+                        ["invocationLength"] = invocation.Length,
+                        ["contentOmitted"] = true
+                    });
+                    var foregroundCompleted = false;
+                    if (requestEchoFilter is not null)
+                    {
+                        foregroundHandoffStarted = true;
+                        foregroundCompleted = await RestoreInteractivePromptAsync(requestId, sessionGeneration, invocation, statusPath, cancellationToken).ConfigureAwait(false);
+                    }
                     foregroundCompletionVerified = foregroundCompleted;
->>>>>>> Stashed changes
                     if (!foregroundCompleted)
                     {
-                        DeveloperDiagnostics.LogWarning("PSES", "Foreground editor execution did not reach a post-script ConPTY prompt boundary.", new Dictionary<string, object?>
+                        DeveloperDiagnostics.LogWarning("PSES", "Foreground editor execution did not satisfy request-specific prompt restoration predicates.", new Dictionary<string, object?>
                         {
                             ["requestId"] = requestId,
                             ["sessionGeneration"] = sessionGeneration,
                             ["statusFileExists"] = File.Exists(statusPath)
                         });
                         status = EditorExecutionStatus.Unknown;
-                        errorMessage = "PSES did not complete foreground editor execution with an observable interactive prompt.";
-                        // A lost response or prompt cannot release ownership while pwsh
-                        // might still be executing the foreground invocation.
-                        await ShutdownAsync().ConfigureAwait(false);
+                        errorMessage = "PSES request-specific prompt restoration timed out or was rejected; inspect correlated prompt predicate diagnostics.";
+                        // The private status file proves the script's completion, but the
+                        // prompt timeout does not prove that the REPL is ready. Preserve
+                        // the shared process and mark input readiness unverified so the
+                        // runtime coordinator faults admission instead of destroying it.
+                        lock (_syncRoot) _interactiveReadinessUnverified = true;
+                        DeveloperDiagnostics.LogWarning("PSES", "Interactive readiness remains unverified after prompt recognition timed out; preserving the live session and blocking input/editor admission.", new Dictionary<string, object?>
+                        {
+                            ["requestId"] = requestId,
+                            ["sessionGeneration"] = sessionGeneration,
+                            ["processId"] = ProcessId,
+                            ["statusFileExists"] = File.Exists(statusPath),
+                            ["shutdownDecision"] = "preserve-session",
+                            ["sessionRunning"] = IsSessionRunning,
+                            ["inputWritable"] = IsInputWritable,
+                            ["readinessState"] = "unverified"
+                        });
                     }
                 }
-                if (status == EditorExecutionStatus.Completed)
+                // Read the correlated outcome only after foreground execution
+                // was requested and its status boundary appeared. This is
+                // independent of prompt restoration: the marker establishes
+                // script outcome, never interactive input readiness.
+                if (foregroundRequested && File.Exists(statusPath))
                 {
                     DeveloperDiagnostics.LogInfo("PSES", "Structured in-operation outcome verification reading private status file.", new Dictionary<string, object?>
                     {
@@ -624,9 +724,12 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     });
                     if (outcome.Equals("ERROR", StringComparison.Ordinal))
                     {
-                        status = EditorExecutionStatus.Failed;
-                        errorMessage = "PowerShell reported a final error status during structured execution.";
                         scriptOutcomeVerified = true;
+                        if (foregroundCompletionVerified)
+                        {
+                            status = EditorExecutionStatus.Failed;
+                            errorMessage = "PowerShell reported a final error status during structured execution.";
+                        }
                     }
                     else if (outcome.Equals("OK", StringComparison.Ordinal))
                     {
@@ -658,30 +761,38 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             var promptRecovered = await StopConsoleForGenerationAsync(sessionGeneration, requirePromptRecovery: true).ConfigureAwait(false);
+            var requestStatusObserved = File.Exists(statusPath) && sessionGeneration == SessionGeneration;
             var sessionTerminated = false;
-            if (!promptRecovered)
+            if (!promptRecovered || !requestStatusObserved)
             {
-                // A sent Ctrl+C does not prove that the foreground pipeline stopped.
-                // Dispose the owned session before releasing structured execution.
+                // Neither Ctrl+C nor a prompt candidate proves that this request's
+                // foreground pipeline stopped. The private status boundary or
+                // owned-process termination must settle it before release.
                 await ShutdownAsync().ConfigureAwait(false);
                 sessionTerminated = !IsSessionRunning;
             }
+            foregroundTerminationVerified = (promptRecovered && requestStatusObserved) || sessionTerminated;
             DeveloperDiagnostics.LogInfo("PSES", "Structured cancellation recovery settled before execution ownership was released.", new Dictionary<string, object?>
             {
                 ["requestId"] = requestId,
                 ["sessionGeneration"] = sessionGeneration,
                 ["promptRecovered"] = promptRecovered,
+                ["requestStatusObserved"] = requestStatusObserved,
                 ["sessionTerminated"] = sessionTerminated,
-                ["pipelineInterruptionProven"] = promptRecovered || sessionTerminated
+                ["pipelineInterruptionProven"] = foregroundTerminationVerified
             });
-            return new AuthoritativeStructuredExecutionResult(promptRecovered || sessionTerminated ? EditorExecutionStatus.Cancelled : EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
-                promptRecovered ? "Execution canceled; the interactive prompt recovered." : sessionTerminated ? "Execution canceled; the owned session was terminated after prompt recovery failed." : "Execution cancellation could not be verified.", false);
+            return new AuthoritativeStructuredExecutionResult(foregroundTerminationVerified ? EditorExecutionStatus.Cancelled : EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
+                promptRecovered && requestStatusObserved ? "Execution canceled; request completion and interactive prompt were observed." : sessionTerminated ? "Execution canceled; the owned session was terminated because request completion or prompt recovery was unverified." : "Execution cancellation could not be verified.", false);
         }
         catch (Exception ex)
         {
             if (foregroundRequested && !foregroundCompletionVerified)
             {
-                try { await ShutdownAsync().ConfigureAwait(false); }
+                try
+                {
+                    await ShutdownAsync().ConfigureAwait(false);
+                    foregroundTerminationVerified = !IsSessionRunning;
+                }
                 catch (Exception shutdownException)
                 {
                     DeveloperDiagnostics.LogException("PSES", shutdownException, "Owned session termination after an unverified foreground failure failed.", new Dictionary<string, object?>
@@ -702,7 +813,51 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         }
         finally
         {
-            TryDeleteFile(statusPath);
+            var foregroundSettled = !foregroundHandoffStarted || foregroundCompletionVerified || foregroundTerminationVerified;
+            if (foregroundSettled)
+                TryDeleteFile(statusPath);
+            else
+                DeveloperDiagnostics.LogWarning("PSES", "Private status file retained because foreground termination was not verified.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = requestId,
+                    ["sessionGeneration"] = sessionGeneration,
+                    ["statusPath"] = DeveloperDiagnostics.SanitizePath(statusPath)
+                });
+            if (snapshotCreated && snapshotPath is not null)
+            {
+                if (foregroundSettled)
+                {
+                    try
+                    {
+                        File.Delete(snapshotPath);
+                        DeveloperDiagnostics.LogInfo("PSES", "Request-owned editor snapshot cleanup completed.", new Dictionary<string, object?>
+                        {
+                            ["requestId"] = requestId,
+                            ["sessionGeneration"] = sessionGeneration,
+                            ["snapshotPath"] = DeveloperDiagnostics.SanitizePath(snapshotPath),
+                            ["snapshotExistsAfterCleanup"] = File.Exists(snapshotPath)
+                        });
+                    }
+                    catch (Exception cleanupException)
+                    {
+                        DeveloperDiagnostics.LogException("PSES", cleanupException, "Request-owned editor snapshot cleanup failed.", new Dictionary<string, object?>
+                        {
+                            ["requestId"] = requestId,
+                            ["sessionGeneration"] = sessionGeneration,
+                            ["snapshotPath"] = DeveloperDiagnostics.SanitizePath(snapshotPath)
+                        });
+                    }
+                }
+                else
+                {
+                    DeveloperDiagnostics.LogWarning("PSES", "Request-owned editor snapshot retained because foreground termination was not verified.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["sessionGeneration"] = sessionGeneration,
+                        ["snapshotPath"] = DeveloperDiagnostics.SanitizePath(snapshotPath)
+                    });
+                }
+            }
             string filteredEchoRemainder;
             lock (_syncRoot)
             {
@@ -808,14 +963,14 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         }
     }
 
-    private async Task<bool> RestoreInteractivePromptAsync(int expectedGeneration, string invocation, string statusPath, CancellationToken cancellationToken)
+    private async Task<bool> RestoreInteractivePromptAsync(Guid requestId, int expectedGeneration, string invocation, string statusPath, CancellationToken cancellationToken)
     {
         PsesLanguageServiceClient? client;
-<<<<<<< Updated upstream
-        var promptWaiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var postScriptPromptObserved = false;
+        var verificationStarted = System.Diagnostics.Stopwatch.StartNew();
         var invocationObserved = false;
         var invocationTail = string.Empty;
+        var promptSignal = new PromptRestorationSignal(expectedGeneration);
+        var eventOrder = 0L;
         Action<int, string> rawHandler = (generation, text) =>
         {
             if (generation != expectedGeneration) return;
@@ -826,33 +981,79 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 invocationObserved = scan.Contains(invocation, StringComparison.Ordinal);
                 invocationTail = scan.Length >= invocation.Length ? scan[^(invocation.Length - 1)..] : scan;
             }
+            if (invocationObserved)
+            {
+                DeveloperDiagnostics.LogInfo("PSES", "Request-generated invocation observed before display filtering.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = requestId,
+                    ["sessionGeneration"] = expectedGeneration,
+                    ["processId"] = ProcessId,
+                    ["eventOrder"] = Interlocked.Increment(ref eventOrder),
+                    ["invocationLength"] = invocation.Length,
+                    ["observedChunkLength"] = text.Length,
+                    ["contentOmitted"] = true
+                });
+            }
         };
-=======
-        var promptSignal = new PromptRestorationSignal(expectedGeneration);
->>>>>>> Stashed changes
-        Action<int, string> promptHandler = (generation, _) =>
+        Action<int, string> promptHandler = (generation, promptText) =>
         {
+            var eventNumber = Interlocked.Increment(ref eventOrder);
+            DeveloperDiagnostics.LogInfo("PSES", "Request prompt-handler callback entered.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = expectedGeneration,
+                ["eventGeneration"] = generation,
+                ["processId"] = ProcessId,
+                ["eventOrder"] = eventNumber,
+                ["promptPatternObserved"] = true,
+                ["promptChunkLength"] = promptText.Length,
+                ["contentOmitted"] = true
+            });
             // The foreground invocation itself is printed after a prompt. A
             // chunk ending there can look like a ready prompt, so only accept
             // one after the script's private completion file has been written.
             bool cursorVisible;
             bool statusFileExists = File.Exists(statusPath);
             bool invocationEchoRemoved;
-            bool acceptedPrompt;
+            bool newPromptCandidate;
             lock (_syncRoot)
             {
-<<<<<<< Updated upstream
-                if (!invocationObserved) return;
-                postScriptPromptObserved = true;
-=======
->>>>>>> Stashed changes
                 cursorVisible = _cursorVisible;
-                invocationEchoRemoved = invocationEchoFilter.EchoRemoved;
-                acceptedPrompt = promptSignal.ObservePrompt(generation, statusFileExists, invocationEchoRemoved, cursorVisible);
+                invocationEchoRemoved = invocationObserved;
+                newPromptCandidate = promptSignal.ObservePrompt(generation, statusFileExists, invocationEchoRemoved, cursorVisible);
             }
-            if (acceptedPrompt && generation == expectedGeneration && invocationEchoRemoved && !statusFileExists)
+            var snapshot = promptSignal.Snapshot();
+            DeveloperDiagnostics.LogInfo("PSES", "Request-specific prompt pattern recognized and predicate evaluated.", new Dictionary<string, object?>
             {
-                DeveloperDiagnostics.LogInfo("PSES", "Foreground prompt boundary observed before the script status file; retaining it for completion verification.", new Dictionary<string, object?>
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = expectedGeneration,
+                ["eventGeneration"] = generation,
+                ["processId"] = ProcessId,
+                ["eventOrder"] = eventNumber,
+                ["statusFileExists"] = statusFileExists,
+                ["invocationObservedBeforeFiltering"] = invocationEchoRemoved,
+                ["cursorVisible"] = cursorVisible,
+                ["promptPatternObserved"] = true,
+                ["postScriptPromptObserved"] = snapshot.PostScriptPromptObserved,
+                ["accepted"] = snapshot.Completed,
+                ["rejectionReason"] = generation != expectedGeneration ? "stale-generation" : !invocationEchoRemoved ? "request-invocation-not-observed" : !statusFileExists ? "status-file-not-yet-visible" : !cursorVisible ? "cursor-hidden" : null
+            });
+            DeveloperDiagnostics.LogInfo("PSES", "Request prompt-handler callback completed.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = expectedGeneration,
+                ["eventGeneration"] = generation,
+                ["processId"] = ProcessId,
+                ["eventOrder"] = eventNumber,
+                ["handlerCompletionObserved"] = true,
+                ["statusFileExists"] = statusFileExists,
+                ["invocationObservedBeforeFiltering"] = invocationEchoRemoved,
+                ["cursorVisible"] = cursorVisible,
+                ["signalCompleted"] = snapshot.Completed
+            });
+            if (newPromptCandidate && generation == expectedGeneration && invocationEchoRemoved && !statusFileExists)
+            {
+                DeveloperDiagnostics.LogInfo("PSES", "Prompt-like boundary before the request status file was ignored for visual restoration.", new Dictionary<string, object?>
                 {
                     ["sessionGeneration"] = expectedGeneration,
                     ["processId"] = ProcessId,
@@ -864,7 +1065,18 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         };
         Action<int, bool> cursorHandler = (generation, visible) =>
         {
+            var eventNumber = Interlocked.Increment(ref eventOrder);
             lock (_syncRoot) promptSignal.ObserveCursor(generation, visible);
+            DeveloperDiagnostics.LogInfo("PSES", "Prompt verification cursor visibility transition observed.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = expectedGeneration,
+                ["eventGeneration"] = generation,
+                ["processId"] = ProcessId,
+                ["eventOrder"] = eventNumber,
+                ["cursorVisible"] = visible,
+                ["signalCompleted"] = promptSignal.Snapshot().Completed
+            });
         };
         long observationBeforeHandoff;
         lock (_syncRoot)
@@ -875,11 +1087,24 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
 
             observationBeforeHandoff = _promptReadyObservation;
             _promptRecognitionBuffer = string.Empty;
+            _promptAnsiCarry = string.Empty;
         }
 
         PromptReadyObserved += promptHandler;
-        RawOutputReceived += rawHandler;
+        OutputObservedBeforeDisplayFiltering += rawHandler;
         CursorVisibilityChanged += cursorHandler;
+        bool cursorVisibleAtEntry;
+        lock (_syncRoot) cursorVisibleAtEntry = _cursorVisible;
+        DeveloperDiagnostics.LogInfo("PSES", "Request-specific prompt verification entered.", new Dictionary<string, object?>
+        {
+            ["requestId"] = requestId,
+            ["sessionGeneration"] = expectedGeneration,
+            ["processId"] = ProcessId,
+            ["statusFileExistsAtEntry"] = File.Exists(statusPath),
+            ["cursorVisibleAtEntry"] = cursorVisibleAtEntry,
+            ["waiterRegisteredUtc"] = DateTimeOffset.UtcNow,
+            ["frameSequenceAtRegistration"] = _promptFrameDiagnostics.Snapshot().Frames.LastOrDefault()?.Sequence ?? 0
+        });
         try
         {
             // PSES owns the foreground transition and writes the invocation before
@@ -904,28 +1129,56 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             // script completion boundary; the private status file is written
             // only after the user script exits. Cancellation or session failure
             // ends this wait without inventing another execution deadline.
-            while (!File.Exists(statusPath))
+            var statusObserved = File.Exists(statusPath);
+            DeveloperDiagnostics.LogInfo("PSES", "Prompt-verification status-file state sampled after foreground handoff.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = expectedGeneration,
+                ["processId"] = ProcessId,
+                ["statusFileExists"] = statusObserved,
+                ["eventOrder"] = Interlocked.Increment(ref eventOrder)
+            });
+            while (!statusObserved)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (!IsSessionRunning || expectedGeneration != SessionGeneration) return false;
                 await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                statusObserved = File.Exists(statusPath);
             }
+            DeveloperDiagnostics.LogInfo("PSES", "Prompt-verification status file became visible.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = expectedGeneration,
+                ["processId"] = ProcessId,
+                ["statusFileExists"] = true,
+                ["eventOrder"] = Interlocked.Increment(ref eventOrder)
+            });
             if (promptSignal.ObserveStatusFileVisible())
             {
                 bool cursorVisibleAtStatus;
                 lock (_syncRoot) cursorVisibleAtStatus = _cursorVisible;
-                DeveloperDiagnostics.LogInfo("PSES", "Foreground status file appeared after a qualified prompt boundary; restoration signal is now eligible.", new Dictionary<string, object?>
+                DeveloperDiagnostics.LogInfo("PSES", "Foreground status file appeared after an earlier prompt candidate; a post-status prompt is still required.", new Dictionary<string, object?>
                 {
                     ["sessionGeneration"] = expectedGeneration,
+                    ["requestId"] = requestId,
                     ["processId"] = ProcessId,
                     ["cursorVisibleAtStatus"] = cursorVisibleAtStatus,
                     ["contentOmitted"] = true
                 });
             }
             await promptSignal.Completion.WaitAsync(PromptRecoveryTimeout, cancellationToken).ConfigureAwait(false);
+            DeveloperDiagnostics.LogInfo("PSES", "Request-specific prompt restoration predicate accepted.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = expectedGeneration,
+                ["processId"] = ProcessId,
+                ["eventOrder"] = Interlocked.Increment(ref eventOrder),
+                ["elapsedMilliseconds"] = verificationStarted.Elapsed.TotalMilliseconds,
+                ["signal"] = promptSignal.Snapshot()
+            });
             long observationAfterHandoff;
             lock (_syncRoot) observationAfterHandoff = _promptReadyObservation;
-            DeveloperDiagnostics.LogInfo("PSES", "Structured execution completed on the foreground PSES host and restored the interactive prompt.", new Dictionary<string, object?>
+            DeveloperDiagnostics.LogInfo("PSES", "Request status and prompt predicates observed; interactive keyboard consumption remains unverified.", new Dictionary<string, object?>
             {
                 ["sessionGeneration"] = expectedGeneration,
                 ["processId"] = ProcessId,
@@ -936,6 +1189,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 ["promptObservedAfterScriptStatus"] = true,
                 ["foregroundInvocationObserved"] = invocationObserved,
                 ["cursorVisibleAtCompletion"] = true,
+                ["inputPipeWritable"] = IsInputWritable,
+                ["inputConsumptionVerified"] = false,
                 ["foregroundInvocationLength"] = invocation.Length,
                 ["contentOmitted"] = true
             });
@@ -943,22 +1198,60 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         }
         catch (TimeoutException)
         {
-            DeveloperDiagnostics.LogWarning("PSES", "Foreground PSES editor execution completed without an observable ConPTY prompt boundary.", new Dictionary<string, object?>
+            var frameSnapshot = _promptFrameDiagnostics.Snapshot();
+            DeveloperDiagnostics.LogWarning("PSES", "Request-specific prompt restoration timed out after prompt-pattern observation or rejection.", new Dictionary<string, object?>
             {
+                ["requestId"] = requestId,
                 ["sessionGeneration"] = expectedGeneration,
                 ["processId"] = ProcessId,
                 ["promptObservationBeforeHandoff"] = observationBeforeHandoff,
-                ["contentOmitted"] = true
+                ["elapsedMilliseconds"] = verificationStarted.Elapsed.TotalMilliseconds,
+                ["statusFileExistsAtTimeout"] = File.Exists(statusPath),
+                ["invocationObservedBeforeFiltering"] = invocationObserved,
+                ["signal"] = promptSignal.Snapshot(),
+                ["sessionShutdownRequestedAfterTimeout"] = false,
+                ["sessionPreservedAfterTimeout"] = IsSessionRunning,
+                ["inputAdmissionBlockedAfterTimeout"] = true,
+                ["contentOmitted"] = true,
+                ["diagnosticHistoryEvictedFrameCount"] = frameSnapshot.Evicted,
+                ["diagnosticHistoryCapacity"] = frameSnapshot.Capacity,
+                ["diagnosticHistoryRetainedFrameCount"] = frameSnapshot.Frames.Length,
+                ["diagnosticHistoryTotalRecordedFrameCount"] = frameSnapshot.TotalRecorded,
+                ["recentConPtyFrames"] = frameSnapshot.Frames.TakeLast(64)
+                    .Select(ToFrameDiagnosticProperties)
+                    .ToArray()
             });
             return false;
         }
         finally
         {
             PromptReadyObserved -= promptHandler;
-            RawOutputReceived -= rawHandler;
+            OutputObservedBeforeDisplayFiltering -= rawHandler;
             CursorVisibilityChanged -= cursorHandler;
         }
     }
+
+    private static IReadOnlyDictionary<string, object?> ToFrameDiagnosticProperties(PromptFrameDiagnostic frame)
+        => new Dictionary<string, object?>
+        {
+            ["sequence"] = frame.Sequence,
+            ["utc"] = frame.Utc,
+            ["monotonicTimestamp"] = frame.MonotonicTimestamp,
+            ["generation"] = frame.Generation,
+            ["requestId"] = frame.RequestId,
+            ["byteCount"] = frame.ByteCount,
+            ["csiStarted"] = frame.CsiStarted,
+            ["csiEnded"] = frame.CsiEnded,
+            ["csiSpannedFrames"] = frame.CsiSpannedFrames,
+            ["pendingControlSequence"] = frame.PendingControlSequence,
+            ["sequenceTypes"] = frame.SequenceTypes,
+            ["controlHex"] = frame.ControlHex,
+            ["promptCandidate"] = frame.PromptCandidate,
+            ["promptAccepted"] = frame.PromptAccepted,
+            ["rejectionReason"] = frame.RejectionReason,
+            ["cursorVisible"] = frame.CursorVisible,
+            ["authoritative"] = frame.Authoritative
+        };
 
     public async Task<bool> ShutdownAsync(CancellationToken cancellationToken = default)
     {
@@ -981,6 +1274,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             if (conPty is not null)
             {
                 _shutdownRequested = true;
+                _pendingInputOutputProbe = null;
             }
         }
         if (conPty is null) return true;
@@ -1126,6 +1420,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     StopRawConPtyCapture();
                     _shutdownRequested = false;
                     _sessionFaulted = false;
+                    _pendingInputOutputProbe = null;
                 }
             }
             DeveloperDiagnostics.LogInfo("PSES", "SHUTDOWN_END.", new Dictionary<string, object?>
@@ -1204,20 +1499,28 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     private async Task WriteInputCoreAsync(string data, CancellationToken cancellationToken, ConPtyProcess? expectedConPty = null, int? expectedGeneration = null)
     {
         ConPtyProcess conPty;
+        int generation;
         lock (_syncRoot)
         {
             conPty = expectedConPty ?? _conPty ?? throw new InvalidOperationException("PSES host is not running.");
-            if (expectedConPty is not null && (!ReferenceEquals(_conPty, expectedConPty) || expectedGeneration != _generation || _shutdownRequested))
+            generation = expectedGeneration ?? _generation;
+            if (!ReferenceEquals(_conPty, conPty) || generation != _generation || _shutdownRequested || _sessionFaulted || conPty.HasExited)
                 throw new InvalidOperationException("The authoritative PSES session changed before the input write was admitted.");
         }
         var bytes = Encoding.UTF8.GetBytes(data);
         await _terminalInputGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        InputOutputProbe? inputProbe = null;
         try
         {
             lock (_syncRoot)
             {
-                if (expectedConPty is not null && (!ReferenceEquals(_conPty, expectedConPty) || expectedGeneration != _generation || _shutdownRequested))
+                if (!ReferenceEquals(_conPty, conPty) || generation != _generation || _shutdownRequested || _sessionFaulted || conPty.HasExited)
                     throw new InvalidOperationException("The authoritative PSES session changed while the input write was waiting for admission.");
+                if (DeveloperDiagnostics.IsEnabled && (data.Contains('\r') || data.Contains('\n')))
+                {
+                    inputProbe = new InputOutputProbe(DeveloperDiagnostics.CurrentOperationId, generation, conPty.ProcessId, Stopwatch.GetTimestamp());
+                    _pendingInputOutputProbe = inputProbe;
+                }
             }
             DeveloperDiagnostics.LogInfo(
                 "Phase2CProof",
@@ -1247,6 +1550,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         }
         catch (Exception ex)
         {
+            lock (_syncRoot)
+            {
+                if (ReferenceEquals(_pendingInputOutputProbe, inputProbe)) _pendingInputOutputProbe = null;
+            }
             DeveloperDiagnostics.LogException(
                 "Phase2CProof",
                 ex,
@@ -1270,6 +1577,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     private async Task ReadStreamAsync(ConPtyProcess owner, Stream stream, ExecutionOutputStreamKind kind, int generation, BoundedStartupCapture capture)
     {
         var buffer = new byte[8192];
+        var decoder = new StreamingUtf8Decoder();
         try
         {
             while (true)
@@ -1277,7 +1585,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 var count = await stream.ReadAsync(buffer).ConfigureAwait(false);
                 if (count == 0) break;
                 CaptureRawConPtyBytes(buffer, count, generation, owner.ProcessId, kind);
-                var text = Encoding.UTF8.GetString(buffer, 0, count);
+                var text = decoder.Decode(buffer, count);
+                if (text.Length == 0) continue;
                 var cursorVisibility = ObserveCursorVisibility(text, generation);
                 ResizeForensicsTrace.Record(
                     $"PsesReceive.{kind}",
@@ -1291,7 +1600,40 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 {
                     try { CursorVisibilityChanged?.Invoke(generation, cursorVisibility.Value); } catch { }
                 }
-                if (ObservePromptBoundary(text, generation))
+                var promptBoundaryObserved = ObservePromptBoundary(text, generation);
+                Guid? activeRequestId;
+                bool cursorVisibleNow;
+                lock (_syncRoot)
+                {
+                    activeRequestId = _activeStructuredEchoFilter?.RequestId;
+                    cursorVisibleNow = _cursorVisible;
+                }
+                var frameDiagnostic = _promptFrameDiagnostics.Record(buffer.AsSpan(0, count), generation,
+                    activeRequestId, promptBoundaryObserved, promptBoundaryObserved,
+                    promptBoundaryObserved ? "accepted-by-existing-predicate" : "no-prompt-candidate",
+                    cursorVisibleNow, promptBoundaryObserved);
+                if (promptBoundaryObserved || frameDiagnostic.CsiSpannedFrames)
+                {
+                    DeveloperDiagnostics.LogInfo("PSES", "ConPTY prompt frame/control-sequence observation.", new Dictionary<string, object?>
+                    {
+                        ["frameSequence"] = frameDiagnostic.Sequence,
+                        ["utc"] = frameDiagnostic.Utc,
+                        ["sessionGeneration"] = generation,
+                        ["requestId"] = activeRequestId,
+                        ["byteCount"] = count,
+                        ["csiStarted"] = frameDiagnostic.CsiStarted,
+                        ["csiEnded"] = frameDiagnostic.CsiEnded,
+                        ["csiSpannedFrames"] = frameDiagnostic.CsiSpannedFrames,
+                        ["pendingControlSequence"] = frameDiagnostic.PendingControlSequence,
+                        ["sequenceTypes"] = frameDiagnostic.SequenceTypes,
+                        ["controlHex"] = frameDiagnostic.ControlHex,
+                        ["promptCandidate"] = promptBoundaryObserved,
+                        ["promptAccepted"] = promptBoundaryObserved,
+                        ["cursorVisible"] = cursorVisibleNow,
+                        ["authoritative"] = false
+                    });
+                }
+                if (promptBoundaryObserved)
                 {
                     TaskCompletionSource<long>? promptRecoveryWaiter;
                     long promptObservation;
@@ -1303,8 +1645,14 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                             : null;
                     }
                     promptRecoveryWaiter?.TrySetResult(promptObservation);
-                    try { PromptReadyObserved?.Invoke(generation, text); } catch { }
+                    NotifyPromptReadyObserved(generation, text);
                 }
+            }
+            var trailingText = decoder.Flush();
+            if (trailingText.Length > 0)
+            {
+                capture.Append(trailingText);
+                PublishOutput(kind, generation, trailingText);
             }
         }
         catch (ObjectDisposedException ex)
@@ -1319,7 +1667,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
 
     private bool ObservePromptBoundary(string text, int generation)
     {
-        var normalized = AnsiSequenceRegex.Replace(text, string.Empty);
+        // Write-Progress can move the cursor to column one before PSReadLine
+        // prints the next prompt without emitting a newline in the raw stream.
         lock (_syncRoot)
         {
             if (generation != _generation || _shutdownRequested || _sessionFaulted)
@@ -1327,11 +1676,13 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 return false;
             }
 
-            _promptRecognitionBuffer += normalized;
-            if (_promptRecognitionBuffer.Length > 1024)
-            {
-                _promptRecognitionBuffer = _promptRecognitionBuffer[^1024..];
-            }
+            // Normalize the accumulated raw stream, not each ConPTY read in
+            // isolation: ANSI CSI sequences and prompt text can split at any byte.
+            _promptAnsiCarry += text;
+            if (_promptAnsiCarry.Length > 2048) _promptAnsiCarry = _promptAnsiCarry[^2048..];
+            var normalized = AnsiSequenceRegex.Replace(CursorColumnOneRegex.Replace(_promptAnsiCarry, "\n"), string.Empty)
+                .Replace('\r', '\n');
+            _promptRecognitionBuffer = normalized.Length > 1024 ? normalized[^1024..] : normalized;
 
             var boundaryObserved = PromptBoundaryRegex.IsMatch(_promptRecognitionBuffer);
             if (boundaryObserved)
@@ -1718,6 +2069,29 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
 
         Action<ExecutionOutputRecord>? onOutput;
         string visibleText;
+        InputOutputProbe? inputProbe;
+        try
+        {
+            var preFilterHandlers = OutputObservedBeforeDisplayFiltering;
+            if (preFilterHandlers is not null)
+            {
+                foreach (Action<int, string> handler in preFilterHandlers.GetInvocationList())
+                {
+                    try { handler(generation, text); }
+                    catch (Exception ex)
+                    {
+                        DeveloperDiagnostics.LogException("PSES", ex, "Pre-filter output observer failed.", new Dictionary<string, object?>
+                        {
+                            ["sessionGeneration"] = generation,
+                            ["processId"] = ProcessId,
+                            ["textLength"] = text.Length,
+                            ["contentOmitted"] = true
+                        });
+                    }
+                }
+            }
+        }
+        catch { /* Diagnostics and observers must not disrupt terminal output. */ }
         lock (_syncRoot)
         {
             if (_shutdownRequested || generation != _generation || _sessionFaulted)
@@ -1736,6 +2110,23 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     ? echoFilter.Filter(string.Concat(executionState.Process(text)))
                     : string.Concat(executionState.Process(text))
                 : _activeStructuredEchoFilter?.Filter(text) ?? text;
+            inputProbe = _pendingInputOutputProbe is { } pending && pending.Generation == generation
+                ? pending
+                : null;
+            if (inputProbe is not null) _pendingInputOutputProbe = null;
+        }
+        if (inputProbe is not null)
+        {
+            DeveloperDiagnostics.LogInfo("PSES", "First ConPTY output observed after an Enter-bearing input write; temporal ordering does not prove command consumption.", new Dictionary<string, object?>
+            {
+                ["inputOperationId"] = inputProbe.OperationId,
+                ["sessionGeneration"] = generation,
+                ["processId"] = inputProbe.ProcessId,
+                ["elapsedAfterInputAttemptMs"] = Stopwatch.GetElapsedTime(inputProbe.StartedAt).TotalMilliseconds,
+                ["rawOutputLength"] = text.Length,
+                ["visibleOutputLength"] = visibleText.Length,
+                ["contentOmitted"] = true
+            });
         }
         PublishVisibleOutput(kind, generation, visibleText);
     }
@@ -1750,8 +2141,57 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             onOutput = _onOutput;
         }
         var record = new ExecutionOutputRecord(kind, visibleText, DateTime.UtcNow);
-        try { onOutput?.Invoke(record); } catch { }
-        try { RawOutputReceived?.Invoke(generation, visibleText); } catch { }
+        try { onOutput?.Invoke(record); }
+        catch (Exception ex)
+        {
+            DeveloperDiagnostics.LogException("PSES", ex, "Terminal output subscriber failed after ConPTY output was decoded.", new Dictionary<string, object?>
+            {
+                ["sessionGeneration"] = generation,
+                ["processId"] = ProcessId,
+                ["outputLength"] = visibleText.Length,
+                ["contentOmitted"] = true
+            });
+        }
+        var rawSubscribers = RawOutputReceived;
+        if (rawSubscribers is null) return;
+        foreach (Action<int, string> subscriber in rawSubscribers.GetInvocationList())
+        {
+            try { subscriber(generation, visibleText); }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("PSES", ex, "Raw terminal output subscriber failed; remaining subscribers will still receive the output.", new Dictionary<string, object?>
+                {
+                    ["sessionGeneration"] = generation,
+                    ["processId"] = ProcessId,
+                    ["outputLength"] = visibleText.Length,
+                    ["contentOmitted"] = true
+                });
+            }
+        }
+    }
+
+    private void NotifyPromptReadyObserved(int generation, string text)
+    {
+        var handlers = PromptReadyObserved;
+        if (handlers is null) return;
+        Guid? activeRequestId;
+        lock (_syncRoot) activeRequestId = _activeStructuredEchoFilter?.RequestId;
+        foreach (Action<int, string> handler in handlers.GetInvocationList())
+        {
+            try { handler(generation, text); }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("PSES", ex, "Prompt-ready subscriber callback failed; remaining subscribers will still be notified.", new Dictionary<string, object?>
+                {
+                    ["sessionGeneration"] = generation,
+                    ["processId"] = ProcessId,
+                    ["requestId"] = activeRequestId,
+                    ["subscriberMethod"] = handler.Method.Name,
+                    ["promptTextLength"] = text.Length,
+                    ["contentOmitted"] = true
+                });
+            }
+        }
     }
 
     private bool IsExpectedTeardown(ConPtyProcess owner, int generation)
@@ -1803,6 +2243,20 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
 
     private static string QuotePowerShellSingleQuotedString(string value)
         => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+
+    internal static string[] BuildInvocationEchoForms(string invocation, bool executeInCurrentScope)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(invocation);
+        if (!executeInCurrentScope || !invocation.StartsWith(". ", StringComparison.Ordinal))
+        {
+            return [invocation];
+        }
+
+        // PSES can echo the current-scope request as just its generated global
+        // variable operand. That request-specific display form is still anchored
+        // by StructuredEchoFilter to the interactive prompt and request window.
+        return [invocation, invocation[2..]];
+    }
 
     private static void TryDeleteFile(string path)
     {
@@ -2103,14 +2557,23 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         private readonly string[] _expectedForms;
         private readonly string[] _normalizedExpectedForms;
         private readonly int _retainedSuffixLength;
+        private readonly bool _preservePromptPrefix;
         private readonly StringBuilder _pending = new();
         private int _suppressedCharacters;
         private int _promptPrefixedSuppressedCharacters;
         private int _traceCallCount;
 
+        public Guid RequestId => _requestId;
+
         public StructuredEchoFilter(Guid requestId, params string[] scriptContents)
+            : this(requestId, preservePromptPrefix: false, scriptContents)
+        {
+        }
+
+        public StructuredEchoFilter(Guid requestId, bool preservePromptPrefix, params string[] scriptContents)
         {
             _requestId = requestId;
+            _preservePromptPrefix = preservePromptPrefix;
             _expectedForms = scriptContents
                 .Where(static value => !string.IsNullOrEmpty(value))
                 .SelectMany(static value =>
@@ -2140,7 +2603,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             {
                 return string.Empty;
             }
-            var emitLength = Math.Max(0, _pending.Length - _retainedSuffixLength);
+            // Once this request's generated invocation echo has been removed,
+            // do not hold short live output until the script finishes.
+            var retainedSuffix = _suppressedCharacters > 0 ? 2 : _retainedSuffixLength;
+            var emitLength = Math.Max(0, _pending.Length - retainedSuffix);
             if (emitLength == 0)
             {
                 return string.Empty;
@@ -2191,7 +2657,11 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     }
                 }
 
+                var preservedControls = _preservePromptPrefix
+                    ? ExtractAnsiControlSequences(_pending.ToString(promptPrefixedMatch.Index, promptPrefixedMatch.Length))
+                    : string.Empty;
                 _pending.Remove(promptPrefixedMatch.Index, promptPrefixedMatch.Length);
+                if (preservedControls.Length > 0) _pending.Insert(promptPrefixedMatch.Index, preservedControls);
                 _suppressedCharacters += promptPrefixedMatch.Length;
                 _promptPrefixedSuppressedCharacters += promptPrefixedMatch.Length;
             }
@@ -2222,7 +2692,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     var prefix = pending[lineStart..firstLineIndex];
                     if (prefix.Contains('>') && pending.AsSpan(firstLineIndex).StartsWith(expected.AsSpan(), StringComparison.Ordinal))
                     {
-                        return (lineStart, firstLineIndex + expected.Length - lineStart);
+                        var removalStart = _preservePromptPrefix ? firstLineIndex : lineStart;
+                        return (removalStart, firstLineIndex + expected.Length - removalStart);
                     }
 
                     searchFrom = firstLineIndex + firstLine.Length;
@@ -2263,7 +2734,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                         var lengthByPayload = CountRawCharactersForNormalizedLength(pending[tokenIndex..], expected.Length);
                         if (lengthByPayload > 0)
                         {
-                            return (lineStart, tokenIndex + lengthByPayload - lineStart);
+                            var removalStart = _preservePromptPrefix ? tokenIndex : lineStart;
+                            return (removalStart, tokenIndex + lengthByPayload - removalStart);
                         }
 
                         searchFrom = tokenIndex + firstToken.Length;
@@ -2273,7 +2745,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     var rawLength = CountRawCharactersForNormalizedLength(pending[tokenIndex..], expected.Length);
                     if (rawLength > 0)
                     {
-                        return (lineStart, tokenIndex + rawLength - lineStart);
+                        var removalStart = _preservePromptPrefix ? tokenIndex : lineStart;
+                        return (removalStart, tokenIndex + rawLength - removalStart);
                     }
                     searchFrom = tokenIndex + firstToken.Length;
                 }
@@ -2327,6 +2800,37 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             return builder.ToString();
         }
 
+        private static string ExtractAnsiControlSequences(string value)
+        {
+            var controls = new StringBuilder();
+            for (var index = 0; index < value.Length; index++)
+            {
+                if (value[index] != '\u001b' || index + 1 >= value.Length) continue;
+                var start = index;
+                if (value[index + 1] == '[')
+                {
+                    index += 2;
+                    while (index < value.Length && value[index] is not (>= '@' and <= '~')) index++;
+                    if (index < value.Length) controls.Append(value, start, index - start + 1);
+                    else controls.Append(value.AsSpan(start));
+                }
+                else if (value[index + 1] == ']')
+                {
+                    index += 2;
+                    while (index < value.Length && value[index] != '\a' && !(value[index] == '\u001b' && index + 1 < value.Length && value[index + 1] == '\\')) index++;
+                    if (index < value.Length && value[index] == '\u001b') index++;
+                    if (index < value.Length) controls.Append(value, start, index - start + 1);
+                    else controls.Append(value.AsSpan(start));
+                }
+                else
+                {
+                    index++;
+                    controls.Append(value, start, index - start + 1);
+                }
+            }
+            return controls.ToString();
+        }
+
         private static int CountRawCharactersForNormalizedLength(string value, int normalizedLength)
         {
             var count = 0;
@@ -2355,6 +2859,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             return count == normalizedLength ? rawIndex : 0;
         }
     }
+
+    private sealed record InputOutputProbe(string? OperationId, int Generation, int ProcessId, long StartedAt);
 
     internal sealed record StructuredMarkerResult(string Status, string? ErrorMessage);
 }

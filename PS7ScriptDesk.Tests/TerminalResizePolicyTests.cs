@@ -54,6 +54,83 @@ public sealed class TerminalResizePolicyTests
     }
 
     [Fact]
+    public void SessionResynchronization_ReplaysLatestGeometryAndAdvancesResizeGeneration()
+    {
+        var policy = new TerminalResizePolicy();
+        policy.Reset(rendererGeneration: 3);
+        var initial = policy.Evaluate(162, 66, rendererGeneration: 3);
+        var duplicate = policy.Evaluate(162, 66, rendererGeneration: 3);
+
+        var resynchronized = policy.Resynchronize(rendererGeneration: 3);
+
+        Assert.True(initial.Accepted);
+        Assert.False(duplicate.Accepted);
+        Assert.True(resynchronized.Accepted);
+        Assert.Equal("session-resynchronization", resynchronized.Reason);
+        Assert.Equal(162, resynchronized.Columns);
+        Assert.Equal(66, resynchronized.Rows);
+        Assert.Equal(2, resynchronized.ResizeGeneration);
+    }
+
+    [Fact]
+    public void SessionResynchronization_UsesMostRecentRapidResizeRequest()
+    {
+        var policy = new TerminalResizePolicy();
+        policy.Reset(rendererGeneration: 3);
+        Assert.True(policy.Evaluate(160, 60, rendererGeneration: 3).Accepted);
+        Assert.True(policy.Evaluate(161, 64, rendererGeneration: 3).Accepted);
+        Assert.True(policy.Evaluate(162, 66, rendererGeneration: 3).Accepted);
+
+        var resynchronized = policy.Resynchronize(rendererGeneration: 3);
+
+        Assert.True(resynchronized.Accepted);
+        Assert.Equal(162, resynchronized.Columns);
+        Assert.Equal(66, resynchronized.Rows);
+        Assert.Equal(4, resynchronized.ResizeGeneration);
+    }
+
+    [Fact]
+    public void SessionResynchronization_RejectsMissingOrStaleRendererGeometry()
+    {
+        var policy = new TerminalResizePolicy();
+        policy.Reset(rendererGeneration: 3);
+
+        var missing = policy.Resynchronize(rendererGeneration: 3);
+        var staleRenderer = policy.Resynchronize(rendererGeneration: 2);
+
+        Assert.False(missing.Accepted);
+        Assert.Equal("no-known-geometry", missing.Reason);
+        Assert.False(staleRenderer.Accepted);
+        Assert.Equal("renderer-generation-mismatch", staleRenderer.Reason);
+        Assert.Equal(0, policy.ResizeGeneration);
+    }
+
+    [Fact]
+    public void SessionActivation_ReappliesGeometryLostBeforeOutputGenerationWasReady()
+    {
+        var source = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalControl.xaml.cs");
+        var beginStart = source.IndexOf("public void BeginTerminalOutputGeneration", StringComparison.Ordinal);
+        var beginEnd = source.IndexOf("public void InvalidateTerminalOutputGeneration", beginStart, StringComparison.Ordinal);
+        var syncStart = source.IndexOf("private void QueueTerminalGeometryResynchronization", StringComparison.Ordinal);
+        var syncEnd = source.IndexOf("private void InvalidateTerminalOutputGeneration", syncStart, StringComparison.Ordinal);
+
+        Assert.True(beginStart >= 0);
+        Assert.True(beginEnd > beginStart);
+        Assert.True(syncStart >= 0);
+        Assert.True(syncEnd > syncStart);
+        Assert.Contains("QueueTerminalGeometryResynchronization(generation);", source[beginStart..beginEnd], StringComparison.Ordinal);
+        Assert.Contains("generation < currentGeneration", source[beginStart..beginEnd], StringComparison.Ordinal);
+        var syncBlock = source[syncStart..syncEnd];
+        Assert.Contains("_outputFlowController.ActiveGeneration != sessionGeneration", syncBlock, StringComparison.Ordinal);
+        Assert.Contains("_terminalResizePolicy.Resynchronize(_rendererInstanceGeneration)", syncBlock, StringComparison.Ordinal);
+        Assert.Contains("_pendingResizeDecision = synchronizationDecision", syncBlock, StringComparison.Ordinal);
+        Assert.Contains("TryStartPendingResizeIfRendererIdle();", syncBlock, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GeometryChanges_DoNotFlushOrResetProtocolFilterCarry()
     {
         var policy = new TerminalResizePolicy();

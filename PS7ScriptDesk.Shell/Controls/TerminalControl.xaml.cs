@@ -1,7 +1,9 @@
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
@@ -30,6 +32,20 @@ namespace PS7ScriptDesk.Shell.Controls
         private const string ClipboardPasteReadOperation = "ClipboardPasteRead";
         private const string XtermVersion = "5.3.0";
         private const string XtermWindowsPtyBackend = "conpty";
+        private const string Bug006VtCaptureModeEnvironmentVariable = "PS7SCRIPTDESK_BUG006_VT_CAPTURE";
+        private const string Bug006VtCaptureDirectoryEnvironmentVariable = "PS7SCRIPTDESK_BUG006_VT_CAPTURE_DIR";
+        private const string Bug006VtCaptureMode = "R29_SYNTHETIC_CLEAR";
+        private const string Bug006VtCaptureArmMarker = "R29_BUG006_VT_CAPTURE_ARMED";
+        private const int Bug006VtCaptureMaxWrites = 32;
+        private const int Bug006VtCaptureMaxWriteBytes = 8 * 1024;
+        private const int Bug006VtCaptureMaxTotalBytes = 64 * 1024;
+        private static readonly string? Bug006VtCaptureDirectory = Environment.GetEnvironmentVariable(Bug006VtCaptureDirectoryEnvironmentVariable);
+        private static readonly object Bug006VtCaptureSync = new();
+        private static readonly bool Bug006VtCaptureEnabled =
+            ResizeForensicsTrace.Enabled &&
+            string.Equals(Environment.GetEnvironmentVariable(Bug006VtCaptureModeEnvironmentVariable), Bug006VtCaptureMode, StringComparison.Ordinal) &&
+            !string.IsNullOrWhiteSpace(Bug006VtCaptureDirectory);
+        private static int _bug006VtCaptureCompleted;
 
         // ── xterm.js HTML page ───────────────────────────────────────────────────
         //
@@ -50,7 +66,13 @@ namespace PS7ScriptDesk.Shell.Controls
             "__PS7_WINDOWS_PTY_BACKEND__",
             XtermWindowsPtyBackend).Replace(
             "__PS7_WINDOWS_PTY_BUILD_NUMBER__",
-            GetWindowsPtyBuildNumber());
+            GetWindowsPtyBuildNumber()).Replace(
+            "__PS7_RESIZE_FORENSICS_ENABLED__",
+            ResizeForensicsTrace.Enabled ? "true" : "false").Replace(
+            "__PS7_RESIZE_FORENSICS_SESSION_ID__",
+            ResizeForensicsTrace.Enabled ? ResizeForensicsTrace.CurrentSessionGuid : string.Empty).Replace(
+            "__PS7_BUG006_VT_CAPTURE_ENABLED__",
+            Bug006VtCaptureEnabled ? "true" : "false");
 
         private const string TerminalHtmlTemplate = """
             <!DOCTYPE html>
@@ -113,6 +135,40 @@ namespace PS7ScriptDesk.Shell.Controls
 
               var termApi = null;
               var readyPosted = false;
+              var rendererInstanceGeneration = __PS7_RENDERER_GENERATION__;
+              var resizeForensicsEnabled = __PS7_RESIZE_FORENSICS_ENABLED__;
+              var resizeForensicsSessionId = '__PS7_RESIZE_FORENSICS_SESSION_ID__';
+              var bug006VtCaptureEnabled = __PS7_BUG006_VT_CAPTURE_ENABLED__;
+              var bug006VtArmMarker = 'R29_BUG006_VT_CAPTURE_ARMED';
+              var bug006VtClearMarker = 'R29_BUG006_VT_CAPTURE_CLEAR_NEXT';
+              var bug006VtCaptureArmed = false;
+              var bug006VtClearAuthorized = false;
+              var bug006VtCaptureFinished = false;
+              var bug006VtCaptureStopped = false;
+              var bug006VtArmScanTail = '';
+              var bug006VtArmedAtUtc = null;
+              var bug006VtGeneration = null;
+              var bug006VtRendererGeneration = null;
+              var bug006VtCaptureWrites = [];
+              var bug006VtCaptureBytes = 0;
+              var bug006VtCaptureMaxWrites = 32;
+              var bug006VtCaptureMaxWriteBytes = 8192;
+              var bug006VtCaptureMaxTotalBytes = 65536;
+              var clearWriteCounter = 0;
+              var diagnosticPromptObservationCounter = 0;
+              var pendingXtermWriteCount = 0;
+              var pendingClearWrites = [];
+              var pendingPromptBoundaryStates = [];
+              var initialResizeCommitCaptured = false;
+              var awaitingPostResizeOutput = false;
+              var clearSequenceScanner = {
+                generation: null,
+                csiTail: '',
+                homeSeen: false,
+                eraseLineCount: 0,
+                writeIds: [],
+                writesRemaining: 0
+              };
 
               // The integrated console remains a traditional black terminal regardless
               // of the surrounding application theme. This also keeps PowerShell's
@@ -306,24 +362,34 @@ namespace PS7ScriptDesk.Shell.Controls
                   return rows;
                 };
 
-                var postScreenStateSnapshot = function (reason, msg, promptBoundary) {
+                var postScreenStateSnapshot = function (reason, msg, promptBoundary, forensicFields) {
                   try {
                     var state = terminalState();
                     state.type = 'xterm_screen_state_snapshot';
                     state.reason = reason || 'unknown';
-                    state.rendererGeneration = msg && Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : 0;
+                    state.rendererGeneration = msg && Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : rendererInstanceGeneration;
                     state.terminalSessionGeneration = msg && Number.isSafeInteger(msg.generation) ? msg.generation : 0;
                     state.outputSequence = msg && Number.isSafeInteger(msg.sequence) ? msg.sequence : 0;
                     state.submissionId = msg && Number.isSafeInteger(msg.submissionId) ? msg.submissionId : 0;
                     state.promptBoundary = promptBoundary === true;
-                    state.markerRows = scanMarkerRows();
-                    state.visibleRows = scanVisibleRows();
+                    var isForensicSnapshot = forensicFields && forensicFields.forensic === true;
+                    state.markerRows = isForensicSnapshot ? [] : scanMarkerRows();
+                    state.visibleRows = isForensicSnapshot ? scanForensicVisibleRows(state) : scanVisibleRows();
                     // DeveloperDiagnostics flattens nested objects through ToString;
                     // retain a JSON form so marker identities and row coordinates
                     // survive the host boundary without retaining terminal text.
                     state.markerRowsJson = JSON.stringify(state.markerRows);
                     state.rendererIdentity = 'xterm-webview-active';
                     state.contentOmitted = true;
+                    if (isForensicSnapshot) {
+                      state.captureTimestampUtc = new Date().toISOString();
+                      state.diagnosticSessionId = resizeForensicsSessionId;
+                      for (var field in forensicFields) {
+                        if (field !== 'forensic' && Object.prototype.hasOwnProperty.call(forensicFields, field)) {
+                          state[field] = forensicFields[field];
+                        }
+                      }
+                    }
                     post(state);
                   } catch (snapshotErr) {
                     post({ type: 'xterm_screen_state_snapshot_error', reason: reason || 'unknown', message: String(snapshotErr), contentOmitted: true });
@@ -337,6 +403,92 @@ namespace PS7ScriptDesk.Shell.Controls
                     hash = Math.imul(hash, 16777619);
                   }
                   return ('00000000' + (hash >>> 0).toString(16)).slice(-8);
+                };
+
+                var captureLogicalScreenState = function () {
+                  var state = terminalState();
+                  var buffer = term.buffer && term.buffer.active ? term.buffer.active : null;
+                  var visibleRows = [];
+                  var nonBlankVisibleRowCount = 0;
+                  if (buffer) {
+                    var start = Math.max(0, Number.isFinite(buffer.viewportY) ? buffer.viewportY : 0);
+                    var count = Math.min(term.rows, 128);
+                    for (var index = 0; index < count; index++) {
+                      var rowIndex = start + index;
+                      var line = buffer.getLine(rowIndex);
+                      if (!line) continue;
+                      var text = line.translateToString(true);
+                      var nonBlank = text.trim().length > 0;
+                      if (nonBlank) nonBlankVisibleRowCount++;
+                      visibleRows.push({
+                        rowIndex: rowIndex,
+                        isWrapped: !!line.isWrapped,
+                        nonBlank: nonBlank,
+                        textLength: text.length,
+                        textHash: stableRowHash(text)
+                      });
+                    }
+                  }
+                  state.nonBlankVisibleRowCount = nonBlankVisibleRowCount;
+                  state.visibleRows = visibleRows;
+                  return state;
+                };
+
+                var encodeCaptureBytesBase64 = function (bytes) {
+                  var binary = '';
+                  for (var index = 0; index < bytes.length; index++) binary += String.fromCharCode(bytes[index]);
+                  return btoa(binary);
+                };
+
+                var observeBug006CaptureArmMarker = function (data) {
+                  if (!bug006VtCaptureEnabled || bug006VtCaptureFinished || bug006VtCaptureStopped) return;
+                  var combined = bug006VtArmScanTail + data;
+                  var clearMarkerSeenThisWrite = false;
+                  if (!bug006VtCaptureArmed && combined.indexOf(bug006VtArmMarker) >= 0) {
+                    bug006VtCaptureArmed = true;
+                    bug006VtArmedAtUtc = new Date().toISOString();
+                    clearSequenceScanner = {
+                      generation: null,
+                      csiTail: '',
+                      homeSeen: false,
+                      eraseLineCount: 0,
+                      writeIds: [],
+                      writesRemaining: 0
+                    };
+                  }
+                  if (bug006VtCaptureArmed && !bug006VtClearAuthorized && combined.indexOf(bug006VtClearMarker) >= 0) {
+                    bug006VtClearAuthorized = true;
+                    clearMarkerSeenThisWrite = true;
+                    clearSequenceScanner = {
+                      generation: null,
+                      csiTail: '',
+                      homeSeen: false,
+                      eraseLineCount: 0,
+                      writeIds: [],
+                      writesRemaining: 0
+                    };
+                  }
+                  bug006VtArmScanTail = combined.slice(-Math.max(bug006VtArmMarker.length, bug006VtClearMarker.length));
+                  return clearMarkerSeenThisWrite;
+                };
+
+                var stopBug006VtCapture = function (reason, msg) {
+                  if (!bug006VtCaptureEnabled || bug006VtCaptureFinished || bug006VtCaptureStopped) return;
+                  bug006VtCaptureStopped = true;
+                  post({
+                    type: 'bug006_vt_capture_status',
+                    diagnosticSessionId: resizeForensicsSessionId,
+                    rendererGeneration: rendererInstanceGeneration,
+                    terminalSessionGeneration: bug006VtGeneration,
+                    lastOutputSequence: msg && Number.isSafeInteger(msg.sequence) ? msg.sequence : 0,
+                    state: 'stopped-without-payload',
+                    reason: reason,
+                    capturedWriteCount: bug006VtCaptureWrites.length,
+                    capturedUtf8Bytes: bug006VtCaptureBytes,
+                    contentOmitted: true
+                  });
+                  bug006VtCaptureWrites = [];
+                  bug006VtCaptureBytes = 0;
                 };
 
                 var scanVisibleRows = function () {
@@ -353,6 +505,142 @@ namespace PS7ScriptDesk.Shell.Controls
                     rows.push({ rowIndex: rowIndex, isWrapped: !!line.isWrapped, textHash: stableRowHash(text), preview: text.slice(0, 200) });
                   }
                   return rows;
+                };
+
+                var scanForensicVisibleRows = function (state) {
+                  var buffer = term.buffer && term.buffer.active ? term.buffer.active : null;
+                  if (!buffer) {
+                    state.visibleRowCount = 0;
+                    state.nonBlankVisibleRowCount = 0;
+                    state.visibleScreenBlank = true;
+                    return [];
+                  }
+
+                  var start = Math.max(0, Number.isFinite(buffer.viewportY) ? buffer.viewportY : 0);
+                  var count = Math.min(term.rows, 128);
+                  var sampleIndexes = {};
+                  for (var first = 0; first < Math.min(count, 4); first++) sampleIndexes[first] = true;
+                  for (var last = Math.max(0, count - 4); last < count; last++) sampleIndexes[last] = true;
+
+                  var rows = [];
+                  var nonBlankRows = 0;
+                  for (var row = 0; row < count; row++) {
+                    var line = buffer.getLine(start + row);
+                    if (!line) continue;
+                    var text = line.translateToString(true);
+                    var nonBlank = text.trim().length > 0;
+                    if (nonBlank) nonBlankRows++;
+                    if (sampleIndexes[row]) {
+                      rows.push({
+                        rowIndex: start + row,
+                        isWrapped: !!line.isWrapped,
+                        nonBlank: nonBlank,
+                        textLength: text.length,
+                        textHash: stableRowHash(text)
+                      });
+                    }
+                  }
+
+                  state.visibleRowCount = count;
+                  state.nonBlankVisibleRowCount = nonBlankRows;
+                  state.visibleScreenBlank = nonBlankRows === 0;
+                  state.visibleRowsSampled = rows.length;
+                  return rows;
+                };
+
+                var removeClearWriteRecord = function (record) {
+                  var index = pendingClearWrites.indexOf(record);
+                  if (index >= 0) pendingClearWrites.splice(index, 1);
+                };
+
+                var flushPromptBoundaryStates = function () {
+                  if (!resizeForensicsEnabled || pendingXtermWriteCount > 0) return;
+                  while (pendingPromptBoundaryStates.length > 0) {
+                    var pending = pendingPromptBoundaryStates.shift();
+                    postScreenStateSnapshot('XTERM_PROMPT_BOUNDARY_STATE', pending.message, true, {
+                      forensic: true,
+                      diagnosticSessionId: resizeForensicsSessionId,
+                      rendererGeneration: rendererInstanceGeneration,
+                      terminalSessionGeneration: pending.generation,
+                      promptObservationId: pending.promptObservationId,
+                      promptObservationSource: 'existing-prompt-boundary-bridge-local-renderer-counter',
+                      correlationStatus: 'not-correlated-no-output-sequence-watermark'
+                    });
+                  }
+                };
+
+                var classifyClearRelatedWrite = function (data, msg) {
+                  if (!resizeForensicsEnabled) return null;
+                  var generation = Number.isSafeInteger(msg.generation) ? msg.generation : 0;
+                  if (clearSequenceScanner.generation !== generation) {
+                    clearSequenceScanner = {
+                      generation: generation,
+                      csiTail: '',
+                      homeSeen: false,
+                      eraseLineCount: 0,
+                      writeIds: [],
+                      writesRemaining: 0
+                    };
+                  }
+
+                  var writeId = [generation, msg.sequence || 0, msg.submissionId || 0].join(':');
+                  if (clearSequenceScanner.homeSeen && clearSequenceScanner.writeIds.indexOf(writeId) < 0) {
+                    clearSequenceScanner.writeIds.push(writeId);
+                    if (clearSequenceScanner.writeIds.length > 8) clearSequenceScanner.writeIds.shift();
+                  }
+                  var combined = clearSequenceScanner.csiTail + data;
+                  var previousLength = clearSequenceScanner.csiTail.length;
+                  var csi = /\x1b\[([0-?]*)([ -/]*)([@-~])/g;
+                  var match;
+                  var classification = null;
+                  var eraseDisplayCount = 0;
+                  while ((match = csi.exec(combined)) !== null) {
+                    if (match.index + match[0].length <= previousLength) continue;
+                    var parameters = match[1];
+                    var finalByte = match[3];
+                    if (finalByte === 'J' && (parameters === '' || parameters === '0' || parameters === '2' || parameters === '3')) {
+                      eraseDisplayCount++;
+                      classification = parameters === '3' ? 'erase-display-and-scrollback' : 'erase-display';
+                    } else if ((finalByte === 'H' || finalByte === 'f') && (parameters === '' || parameters === '1' || parameters === '1;1')) {
+                      clearSequenceScanner.homeSeen = true;
+                      clearSequenceScanner.eraseLineCount = 0;
+                      clearSequenceScanner.writeIds = [writeId];
+                      clearSequenceScanner.writesRemaining = 8;
+                    } else if (clearSequenceScanner.homeSeen && finalByte === 'K') {
+                      clearSequenceScanner.eraseLineCount++;
+                      if (clearSequenceScanner.writeIds.indexOf(writeId) < 0) clearSequenceScanner.writeIds.push(writeId);
+                      if (clearSequenceScanner.writeIds.length > 8) clearSequenceScanner.writeIds.shift();
+                      if (clearSequenceScanner.eraseLineCount >= 4) classification = 'cursor-home-plus-multiple-line-erase';
+                    }
+                    if (classification) break;
+                  }
+
+                  clearSequenceScanner.csiTail = combined.slice(-32);
+                  if (!classification && clearSequenceScanner.homeSeen) {
+                    clearSequenceScanner.writesRemaining--;
+                    if (clearSequenceScanner.writesRemaining <= 0) {
+                      clearSequenceScanner.homeSeen = false;
+                      clearSequenceScanner.eraseLineCount = 0;
+                      clearSequenceScanner.writeIds = [];
+                    }
+                  }
+                  if (!classification) return null;
+
+                  var classifiedEraseLineCount = clearSequenceScanner.eraseLineCount;
+                  var sourceWriteIds = clearSequenceScanner.writeIds.slice(0, 8);
+                  if (sourceWriteIds.length === 0) sourceWriteIds.push(writeId);
+                  clearSequenceScanner.homeSeen = false;
+                  clearSequenceScanner.eraseLineCount = 0;
+                  clearSequenceScanner.writeIds = [];
+                  clearSequenceScanner.writesRemaining = 0;
+                  return {
+                    writeId: writeId,
+                    generation: generation,
+                    classification: classification,
+                    eraseDisplayCount: eraseDisplayCount,
+                    eraseLineCount: classifiedEraseLineCount,
+                    sourceWriteIds: sourceWriteIds
+                  };
                 };
 
                 var captureViewportAnchor = function () {
@@ -733,6 +1021,15 @@ namespace PS7ScriptDesk.Shell.Controls
                   }
 
                   reportLayout(source);
+                  if (resizeForensicsEnabled && source === 'startup.raf2') {
+                    postScreenStateSnapshot('XTERM_INITIAL_FIT', {}, false, {
+                      forensic: true,
+                      diagnosticSessionId: resizeForensicsSessionId,
+                      fitSource: source,
+                      clientWidth: terminalElement.clientWidth,
+                      clientHeight: terminalElement.clientHeight
+                    });
+                  }
                 }
 
                 function focusTerminal(source) {
@@ -771,6 +1068,15 @@ namespace PS7ScriptDesk.Shell.Controls
                 }
 
                 function initializeTerminalHost() {
+                  if (resizeForensicsEnabled) {
+                    postScreenStateSnapshot('XTERM_STARTUP_STATE', {}, false, {
+                      forensic: true,
+                      diagnosticSessionId: resizeForensicsSessionId,
+                      initializationStage: 'terminal-opened-before-startup-fit',
+                      clientWidth: terminalElement.clientWidth,
+                      clientHeight: terminalElement.clientHeight
+                    });
+                  }
                   window.requestAnimationFrame(function() {
                     fitTerminal('startup.raf1');
                     window.requestAnimationFrame(function() {
@@ -925,8 +1231,10 @@ namespace PS7ScriptDesk.Shell.Controls
                   write: function (d, callback) {
                     try {
                       term.write(d, callback);
+                      return true;
                     } catch (writeErr) {
                       post({ type: 'xterm_write_error', message: String(writeErr) });
+                      return false;
                     }
                   },
                   paste: function (d) {
@@ -1014,6 +1322,7 @@ namespace PS7ScriptDesk.Shell.Controls
                     const generation = Number.isSafeInteger(msg.generation) ? msg.generation : null;
                     const sequence = Number.isSafeInteger(msg.sequence) ? msg.sequence : null;
                     const decodedOutput = decodeBase64Utf8(msg.data);
+                    var clearMarkerSeenThisWrite = observeBug006CaptureArmMarker(decodedOutput) === true;
                     if (msg.resizeForensicsEnabled === true) {
                       post({
                         type: 'resize_forensics_xterm_write',
@@ -1049,7 +1358,97 @@ namespace PS7ScriptDesk.Shell.Controls
                       }
                     }
 
-                    termApi.write(decodedOutput, () => {
+                    var clearClassification = classifyClearRelatedWrite(decodedOutput, msg);
+                    if (clearMarkerSeenThisWrite) {
+                      clearSequenceScanner = {
+                        generation: generation === null ? 0 : generation,
+                        csiTail: '',
+                        homeSeen: false,
+                        eraseLineCount: 0,
+                        writeIds: [],
+                        writesRemaining: 0
+                      };
+                    }
+                    var bug006VtCaptureWrite = null;
+                    if (bug006VtCaptureEnabled && resizeForensicsEnabled && bug006VtCaptureArmed && !bug006VtCaptureFinished && !bug006VtCaptureStopped) {
+                      var currentGeneration = generation === null ? 0 : generation;
+                      var currentRendererGeneration = Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : 0;
+                      if ((bug006VtGeneration !== null && bug006VtGeneration !== currentGeneration) ||
+                          (bug006VtRendererGeneration !== null && bug006VtRendererGeneration !== currentRendererGeneration)) {
+                        stopBug006VtCapture('terminal-generation-changed-before-clear-completed', msg);
+                      } else {
+                        bug006VtGeneration = currentGeneration;
+                        bug006VtRendererGeneration = currentRendererGeneration;
+                        try {
+                          var captureBytes = new TextEncoder().encode(decodedOutput);
+                          if (captureBytes.length > bug006VtCaptureMaxWriteBytes ||
+                              bug006VtCaptureWrites.length >= bug006VtCaptureMaxWrites ||
+                              bug006VtCaptureBytes + captureBytes.length > bug006VtCaptureMaxTotalBytes) {
+                            stopBug006VtCapture('capture-byte-or-write-limit-exceeded', msg);
+                          } else {
+                            var captureSubmissionId = Number.isSafeInteger(msg.submissionId) ? msg.submissionId : 0;
+                            bug006VtCaptureWrite = {
+                              writeId: [currentGeneration, sequence || 0, captureSubmissionId].join(':'),
+                              generation: currentGeneration,
+                              sequence: sequence || 0,
+                              submissionId: captureSubmissionId,
+                              rendererGeneration: currentRendererGeneration,
+                              resizeGeneration: Number.isSafeInteger(msg.resizeGeneration) ? msg.resizeGeneration : 0,
+                              resizeTransactionId: Number.isSafeInteger(msg.resizeGeneration) && msg.resizeGeneration > 0
+                                ? currentRendererGeneration + ':' + msg.resizeGeneration
+                                : null,
+                              sourceBoundary: 'decoded JavaScript output string passed to xterm.js term.write; payload is its UTF-8 encoding',
+                              payloadUtf8Base64: encodeCaptureBytesBase64(captureBytes),
+                              payloadUtf8ByteLength: captureBytes.length,
+                              payloadUtf16Length: decodedOutput.length,
+                              writeSubmittedUtc: new Date().toISOString(),
+                              writeSubmittedMonotonicMs: performance.now(),
+                              cols: term.cols,
+                              rows: term.rows,
+                              beforeState: captureLogicalScreenState(),
+                              writeCompletedUtc: null,
+                              writeCompletedMonotonicMs: null,
+                              afterState: null
+                            };
+                            bug006VtCaptureWrites.push(bug006VtCaptureWrite);
+                            bug006VtCaptureBytes += captureBytes.length;
+                          }
+                        } catch (captureErr) {
+                          stopBug006VtCapture('capture-encoding-failed', msg);
+                        }
+                      }
+                    }
+                    var clearWriteRecord = null;
+                    if (resizeForensicsEnabled) {
+                      pendingXtermWriteCount++;
+                      if (clearClassification) {
+                        clearWriteCounter++;
+                        clearWriteRecord = {
+                          clearWriteId: resizeForensicsSessionId + ':' + rendererInstanceGeneration + ':' + clearClassification.generation + ':' + clearWriteCounter,
+                          generation: clearClassification.generation,
+                          rendererGeneration: Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : 0,
+                          sequence: sequence || 0,
+                          submissionId: Number.isSafeInteger(msg.submissionId) ? msg.submissionId : 0,
+                          classification: clearClassification.classification,
+                          eraseDisplayCount: clearClassification.eraseDisplayCount,
+                          eraseLineCount: clearClassification.eraseLineCount,
+                          sourceWriteIds: clearClassification.sourceWriteIds
+                        };
+                        pendingClearWrites.push(clearWriteRecord);
+                        if (pendingClearWrites.length > 8) removeClearWriteRecord(pendingClearWrites[0]);
+                      }
+                    }
+
+                    var writeAccepted = termApi.write(decodedOutput, () => {
+                      if (bug006VtCaptureWrite) {
+                        try {
+                          bug006VtCaptureWrite.writeCompletedUtc = new Date().toISOString();
+                          bug006VtCaptureWrite.writeCompletedMonotonicMs = performance.now();
+                          bug006VtCaptureWrite.afterState = captureLogicalScreenState();
+                        } catch (captureCompletionErr) {
+                          stopBug006VtCapture('post-write-state-capture-failed', msg);
+                        }
+                      }
                       try {
                         if (traceOutputCursor) {
                           try {
@@ -1068,12 +1467,92 @@ namespace PS7ScriptDesk.Shell.Controls
                         if (msg.markerCandidate === true) postScreenStateSnapshot('marker-write-after', msg, false);
                         if (msg.resizeAdjacent === true) postScreenStateSnapshot('resize-adjacent-output-after', msg, false);
                       } finally {
+                        if (resizeForensicsEnabled) {
+                          pendingXtermWriteCount = Math.max(0, pendingXtermWriteCount - 1);
+                          if (awaitingPostResizeOutput) {
+                            awaitingPostResizeOutput = false;
+                            postScreenStateSnapshot('XTERM_RESIZE_OUTPUT_AFTER', msg, false, {
+                              forensic: true,
+                              diagnosticSessionId: resizeForensicsSessionId,
+                              outputWriteCompleted: true,
+                              resizeGeneration: Number.isSafeInteger(msg.resizeGeneration) ? msg.resizeGeneration : 0
+                            });
+                          }
+                          if (clearWriteRecord) {
+                            postScreenStateSnapshot('XTERM_CLEAR_POST_WRITE', msg, false, {
+                              forensic: true,
+                              diagnosticSessionId: resizeForensicsSessionId,
+                              clearWriteId: clearWriteRecord.clearWriteId,
+                              clearSequenceClassification: clearWriteRecord.classification,
+                              clearEraseDisplayCount: clearWriteRecord.eraseDisplayCount,
+                              clearEraseLineCount: clearWriteRecord.eraseLineCount,
+                              clearSourceWriteIds: clearWriteRecord.sourceWriteIds,
+                              writeCompletion: 'xterm-write-callback',
+                              correlationStatus: 'prompt-uncorrelated-no-output-sequence-watermark'
+                            });
+                            removeClearWriteRecord(clearWriteRecord);
+                          }
+                          var correlatedClearSequence = clearClassification &&
+                            Array.isArray(clearClassification.sourceWriteIds) && clearClassification.sourceWriteIds.length >= 2 &&
+                            clearClassification.classification === 'cursor-home-plus-multiple-line-erase';
+                          if (correlatedClearSequence && !clearMarkerSeenThisWrite && bug006VtCaptureArmed && bug006VtClearAuthorized && !bug006VtCaptureFinished && !bug006VtCaptureStopped) {
+                            var allCaptureWritesCompleted = bug006VtCaptureWrites.length > 0 &&
+                              bug006VtCaptureWrites.every(function (captureWrite) {
+                                return !!captureWrite.writeCompletedUtc && !!captureWrite.afterState;
+                              });
+                            if (!allCaptureWritesCompleted) {
+                              stopBug006VtCapture('clear-completed-before-all-captured-writes', msg);
+                            } else {
+                              post({
+                                type: 'bug006_vt_capture_sequence',
+                                diagnosticSessionId: resizeForensicsSessionId,
+                                armMarker: bug006VtArmMarker,
+                                armMarkerObserved: true,
+                                clearMarker: bug006VtClearMarker,
+                                clearMarkerObserved: true,
+                                armedAtUtc: bug006VtArmedAtUtc,
+                                rendererGeneration: bug006VtRendererGeneration,
+                                terminalSessionGeneration: bug006VtGeneration,
+                                sequenceComplete: true,
+                                clearClassification: clearClassification.classification,
+                                clearSourceWriteIds: clearClassification.sourceWriteIds,
+                                sourceBoundary: 'decoded JavaScript output strings passed to xterm.js term.write; payloads are UTF-8 encodings of those strings, not raw ConPTY bytes',
+                                totalUtf8Bytes: bug006VtCaptureBytes,
+                                writes: bug006VtCaptureWrites
+                              });
+                              bug006VtCaptureFinished = true;
+                              bug006VtCaptureWrites = [];
+                              bug006VtCaptureBytes = 0;
+                            }
+                          }
+                          flushPromptBoundaryStates();
+                        }
                         if (generation !== null && sequence !== null) post({ type: 'output_ack', rendererGeneration: Number.isSafeInteger(msg.rendererGeneration) ? msg.rendererGeneration : 0, generation: generation, sequence: sequence });
                       }
                     });
+                    if (writeAccepted === false && bug006VtCaptureWrite) {
+                      stopBug006VtCapture('xterm-write-rejected', msg);
+                    }
+                    if (writeAccepted === false && resizeForensicsEnabled) {
+                      pendingXtermWriteCount = Math.max(0, pendingXtermWriteCount - 1);
+                      if (clearWriteRecord) removeClearWriteRecord(clearWriteRecord);
+                      flushPromptBoundaryStates();
+                    }
                   }
                   else if (msg.type === 'output') { termApi.write(msg.data || ''); }
-                  else if (msg.type === 'prompt_boundary') { postScreenStateSnapshot('prompt-boundary', msg, true); }
+                  else if (msg.type === 'prompt_boundary') {
+                    postScreenStateSnapshot('prompt-boundary', msg, true);
+                    if (resizeForensicsEnabled) {
+                      diagnosticPromptObservationCounter++;
+                      pendingPromptBoundaryStates.push({
+                        message: msg,
+                        generation: msg.generation,
+                        promptObservationId: diagnosticPromptObservationCounter
+                      });
+                      if (pendingPromptBoundaryStates.length > 8) pendingPromptBoundaryStates.shift();
+                      flushPromptBoundaryStates();
+                    }
+                  }
                   else if (msg.type === 'clear')  { termApi.clear(); }
                   else if (msg.type === 'reconcile_authoritative_clear') { termApi.reconcileAuthoritativeClear(); }
                   else if (msg.type === 'resize_commit') {
@@ -1097,6 +1576,18 @@ namespace PS7ScriptDesk.Shell.Controls
                         resizeGeneration: commit.resizeGeneration
                       });
                       postScreenStateSnapshot('before-host-resize-commit', msg, false);
+                      var isInitialResizeCommit = !initialResizeCommitCaptured;
+                      if (resizeForensicsEnabled && !isInitialResizeCommit) {
+                        postScreenStateSnapshot('XTERM_RESIZE_BEFORE', msg, false, {
+                          forensic: true,
+                          diagnosticSessionId: resizeForensicsSessionId,
+                          resizeGeneration: commit.resizeGeneration,
+                          requestedColumns: commitCols,
+                          requestedRows: commitRows,
+                          resizeStage: 'before-xterm-term-resize',
+                          conptyResizeAcknowledgement: 'not-provided-by-current-host-contract'
+                        });
+                      }
                       var viewportAnchor = requestedResizeAnchor &&
                         requestedResizeAnchor.cols === commitCols &&
                         requestedResizeAnchor.rows === commitRows
@@ -1114,6 +1605,31 @@ namespace PS7ScriptDesk.Shell.Controls
                         });
                         postScreenStateSnapshot('after-host-resize-commit', msg, false);
                         var acknowledgedState = terminalState();
+                        if (resizeForensicsEnabled) {
+                          if (isInitialResizeCommit) {
+                            initialResizeCommitCaptured = true;
+                            postScreenStateSnapshot('XTERM_INITIAL_RESIZE_AFTER', msg, false, {
+                              forensic: true,
+                              diagnosticSessionId: resizeForensicsSessionId,
+                              resizeGeneration: commit.resizeGeneration,
+                              requestedColumns: commitCols,
+                              requestedRows: commitRows,
+                              resizeStage: 'after-xterm-term-resize-ack-posted',
+                              conptyResizeAcknowledgement: 'not-provided-by-current-host-contract'
+                            });
+                          } else {
+                            postScreenStateSnapshot('XTERM_RESIZE_AFTER', msg, false, {
+                              forensic: true,
+                              diagnosticSessionId: resizeForensicsSessionId,
+                              resizeGeneration: commit.resizeGeneration,
+                              requestedColumns: commitCols,
+                              requestedRows: commitRows,
+                              resizeStage: 'after-xterm-term-resize-before-host-ack',
+                              conptyResizeAcknowledgement: 'not-provided-by-current-host-contract'
+                            });
+                            awaitingPostResizeOutput = true;
+                          }
+                        }
                         post({
                           type: 'resize_commit_ack',
                           rendererGeneration: commit.rendererGeneration,
@@ -1249,6 +1765,16 @@ namespace PS7ScriptDesk.Shell.Controls
         {
             InitializeComponent();
             TerminalStartupTrace.Write("TERMINAL_CONTROL_CONSTRUCTED", $"controlId={GetHashCode():X8}");
+            if (Bug006VtCaptureEnabled)
+            {
+                DeveloperDiagnostics.LogInfo("Terminal", "Opt-in BUG-006 VT capture is enabled and waiting for the R29 synthetic arm marker.", new Dictionary<string, object?>
+                {
+                    ["captureDirectory"] = DeveloperDiagnostics.SanitizePath(Bug006VtCaptureDirectory ?? string.Empty),
+                    ["captureMode"] = Bug006VtCaptureMode,
+                    ["existingResizeForensicsEnabled"] = ResizeForensicsTrace.Enabled,
+                    ["contentOmitted"] = true
+                });
+            }
             _resizeOutputBarrierTimer = new DispatcherTimer(DispatcherPriority.Background)
             {
                 Interval = TimeSpan.FromMilliseconds(100)
@@ -1444,7 +1970,9 @@ namespace PS7ScriptDesk.Shell.Controls
 
                 coreWebView2.NavigationCompleted += OnNavigationCompleted;
 
-                coreWebView2.NavigateToString(TerminalHtml);
+                coreWebView2.NavigateToString(TerminalHtml.Replace(
+                    "__PS7_RENDERER_GENERATION__",
+                    _rendererInstanceGeneration.ToString(CultureInfo.InvariantCulture)));
                 lifecycle.MarkReady();
                 TerminalStartupTrace.Write("XTERM_INIT_START", "NavigateToString completed; waiting for xterm ready signal");
                 StartupLifecycleTrace.Write("TerminalControl.WebView2", "NAVIGATION_STARTED");
@@ -1861,7 +2389,24 @@ namespace PS7ScriptDesk.Shell.Controls
             // notification reaches the UI. If the first output chunk already
             // bootstrapped this generation, do not reset the flow controller or
             // session-owned history and discard that startup output.
-            if (_outputFlowController.ActiveGeneration == generation)
+            var activeGeneration = _outputFlowController.ActiveGeneration;
+            if (activeGeneration is { } currentGeneration && generation < currentGeneration)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "TerminalOutputGeneration",
+                    "Ignored a stale session-start notification.",
+                    "StaleGeneration",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestedGeneration"] = generation,
+                        ["activeGeneration"] = currentGeneration,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            if (activeGeneration == generation)
             {
                 return;
             }
@@ -1873,6 +2418,67 @@ namespace PS7ScriptDesk.Shell.Controls
             _persistentOutputHistory.ActivateGeneration(generation);
             var result = _outputFlowController.ActivateGeneration(generation);
             ReportDiscardedTerminalOutput(result, "session-start");
+            QueueTerminalGeometryResynchronization(generation);
+        }
+
+        private void QueueTerminalGeometryResynchronization(int sessionGeneration)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(
+                    new Action(() => QueueTerminalGeometryResynchronization(sessionGeneration)),
+                    DispatcherPriority.Background);
+                return;
+            }
+
+            if (_outputFlowController.ActiveGeneration != sessionGeneration)
+            {
+                TerminalCriticalTrace.LogStage(
+                    "TerminalGeometry.ResynchronizationSkipped",
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = "session-generation-no-longer-active",
+                        ["requestedSessionGeneration"] = sessionGeneration,
+                        ["activeSessionGeneration"] = _outputFlowController.ActiveGeneration,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            var synchronizationDecision = _terminalResizePolicy.Resynchronize(_rendererInstanceGeneration);
+            if (!synchronizationDecision.Accepted)
+            {
+                DeveloperDiagnostics.LogDebug(
+                    "Terminal",
+                    "Session geometry resynchronization skipped because no current renderer geometry is available.",
+                    new Dictionary<string, object?>
+                    {
+                        ["sessionGeneration"] = sessionGeneration,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["reason"] = synchronizationDecision.Reason,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            _pendingResizeDecision = synchronizationDecision;
+            var metadata = new Dictionary<string, object?>
+            {
+                ["sessionGeneration"] = sessionGeneration,
+                ["rendererGeneration"] = _rendererInstanceGeneration,
+                ["resizeGeneration"] = synchronizationDecision.ResizeGeneration,
+                ["columns"] = synchronizationDecision.Columns,
+                ["rows"] = synchronizationDecision.Rows,
+                ["reason"] = synchronizationDecision.Reason,
+                ["contentOmitted"] = true
+            };
+            TerminalCriticalTrace.LogStage("TerminalGeometry.ResynchronizationRequested", metadata);
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Reapplying the latest measured terminal geometry after session activation.",
+                metadata);
+            TryStartPendingResizeIfRendererIdle();
         }
 
         /// <summary>Invalidates pending output from a terminal session that is stopping.</summary>
@@ -3493,8 +4099,12 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void LogXtermScreenStateSnapshot(JsonElement root)
         {
-            var metadata = CreateResizeTraceMetadata(root, GetStringProperty(root, "reason", "unknown"));
+            var captureEvent = GetStringProperty(root, "reason", "unknown");
+            var metadata = CreateResizeTraceMetadata(root, captureEvent);
             metadata["event"] = "TerminalScreenStateSnapshot";
+            metadata["captureEvent"] = captureEvent;
+            metadata["captureTimestampUtc"] = GetStringProperty(root, "captureTimestampUtc", string.Empty);
+            metadata["diagnosticSessionId"] = GetStringProperty(root, "diagnosticSessionId", string.Empty);
             metadata["rendererIdentity"] = GetStringProperty(root, "rendererIdentity", "unknown");
             metadata["bufferType"] = GetStringProperty(root, "bufferType", "unknown");
             metadata["bufferLength"] = GetIntProperty(root, "bufferLength", 0);
@@ -3506,6 +4116,16 @@ namespace PS7ScriptDesk.Shell.Controls
             metadata["promptBoundary"] = GetBooleanProperty(root, "promptBoundary");
             metadata["outputSequence"] = GetLongProperty(root, "outputSequence", 0);
             metadata["submissionId"] = GetLongProperty(root, "submissionId", 0);
+            metadata["clearWriteId"] = GetStringProperty(root, "clearWriteId", string.Empty);
+            metadata["clearSequenceClassification"] = GetStringProperty(root, "clearSequenceClassification", string.Empty);
+            metadata["clearSourceWriteIds"] = GetBoundedJsonArrayProperty(root, "clearSourceWriteIds");
+            metadata["promptObservationId"] = GetLongProperty(root, "promptObservationId", 0);
+            metadata["promptObservationSource"] = GetStringProperty(root, "promptObservationSource", string.Empty);
+            metadata["correlationStatus"] = GetStringProperty(root, "correlationStatus", string.Empty);
+            metadata["terminalSessionGeneration"] = GetIntProperty(root, "terminalSessionGeneration", 0);
+            metadata["visibleRowCount"] = GetIntProperty(root, "visibleRowCount", 0);
+            metadata["nonBlankVisibleRowCount"] = GetIntProperty(root, "nonBlankVisibleRowCount", 0);
+            metadata["visibleScreenBlank"] = GetBooleanProperty(root, "visibleScreenBlank");
 
             var markerRowsJson = root.TryGetProperty("markerRowsJson", out var markerRowsJsonProperty) &&
                 markerRowsJsonProperty.ValueKind == JsonValueKind.String
@@ -3907,6 +4527,30 @@ namespace PS7ScriptDesk.Shell.Controls
                         }
                         break;
 
+                    case "bug006_vt_capture_sequence":
+                        CaptureBug006VtSequence(root);
+                        break;
+
+                    case "bug006_vt_capture_status":
+                        if (Bug006VtCaptureEnabled &&
+                            string.Equals(GetStringProperty(root, "diagnosticSessionId", string.Empty), ResizeForensicsTrace.CurrentSessionGuid, StringComparison.Ordinal))
+                        {
+                            DeveloperDiagnostics.LogWarning(
+                                "Terminal",
+                                "Opt-in BUG-006 VT capture stopped before a complete sequence was saved.",
+                                new Dictionary<string, object?>
+                                {
+                                    ["state"] = GetStringProperty(root, "state", "unknown"),
+                                    ["reason"] = GetStringProperty(root, "reason", "unknown"),
+                                    ["capturedWriteCount"] = GetIntProperty(root, "capturedWriteCount", 0),
+                                    ["capturedUtf8Bytes"] = GetIntProperty(root, "capturedUtf8Bytes", 0),
+                                    ["terminalSessionGeneration"] = GetIntProperty(root, "terminalSessionGeneration", 0),
+                                    ["rendererGeneration"] = GetIntProperty(root, "rendererGeneration", 0),
+                                    ["contentOmitted"] = true
+                                });
+                        }
+                        break;
+
                     case "xterm_screen_state_snapshot_error":
                         DeveloperDiagnostics.LogWarning(
                             "Terminal",
@@ -4115,7 +4759,20 @@ namespace PS7ScriptDesk.Shell.Controls
                                     "xterm input received from WebView2.",
                                     new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(data)));
                                 RaiseTerminalActivated("xterm.onData");
-                                UserInput?.Invoke(data);
+                                var inputHandlers = UserInput;
+                                if (inputHandlers is null)
+                                {
+                                    DeveloperDiagnostics.LogWarning("Terminal", "xterm input had no host forwarding subscriber.", new Dictionary<string, object?>
+                                    {
+                                        ["inputLength"] = data.Length,
+                                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                                        ["contentOmitted"] = true
+                                    });
+                                }
+                                else
+                                {
+                                    inputHandlers.Invoke(data);
+                                }
                             }
                         }
                         break;
@@ -4136,6 +4793,208 @@ namespace PS7ScriptDesk.Shell.Controls
                     $"[TerminalControl] WebMessage parse error: {ex.Message}");
                 AppLogger.Error("Terminal", "WebView2 terminal message parsing failed.", ex);
                 DeveloperDiagnostics.LogException("Terminal", ex, "WebView2 terminal message parsing failed.");
+            }
+        }
+
+        private static void CaptureBug006VtSequence(JsonElement root)
+        {
+            if (!Bug006VtCaptureEnabled || !ResizeForensicsTrace.Enabled)
+            {
+                return;
+            }
+
+            try
+            {
+                var diagnosticSessionId = GetStringProperty(root, "diagnosticSessionId", string.Empty);
+                var markerObserved = root.TryGetProperty("armMarkerObserved", out var markerObservedElement) && markerObservedElement.ValueKind == JsonValueKind.True;
+                var clearMarkerObserved = root.TryGetProperty("clearMarkerObserved", out var clearMarkerObservedElement) && clearMarkerObservedElement.ValueKind == JsonValueKind.True;
+                var sequenceComplete = root.TryGetProperty("sequenceComplete", out var sequenceCompleteElement) && sequenceCompleteElement.ValueKind == JsonValueKind.True;
+                if (!string.Equals(diagnosticSessionId, ResizeForensicsTrace.CurrentSessionGuid, StringComparison.Ordinal) ||
+                    !string.Equals(GetStringProperty(root, "armMarker", string.Empty), Bug006VtCaptureArmMarker, StringComparison.Ordinal) ||
+                    !markerObserved ||
+                    !clearMarkerObserved ||
+                    !string.Equals(GetStringProperty(root, "clearMarker", string.Empty), "R29_BUG006_VT_CAPTURE_CLEAR_NEXT", StringComparison.Ordinal) ||
+                    !sequenceComplete ||
+                    !root.TryGetProperty("writes", out var writesElement) || writesElement.ValueKind != JsonValueKind.Array)
+                {
+                    DeveloperDiagnostics.LogWarning("Terminal", "Opt-in BUG-006 VT capture rejected an incomplete or uncorrelated event.", new Dictionary<string, object?>
+                    {
+                        ["diagnosticSessionMatches"] = string.Equals(diagnosticSessionId, ResizeForensicsTrace.CurrentSessionGuid, StringComparison.Ordinal),
+                        ["sequenceComplete"] = sequenceComplete,
+                        ["contentOmitted"] = true
+                    });
+                    return;
+                }
+
+                var writeCount = writesElement.GetArrayLength();
+                if (writeCount is <= 0 or > Bug006VtCaptureMaxWrites)
+                {
+                    throw new InvalidDataException("BUG-006 capture write count exceeded its configured bound.");
+                }
+
+                var expectedGeneration = GetIntProperty(root, "terminalSessionGeneration", -1);
+                var expectedRendererGeneration = GetIntProperty(root, "rendererGeneration", -1);
+                if (expectedGeneration < 0 || expectedRendererGeneration < 0)
+                {
+                    throw new InvalidDataException("BUG-006 capture omitted its terminal or renderer generation.");
+                }
+
+                var utf8 = new UTF8Encoding(false, true);
+                var totalBytes = 0;
+                var previousCompletionUtc = DateTimeOffset.MinValue;
+                long previousSubmissionId = 0;
+                var writeIds = new HashSet<string>(StringComparer.Ordinal);
+                var capturedWrites = new List<Dictionary<string, object?>>(writeCount);
+                foreach (var write in writesElement.EnumerateArray())
+                {
+                    var writeId = GetStringProperty(write, "writeId", string.Empty);
+                    var generation = GetIntProperty(write, "generation", -1);
+                    var rendererGeneration = GetIntProperty(write, "rendererGeneration", -1);
+                    var sourceBoundary = GetStringProperty(write, "sourceBoundary", string.Empty);
+                    var payloadBase64 = GetStringProperty(write, "payloadUtf8Base64", string.Empty);
+                    if (string.IsNullOrWhiteSpace(writeId) ||
+                        !writeIds.Add(writeId) ||
+                        generation != expectedGeneration ||
+                        rendererGeneration != expectedRendererGeneration ||
+                        !sourceBoundary.StartsWith("decoded JavaScript output string passed to xterm.js term.write", StringComparison.Ordinal) ||
+                        string.IsNullOrEmpty(payloadBase64) ||
+                        !write.TryGetProperty("payloadUtf8ByteLength", out var byteLengthElement) || !byteLengthElement.TryGetInt32(out var expectedByteLength) ||
+                        !write.TryGetProperty("payloadUtf16Length", out var utf16LengthElement) || !utf16LengthElement.TryGetInt32(out var expectedUtf16Length) ||
+                        !write.TryGetProperty("beforeState", out var beforeState) || beforeState.ValueKind != JsonValueKind.Object ||
+                        !write.TryGetProperty("afterState", out var afterState) || afterState.ValueKind != JsonValueKind.Object ||
+                        string.IsNullOrWhiteSpace(GetStringProperty(write, "writeSubmittedUtc", string.Empty)) ||
+                        string.IsNullOrWhiteSpace(GetStringProperty(write, "writeCompletedUtc", string.Empty)))
+                    {
+                        throw new InvalidDataException("BUG-006 capture contained a missing, duplicate, or cross-generation write boundary.");
+                    }
+
+                    var payloadBytes = Convert.FromBase64String(payloadBase64);
+                    totalBytes = checked(totalBytes + payloadBytes.Length);
+                    if (payloadBytes.Length != expectedByteLength ||
+                        payloadBytes.Length > Bug006VtCaptureMaxWriteBytes ||
+                        totalBytes > Bug006VtCaptureMaxTotalBytes)
+                    {
+                        throw new InvalidDataException("BUG-006 capture payload length exceeded its declared or configured bound.");
+                    }
+
+                    var decodedPayload = utf8.GetString(payloadBytes);
+                    if (decodedPayload.Length != expectedUtf16Length)
+                    {
+                        throw new InvalidDataException("BUG-006 capture UTF-8 payload did not round-trip to the recorded JavaScript string length.");
+                    }
+
+                    var submittedUtc = DateTimeOffset.Parse(GetStringProperty(write, "writeSubmittedUtc", string.Empty), CultureInfo.InvariantCulture);
+                    var completedUtc = DateTimeOffset.Parse(GetStringProperty(write, "writeCompletedUtc", string.Empty), CultureInfo.InvariantCulture);
+                    var submissionId = GetLongProperty(write, "submissionId", 0);
+                    if (completedUtc < submittedUtc ||
+                        submittedUtc < previousCompletionUtc ||
+                        submissionId <= previousSubmissionId)
+                    {
+                        throw new InvalidDataException("BUG-006 capture write ordering or submission identifiers were not monotonic.");
+                    }
+                    previousCompletionUtc = completedUtc;
+                    previousSubmissionId = submissionId;
+
+                    capturedWrites.Add(new Dictionary<string, object?>
+                    {
+                        ["write"] = write.Clone(),
+                        ["payloadSha256"] = Convert.ToHexString(SHA256.HashData(payloadBytes)),
+                        ["payloadUtf8ByteLengthVerified"] = payloadBytes.Length,
+                        ["payloadUtf16LengthVerified"] = decodedPayload.Length
+                    });
+                }
+
+                if (!root.TryGetProperty("totalUtf8Bytes", out var totalElement) ||
+                    !totalElement.TryGetInt32(out var reportedTotalBytes) || reportedTotalBytes != totalBytes ||
+                    !root.TryGetProperty("clearSourceWriteIds", out var sourceIdsElement) ||
+                    sourceIdsElement.ValueKind != JsonValueKind.Array ||
+                    sourceIdsElement.GetArrayLength() < 2 || sourceIdsElement.GetArrayLength() > 8 ||
+                    !string.Equals(GetStringProperty(root, "clearClassification", string.Empty), "cursor-home-plus-multiple-line-erase", StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException("BUG-006 capture total length or source-write correlation was missing.");
+                }
+
+                foreach (var sourceId in sourceIdsElement.EnumerateArray())
+                {
+                    if (sourceId.ValueKind != JsonValueKind.String || !writeIds.Contains(sourceId.GetString() ?? string.Empty))
+                    {
+                        throw new InvalidDataException("BUG-006 capture did not include every clear-classified source write.");
+                    }
+                }
+
+                var configuredDirectory = Bug006VtCaptureDirectory;
+                if (string.IsNullOrWhiteSpace(configuredDirectory) || !Path.IsPathFullyQualified(configuredDirectory))
+                {
+                    throw new InvalidDataException("BUG-006 capture directory must be an explicit absolute local path.");
+                }
+
+                var localAppData = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+                var captureDirectory = Path.GetFullPath(configuredDirectory);
+                var relativeDirectory = Path.GetRelativePath(localAppData, captureDirectory);
+                if (Path.IsPathRooted(relativeDirectory) ||
+                    string.Equals(relativeDirectory, "..", StringComparison.Ordinal) ||
+                    relativeDirectory.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException("BUG-006 VT payloads may only be written beneath LocalAppData.");
+                }
+
+                var captureArtifact = new Dictionary<string, object?>
+                {
+                    ["schemaVersion"] = 1,
+                    ["privacyClassification"] = "PRIVATE_UNREDACTED_TERMINAL_OUTPUT; do not place in ordinary evidence ZIPs",
+                    ["diagnosticSessionId"] = diagnosticSessionId,
+                    ["resizeForensicsRunId"] = ResizeForensicsTrace.CurrentRunId,
+                    ["captureTimestampUtc"] = DateTimeOffset.UtcNow,
+                    ["armMarker"] = Bug006VtCaptureArmMarker,
+                    ["clearMarker"] = "R29_BUG006_VT_CAPTURE_CLEAR_NEXT",
+                    ["armedAtUtc"] = GetStringProperty(root, "armedAtUtc", string.Empty),
+                    ["terminalSessionGeneration"] = expectedGeneration,
+                    ["rendererGeneration"] = expectedRendererGeneration,
+                    ["clearClassification"] = GetStringProperty(root, "clearClassification", "unknown"),
+                    ["clearSourceWriteIds"] = sourceIdsElement.Clone(),
+                    ["sourceBoundary"] = GetStringProperty(root, "sourceBoundary", string.Empty),
+                    ["payloadEncoding"] = "Base64 of UTF-8 bytes re-encoded from the exact decoded JavaScript string passed to xterm.js term.write; not raw ConPTY bytes.",
+                    ["totalUtf8Bytes"] = totalBytes,
+                    ["writeCount"] = writeCount,
+                    ["writes"] = capturedWrites
+                };
+
+                var artifactBytes = JsonSerializer.SerializeToUtf8Bytes(captureArtifact, new JsonSerializerOptions { WriteIndented = true });
+                var captureFileName = $"{DateTimeOffset.Now:yyyyMMdd_HHmmss_fff}_{diagnosticSessionId}_BUG006_VT_SEQUENCE_PRIVATE.json";
+                var capturePath = Path.Combine(captureDirectory, captureFileName);
+                lock (Bug006VtCaptureSync)
+                {
+                    if (_bug006VtCaptureCompleted != 0)
+                    {
+                        return;
+                    }
+
+                    Directory.CreateDirectory(captureDirectory);
+                    using var fileStream = new FileStream(capturePath, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 8192, FileOptions.WriteThrough);
+                    fileStream.Write(artifactBytes);
+                    fileStream.Flush(flushToDisk: true);
+                    _bug006VtCaptureCompleted = 1;
+                }
+
+                DeveloperDiagnostics.LogInfo("Terminal", "Opt-in BUG-006 xterm-boundary VT sequence capture saved locally.", new Dictionary<string, object?>
+                {
+                    ["capturePath"] = DeveloperDiagnostics.SanitizePath(capturePath),
+                    ["captureSha256"] = Convert.ToHexString(SHA256.HashData(artifactBytes)),
+                    ["writeCount"] = writeCount,
+                    ["payloadBytes"] = totalBytes,
+                    ["terminalSessionGeneration"] = expectedGeneration,
+                    ["rendererGeneration"] = expectedRendererGeneration,
+                    ["clearClassification"] = GetStringProperty(root, "clearClassification", "unknown"),
+                    ["contentOmitted"] = true
+                });
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("Terminal", ex, "Opt-in BUG-006 xterm-boundary VT capture failed; terminal output handling continued.", new Dictionary<string, object?>
+                {
+                    ["captureDirectory"] = DeveloperDiagnostics.SanitizePath(Bug006VtCaptureDirectory ?? string.Empty),
+                    ["contentOmitted"] = true
+                });
             }
         }
 

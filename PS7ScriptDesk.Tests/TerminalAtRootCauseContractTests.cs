@@ -18,6 +18,9 @@ public sealed class TerminalAtRootCauseContractTests
 
         Assert.Contains("if (_liveConsoleService.IsInputWritable)", source, StringComparison.Ordinal);
         Assert.Contains("Authoritative terminal clear failed.", source, StringComparison.Ordinal);
+        var clearMethod = source[source.IndexOf("private async Task OnClearConsoleAsync()", StringComparison.Ordinal)..];
+        Assert.DoesNotContain("_clearTerminalSink", clearMethod, StringComparison.Ordinal);
+        Assert.Contains("PowerShell session unavailable. Use Reset Console", clearMethod, StringComparison.Ordinal);
     }
 
     [Fact]

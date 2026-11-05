@@ -1,9 +1,9 @@
 namespace PS7ScriptDesk.PowerShell.Services;
 
 /// <summary>
-/// Coordinates the prompt and cursor observations used to verify completion of
-/// one foreground invocation. This intentionally mirrors the event predicates
-/// used by PsesOwnedInteractiveSessionService.
+/// Coordinates visual prompt restoration after the request's private status
+/// boundary. A prompt-looking output fragment before that boundary is never
+/// evidence that the foreground invocation has returned to the REPL.
 /// </summary>
 internal sealed class PromptRestorationSignal(int expectedGeneration)
 {
@@ -14,19 +14,27 @@ internal sealed class PromptRestorationSignal(int expectedGeneration)
     private bool _postScriptPromptObserved;
     private bool _cursorVisible;
 
+    public PromptRestorationSnapshot Snapshot()
+    {
+        lock (_syncRoot)
+        {
+            return new PromptRestorationSnapshot(
+                _statusFileObserved,
+                _promptBoundaryObserved,
+                _postScriptPromptObserved,
+                _cursorVisible,
+                _completion.Task.IsCompleted);
+        }
+    }
+
     public Task<bool> Completion => _completion.Task;
 
     public bool ObserveStatusFileVisible()
     {
         lock (_syncRoot)
         {
-            var promptWasBuffered = !_statusFileObserved && _promptBoundaryObserved;
             _statusFileObserved = true;
-            if (!_promptBoundaryObserved) return false;
-
-            _postScriptPromptObserved = true;
-            if (_cursorVisible) _completion.TrySetResult(true);
-            return promptWasBuffered;
+            return _promptBoundaryObserved;
         }
     }
 
@@ -60,3 +68,10 @@ internal sealed class PromptRestorationSignal(int expectedGeneration)
         }
     }
 }
+
+internal sealed record PromptRestorationSnapshot(
+    bool StatusFileObserved,
+    bool PromptBoundaryObserved,
+    bool PostScriptPromptObserved,
+    bool CursorVisible,
+    bool Completed);

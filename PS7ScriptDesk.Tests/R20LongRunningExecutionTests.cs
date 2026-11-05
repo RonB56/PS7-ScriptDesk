@@ -176,6 +176,11 @@ public sealed class R20LongRunningExecutionTests
                     "x64", runtimePath, "R20", true, false, true, true);
                 await service.StartSessionAsync(runtime, _ => { }, Environment.CurrentDirectory)
                     .WaitAsync(TimeSpan.FromSeconds(45));
+                // The testhost's nested bin path can wrap the generated editor
+                // command in PSReadLine before the raw echo filter sees it.
+                var promptBeforeLocation = fixture.PromptCount;
+                await service.WriteRawInputAsync("Set-Location 'C:\\'\r").WaitAsync(TimeSpan.FromSeconds(10));
+                await WaitForAsync(() => fixture.PromptCount > promptBeforeLocation, TimeSpan.FromSeconds(10));
                 return fixture;
             }
             catch

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -18,17 +18,10 @@
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and ('$(Platform)' == 'AnyCPU' or '$(Platform)' == 'Any CPU' or '$(Platform)' == '')">win-x64</RuntimeIdentifier>
     <!-- The package carries the Windows App SDK lifecycle payload for each RID. -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
-<<<<<<< Updated upstream
-    <Version>8.0.0</Version>
-    <AssemblyVersion>8.0.0.0</AssemblyVersion>
-    <FileVersion>8.0.0.0</FileVersion>
-    <InformationalVersion>8.0.0</InformationalVersion>
-=======
-    <Version>8.1.2</Version>
-    <AssemblyVersion>8.1.2.0</AssemblyVersion>
-    <FileVersion>8.1.2.0</FileVersion>
-    <InformationalVersion>8.1.2</InformationalVersion>
->>>>>>> Stashed changes
+    <Version>8.1.3</Version>
+    <AssemblyVersion>8.1.3.0</AssemblyVersion>
+    <FileVersion>8.1.3.0</FileVersion>
+    <InformationalVersion>8.1.3</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <AssemblyTitle>PS7 ScriptDesk</AssemblyTitle>
     <Product>PS7 ScriptDesk</Product>

@@ -1146,6 +1146,10 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 Exception exception => ExceptionInfo.Create(exception),
                 IReadOnlyDictionary<string, object?> dictionary => SanitizeProperties(dictionary),
                 IDictionary<string, object?> dictionary => SanitizeProperties(new Dictionary<string, object?>(dictionary)),
+                IEnumerable<IReadOnlyDictionary<string, object?>> dictionaries => dictionaries
+                    .Take(128)
+                    .Select(SanitizeProperties)
+                    .ToArray(),
                 IEnumerable<string> strings => strings.Select(item => SanitizePreview(item, MaximumPropertyValueLength)).ToArray(),
                 double number when double.IsNaN(number) || double.IsInfinity(number) => number.ToString("R", CultureInfo.InvariantCulture),
                 float number when float.IsNaN(number) || float.IsInfinity(number) => number.ToString("R", CultureInfo.InvariantCulture),

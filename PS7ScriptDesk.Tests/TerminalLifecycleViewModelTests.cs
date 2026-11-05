@@ -8,6 +8,54 @@ namespace PS7ScriptDesk.Tests;
 
 public sealed class TerminalLifecycleViewModelTests
 {
+    [Fact]
+    public async Task CoordinatorOwnershipKeepsRunDisabledAndInterruptAvailableAfterTerminalCompletionEvent()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var terminal = new InteractiveTerminalCoordinator();
+        terminal.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "ready");
+        var execution = new RecordingEditorExecutionCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), terminal, execution);
+        Assert.True(viewModel.IsRunAvailable);
+
+        execution.SetActive(new ActiveEditorExecutionSnapshot(
+            Guid.NewGuid(), 1, EditorExecutionCoordinator.LegacyBackendId,
+            new ExecutionBackendCapabilities(true, true, true, false, true, false, true, true, true, true),
+            DateTimeOffset.UtcNow));
+        console.RaiseCommandCompleted();
+
+        Assert.False(viewModel.IsRunAvailable);
+        Assert.True(viewModel.StopCommand.CanExecute(null));
+
+        execution.SetActive(null);
+        Assert.True(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task RejectedTerminalInputShowsARecoverableStatusInsteadOfSilentlyFailing()
+    {
+        var interactive = new InteractiveTerminalCoordinator();
+        interactive.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "test-idle");
+        var console = new RecordingLiveConsoleService
+        {
+            IsSessionRunning = true,
+            RawInputException = new InvalidOperationException("stale terminal")
+        };
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), interactive);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => viewModel.WriteRawInputAsync("Get-Date\r"));
+
+        Assert.Contains("delivery could not be verified", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, interactive.State);
+        Assert.True(viewModel.IsRunAvailable);
+        console.RawInputException = null;
+        await viewModel.WriteRawInputAsync("Get-Date\r");
+        Assert.Contains("Get-Date\r", console.RawInputs);
+        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, interactive.State);
+        viewModel.Dispose();
+    }
+
     [Theory]
     [InlineData("\u001b[I")]
     [InlineData("\u001b[O")]
@@ -565,7 +613,9 @@ public sealed class TerminalLifecycleViewModelTests
             console.IsSessionRunning = false;
             console.IsCommandInProgress = false;
             console.RaiseSessionTerminated();
-            await WaitUntilAsync(() => console.Operations.Count(operation => operation == "start") == i + 1 && viewModel.StatusText.Contains("restarted", StringComparison.OrdinalIgnoreCase));
+            await WaitUntilAsync(() => console.Operations.Count(operation => operation == "start") == i + 1 &&
+                console.IsSessionRunning &&
+                viewModel.ApplicationActivityText.Split("PowerShell terminal restarted with", StringSplitOptions.None).Length >= i + 2);
         }
 
         console.IsSessionRunning = false;
@@ -582,10 +632,88 @@ public sealed class TerminalLifecycleViewModelTests
         Assert.Contains("restarted", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task ClearConsoleWithoutSession_PreservesOutputAndExplainsResetRecovery()
+    {
+        var console = new RecordingLiveConsoleService();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime());
+        var originalOutput = viewModel.TerminalDisplayText;
+        var rendererClearCount = 0;
+        viewModel.SetTerminalSessionControls(() => rendererClearCount++);
+
+        viewModel.ClearConsoleCommand.Execute(null);
+
+        await WaitUntilAsync(() => viewModel.StatusText.Contains("Use Reset Console", StringComparison.Ordinal));
+        Assert.Equal(originalOutput, viewModel.TerminalDisplayText);
+        Assert.Equal(0, rendererClearCount);
+        Assert.Empty(console.RawInputs);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task ClearConsoleLiveSession_SendsClsAndKeepsRendererResetUnused()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime());
+        var rendererClearCount = 0;
+        var reconcileCount = 0;
+        viewModel.SetTerminalSessionControls(
+            () => rendererClearCount++,
+            reconcileAuthoritativeClear: () => reconcileCount++);
+
+        viewModel.ClearConsoleCommand.Execute(null);
+
+        await WaitUntilAsync(() => viewModel.StatusText == "PowerShell clear command sent.");
+        Assert.Equal(new[] { "cls\r" }, console.RawInputs);
+        Assert.Equal(0, rendererClearCount);
+        Assert.Equal(1, reconcileCount);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task ClearConsoleWriteFailure_PreservesRendererAndReportsFailure()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true, RawInputException = new IOException("session closed") };
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime());
+        var originalOutput = viewModel.TerminalDisplayText;
+        var rendererClearCount = 0;
+        viewModel.SetTerminalSessionControls(() => rendererClearCount++);
+
+        viewModel.ClearConsoleCommand.Execute(null);
+
+        await WaitUntilAsync(() => viewModel.StatusText.Contains("Terminal clear failed", StringComparison.Ordinal));
+        Assert.Equal(originalOutput, viewModel.TerminalDisplayText);
+        Assert.Equal(0, rendererClearCount);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task ClearConsoleSessionShutdownRace_PreservesOutputAndReportsFailure()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        console.BeforeRawInputWrite = () =>
+        {
+            console.IsSessionRunning = false;
+            throw new IOException("session stopped during clear admission");
+        };
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime());
+        var originalOutput = viewModel.TerminalDisplayText;
+        var rendererClearCount = 0;
+        viewModel.SetTerminalSessionControls(() => rendererClearCount++);
+
+        viewModel.ClearConsoleCommand.Execute(null);
+
+        await WaitUntilAsync(() => viewModel.StatusText.Contains("Terminal clear failed", StringComparison.Ordinal));
+        Assert.Equal(originalOutput, viewModel.TerminalDisplayText);
+        Assert.Equal(0, rendererClearCount);
+        viewModel.Dispose();
+    }
+
     private static Task<MainWindowViewModel> CreateViewModelAsync(
         RecordingLiveConsoleService console,
         PowerShellRuntimeInfo? runtime = null,
-        IInteractiveTerminalCoordinator? coordinator = null)
+        IInteractiveTerminalCoordinator? coordinator = null,
+        IEditorExecutionCoordinator? executionCoordinator = null)
     {
         return Task.Run(() => new MainWindowViewModel(
             new FakeWorkspaceService(),
@@ -596,7 +724,8 @@ public sealed class TerminalLifecycleViewModelTests
             console,
             new FakeExeExportService(),
             startupRuntimeInfo: runtime,
-            interactiveTerminalCoordinator: coordinator));
+            interactiveTerminalCoordinator: coordinator,
+            executionCoordinator: executionCoordinator));
     }
 
     private static PowerShellRuntimeInfo CreateRuntime()
@@ -625,18 +754,42 @@ public sealed class TerminalLifecycleViewModelTests
 
         Assert.True(condition());
     }
+
+    private sealed class RecordingEditorExecutionCoordinator : IEditorExecutionCoordinator
+    {
+        public bool IsShadowMode => false;
+        public bool IsRollbackEnabled => false;
+        public ActiveEditorExecutionSnapshot? ActiveExecution { get; private set; }
+        public event Action<EditorExecutionEvent>? EventPublished { add { } remove { } }
+        public event Action? ActiveExecutionChanged;
+
+        public void SetActive(ActiveEditorExecutionSnapshot? active)
+        {
+            ActiveExecution = active;
+            ActiveExecutionChanged?.Invoke();
+        }
+
+        public ExecutionRoutingDecision Route(EditorExecutionRequest request) => throw new NotSupportedException();
+        public Task<ExecutionRoutingDecision> ObserveAsync(EditorExecutionRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<EditorExecutionResult> ExecuteAsync(EditorExecutionRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public void Dispose() { }
+    }
 }
 
 internal sealed class RecordingLiveConsoleService : ILiveConsoleService
 {
     public int? ProcessId => null;
     public bool IsSessionRunning { get; set; }
-    public bool IsInputWritable => IsSessionRunning;
+    public bool? InputWritableOverride { get; set; }
+    public bool IsInputWritable => InputWritableOverride ?? IsSessionRunning;
     public bool IsCommandInProgress { get; set; }
     public bool IsHostAttached => true;
     public PowerShellRuntimeInfo? ActiveRuntime { get; private set; }
     public string? CurrentWorkingDirectory => null;
     public List<string> Operations { get; } = new();
+    public List<string> RawInputs { get; } = new();
+    public Exception? RawInputException { get; set; }
+    public Action? BeforeRawInputWrite { get; set; }
     public LiveConsoleInterruptResult InterruptResult { get; set; } = new(
         false,
         false,
@@ -670,6 +823,9 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public Task WriteRawInputAsync(string data, CancellationToken cancellationToken = default)
     {
         RawInputCount++;
+        BeforeRawInputWrite?.Invoke();
+        if (RawInputException is not null) throw RawInputException;
+        RawInputs.Add(data);
         return Task.CompletedTask;
     }
 

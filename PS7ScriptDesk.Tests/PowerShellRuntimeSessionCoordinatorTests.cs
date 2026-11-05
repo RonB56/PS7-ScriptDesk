@@ -123,6 +123,71 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
         Assert.Equal(1, terminal.RawInputWriteCount);
     }
 
+    [Fact]
+    public async Task CachedReadySnapshotCannotAdmitInputWhenBackingTransportStopsAcceptingIt()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+
+        terminal.InputWritableOverride = false;
+
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, coordinator.Snapshot.State);
+        Assert.False(coordinator.IsCurrent(current.SessionId, current.Generation));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.WriteRawInputAsync(current.SessionId, current.Generation, "input"));
+        Assert.Equal(0, terminal.RawInputWriteCount);
+    }
+
+    [Fact]
+    public async Task UnannouncedProcessReplacementRejectsOldRuntimeIdentity()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+
+        terminal.ReplaceProcessWithoutNotification(9876);
+
+        Assert.False(coordinator.IsCurrent(current.SessionId, current.Generation));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.WriteRawInputAsync(current.SessionId, current.Generation, "input"));
+        Assert.Equal(0, terminal.RawInputWriteCount);
+    }
+
+    [Fact]
+    public async Task ProcessReplacementDuringWriteCannotBeReportedAsDeliveryToCurrentSession()
+    {
+        var terminal = new CoordinatorTerminalFake
+        {
+            WriteCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+        };
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+
+        var write = coordinator.WriteRawInputAsync(current.SessionId, current.Generation, "input");
+        await terminal.WriteObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        terminal.ReplaceProcessWithoutNotification(9876);
+        terminal.WriteCompletion.SetResult(true);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => write);
+        Assert.Equal(1, terminal.RawInputWriteCount);
+    }
+
+    [Fact]
+    public async Task ExecutionLeaseDoesNotReturnToReadyAfterInputTransportFailure()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+
+        terminal.InputWritableOverride = false;
+        await lease.DisposeAsync();
+
+        Assert.Equal(PowerShellRuntimeSessionState.Faulted, coordinator.Snapshot.State);
+        Assert.False(coordinator.IsCurrent(current.SessionId, current.Generation));
+    }
+
     private static PowerShellRuntimeInfo CreateRuntime() => new(
         "Test PowerShell", "Core", "7.6.0", new Version(7, 6, 0), "x64",
         Environment.ProcessPath!, "test", true, false, true);
@@ -130,7 +195,8 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
     private sealed class CoordinatorTerminalFake : ILiveConsoleService
     {
         public bool IsSessionRunning { get; private set; }
-        public bool IsInputWritable => IsSessionRunning;
+        public bool IsInputWritable => InputWritableOverride ?? IsSessionRunning;
+        public bool? InputWritableOverride { get; set; }
         public bool IsCommandInProgress => false;
         public bool IsHostAttached => true;
         public PowerShellRuntimeInfo? ActiveRuntime { get; private set; }
@@ -139,6 +205,8 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
         public int StartCount { get; private set; }
         public int ShutdownCount { get; private set; }
         public int RawInputWriteCount { get; private set; }
+        public TaskCompletionSource<bool>? WriteCompletion { get; set; }
+        public TaskCompletionSource<bool> WriteObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool FailStart { get; init; }
         public bool HoldStartAfterEarlyNotification { get; init; }
         public TaskCompletionSource<bool> EarlyStartNotificationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -170,6 +238,7 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
         }
 
         public void CompleteHeldStart() => _heldStartCompletion?.TrySetResult(true);
+        public void ReplaceProcessWithoutNotification(int processId) => ProcessId = processId;
 
         public Task<bool> ShutdownAsync(CancellationToken cancellationToken = default)
         {
@@ -186,10 +255,11 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
         public void ResizeHost(int width, int height) { }
         public void ResizeConsole(int cols, int rows) { }
         public void FocusConsole() { }
-        public Task WriteRawInputAsync(string data, CancellationToken cancellationToken = default)
+        public async Task WriteRawInputAsync(string data, CancellationToken cancellationToken = default)
         {
             RawInputWriteCount++;
-            return Task.CompletedTask;
+            WriteObserved.TrySetResult(true);
+            if (WriteCompletion is not null) await WriteCompletion.Task.WaitAsync(cancellationToken);
         }
         public Task<LiveConsoleCommandResult> ExecuteConsoleCommandAsync(string commandText, Action<ExecutionOutputRecord> onOutput, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<LiveConsoleCommandResult> ExecuteScriptAsync(string documentDisplayName, string scriptContent, Action<ExecutionOutputRecord> onOutput, bool executeInCurrentScope = false, CancellationToken cancellationToken = default) => throw new NotSupportedException();

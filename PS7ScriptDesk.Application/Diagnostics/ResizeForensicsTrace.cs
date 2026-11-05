@@ -24,6 +24,7 @@ public static class ResizeForensicsTrace
 
     public static bool Enabled => string.Equals(Environment.GetEnvironmentVariable("PS7SCRIPTDESK_RESIZE_FORENSICS"), "1", StringComparison.Ordinal);
     public static string CurrentSessionGuid => SessionGuid;
+    public static string CurrentRunId => RunId;
 
     public static void SetAuthoritativeProcessId(int processId)
     {

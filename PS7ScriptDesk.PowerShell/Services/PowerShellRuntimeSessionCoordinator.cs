@@ -150,19 +150,51 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
         var current = Snapshot;
         return current.SessionId == sessionId && current.Generation == generation &&
                current.State is PowerShellRuntimeSessionState.Ready or PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging &&
-               current.ProcessId.HasValue && current.InputWritable;
+               current.ProcessId.HasValue && current.InputWritable &&
+               _terminal.IsSessionRunning && _terminal.IsInputWritable &&
+               _terminal.ProcessId == current.ProcessId;
     }
 
     public async Task WriteRawInputAsync(Guid sessionId, long generation, string data, CancellationToken cancellationToken = default)
     {
         if (!IsCurrent(sessionId, generation))
+        {
+            DeveloperDiagnostics.LogDecision("RuntimeBroker", "TerminalInputRejected",
+                "Runtime input was rejected before transport because the request or backing terminal is stale or non-writable.",
+                "BeforeWrite", InputMetadata(sessionId, generation, data.Length));
             throw new InvalidOperationException("The terminal input belongs to a stale or non-writable PowerShell runtime session.");
+        }
 
         var expectedProcessId = Snapshot.ProcessId;
         await _terminal.WriteRawInputAsync(data, cancellationToken).ConfigureAwait(false);
 
         if (!IsCurrent(sessionId, generation) || Snapshot.ProcessId != expectedProcessId)
+        {
+            DeveloperDiagnostics.LogDecision("RuntimeBroker", "TerminalInputRejected",
+                "Runtime input was written to the previous transport, but the session changed before forwarding completed.",
+                "ChangedAfterWrite", InputMetadata(sessionId, generation, data.Length));
             throw new InvalidOperationException("The PowerShell runtime session changed while terminal input was being forwarded.");
+        }
+    }
+
+    private Dictionary<string, object?> InputMetadata(Guid requestedSessionId, long requestedGeneration, int inputLength)
+    {
+        var current = Snapshot;
+        return new Dictionary<string, object?>
+        {
+            ["requestedSessionId"] = requestedSessionId,
+            ["requestedGeneration"] = requestedGeneration,
+            ["sessionId"] = current.SessionId,
+            ["generation"] = current.Generation,
+            ["runtimeState"] = current.State.ToString(),
+            ["snapshotProcessId"] = current.ProcessId,
+            ["snapshotInputWritable"] = current.InputWritable,
+            ["terminalProcessId"] = _terminal.ProcessId,
+            ["terminalRunning"] = _terminal.IsSessionRunning,
+            ["terminalInputWritable"] = _terminal.IsInputWritable,
+            ["inputLength"] = inputLength,
+            ["contentOmitted"] = true
+        };
     }
 
     public async Task<IAsyncDisposable> AcquireExecutionAsync(Guid sessionId, long generation, bool debugger, CancellationToken cancellationToken = default)
@@ -278,7 +310,15 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
             if (Interlocked.Exchange(ref _released, 1) == 0)
             {
                 var current = _owner.Snapshot;
-                if (_owner.IsCurrent(_sessionId, _generation)) _owner.Publish(PowerShellRuntimeSessionState.Ready, _sessionId, _generation, current.Runtime, null);
+                if (current.SessionId == _sessionId && current.Generation == _generation &&
+                    current.State is PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging)
+                {
+                    if (_owner.IsCurrent(_sessionId, _generation))
+                        _owner.Publish(PowerShellRuntimeSessionState.Ready, _sessionId, _generation, current.Runtime, null);
+                    else
+                        _owner.Publish(PowerShellRuntimeSessionState.Faulted, _sessionId, _generation, current.Runtime,
+                            "The PowerShell input transport is no longer writable after execution.");
+                }
                 _owner._executionGate.Release();
             }
             return ValueTask.CompletedTask;

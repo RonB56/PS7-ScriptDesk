@@ -61,6 +61,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private bool _runtimeReplacementPromptShown;
         private CancellationTokenSource? _structuredExecutionCancellation;
         private Guid? _activeStructuredExecutionRequestId;
+        private Guid? _activeCoordinatorExecutionRequestId;
 
         private readonly RelayCommand _runCommand;
         private readonly RelayCommand _stopCommand;
@@ -122,6 +123,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private Action<int>?    _invalidateTerminalOutputGenerationSink;
         private TerminalFocusRestoreIntent _preparedTerminalFocusIntent;
         private int _currentTerminalGeneration;
+        private int _terminalInputRejectionEpisode;
         private int _resetConsoleInProgress;
         private bool _isDebugSessionActive;
         private string _workspaceText;
@@ -289,7 +291,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             RunCommand = _runCommand;
             _stopCommand = new RelayCommand(async () => await OnStopAsync(), CanStopScript);
             StopCommand = _stopCommand;
-            ClearConsoleCommand = new RelayCommand(async () => await OnClearConsoleAsync());
+            ClearConsoleCommand = new RelayCommand(async () => await OnClearConsoleAsync(),
+                () => !_liveConsoleService.IsCommandInProgress && !IsStopInProgress);
             _refreshRuntimesCommand = new RelayCommand(async () => await OnRefreshRuntimesAsync(), CanRefreshRuntimes);
             RefreshRuntimesCommand = _refreshRuntimesCommand;
             RefreshWorkspaceCommand = new RelayCommand(async () => await OnRefreshWorkspaceAsync());
@@ -1299,6 +1302,20 @@ namespace PS7ScriptDesk.UI.ViewModels
             get => _isExecutionRunning;
             private set
             {
+                if (!value && _executionCoordinator?.ActiveExecution is { } activeExecution)
+                {
+                    DeveloperDiagnostics.LogDecision(
+                        "Execution",
+                        "EditorExecutionUiReleaseDeferred",
+                        "A terminal or recovery event cannot clear the ViewModel projection while the coordinator owns an editor request.",
+                        "CoordinatorActive",
+                        new Dictionary<string, object?>
+                        {
+                            ["requestId"] = activeExecution.RequestId,
+                            ["sessionGeneration"] = activeExecution.SessionGeneration
+                        });
+                    return;
+                }
                 if (_isExecutionRunning != value)
                 {
                     _isExecutionRunning = value;
@@ -2297,23 +2314,26 @@ namespace PS7ScriptDesk.UI.ViewModels
             try
             {
                 var inputClass = TerminalInputClassifier.Classify(data);
-                if (string.Equals(inputClass, "CtrlC", StringComparison.Ordinal))
+                var interactiveStateBeforeInput = _interactiveTerminalCoordinator.State;
+                var requestedInputState = string.Equals(inputClass, "CtrlC", StringComparison.Ordinal)
+                    ? InteractiveTerminalState.InteractiveCommandRunning
+                    : TerminalInputClassifier.EstablishesUserEditOwnership(inputClass)
+                        ? (data.Contains('\r') || data.Contains('\n') ? InteractiveTerminalState.InteractiveCommandRunning : InteractiveTerminalState.InteractiveInputEditing)
+                        : interactiveStateBeforeInput;
+                var runtimeBeforeInput = _runtimeSessionCoordinator?.Snapshot;
+                DeveloperDiagnostics.LogInfo("Terminal", "Console input ownership decision started.", new Dictionary<string, object?>
                 {
-                    _interactiveTerminalCoordinator.SetState(
-                        InteractiveTerminalState.InteractiveCommandRunning,
-                        "Ctrl+C cancelled console input; waiting for the backend prompt.");
-                    _terminalOutputMultiplexer.SetInteractiveState(
-                        InteractiveTerminalState.InteractiveCommandRunning,
-                        "Ctrl+C cancelled console input; waiting for the backend prompt.");
-                }
-                else if (TerminalInputClassifier.EstablishesUserEditOwnership(inputClass))
-                {
-                    var inputState = data.Contains('\r') || data.Contains('\n')
-                        ? InteractiveTerminalState.InteractiveCommandRunning
-                        : InteractiveTerminalState.InteractiveInputEditing;
-                    _interactiveTerminalCoordinator.SetState(inputState, "User input was forwarded to the interactive terminal.");
-                    _terminalOutputMultiplexer.SetInteractiveState(inputState, "User input was forwarded to the interactive terminal.");
-                }
+                    ["inputClass"] = inputClass,
+                    ["inputLength"] = data.Length,
+                    ["previousInteractiveState"] = interactiveStateBeforeInput.ToString(),
+                    ["requestedInteractiveState"] = requestedInputState.ToString(),
+                    ["sessionGeneration"] = runtimeBeforeInput?.Generation,
+                    ["runtimeState"] = runtimeBeforeInput?.State.ToString(),
+                    ["runtimeInputWritable"] = runtimeBeforeInput?.InputWritable,
+                    ["executionRunning"] = IsExecutionRunning,
+                    ["cancellationRequested"] = _structuredExecutionCancellation?.IsCancellationRequested,
+                    ["contentOmitted"] = true
+                });
                 AppLogger.Debug("Console", $"ViewModel forwarding raw terminal input to LiveConsoleService. Length={data.Length}.");
                 if (_runtimeSessionCoordinator is not null)
                 {
@@ -2327,6 +2347,32 @@ namespace PS7ScriptDesk.UI.ViewModels
                 {
                     await _liveConsoleService.WriteRawInputAsync(data).ConfigureAwait(false);
                 }
+                // Update interactive ownership only after the active transport
+                // admits the bytes. Rejected input must not strand Run disabled.
+                if (string.Equals(inputClass, "CtrlC", StringComparison.Ordinal))
+                {
+                    _interactiveTerminalCoordinator.SetState(InteractiveTerminalState.InteractiveCommandRunning,
+                        "Ctrl+C was forwarded; waiting for the backend prompt.");
+                    _terminalOutputMultiplexer.SetInteractiveState(InteractiveTerminalState.InteractiveCommandRunning,
+                        "Ctrl+C was forwarded; waiting for the backend prompt.");
+                }
+                else if (TerminalInputClassifier.EstablishesUserEditOwnership(inputClass))
+                {
+                    var inputState = data.Contains('\r') || data.Contains('\n')
+                        ? InteractiveTerminalState.InteractiveCommandRunning
+                        : InteractiveTerminalState.InteractiveInputEditing;
+                    _interactiveTerminalCoordinator.SetState(inputState, "User input was admitted by the interactive terminal.");
+                    _terminalOutputMultiplexer.SetInteractiveState(inputState, "User input was admitted by the interactive terminal.");
+                }
+                Interlocked.Exchange(ref _terminalInputRejectionEpisode, 0);
+                DeveloperDiagnostics.LogInfo("Terminal", "Console input write accepted.", new Dictionary<string, object?>
+                {
+                    ["inputClass"] = inputClass,
+                    ["inputLength"] = data.Length,
+                    ["sessionGeneration"] = _runtimeSessionCoordinator?.Snapshot.Generation,
+                    ["interactiveState"] = _interactiveTerminalCoordinator.State.ToString(),
+                    ["contentOmitted"] = true
+                });
             }
             catch (Exception ex)
             {
@@ -2340,8 +2386,22 @@ namespace PS7ScriptDesk.UI.ViewModels
                     new Dictionary<string, object?>
                     {
                         ["inputLength"] = data.Length,
+                        ["interactiveStateAfterFailure"] = _interactiveTerminalCoordinator.State.ToString(),
+                        ["sessionGenerationAfterFailure"] = _runtimeSessionCoordinator?.Snapshot.Generation,
+                        ["runtimeStateAfterFailure"] = _runtimeSessionCoordinator?.Snapshot.State.ToString(),
+                        ["runtimeInputWritableAfterFailure"] = _runtimeSessionCoordinator?.Snapshot.InputWritable,
+                        ["executionRunning"] = IsExecutionRunning,
+                        ["cancellationRequested"] = _structuredExecutionCancellation?.IsCancellationRequested,
                         ["contentOmitted"] = true
                     });
+                if (Interlocked.Exchange(ref _terminalInputRejectionEpisode, 1) == 0)
+                {
+                    PostToUi(() =>
+                    {
+                        StatusText = "Console input delivery could not be verified. Check the session state or use Reset Console.";
+                        UpdateConsoleSessionPresentation();
+                    });
+                }
                 throw;
             }
         }
@@ -4740,6 +4800,12 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task OnRunAsync()
         {
+            if (!CanRunScript())
+            {
+                StatusText = GetRunDisabledReason() ?? "Run is not available right now";
+                return;
+            }
+
             var selectedTab = SelectedTab;
             if (selectedTab is null)
             {
@@ -4917,6 +4983,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
+            _activeCoordinatorExecutionRequestId = request.RequestId;
             IsExecutionRunning = true;
             if (structured)
             {
@@ -4935,8 +5002,9 @@ namespace PS7ScriptDesk.UI.ViewModels
                 var result = await _executionCoordinator.ExecuteAsync(
                     request,
                     structured ? _structuredExecutionCancellation!.Token : CancellationToken.None).ConfigureAwait(false);
-                PostToUi(() =>
+                await PostToUiAsync(() =>
                 {
+                    if (_activeCoordinatorExecutionRequestId != request.RequestId) return;
                     StatusText = result.Status switch
                     {
                         EditorExecutionStatus.Completed => structured
@@ -4948,11 +5016,15 @@ namespace PS7ScriptDesk.UI.ViewModels
                         _ => result.ErrorMessage ?? "Editor execution failed"
                     };
                     UpdateConsoleSessionPresentation();
-                });
+                }).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (structured)
             {
-                PostToUi(() => StatusText = $"{displayName} cancelled");
+                await PostToUiAsync(() =>
+                {
+                    if (_activeCoordinatorExecutionRequestId == request.RequestId)
+                        StatusText = $"{displayName} cancelled";
+                }).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -4961,26 +5033,30 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ex,
                     "Coordinator-owned editor execution failed.",
                     new Dictionary<string, object?> { ["requestId"] = request.RequestId, ["selectedBackend"] = decision.SelectedBackend, ["contentOmitted"] = true });
-                PostToUi(() =>
+                await PostToUiAsync(() =>
                 {
+                    if (_activeCoordinatorExecutionRequestId != request.RequestId) return;
                     StatusText = "Editor execution failed";
                     AppendOutputLine($"Editor execution failed: {ex.Message}");
-                });
+                }).ConfigureAwait(false);
             }
             finally
             {
-                if (structured)
+                await PostToUiAsync(() =>
                 {
-                    _terminalOutputMultiplexer.EndEditorExecution(request.RequestId);
-                    _activeStructuredExecutionRequestId = null;
-                    _structuredExecutionCancellation?.Dispose();
-                    _structuredExecutionCancellation = null;
-                }
-                PostToUi(() =>
-                {
-                    IsExecutionRunning = false;
+                    if (_activeCoordinatorExecutionRequestId != request.RequestId) return;
+                    if (structured)
+                    {
+                        _terminalOutputMultiplexer.EndEditorExecution(request.RequestId);
+                        _activeStructuredExecutionRequestId = null;
+                        _structuredExecutionCancellation?.Dispose();
+                        _structuredExecutionCancellation = null;
+                    }
+                    _activeCoordinatorExecutionRequestId = null;
+                    if (_executionCoordinator?.ActiveExecution is null)
+                        IsExecutionRunning = false;
                     RefreshCommandStates();
-                });
+                }).ConfigureAwait(false);
             }
         }
 
@@ -5303,7 +5379,8 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             var interactiveState = _interactiveTerminalCoordinator.State;
             var interactiveOperationInProgress = interactiveState is InteractiveTerminalState.InteractiveInputEditing or InteractiveTerminalState.InteractiveCommandRunning;
-            if (!_liveConsoleService.IsCommandInProgress && !interactiveOperationInProgress)
+            if (_executionCoordinator?.ActiveExecution is null &&
+                !_liveConsoleService.IsCommandInProgress && !interactiveOperationInProgress)
             {
                 StatusText = "There is no running script or command to stop";
                 return;
@@ -5350,10 +5427,11 @@ namespace PS7ScriptDesk.UI.ViewModels
                     .InterruptOrRestartAsync(AppendExecutionOutput)
                     .ConfigureAwait(false);
 
-                var executionResolved = interruptResult.CompletedGracefully ||
+                var executionResolved = _executionCoordinator?.ActiveExecution is null &&
+                                        (interruptResult.CompletedGracefully ||
                                         interruptResult.SessionRestarted ||
                                         !_liveConsoleService.IsSessionRunning ||
-                                        !_liveConsoleService.IsCommandInProgress;
+                                        !_liveConsoleService.IsCommandInProgress);
 
                 PostToUi(() =>
                 {
@@ -5423,8 +5501,9 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ex,
                     "Interrupt or restart failed.",
                     new Dictionary<string, object?> { ["operationId"] = operationId });
-                var executionResolved = !_liveConsoleService.IsSessionRunning ||
-                                        !_liveConsoleService.IsCommandInProgress;
+                var executionResolved = _executionCoordinator?.ActiveExecution is null &&
+                                        (!_liveConsoleService.IsSessionRunning ||
+                                         !_liveConsoleService.IsCommandInProgress);
                 PostToUi(() =>
                 {
                     StatusText = executionResolved
@@ -5536,6 +5615,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             // stray continuation prompt (">>").  Sending the same command the user
             // can type manually keeps PowerShell, PSReadLine, ConPTY, and xterm.js
             // in agreement: PowerShell performs the clear and redraws its own prompt.
+            var clearRequestId = Guid.NewGuid();
+            var clearTimer = System.Diagnostics.Stopwatch.StartNew();
             DeveloperDiagnostics.LogUserAction(
                 "Terminal",
                 "TerminalClearRequested",
@@ -5546,13 +5627,54 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ["inputWritable"] = _liveConsoleService.IsInputWritable,
                     ["commandInProgress"] = _liveConsoleService.IsCommandInProgress,
                     ["processId"] = _liveConsoleService.ProcessId,
+                    ["requestId"] = clearRequestId,
                     ["contentOmitted"] = true
                 });
+
+            if (!_liveConsoleService.IsSessionRunning || !_liveConsoleService.IsInputWritable)
+            {
+                const string unavailableMessage = "PowerShell session unavailable. Use Reset Console to start a new session.";
+                DeveloperDiagnostics.LogWarning("Terminal", "Clear Console rejected because the PowerShell session is unavailable or not writable.", new Dictionary<string, object?>
+                {
+                    ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                    ["inputWritable"] = _liveConsoleService.IsInputWritable,
+                    ["processId"] = _liveConsoleService.ProcessId,
+                    ["requestId"] = clearRequestId,
+                    ["contentOmitted"] = true
+                });
+                PostToUi(() => StatusText = unavailableMessage);
+                return;
+            }
+
+            if (_liveConsoleService.IsCommandInProgress || IsStopInProgress)
+            {
+                PostToUi(() => StatusText = "Wait for the current PowerShell operation to finish before clearing the terminal.");
+                DeveloperDiagnostics.LogInfo("Terminal", "Clear Console rejected because an operation is active.", new Dictionary<string, object?>
+                {
+                    ["commandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                    ["stopInProgress"] = IsStopInProgress,
+                    ["processId"] = _liveConsoleService.ProcessId
+                });
+                return;
+            }
 
             if (_liveConsoleService.IsInputWritable)
             {
                 try
                 {
+                    if (!_liveConsoleService.IsSessionRunning || !_liveConsoleService.IsInputWritable)
+                    {
+                        PostToUi(() => StatusText = "PowerShell session unavailable. Use Reset Console to start a new session.");
+                        DeveloperDiagnostics.LogWarning("Terminal", "Clear Console rejected after admission because the session stopped before its input write.", new Dictionary<string, object?>
+                        {
+                            ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                            ["inputWritable"] = _liveConsoleService.IsInputWritable,
+                            ["processId"] = _liveConsoleService.ProcessId,
+                            ["requestId"] = clearRequestId,
+                            ["contentOmitted"] = true
+                        });
+                        return;
+                    }
                     PostToUi(() => _focusTerminalSink?.Invoke());
 
                     await _liveConsoleService.WriteRawInputAsync("cls\r").ConfigureAwait(false);
@@ -5565,15 +5687,24 @@ namespace PS7ScriptDesk.UI.ViewModels
                     PostToUi(() =>
                     {
                         _focusTerminalSink?.Invoke();
-                        StatusText = "Terminal output cleared";
+                        StatusText = "PowerShell clear command sent.";
                     });
 
-                    AppLogger.Info("Console", "Terminal output was cleared by sending the PowerShell cls command through the live ConPTY session.");
+                    DeveloperDiagnostics.LogInfo("Terminal", "PowerShell clear command was accepted by the live terminal input transport.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = clearRequestId,
+                        ["processId"] = _liveConsoleService.ProcessId,
+                        ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                        ["inputWritable"] = _liveConsoleService.IsInputWritable,
+                        ["elapsedMilliseconds"] = clearTimer.Elapsed.TotalMilliseconds,
+                        ["contentOmitted"] = true
+                    });
+                    AppLogger.Info("Console", "The PowerShell cls clear command was sent through the live ConPTY session.");
                     return;
                 }
                 catch (Exception ex)
                 {
-                    AppLogger.Warning("Console", $"PowerShell cls clear failed; falling back to xterm display clear. Reason={ex.Message}");
+                    AppLogger.Warning("Console", $"PowerShell cls clear failed; terminal output was preserved. Reason={ex.Message}");
                     DeveloperDiagnostics.LogException(
                         "Terminal",
                         ex,
@@ -5583,30 +5714,14 @@ namespace PS7ScriptDesk.UI.ViewModels
                             ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
                             ["inputWritable"] = _liveConsoleService.IsInputWritable,
                             ["processId"] = _liveConsoleService.ProcessId,
+                            ["requestId"] = clearRequestId,
+                            ["elapsedMilliseconds"] = clearTimer.Elapsed.TotalMilliseconds,
                             ["contentOmitted"] = true
                         });
+                    PostToUi(() => StatusText = "Terminal clear failed; existing output was preserved. Use Reset Console if the session is unavailable.");
+                    return;
                 }
             }
-
-            // Fallback for startup or a missing/terminated session.  There is no
-            // live PowerShell process available to redraw a prompt, so this is
-            // display-only and should be used only when no session exists.
-            PostToUi(() =>
-            {
-                if (_clearTerminalSink is not null)
-                {
-                    _clearTerminalSink();
-                }
-                else
-                {
-                    TerminalDisplayText = string.Empty;
-                }
-
-                _focusTerminalSink?.Invoke();
-                StatusText = "Terminal output cleared";
-            });
-
-            AppLogger.Info("Console", "Terminal output was cleared by the app UI fallback path because no live session was available.");
         }
 
         private async Task OnRefreshRuntimesAsync()
@@ -6240,8 +6355,22 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
+            var runtimeSnapshot = _runtimeSessionCoordinator?.Snapshot;
+            var inputRouteCurrent = runtimeSnapshot is null ||
+                _runtimeSessionCoordinator!.IsCurrent(runtimeSnapshot.SessionId, runtimeSnapshot.Generation);
+            if (!_liveConsoleService.IsInputWritable || !inputRouteCurrent)
+            {
+                ConsoleSessionText = "ConPTY terminal: input route unavailable; use Reset Console";
+                RefreshRuntimeStatePresentation();
+                return;
+            }
+
             var directoryText = string.IsNullOrWhiteSpace(currentDirectory) ? "startup directory unavailable" : currentDirectory;
-            var activityText = _liveConsoleService.IsCommandInProgress ? "busy" : "idle";
+            var activityText = _executionCoordinator?.ActiveExecution is not null
+                ? "editor execution active"
+                : _liveConsoleService.IsCommandInProgress
+                    ? "busy"
+                    : "input pipe writable";
             ConsoleSessionText = $"ConPTY terminal: {runtime.DisplayName} running ({activityText}, {directoryText})";
             _consolePromptText = string.IsNullOrWhiteSpace(currentDirectory) ? "PS >" : $"PS {currentDirectory}>";
             OnPropertyChanged(nameof(ConsolePromptText));
@@ -8529,10 +8658,15 @@ namespace PS7ScriptDesk.UI.ViewModels
             var hasSelectedTab = SelectedTab is not null;
             var hasRuntime = SelectedRuntimeItem is not null || _preferredRuntimeItem is not null;
             var canStartEditorExecution = _interactiveTerminalCoordinator.CanStartEditorExecution;
+            var runtimeSnapshot = _runtimeSessionCoordinator?.Snapshot;
+            var runtimeInputCurrent = runtimeSnapshot is null ||
+                _runtimeSessionCoordinator!.IsCurrent(runtimeSnapshot.SessionId, runtimeSnapshot.Generation);
             var canRun = hasSelectedTab &&
                          SelectedTab!.IsPowerShellDocument &&
                          hasRuntime &&
                          !IsExecutionRunning &&
+                         _executionCoordinator?.ActiveExecution is null &&
+                         runtimeInputCurrent &&
                          !_liveConsoleService.IsCommandInProgress &&
                          canStartEditorExecution &&
                          !IsStopInProgress &&
@@ -8584,7 +8718,14 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return "Editor execution is unavailable while a debug session is active.";
             }
 
-            if (IsExecutionRunning || _liveConsoleService.IsCommandInProgress)
+            if (_runtimeSessionCoordinator is { } runtimeCoordinator)
+            {
+                var runtime = runtimeCoordinator.Snapshot;
+                if (!runtimeCoordinator.IsCurrent(runtime.SessionId, runtime.Generation))
+                    return "Editor execution is unavailable because the PowerShell input route is not current or writable. Use Reset Console.";
+            }
+
+            if (IsExecutionRunning || _executionCoordinator?.ActiveExecution is not null || _liveConsoleService.IsCommandInProgress)
             {
                 return "Editor execution is unavailable while another command is running.";
             }
@@ -8641,8 +8782,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                                            (activeCoordinatorExecution.Capabilities.SupportsTerminalInterrupt ||
                                             activeCoordinatorExecution.Capabilities.SupportsCancellation);
 
-            return (activeCoordinatorExecution is not null ||
-                    coordinatorCanInterrupt ||
+            return (coordinatorCanInterrupt ||
                     (_activeStructuredExecutionRequestId.HasValue && _structuredExecutionCancellation is not null) ||
                     IsExecutionRunning ||
                     (_liveConsoleService.IsSessionRunning && (_liveConsoleService.IsCommandInProgress ||
@@ -8681,6 +8821,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             _refreshRuntimesCommand.RaiseCanExecuteChanged();
             _sendConsoleCommand.RaiseCanExecuteChanged();
             _restartConsoleCommand.RaiseCanExecuteChanged();
+            (ClearConsoleCommand as RelayCommand)?.RaiseCanExecuteChanged();
             _exportAsExeCommand.RaiseCanExecuteChanged();
             _publishRestApiCommand.RaiseCanExecuteChanged();
             OnPropertyChanged(nameof(IsRunAvailable));

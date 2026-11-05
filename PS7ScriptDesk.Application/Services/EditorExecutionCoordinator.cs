@@ -112,7 +112,24 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
             backend.BackendId,
             backend.Capabilities,
             DateTimeOffset.UtcNow);
-        Volatile.Write(ref _activeExecution, activeExecution);
+        var competingExecution = Interlocked.CompareExchange(ref _activeExecution, activeExecution, null);
+        if (competingExecution is not null)
+        {
+            _activeRequests.TryRemove(request.RequestId, out _);
+            DeveloperDiagnostics.LogDecision(
+                "Execution",
+                "EditorExecutionAdmissionRejected",
+                "Another editor request still owns the shared PowerShell session.",
+                "ActiveRequest",
+                new Dictionary<string, object?>
+                {
+                    ["requestId"] = request.RequestId,
+                    ["activeRequestId"] = competingExecution.RequestId,
+                    ["sessionGeneration"] = request.SessionGeneration,
+                    ["activeSessionGeneration"] = competingExecution.SessionGeneration
+                });
+            return Rejected(request, "Another editor execution is already active.", backend.BackendId);
+        }
         DeveloperDiagnostics.LogStateTransition(
             "Execution",
             "ActiveEditorExecution",
@@ -126,7 +143,7 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
                 ["supportsTerminalInterrupt"] = backend.Capabilities.SupportsTerminalInterrupt,
                 ["supportsCancellation"] = backend.Capabilities.SupportsCancellation
             });
-        ActiveExecutionChanged?.Invoke();
+        NotifyActiveExecutionChanged();
 
         try
         {
@@ -188,7 +205,7 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
                         ["requestId"] = request.RequestId,
                         ["selectedBackend"] = backend.BackendId
                     });
-                ActiveExecutionChanged?.Invoke();
+                NotifyActiveExecutionChanged();
             }
         }
     }
@@ -209,6 +226,21 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
         Interlocked.Exchange(ref _activeExecution, null);
         EventPublished = null;
         ActiveExecutionChanged = null;
+    }
+
+    private void NotifyActiveExecutionChanged()
+    {
+        var handlers = ActiveExecutionChanged;
+        if (handlers is null) return;
+        foreach (Action handler in handlers.GetInvocationList())
+        {
+            try { handler(); }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("Execution", ex,
+                    "Editor execution lifecycle observer failed; coordinator ownership was retained.");
+            }
+        }
     }
 
     private ExecutionRoutingDecision SelectBackend(EditorExecutionRequest request)

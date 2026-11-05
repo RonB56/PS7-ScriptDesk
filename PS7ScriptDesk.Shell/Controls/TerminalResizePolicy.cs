@@ -66,4 +66,35 @@ internal sealed class TerminalResizePolicy
             ResizeGeneration: _resizeGeneration,
             Reason: "accepted");
     }
+
+    public TerminalResizeDecision Resynchronize(int rendererGeneration)
+    {
+        if (_rendererGeneration != rendererGeneration)
+        {
+            return new TerminalResizeDecision(
+                Accepted: false,
+                Columns: _lastColumns,
+                Rows: _lastRows,
+                ResizeGeneration: _resizeGeneration,
+                Reason: "renderer-generation-mismatch");
+        }
+
+        if (_lastColumns <= 0 || _lastRows <= 0)
+        {
+            return new TerminalResizeDecision(
+                Accepted: false,
+                Columns: _lastColumns,
+                Rows: _lastRows,
+                ResizeGeneration: _resizeGeneration,
+                Reason: "no-known-geometry");
+        }
+
+        _resizeGeneration++;
+        return new TerminalResizeDecision(
+            Accepted: true,
+            Columns: _lastColumns,
+            Rows: _lastRows,
+            ResizeGeneration: _resizeGeneration,
+            Reason: "session-resynchronization");
+    }
 }

@@ -145,6 +145,7 @@ namespace PS7ScriptDesk.Shell
         private CommandPaletteWindow? _commandPaletteWindow;
         private int _terminalOutputDrainScheduled;
         private int _terminalOutputQueuedEnvelopeCount;
+        private long _terminalInputSequence;
         private const string ThemeIconSuccessResourceKey = "Theme.Icon.Success";
         private const string ThemeStatusErrorBackgroundResourceKey = "Theme.Status.Error.Background";
         private const string ThemeStatusErrorBorderResourceKey = "Theme.Status.Error.Border";
@@ -1654,6 +1655,9 @@ namespace PS7ScriptDesk.Shell
                 // Forward xterm.js keystrokes to ConPTY stdin.
                 TerminalConsole.UserInput += async data =>
                 {
+                    using var inputScope = DeveloperDiagnostics.IsEnabled
+                        ? DeveloperDiagnostics.BeginScope(operationId: $"TerminalInput-{Interlocked.Increment(ref _terminalInputSequence)}")
+                        : null;
                     AppLogger.Debug("Terminal", $"MainWindow received terminal input for forwarding. Length={data.Length}, ContentOmitted=True.");
                     DeveloperDiagnostics.LogUserAction(
                         "Terminal",
@@ -1677,6 +1681,14 @@ namespace PS7ScriptDesk.Shell
                                 "Terminal",
                                 $"MainWindow could not forward terminal input. Length={data.Length}, ExceptionType={ex.GetType().Name}, ContentOmitted=True.");
                         }
+                    }
+                    else
+                    {
+                        DeveloperDiagnostics.LogWarning("Terminal", "xterm input was rejected because the main ViewModel is unavailable.", new Dictionary<string, object?>
+                        {
+                            ["inputLength"] = data.Length,
+                            ["contentOmitted"] = true
+                        });
                     }
                 };
 
@@ -11906,8 +11918,7 @@ namespace PS7ScriptDesk.Shell
             var activeTabIndex = selectedTab is null || ViewModel is null ? (int?)null : ViewModel.OpenTabs.IndexOf(selectedTab);
             var runtime = _runtimeSessionCoordinator?.Snapshot;
             var terminalReady = _terminalIsReady && runtime is not null &&
-                runtime.State is PowerShellRuntimeSessionState.Ready or PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging &&
-                runtime.ProcessId.HasValue && runtime.InputWritable;
+                _runtimeSessionCoordinator!.IsCurrent(runtime.SessionId, runtime.Generation);
             return new DeveloperDiagnosticsStateSnapshot
             {
                 ActiveDocumentPath = selectedTab?.FilePath,

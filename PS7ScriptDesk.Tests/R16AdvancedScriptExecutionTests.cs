@@ -42,6 +42,12 @@ public sealed class R16AdvancedScriptExecutionTests
         {
             await service.StartSessionAsync(runtime, _ => { }, Environment.CurrentDirectory)
                 .WaitAsync(TimeSpan.FromSeconds(45));
+            // The testhost starts in a deeply nested bin directory. Shorten the
+            // interactive prompt before repeated requests so PSReadLine does
+            // not wrap the generated command at the ConPTY viewport edge.
+            var locationPromptBefore = promptCount;
+            await service.WriteRawInputAsync("Set-Location 'C:\\'\r").WaitAsync(TimeSpan.FromSeconds(10));
+            await WaitForAsync(() => promptCount > locationPromptBefore, TimeSpan.FromSeconds(10));
             var pid = service.ProcessId;
             var content = await File.ReadAllTextAsync(path);
             var lastValue = string.Empty;
@@ -74,9 +80,39 @@ public sealed class R16AdvancedScriptExecutionTests
                 "R16 invalid syntax", "[CmdletBinding()] param(", false, _ => { })
                 .WaitAsync(TimeSpan.FromSeconds(25));
             Assert.Equal(EditorExecutionStatus.Failed, invalid.Status);
-            Assert.False(invalid.CompletionObserved);
+            // The snapshot is parsed during foreground execution, so the
+            // launcher reports ERROR and the prompt can recover normally.
+            Assert.True(invalid.CompletionObserved);
             Assert.DoesNotContain("expression after '&'", string.Concat(output)[invalidStartLength..], StringComparison.OrdinalIgnoreCase);
             Assert.True(service.IsInputWritable);
+
+            var requires = await service.ExecuteStructuredScriptAsync(Guid.NewGuid(), service.SessionGeneration,
+                "R16 impossible requirement", "#Requires -Version 99.0\nWrite-Output 'R16_UNREACHABLE'", false, _ => { })
+                .WaitAsync(TimeSpan.FromSeconds(25));
+            Assert.Equal(EditorExecutionStatus.Failed, requires.Status);
+            Assert.True(requires.CompletionObserved);
+            Assert.True(service.IsInputWritable);
+
+            var usingStartLength = string.Concat(output).Length;
+            var usingResult = await service.ExecuteStructuredScriptAsync(Guid.NewGuid(), service.SessionGeneration,
+                "R16 using namespace", "using namespace System.Text\n[StringBuilder]::new('R16_USING_OK').ToString()", false, _ => { })
+                .WaitAsync(TimeSpan.FromSeconds(25));
+            Assert.True(usingResult.Status == EditorExecutionStatus.Completed,
+                $"Using-directive run returned {usingResult.Status}: {usingResult.ErrorMessage}. Visible output: {string.Concat(output)[usingStartLength..]}");
+            Assert.True(usingResult.CompletionObserved);
+            Assert.Contains("R16_USING_OK", string.Concat(output)[usingStartLength..], StringComparison.Ordinal);
+
+            var selection = await service.ExecuteStructuredScriptAsync(Guid.NewGuid(), service.SessionGeneration,
+                "R16 selection state", "$R16SelectionValue = 42; function Get-R16SelectionValue { $R16SelectionValue }", true, _ => { })
+                .WaitAsync(TimeSpan.FromSeconds(25));
+            Assert.Equal(EditorExecutionStatus.Completed, selection.Status);
+            var scopeStartLength = string.Concat(output).Length;
+            var scope = await service.ExecuteStructuredScriptAsync(Guid.NewGuid(), service.SessionGeneration,
+                "R16 selection read", "Write-Output ('R16_SELECTION=' + (Get-R16SelectionValue))", true, _ => { })
+                .WaitAsync(TimeSpan.FromSeconds(25));
+            Assert.Equal(EditorExecutionStatus.Completed, scope.Status);
+            Assert.Contains("R16_SELECTION=42", string.Concat(output)[scopeStartLength..], StringComparison.Ordinal);
+
             await service.WriteRawInputAsync("Write-Output ('R16_SHARED=' + $global:R16_LoadRunValue)\r")
                 .WaitAsync(TimeSpan.FromSeconds(10));
             await WaitForAsync(() => string.Concat(output).Contains("R16_SHARED=" + lastValue, StringComparison.Ordinal),

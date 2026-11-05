@@ -14,17 +14,17 @@ public sealed class PromptRestorationSignalTests
     }
 
     [Fact]
-    public async Task PromptBeforeStatus_IsRetainedUntilStatusAppears()
+    public void PromptLookingOutputBeforeStatus_CannotRestoreTheTerminal()
     {
         var signal = new PromptRestorationSignal(expectedGeneration: 7);
 
         Assert.True(signal.ObservePrompt(7, statusFileExists: false, invocationEchoRemoved: true, cursorVisible: true));
         Assert.False(signal.Completion.IsCompleted);
-        // The production method observes status visibility by polling, then
-        // awaits this same signal without receiving another prompt event.
         signal.ObserveStatusFileVisible();
 
-        Assert.True(await signal.Completion.WaitAsync(TimeSpan.FromMilliseconds(100)));
+        Assert.False(signal.Completion.IsCompleted);
+        Assert.False(signal.ObservePrompt(7, statusFileExists: true, invocationEchoRemoved: true, cursorVisible: true));
+        Assert.True(signal.Completion.IsCompleted);
     }
 
     [Fact]
@@ -48,6 +48,8 @@ public sealed class PromptRestorationSignalTests
                 return signal.ObserveStatusFileVisible();
             }));
 
+        if (!completion.IsCompleted)
+            signal.ObservePrompt(12, statusFileExists: true, invocationEchoRemoved: true, cursorVisible: true);
         Assert.True(completion.IsCompleted);
         Assert.True(signal.ObserveCursor(12, visible: true));
         Assert.False(signal.ObservePrompt(12, statusFileExists: true, invocationEchoRemoved: true, cursorVisible: true));
@@ -67,5 +69,74 @@ public sealed class PromptRestorationSignalTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => wait);
         Assert.False(signal.Completion.IsCompleted);
+    }
+
+    [Fact]
+    public void PredicateMatrix_RecordsMissingInvocationHiddenCursorAndStaleGeneration()
+    {
+        var missingInvocation = new PromptRestorationSignal(expectedGeneration: 4);
+        Assert.False(missingInvocation.ObservePrompt(4, statusFileExists: true, invocationEchoRemoved: false, cursorVisible: true));
+        Assert.False(missingInvocation.Snapshot().PromptBoundaryObserved);
+        Assert.False(missingInvocation.Completion.IsCompleted);
+
+        var hiddenCursor = new PromptRestorationSignal(expectedGeneration: 4);
+        Assert.True(hiddenCursor.ObservePrompt(4, statusFileExists: true, invocationEchoRemoved: true, cursorVisible: false));
+        Assert.True(hiddenCursor.Snapshot().PostScriptPromptObserved);
+        Assert.False(hiddenCursor.Completion.IsCompleted);
+        Assert.True(hiddenCursor.ObserveCursor(4, visible: true));
+        Assert.True(hiddenCursor.Completion.IsCompleted);
+
+        var staleGeneration = new PromptRestorationSignal(expectedGeneration: 4);
+        Assert.False(staleGeneration.ObservePrompt(3, statusFileExists: true, invocationEchoRemoved: true, cursorVisible: true));
+        Assert.False(staleGeneration.Snapshot().PromptBoundaryObserved);
+        Assert.False(staleGeneration.Completion.IsCompleted);
+    }
+
+    [Fact]
+    public void MissingStatusFile_RequiresAnotherPromptAfterStatusTransition()
+    {
+        var signal = new PromptRestorationSignal(expectedGeneration: 9);
+
+        Assert.True(signal.ObservePrompt(9, statusFileExists: false, invocationEchoRemoved: true, cursorVisible: true));
+        var beforeStatus = signal.Snapshot();
+        Assert.True(beforeStatus.PromptBoundaryObserved);
+        Assert.False(beforeStatus.StatusFileObserved);
+        Assert.False(beforeStatus.Completed);
+
+        Assert.True(signal.ObserveStatusFileVisible());
+        Assert.False(signal.Snapshot().Completed);
+        signal.ObservePrompt(9, statusFileExists: true, invocationEchoRemoved: true, cursorVisible: true);
+        Assert.True(signal.Snapshot().Completed);
+    }
+
+    [Fact]
+    public void PromptDiagnostics_AreCorrelatedAndTimeoutDoesNotClaimNoPromptWasSeen()
+    {
+        var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.PowerShell", "Services", "PsesOwnedInteractiveSessionService.cs");
+
+        Assert.Contains("Request prompt-handler callback entered.", source, StringComparison.Ordinal);
+        Assert.Contains("Request prompt-handler callback completed.", source, StringComparison.Ordinal);
+        Assert.Contains("Request-specific prompt pattern recognized and predicate evaluated.", source, StringComparison.Ordinal);
+        Assert.Contains("rejectionReason", source, StringComparison.Ordinal);
+        Assert.Contains("elapsedMilliseconds", source, StringComparison.Ordinal);
+        Assert.Contains("Interactive readiness remains unverified after prompt recognition timed out", source, StringComparison.Ordinal);
+        Assert.Contains("sessionPreservedAfterTimeout", source, StringComparison.Ordinal);
+        Assert.Contains("Prompt-ready subscriber callback failed", source, StringComparison.Ordinal);
+        Assert.Contains("request-specific prompt restoration timed out", source, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("completed without an observable ConPTY prompt boundary", source, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void MissingVisualPromptPreservesSessionAndMarksInputReadinessUnverified()
+    {
+        var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.PowerShell", "Services", "PsesOwnedInteractiveSessionService.cs");
+        var start = source.IndexOf("if (!foregroundCompleted)", StringComparison.Ordinal);
+        var end = source.IndexOf("if (foregroundRequested && File.Exists(statusPath))", start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start);
+        var timeoutBranch = source[start..end];
+
+        Assert.Contains("_interactiveReadinessUnverified = true", timeoutBranch, StringComparison.Ordinal);
+        Assert.Contains("shutdownDecision\"] = \"preserve-session", timeoutBranch, StringComparison.Ordinal);
+        Assert.DoesNotContain("ShutdownAsync", timeoutBranch, StringComparison.Ordinal);
     }
 }

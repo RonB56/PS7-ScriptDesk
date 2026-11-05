@@ -138,6 +138,40 @@ public sealed class EditorExecutionCoordinatorTests
     }
 
     [Fact]
+    public async Task DifferentRequestCannotReplaceTheActiveSharedSessionOwner()
+    {
+        var backend = new FakeBackend(EditorExecutionCoordinator.LegacyBackendId, LegacyCapabilities)
+        {
+            Release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+        };
+        using var coordinator = CreateCoordinator(backend, null, new EditorExecutionFeatureGate(false), shadowMode: false);
+        var firstRequest = CreateRequest();
+        var secondRequest = CreateRequest();
+
+        var first = coordinator.ExecuteAsync(firstRequest);
+        Assert.Equal(firstRequest.RequestId, coordinator.ActiveExecution?.RequestId);
+
+        // A backend event and a prompt-looking output cannot release ownership.
+        backend.PublishCompletion(firstRequest);
+        var second = await coordinator.ExecuteAsync(secondRequest);
+        Assert.Equal(EditorExecutionStatus.Rejected, second.Status);
+        Assert.Equal(firstRequest.RequestId, coordinator.ActiveExecution?.RequestId);
+        Assert.Equal(1, backend.ExecutionCount);
+
+        backend.Release.SetResult(true);
+        Assert.Equal(EditorExecutionStatus.Completed, (await first).Status);
+        Assert.Null(coordinator.ActiveExecution);
+
+        backend.Release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var next = coordinator.ExecuteAsync(secondRequest);
+        backend.PublishCompletion(firstRequest);
+        Assert.Equal(secondRequest.RequestId, coordinator.ActiveExecution?.RequestId);
+        backend.Release.SetResult(true);
+        Assert.Equal(EditorExecutionStatus.Completed, (await next).Status);
+        Assert.Equal(2, backend.ExecutionCount);
+    }
+
+    [Fact]
     public async Task ActiveExecutionSnapshotTracksLifecycleAndSelectedBackendCapability()
     {
         var legacy = new FakeBackend(EditorExecutionCoordinator.LegacyBackendId, LegacyCapabilities, TimeSpan.FromMilliseconds(80));
@@ -259,11 +293,16 @@ public sealed class EditorExecutionCoordinatorTests
         public ExecutionBackendAvailability Availability => ExecutionBackendAvailability.Available;
         public string? AvailabilityReason => null;
         public int ExecutionCount { get; private set; }
+        public TaskCompletionSource<bool>? Release { get; set; }
         public event Action<EditorExecutionEvent>? EventPublished;
+
+        public void PublishCompletion(EditorExecutionRequest request)
+            => EventPublished?.Invoke(new EditorExecutionEvent(EditorExecutionEventKind.Completed, request.RequestId, request.SessionGeneration, 1, Timestamp: DateTimeOffset.UtcNow, BackendId: BackendId));
 
         public async Task<EditorExecutionResult> ExecuteAsync(EditorExecutionRequest request, CancellationToken cancellationToken)
         {
             ExecutionCount++;
+            if (Release is not null) await Release.Task.WaitAsync(cancellationToken);
             if (_delay > TimeSpan.Zero) await Task.Delay(_delay, cancellationToken);
             var now = DateTimeOffset.UtcNow;
             EventPublished?.Invoke(new EditorExecutionEvent(EditorExecutionEventKind.Completed, request.RequestId, request.SessionGeneration, 1, Timestamp: now, BackendId: BackendId));

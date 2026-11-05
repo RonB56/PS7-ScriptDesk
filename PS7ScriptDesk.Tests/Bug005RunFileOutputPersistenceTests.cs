@@ -32,15 +32,21 @@ public sealed class Bug005RunFileOutputPersistenceTests
             "x64", runtimePath, "BUG005-R11", true, false, true, true);
         using var service = new PsesOwnedInteractiveSessionService();
         var chunks = new ConcurrentQueue<string>();
+        var preFilterChunks = new ConcurrentQueue<string>();
         var promptEvents = 0;
         service.RawOutputReceived += (_, text) => chunks.Enqueue(text);
+        service.OutputObservedBeforeDisplayFiltering += (_, text) => preFilterChunks.Enqueue(text);
         service.PromptReadyObserved += (_, _) => Interlocked.Increment(ref promptEvents);
         try
         {
             await service.StartSessionAsync(runtime, _ => { }, Environment.CurrentDirectory)
                 .WaitAsync(TimeSpan.FromSeconds(45));
             await WaitForAsync(() => Regex.IsMatch(string.Concat(chunks), @"PS\s+[^\r\n>]*>"));
+            var promptBeforeLocation = promptEvents;
+            await service.WriteRawInputAsync("Set-Location 'C:\\'\r").WaitAsync(TimeSpan.FromSeconds(10));
+            await WaitForAsync(() => promptEvents > promptBeforeLocation);
             var startOffset = string.Concat(chunks).Length;
+            var preFilterStartOffset = string.Concat(preFilterChunks).Length;
             var promptCount = promptEvents;
 
             await service.ExecuteScriptAsync(filePath, await File.ReadAllTextAsync(filePath), _ => { })
@@ -49,6 +55,8 @@ public sealed class Bug005RunFileOutputPersistenceTests
             Assert.Contains("R11 FILE START", runOutput, StringComparison.Ordinal);
             Assert.Contains("R11 FILE OUTPUT", runOutput, StringComparison.Ordinal);
             Assert.Contains("R11 FILE END", runOutput, StringComparison.Ordinal);
+            Assert.DoesNotContain("__ps7sd_editor_", runOutput, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("__ps7sd_editor_", string.Concat(preFilterChunks)[preFilterStartOffset..], StringComparison.OrdinalIgnoreCase);
             Assert.True(promptEvents > promptCount, "No prompt arrived after the editor run.");
             Assert.DoesNotContain("__ps7sd_status_", runOutput, StringComparison.OrdinalIgnoreCase);
 
@@ -87,6 +95,7 @@ public sealed class Bug005RunFileOutputPersistenceTests
                 var repeatedOutput = string.Concat(chunks)[beforeRepeat..];
                 var repeatedEnd = repeatedOutput.IndexOf("R11 FILE END", StringComparison.Ordinal);
                 Assert.True(repeatedEnd >= 0, "Repeated Run File lost the last output line.");
+                Assert.DoesNotContain("__ps7sd_editor_", repeatedOutput, StringComparison.OrdinalIgnoreCase);
                 Assert.Single(Regex.Matches(repeatedOutput[(repeatedEnd + "R11 FILE END".Length)..], @"PS\s+[^\r\n>]*>"));
                 var repeatedScreen = ReplayVtScreen(string.Concat(chunks));
                 Assert.Contains("R11 FILE START", repeatedScreen, StringComparison.Ordinal);
@@ -99,8 +108,31 @@ public sealed class Bug005RunFileOutputPersistenceTests
                 "$R12SelectionValue = 17\nWrite-Output \"R12 SELECTION $R12SelectionValue\"\n",
                 _ => { }, executeInCurrentScope: true).WaitAsync(TimeSpan.FromSeconds(30));
             var selectionOutput = string.Concat(chunks)[beforeSelection..];
+            Assert.DoesNotContain("__ps7sd_editor_", selectionOutput, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("R12 SELECTION 17", selectionOutput, StringComparison.Ordinal);
             Assert.Contains("R12 SELECTION 17", ReplayVtScreen(string.Concat(chunks)), StringComparison.Ordinal);
+
+            var beforeRepeatedSelection = string.Concat(chunks).Length;
+            var promptCountBeforeRepeatedSelection = promptEvents;
+            await service.ExecuteScriptAsync("R12 consecutive selection",
+                "Write-Output 'R12 CONSECUTIVE SELECTION'\n",
+                _ => { }, executeInCurrentScope: true).WaitAsync(TimeSpan.FromSeconds(30));
+            var repeatedSelectionOutput = string.Concat(chunks)[beforeRepeatedSelection..];
+            Assert.DoesNotContain("__ps7sd_editor_", repeatedSelectionOutput, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("R12 CONSECUTIVE SELECTION", repeatedSelectionOutput, StringComparison.Ordinal);
+            Assert.True(promptEvents > promptCountBeforeRepeatedSelection,
+                "No prompt arrived after the consecutive Run Selection request.");
+
+            var beforeRunFileAfterSelection = string.Concat(chunks).Length;
+            var promptCountBeforeRunFileAfterSelection = promptEvents;
+            await service.ExecuteScriptAsync(filePath, await File.ReadAllTextAsync(filePath), _ => { })
+                .WaitAsync(TimeSpan.FromSeconds(30));
+            var runFileAfterSelectionOutput = string.Concat(chunks)[beforeRunFileAfterSelection..];
+            Assert.DoesNotContain("__ps7sd_editor_", runFileAfterSelectionOutput, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("R11 FILE OUTPUT", runFileAfterSelectionOutput, StringComparison.Ordinal);
+            Assert.True(promptEvents > promptCountBeforeRunFileAfterSelection,
+                "No prompt arrived after Run File following Run Selection.");
+            Assert.True(service.IsSessionRunning, "The PSES session stopped after Run File following Run Selection.");
 
             var beforeInteractive = string.Concat(chunks).Length;
             await service.WriteRawInputAsync("Write-Host \"R12 INTERACTIVE $R12SelectionValue\"\r");
@@ -123,6 +155,8 @@ public sealed class Bug005RunFileOutputPersistenceTests
             Assert.Contains("R12 ERROR", mixedOutput, StringComparison.Ordinal);
             Assert.Contains("R12-NATIVE-OK", mixedOutput, StringComparison.Ordinal);
             Assert.Contains("R12-NATIVE-OK", ReplayVtScreen(string.Concat(chunks)), StringComparison.Ordinal);
+            Assert.True(service.IsSessionRunning,
+                "The PSES session stopped after mixed output. Tail: " + mixedOutput[^Math.Min(mixedOutput.Length, 300)..]);
 
             var slowRun = service.ExecuteScriptAsync("R12 overlapping run",
                 "Start-Sleep -Milliseconds 500\nWrite-Output 'R12 OVERLAP DONE'", _ => { });
