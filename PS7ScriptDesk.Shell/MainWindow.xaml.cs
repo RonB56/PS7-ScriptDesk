@@ -317,6 +317,7 @@ namespace PS7ScriptDesk.Shell
         private bool _lastFindUseRegex;
         private readonly ThemeService _themeService = new();
         private IDebugSession? _debugSession;
+        private IPowerShellRuntimeExecutionLease? _debugRuntimeExecutionLease;
         private readonly DebuggerExecutionControlGate _debugExecutionControlGate = new();
         private Action<DebugSessionState>? _debugSessionStateChangedHandler;
         private Action<DebuggerEvent>? _debugSessionTypedEventHandler;
@@ -8611,6 +8612,28 @@ namespace PS7ScriptDesk.Shell
                             ["sessionHash"] = debugSession.GetHashCode()
                         });
 
+                    if (_runtimeSessionCoordinator is not null)
+                    {
+                        var runtimeSession = _runtimeSessionCoordinator.Snapshot;
+                        if (runtimeSession.Runtime is null ||
+                            !string.Equals(runtimeSession.Runtime.LaunchExecutablePath, runtime.LaunchExecutablePath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException("The selected debugger runtime does not match the authoritative runtime session.");
+                        }
+                        _debugRuntimeExecutionLease = await _runtimeSessionCoordinator.AcquireExecutionAsync(
+                            runtimeSession.SessionId,
+                            runtimeSession.Generation,
+                            debugger: true).ConfigureAwait(true);
+                        DeveloperDiagnostics.LogInfo("RuntimeBroker", "Debugger acquired the authoritative runtime execution lease before DAP launch.", new Dictionary<string, object?>
+                        {
+                            ["debugSessionId"] = debugSession.SessionId,
+                            ["runtimeSessionId"] = runtimeSession.SessionId,
+                            ["runtimeGeneration"] = runtimeSession.Generation,
+                            ["processId"] = runtimeSession.ProcessId,
+                            ["debugBackend"] = debugSession.GetType().Name
+                        });
+                    }
+
                     await debugSession.StartAsync(runtime, launchScriptPath, breakpoints).ConfigureAwait(true);
                     TraceDebugShell("StartDebug_Click", $"After StartAsync; sessionHash={debugSession.GetHashCode()}; sessionState={debugSession.CurrentState}; {DescribeDebugUiState()}");
                     DeveloperDiagnostics.LogInfo("Debugger", "PsesDebugSession.StartAsync completed.", new Dictionary<string, object?> { ["sessionState"] = debugSession.CurrentState.ToString() });
@@ -9496,6 +9519,29 @@ namespace PS7ScriptDesk.Shell
                 finally
                 {
                     debugSession.Dispose();
+                }
+            }
+
+            var runtimeExecutionLease = Interlocked.Exchange(ref _debugRuntimeExecutionLease, null);
+            if (runtimeExecutionLease is not null)
+            {
+                try
+                {
+                    if (!stopped)
+                        runtimeExecutionLease.MarkReadinessUnverified("Debugger teardown did not verify the session handoff.");
+                    await runtimeExecutionLease.DisposeAsync().ConfigureAwait(true);
+                    DeveloperDiagnostics.LogInfo("RuntimeBroker", "Debugger runtime execution lease released after debugger teardown.", new Dictionary<string, object?>
+                    {
+                        ["debugSessionId"] = debugSession?.SessionId,
+                        ["reason"] = reason.ToString(),
+                        ["stopped"] = stopped
+                    });
+                }
+                catch (Exception leaseException)
+                {
+                    DeveloperDiagnostics.LogException("RuntimeBroker", leaseException,
+                        "Debugger runtime execution lease release failed.",
+                        new Dictionary<string, object?> { ["reason"] = reason.ToString() });
                 }
             }
 

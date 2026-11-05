@@ -75,6 +75,209 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
     }
 
     [Fact]
+    public async Task RestartWaitsForRuntimeExecutionLeaseAndReplacesOnlyAfterRelease()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var runtime = CreateRuntime();
+        var current = await coordinator.AcquireAsync(runtime, _ => { });
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+
+        var restart = coordinator.RestartAsync(runtime, _ => { });
+        await Task.Delay(50);
+        Assert.False(restart.IsCompleted);
+        Assert.Equal(0, terminal.ShutdownCount);
+
+        await lease.DisposeAsync();
+        var replacement = await restart.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(replacement.Generation > current.Generation);
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, replacement.State);
+        Assert.Equal(2, terminal.StartCount);
+        await lease.DisposeAsync();
+        Assert.Equal(replacement.SessionId, coordinator.Snapshot.SessionId);
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, coordinator.Snapshot.State);
+    }
+
+    [Fact]
+    public async Task ResetDuringLongRunningEditorExecutionKeepsGenerationCurrentUntilLeaseDrains()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var runtime = CreateRuntime();
+        var current = await coordinator.AcquireAsync(runtime, _ => { });
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+
+        var reset = coordinator.RestartAsync(runtime, _ => { });
+        await WaitForLifecyclePhaseAsync(coordinator, PowerShellRuntimeLifecyclePhase.Draining);
+
+        Assert.Equal(PowerShellRuntimeSessionState.Executing, coordinator.Snapshot.State);
+        Assert.True(coordinator.IsCurrent(current.SessionId, current.Generation));
+        Assert.Equal(0, terminal.ShutdownCount);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false));
+        await coordinator.WriteRawInputAsync(current.SessionId, current.Generation, "\u0003");
+
+        await lease.DisposeAsync();
+        var replacement = await reset.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(replacement.Generation > current.Generation);
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, replacement.State);
+        Assert.Equal(PowerShellRuntimeLifecyclePhase.Stable, replacement.LifecyclePhase);
+    }
+
+    [Fact]
+    public async Task ResetDuringReadHostWaitKeepsInputAdmissionUntilEditorLeaseCompletes()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+
+        var reset = coordinator.RestartAsync(CreateRuntime(), _ => { });
+        await WaitForLifecyclePhaseAsync(coordinator, PowerShellRuntimeLifecyclePhase.Draining);
+        await coordinator.WriteRawInputAsync(current.SessionId, current.Generation, "interactive-value\r");
+
+        Assert.Equal(1, terminal.RawInputWriteCount);
+        Assert.True(coordinator.IsCurrent(current.SessionId, current.Generation));
+        await lease.DisposeAsync();
+        await reset.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task ResetWhileDebuggerPausedPreservesDebuggerOwnershipUntilDebuggerStops()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var debugger = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: true);
+
+        var reset = coordinator.RestartAsync(CreateRuntime(), _ => { });
+        await WaitForLifecyclePhaseAsync(coordinator, PowerShellRuntimeLifecyclePhase.Draining);
+        Assert.Equal(PowerShellRuntimeSessionState.Debugging, coordinator.Snapshot.State);
+        Assert.True(coordinator.IsCurrent(current.SessionId, current.Generation));
+        Assert.Equal(0, terminal.ShutdownCount);
+
+        await debugger.DisposeAsync(); // Represents DAP stop or completion releasing debugger ownership.
+        var replacement = await reset.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, replacement.State);
+        Assert.True(replacement.Generation > current.Generation);
+    }
+
+    [Fact]
+    public async Task CancellingResetWhileWaitingRestoresHealthySessionAndInput()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+        using var cancellation = new CancellationTokenSource();
+
+        var reset = coordinator.RestartAsync(CreateRuntime(), _ => { }, cancellationToken: cancellation.Token);
+        await WaitForLifecyclePhaseAsync(coordinator, PowerShellRuntimeLifecyclePhase.Draining);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => reset.WaitAsync(TimeSpan.FromSeconds(2)));
+
+        Assert.Equal(PowerShellRuntimeSessionState.Executing, coordinator.Snapshot.State);
+        Assert.Equal(PowerShellRuntimeLifecyclePhase.Stable, coordinator.Snapshot.LifecyclePhase);
+        Assert.True(coordinator.IsCurrent(current.SessionId, current.Generation));
+        await coordinator.WriteRawInputAsync(current.SessionId, current.Generation, "still-healthy");
+        Assert.Equal(0, terminal.ShutdownCount);
+        await lease.DisposeAsync();
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, coordinator.Snapshot.State);
+    }
+
+    [Fact]
+    public async Task RepeatedResetRequestsSerializeAndEachPublishACompletedGeneration()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var runtime = CreateRuntime();
+        var initial = await coordinator.AcquireAsync(runtime, _ => { });
+
+        var firstReset = coordinator.RestartAsync(runtime, _ => { });
+        var secondReset = coordinator.RestartAsync(runtime, _ => { });
+        var replacements = await Task.WhenAll(firstReset, secondReset).WaitAsync(TimeSpan.FromSeconds(4));
+
+        Assert.Equal(3, terminal.StartCount);
+        Assert.Equal(2, terminal.ShutdownCount);
+        Assert.All(replacements, replacement => Assert.True(replacement.Generation > initial.Generation));
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, coordinator.Snapshot.State);
+        Assert.Equal(PowerShellRuntimeLifecyclePhase.Stable, coordinator.Snapshot.LifecyclePhase);
+    }
+
+    [Fact]
+    public async Task RuntimeReacquisitionDuringExecutionDoesNotPublishReadyOverActiveLease()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var runtime = CreateRuntime();
+        var current = await coordinator.AcquireAsync(runtime, _ => { });
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+
+        var reacquired = await coordinator.AcquireAsync(runtime, _ => { }).WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(PowerShellRuntimeSessionState.Executing, reacquired.State);
+        Assert.Equal(PowerShellRuntimeSessionState.Executing, coordinator.Snapshot.State);
+        Assert.Equal(current.Generation, reacquired.Generation);
+        await lease.DisposeAsync();
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, coordinator.Snapshot.State);
+    }
+
+    [Fact]
+    public async Task NormalExecutionCanReturnToInteractiveConsoleInput()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+        await lease.DisposeAsync();
+
+        await coordinator.WriteRawInputAsync(current.SessionId, current.Generation, "Get-Date\r");
+
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, coordinator.Snapshot.State);
+        Assert.Equal(1, terminal.RawInputWriteCount);
+    }
+
+    [Fact]
+    public async Task CancelledLeaseAdmissionAndRepeatedReleaseDoNotLeakOrDoubleReleaseAdmission()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var owner = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: true);
+        using var cancellation = new CancellationTokenSource();
+
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false, cancellation.Token));
+        await owner.DisposeAsync();
+        await owner.DisposeAsync();
+
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, coordinator.Snapshot.State);
+        var next = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+        await next.DisposeAsync();
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, coordinator.Snapshot.State);
+    }
+
+    [Fact]
+    public async Task DebuggerLeaseExcludesEditorLeaseAcrossPauseAndControlLifetime()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var debugger = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: true);
+
+        Assert.Equal(PowerShellRuntimeSessionState.Debugging, coordinator.Snapshot.State);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false));
+        Assert.Equal(PowerShellRuntimeSessionState.Debugging, coordinator.Snapshot.State);
+
+        await debugger.DisposeAsync();
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, coordinator.Snapshot.State);
+        var editor = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
     public async Task StartupFailurePublishesFaultedState()
     {
         var terminal = new CoordinatorTerminalFake { FailStart = true };
@@ -188,9 +391,46 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
         Assert.False(coordinator.IsCurrent(current.SessionId, current.Generation));
     }
 
+    [Fact]
+    public async Task ExecutionLeaseDoesNotReturnReadyWhenTransportWorksButReadinessIsUnverified()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+
+        Assert.True(terminal.IsInputWritable);
+        lease.MarkReadinessUnverified("PSES foreground completion was unknown.");
+        await lease.DisposeAsync();
+
+        Assert.Equal(PowerShellRuntimeSessionState.Faulted, coordinator.Snapshot.State);
+        Assert.Contains("unknown", coordinator.Snapshot.FaultMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.False(coordinator.IsCurrent(current.SessionId, current.Generation));
+    }
+
     private static PowerShellRuntimeInfo CreateRuntime() => new(
         "Test PowerShell", "Core", "7.6.0", new Version(7, 6, 0), "x64",
         Environment.ProcessPath!, "test", true, false, true);
+
+    private static async Task WaitForLifecyclePhaseAsync(
+        PowerShellRuntimeSessionCoordinator coordinator,
+        PowerShellRuntimeLifecyclePhase phase)
+    {
+        if (coordinator.Snapshot.LifecyclePhase == phase) return;
+        var observed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Handler(PowerShellRuntimeSessionSnapshot snapshot)
+        {
+            if (snapshot.LifecyclePhase == phase) observed.TrySetResult(true);
+        }
+
+        coordinator.StateChanged += Handler;
+        try
+        {
+            if (coordinator.Snapshot.LifecyclePhase == phase) return;
+            await observed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally { coordinator.StateChanged -= Handler; }
+    }
 
     private sealed class CoordinatorTerminalFake : ILiveConsoleService
     {
@@ -211,13 +451,13 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
         public bool HoldStartAfterEarlyNotification { get; init; }
         public TaskCompletionSource<bool> EarlyStartNotificationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource<bool>? _heldStartCompletion;
-        public event Action? ScriptExecutionCompleted;
-        public event Action? CommandExecutionCompleted;
-        public event Action? SessionTerminated;
+        public event Action? ScriptExecutionCompleted { add { } remove { } }
+        public event Action? CommandExecutionCompleted { add { } remove { } }
+        public event Action? SessionTerminated { add { } remove { } }
         public event Action<int>? TerminalSessionStarted;
         public event Action<int>? TerminalSessionStopping;
-        public event Action<int, string>? PromptReadyObserved;
-        public event Action<int, string>? RawOutputReceived;
+        public event Action<int, string>? PromptReadyObserved { add { } remove { } }
+        public event Action<int, string>? RawOutputReceived { add { } remove { } }
 
         public async Task StartSessionAsync(PowerShellRuntimeInfo runtime, Action<ExecutionOutputRecord> onOutput, string? startupWorkingDirectory = null, CancellationToken cancellationToken = default)
         {

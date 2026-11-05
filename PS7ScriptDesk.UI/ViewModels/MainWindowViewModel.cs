@@ -4991,6 +4991,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 _structuredExecutionCancellation?.Dispose();
                 _structuredExecutionCancellation = new CancellationTokenSource();
             }
+            IPowerShellRuntimeExecutionLease? runtimeExecutionLease = null;
 
             StatusText = structured
                 ? $"Running {displayName} through the authoritative PSES session..."
@@ -4999,9 +5000,40 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             try
             {
+                if (_runtimeSessionCoordinator is not null)
+                {
+                    var runtimeSession = _runtimeSessionCoordinator.Snapshot;
+                    runtimeExecutionLease = await _runtimeSessionCoordinator.AcquireExecutionAsync(
+                        runtimeSession.SessionId,
+                        runtimeSession.Generation,
+                        debugger: false,
+                        structured ? _structuredExecutionCancellation!.Token : CancellationToken.None).ConfigureAwait(false);
+                    DeveloperDiagnostics.LogInfo("Execution", "Editor request acquired the authoritative runtime execution lease before backend dispatch.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = request.RequestId,
+                        ["runtimeSessionId"] = runtimeSession.SessionId,
+                        ["runtimeGeneration"] = runtimeSession.Generation,
+                        ["backendSessionGeneration"] = request.SessionGeneration,
+                        ["backendId"] = decision.SelectedBackend,
+                        ["contentOmitted"] = true
+                    });
+                }
+
                 var result = await _executionCoordinator.ExecuteAsync(
                     request,
                     structured ? _structuredExecutionCancellation!.Token : CancellationToken.None).ConfigureAwait(false);
+                if (result.Status == EditorExecutionStatus.Unknown)
+                {
+                    runtimeExecutionLease?.MarkReadinessUnverified(result.ErrorMessage ?? "Editor execution outcome or interactive readiness was not verified.");
+                    DeveloperDiagnostics.LogWarning("RuntimeBroker", "Runtime lease will not publish Ready because the editor backend returned an unknown execution result.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = request.RequestId,
+                        ["backendId"] = decision.SelectedBackend,
+                        ["runtimeGeneration"] = _runtimeSessionCoordinator?.Snapshot.Generation,
+                        ["backendSessionGeneration"] = request.SessionGeneration,
+                        ["contentOmitted"] = true
+                    });
+                }
                 await PostToUiAsync(() =>
                 {
                     if (_activeCoordinatorExecutionRequestId != request.RequestId) return;
@@ -5042,6 +5074,19 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
             finally
             {
+                if (runtimeExecutionLease is not null)
+                {
+                    try
+                    {
+                        await runtimeExecutionLease.DisposeAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception leaseException)
+                    {
+                        DeveloperDiagnostics.LogException("RuntimeBroker", leaseException,
+                            "Runtime execution lease release failed after editor dispatch.",
+                            new Dictionary<string, object?> { ["requestId"] = request.RequestId, ["backendId"] = decision.SelectedBackend });
+                    }
+                }
                 await PostToUiAsync(() =>
                 {
                     if (_activeCoordinatorExecutionRequestId != request.RequestId) return;
@@ -5344,7 +5389,8 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task OnStopAsync()
         {
-            if (IsStopInProgress)
+            var resetWaitingForRuntimeLease = Volatile.Read(ref _resetConsoleInProgress) != 0;
+            if (IsStopInProgress && !resetWaitingForRuntimeLease)
             {
                 return;
             }
@@ -5363,6 +5409,39 @@ namespace PS7ScriptDesk.UI.ViewModels
                         ["interactiveInterruptAttempted"] = false
                     });
                 _structuredExecutionCancellation.Cancel();
+                return;
+            }
+
+            if (resetWaitingForRuntimeLease)
+            {
+                if (IsDebugSessionActive)
+                {
+                    StatusText = "Stop or continue the paused debugger to let Reset Console finish";
+                    DeveloperDiagnostics.LogDecision("RuntimeBroker", "ResetDrainStopRequested",
+                        "Terminal interrupt was not sent because debugger ownership requires its DAP stop or continue path.",
+                        "DebuggerOwnsExecutionLease", new Dictionary<string, object?>
+                        {
+                            ["runtimeGeneration"] = _runtimeSessionCoordinator?.Snapshot.Generation,
+                            ["contentOmitted"] = true
+                        });
+                    return;
+                }
+
+                if (_liveConsoleService.IsSessionRunning &&
+                    (_liveConsoleService.IsCommandInProgress ||
+                     _interactiveTerminalCoordinator.State is InteractiveTerminalState.InteractiveInputEditing or InteractiveTerminalState.InteractiveCommandRunning))
+                {
+                    // Do not use InterruptOrRestartAsync while the lease is owned:
+                    // its timeout path may replace this process before lease release.
+                    await _liveConsoleService.SendInterruptAsync().ConfigureAwait(false);
+                    StatusText = "Graceful interrupt sent; Reset Console is waiting for execution to drain";
+                    DeveloperDiagnostics.LogInfo("RuntimeBroker", "Graceful interrupt requested while reset waits for the active execution lease.", new Dictionary<string, object?>
+                    {
+                        ["runtimeGeneration"] = _runtimeSessionCoordinator?.Snapshot.Generation,
+                        ["escalationAllowed"] = false,
+                        ["contentOmitted"] = true
+                    });
+                }
                 return;
             }
 
@@ -5901,7 +5980,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                                        _liveConsoleService.ActiveRuntime is not null &&
                                        string.Equals(_liveConsoleService.ActiveRuntime.ExecutablePath, runtime.ExecutablePath, StringComparison.OrdinalIgnoreCase);
 
-                if (forceRestart && _liveConsoleService.IsSessionRunning)
+                if (forceRestart && _runtimeSessionCoordinator is null && _liveConsoleService.IsSessionRunning)
                 {
                     var stopped = await _liveConsoleService.StopConsoleAsync(AppendExecutionOutput).ConfigureAwait(false);
                     if (!stopped || _liveConsoleService.IsSessionRunning)
@@ -5909,6 +5988,13 @@ namespace PS7ScriptDesk.UI.ViewModels
                         throw new InvalidOperationException("The existing PowerShell terminal session did not reach a clean teardown boundary.");
                     }
 
+                    sessionIsCurrent = false;
+                }
+                else if (forceRestart && _runtimeSessionCoordinator is not null)
+                {
+                    // The runtime coordinator owns execution admission and performs
+                    // the drain before terminal shutdown. Do not tear down its
+                    // process from this outer ViewModel path.
                     sessionIsCurrent = false;
                 }
 
@@ -8787,7 +8873,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     IsExecutionRunning ||
                     (_liveConsoleService.IsSessionRunning && (_liveConsoleService.IsCommandInProgress ||
                         _interactiveTerminalCoordinator.State is InteractiveTerminalState.InteractiveInputEditing or InteractiveTerminalState.InteractiveCommandRunning))) &&
-                   !IsStopInProgress &&
+                   (!IsStopInProgress || Volatile.Read(ref _resetConsoleInProgress) != 0) &&
                    !IsRuntimeDiscoveryInProgress;
         }
 

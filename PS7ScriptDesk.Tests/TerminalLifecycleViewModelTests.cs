@@ -3,6 +3,7 @@ using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.Infrastructure.Services;
 using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.UI.ViewModels;
+using PS7ScriptDesk.PowerShell.Services;
 
 namespace PS7ScriptDesk.Tests;
 
@@ -53,6 +54,88 @@ public sealed class TerminalLifecycleViewModelTests
         await viewModel.WriteRawInputAsync("Get-Date\r");
         Assert.Contains("Get-Date\r", console.RawInputs);
         Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, interactive.State);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task ProductionViewModelDispatchHoldsRuntimeLeaseUntilBackendCompletesAndRestartWaits()
+    {
+        var console = new RecordingLiveConsoleService();
+        var runtime = CreateRuntime();
+        await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
+        var initial = await runtimeCoordinator.AcquireAsync(runtime, _ => { });
+        var backend = new BlockingExecutionBackend();
+        var executionCoordinator = new EditorExecutionCoordinator(
+            [backend],
+            new EditorExecutionFeatureGate(false),
+            shadowMode: false,
+            ExecutionBackendAvailability.Unavailable,
+            new PowerShellExecutionRequestClassifier());
+        var viewModel = await CreateViewModelAsync(console, runtime, executionCoordinator: executionCoordinator, runtimeSessionCoordinator: runtimeCoordinator);
+        var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(dispatch);
+
+        var executeTask = (Task)dispatch!.Invoke(viewModel, ["lease-test.ps1", "Write-Output 'ok'", EditorExecutionMode.ScriptCall, false, null])!;
+        await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(PowerShellRuntimeSessionState.Executing, runtimeCoordinator.Snapshot.State);
+
+        var restart = runtimeCoordinator.RestartAsync(runtime, _ => { });
+        await Task.Delay(50);
+        Assert.False(restart.IsCompleted);
+
+        backend.Complete();
+        await executeTask.WaitAsync(TimeSpan.FromSeconds(2));
+        var replacement = await restart.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(replacement.Generation > initial.Generation);
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, replacement.State);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task ProductionViewModelDispatchReleasesRuntimeLeaseWhenBackendThrows()
+    {
+        var console = new RecordingLiveConsoleService();
+        var runtime = CreateRuntime();
+        await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
+        var current = await runtimeCoordinator.AcquireAsync(runtime, _ => { });
+        var backend = new BlockingExecutionBackend { Failure = new InvalidOperationException("simulated backend fault") };
+        var executionCoordinator = new EditorExecutionCoordinator(
+            [backend], new EditorExecutionFeatureGate(false), shadowMode: false,
+            ExecutionBackendAvailability.Unavailable, new PowerShellExecutionRequestClassifier());
+        var viewModel = await CreateViewModelAsync(console, runtime, executionCoordinator: executionCoordinator, runtimeSessionCoordinator: runtimeCoordinator);
+        var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var executeTask = (Task)dispatch!.Invoke(viewModel, ["fault-test.ps1", "throw 'fault'", EditorExecutionMode.ScriptCall, false, null])!;
+        await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        backend.Complete();
+        await executeTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, runtimeCoordinator.Snapshot.State);
+        var next = await runtimeCoordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+        await next.DisposeAsync();
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task ProductionViewModelDispatchKeepsRuntimeFaultedWhenBackendReadinessIsUnknown()
+    {
+        var console = new RecordingLiveConsoleService();
+        var runtime = CreateRuntime();
+        await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
+        var current = await runtimeCoordinator.AcquireAsync(runtime, _ => { });
+        var backend = new BlockingExecutionBackend { ResultStatus = EditorExecutionStatus.Unknown };
+        var executionCoordinator = new EditorExecutionCoordinator(
+            [backend], new EditorExecutionFeatureGate(false), shadowMode: false,
+            ExecutionBackendAvailability.Unavailable, new PowerShellExecutionRequestClassifier());
+        var viewModel = await CreateViewModelAsync(console, runtime, executionCoordinator: executionCoordinator, runtimeSessionCoordinator: runtimeCoordinator);
+        var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var executeTask = (Task)dispatch!.Invoke(viewModel, ["unknown-test.ps1", "Write-Output 'uncertain'", EditorExecutionMode.ScriptCall, false, null])!;
+        await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        backend.Complete();
+        await executeTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.True(console.IsInputWritable);
+        Assert.Equal(PowerShellRuntimeSessionState.Faulted, runtimeCoordinator.Snapshot.State);
+        Assert.False(runtimeCoordinator.IsCurrent(current.SessionId, current.Generation));
         viewModel.Dispose();
     }
 
@@ -713,7 +796,8 @@ public sealed class TerminalLifecycleViewModelTests
         RecordingLiveConsoleService console,
         PowerShellRuntimeInfo? runtime = null,
         IInteractiveTerminalCoordinator? coordinator = null,
-        IEditorExecutionCoordinator? executionCoordinator = null)
+        IEditorExecutionCoordinator? executionCoordinator = null,
+        IPowerShellRuntimeSessionCoordinator? runtimeSessionCoordinator = null)
     {
         return Task.Run(() => new MainWindowViewModel(
             new FakeWorkspaceService(),
@@ -725,7 +809,8 @@ public sealed class TerminalLifecycleViewModelTests
             new FakeExeExportService(),
             startupRuntimeInfo: runtime,
             interactiveTerminalCoordinator: coordinator,
-            executionCoordinator: executionCoordinator));
+            executionCoordinator: executionCoordinator,
+            runtimeSessionCoordinator: runtimeSessionCoordinator));
     }
 
     private static PowerShellRuntimeInfo CreateRuntime()
@@ -774,11 +859,39 @@ public sealed class TerminalLifecycleViewModelTests
         public Task<EditorExecutionResult> ExecuteAsync(EditorExecutionRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public void Dispose() { }
     }
+
+    private sealed class BlockingExecutionBackend : IEditorExecutionBackend
+    {
+        private static readonly ExecutionBackendCapabilities BackendCapabilities = new(true, true, true, false, true, false, true, true, true, true);
+        public string BackendId => EditorExecutionCoordinator.LegacyBackendId;
+        public ExecutionBackendCapabilities Capabilities => BackendCapabilities;
+        public ExecutionBackendAvailability Availability => ExecutionBackendAvailability.Available;
+        public string? AvailabilityReason => null;
+        public event Action<EditorExecutionEvent>? EventPublished;
+        public TaskCompletionSource<bool> Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Exception? Failure { get; init; }
+        public EditorExecutionStatus ResultStatus { get; init; } = EditorExecutionStatus.Completed;
+
+        public void Complete() => _completion.TrySetResult(true);
+        public async Task<EditorExecutionResult> ExecuteAsync(EditorExecutionRequest request, CancellationToken cancellationToken = default)
+        {
+            Started.TrySetResult(true);
+            await _completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (Failure is not null) throw Failure;
+            var now = DateTimeOffset.UtcNow;
+            EventPublished?.Invoke(new EditorExecutionEvent(EditorExecutionEventKind.Completed, request.RequestId,
+                request.SessionGeneration, 1, Timestamp: now, BackendId: BackendId));
+            return new EditorExecutionResult(request.RequestId, request.SessionGeneration, ResultStatus,
+                Array.Empty<EditorOutputRecord>(), request.WorkingDirectory, null,
+                ResultStatus == EditorExecutionStatus.Unknown ? "simulated unknown readiness" : null, now, now, BackendId);
+        }
+    }
 }
 
 internal sealed class RecordingLiveConsoleService : ILiveConsoleService
 {
-    public int? ProcessId => null;
+    public int? ProcessId { get; private set; }
     public bool IsSessionRunning { get; set; }
     public bool? InputWritableOverride { get; set; }
     public bool IsInputWritable => InputWritableOverride ?? IsSessionRunning;
@@ -844,6 +957,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
         TerminalSessionStarted?.Invoke(1);
         ActiveRuntime = runtime;
         IsSessionRunning = true;
+        ProcessId = 4321;
         StartObserved.TrySetResult(true);
         return Task.CompletedTask;
     }
@@ -872,6 +986,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
         IsCommandInProgress = false;
         IsSessionRunning = false;
         ActiveRuntime = null;
+        ProcessId = null;
         return Task.FromResult(true);
     }
 
@@ -882,6 +997,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
         IsCommandInProgress = false;
         IsSessionRunning = false;
         ActiveRuntime = null;
+        ProcessId = null;
         return ShutdownCompletion?.Task ?? Task.FromResult(true);
     }
 

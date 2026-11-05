@@ -14,6 +14,17 @@ public enum PowerShellRuntimeSessionState
     Stopped
 }
 
+/// <summary>Lifecycle intent is separate from terminal readiness so a reset can drain an active lease without disabling its input.</summary>
+public enum PowerShellRuntimeLifecyclePhase
+{
+    Stable,
+    ResetPending,
+    Draining,
+    TerminalShutdown,
+    Replacing,
+    Failed
+}
+
 public sealed record PowerShellRuntimeSessionSnapshot(
     Guid SessionId,
     long Generation,
@@ -23,7 +34,13 @@ public sealed record PowerShellRuntimeSessionSnapshot(
     bool InputWritable,
     bool DebuggerTransportAttached,
     PowerShellRuntimeInfo? Runtime,
-    string? FaultMessage);
+    string? FaultMessage,
+    PowerShellRuntimeLifecyclePhase LifecyclePhase = PowerShellRuntimeLifecyclePhase.Stable);
+
+public interface IPowerShellRuntimeExecutionLease : IAsyncDisposable
+{
+    void MarkReadinessUnverified(string reason);
+}
 
 public interface IPowerShellRuntimeSessionCoordinator : IAsyncDisposable
 {
@@ -53,7 +70,7 @@ public interface IPowerShellRuntimeSessionCoordinator : IAsyncDisposable
 
     bool IsCurrent(Guid sessionId, long generation);
 
-    Task<IAsyncDisposable> AcquireExecutionAsync(
+    Task<IPowerShellRuntimeExecutionLease> AcquireExecutionAsync(
         Guid sessionId,
         long generation,
         bool debugger,
