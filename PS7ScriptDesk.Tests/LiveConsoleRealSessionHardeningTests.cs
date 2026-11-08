@@ -514,7 +514,7 @@ public sealed class LiveConsoleRealSessionHardeningTests
                     _rawOutput.Append(text);
                 }
             };
-            Service.CommandExecutionCompleted += () =>
+            Service.CommandExecutionCompleted += _ =>
             {
                 TaskCompletionSource<bool>? completion;
                 lock (_syncRoot)

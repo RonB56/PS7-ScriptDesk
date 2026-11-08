@@ -158,6 +158,12 @@ public sealed record EditorExecutionArtifact(
     bool IsSnapshot,
     bool DeleteAfterRun);
 
+public sealed record EditorExecutionSourceInfo(
+    Guid DocumentId,
+    long DocumentRevision,
+    int SelectionStart,
+    int SelectionLength);
+
 public sealed record EditorExecutionRequest(
     Guid RequestId,
     int SessionGeneration,
@@ -168,7 +174,8 @@ public sealed record EditorExecutionRequest(
     bool IsSavedClean = false,
     string? WorkingDirectory = null,
     bool ExecuteInCurrentScope = false,
-    ExecutionCapabilityRequirements? CapabilityRequirements = null)
+    ExecutionCapabilityRequirements? CapabilityRequirements = null,
+    EditorExecutionSourceInfo? SourceInfo = null)
 {
     public bool IsRunSelection => Mode == EditorExecutionMode.RunSelection;
 }

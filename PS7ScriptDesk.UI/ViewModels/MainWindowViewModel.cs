@@ -62,6 +62,13 @@ namespace PS7ScriptDesk.UI.ViewModels
         private CancellationTokenSource? _structuredExecutionCancellation;
         private Guid? _activeStructuredExecutionRequestId;
         private Guid? _activeCoordinatorExecutionRequestId;
+        private Guid? _activeInternalTerminalCommandRequestId;
+        private int _activeInternalTerminalCommandGeneration;
+        private int? _activeInternalTerminalCommandProcessId;
+        private readonly IStructuredPromptReadinessSource? _structuredPromptReadinessSource;
+        private readonly object _deferredStructuredPromptSync = new();
+        private DeferredStructuredPromptObservation? _deferredStructuredPromptObservation;
+        private int _structuredPromptReconciliationInvalidated;
 
         private readonly RelayCommand _runCommand;
         private readonly RelayCommand _stopCommand;
@@ -125,6 +132,8 @@ namespace PS7ScriptDesk.UI.ViewModels
         private int _currentTerminalGeneration;
         private int _terminalInputRejectionEpisode;
         private int _resetConsoleInProgress;
+        private readonly object _deferredResetPromptSync = new();
+        private DeferredResetPromptObservation? _deferredResetPromptObservation;
         private bool _isDebugSessionActive;
         private string _workspaceText;
         private string _workspaceFilterText = string.Empty;
@@ -144,6 +153,20 @@ namespace PS7ScriptDesk.UI.ViewModels
         private bool _isExecutionRunning;
         private string? _lastRunAvailabilityDiagnosticSignature;
         private bool _isStopInProgress;
+
+        private sealed record DeferredResetPromptObservation(
+            int Generation,
+            string Path,
+            Guid RuntimeSessionId,
+            long? RuntimeGeneration,
+            int ProcessId);
+        private sealed record DeferredStructuredPromptObservation(
+            Guid RequestId,
+            int TerminalGeneration,
+            string Path,
+            Guid RuntimeSessionId,
+            long? RuntimeGeneration,
+            int ProcessId);
         private bool _isExeExportInProgress;
         private bool _isRestApiWizardOpen;
         private readonly List<string> _recentFilePaths = new();
@@ -235,6 +258,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 _gitWorkspaceCoordinator.RefreshRequested += GitWorkspaceCoordinator_RefreshRequested;
             _userPromptService = userPromptService;
             _liveConsoleService = liveConsoleService;
+            _structuredPromptReadinessSource = liveConsoleService as IStructuredPromptReadinessSource;
             _runtimeSessionCoordinator = runtimeSessionCoordinator;
             _exeExportService = exeExportService;
             _documentRecoveryService = documentRecoveryService ?? new NoOpDocumentRecoveryService();
@@ -358,10 +382,13 @@ namespace PS7ScriptDesk.UI.ViewModels
             // when a script finishes executing (1A) and when the session terminates (e.g.
             // the user called 'exit' before the sentinel was echoed).
             _liveConsoleService.CommandExecutionCompleted += OnTerminalCommandCompleted;
+            _liveConsoleService.InteractiveCommandCompleted += OnInteractiveCommandCompleted;
             _liveConsoleService.SessionTerminated       += OnSessionTerminated;
             _liveConsoleService.TerminalSessionStarted   += OnTerminalSessionStarted;
             _liveConsoleService.TerminalSessionStopping  += OnTerminalSessionStopping;
             _liveConsoleService.PromptReadyObserved      += OnTerminalPromptReadyObserved;
+            if (_structuredPromptReadinessSource is not null)
+                _structuredPromptReadinessSource.StructuredPromptReadyObserved += OnStructuredPromptReadyObserved;
 
             _startupRecoveryCandidates = _documentRecoveryService.GetRecoverableDocuments();
             RestorePersistedState(initialSettings);
@@ -1170,6 +1197,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 if (_isDebugSessionActive != value)
                 {
                     _isDebugSessionActive = value;
+                    if (value)
+                        ClearDeferredStructuredPromptObservation("DebuggerOwnershipStarted");
                     OnPropertyChanged();
                     OnPropertyChanged(nameof(IsRuntimeListEnabled));
                     OnPropertyChanged(nameof(RuntimeSelectionStatusText));
@@ -1775,6 +1804,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         public void Dispose()
         {
             _interactiveTerminalCoordinator.StateChanged -= OnInteractiveTerminalStateChanged;
+            _liveConsoleService.InteractiveCommandCompleted -= OnInteractiveCommandCompleted;
             if (_gitWorkspaceCoordinator is not null)
                 _gitWorkspaceCoordinator.RefreshRequested -= GitWorkspaceCoordinator_RefreshRequested;
             if (_executionCoordinator is not null)
@@ -1782,6 +1812,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 _executionCoordinator.EventPublished -= OnCoordinatorExecutionEvent;
                 _executionCoordinator.ActiveExecutionChanged -= OnCoordinatorActiveExecutionChanged;
             }
+            if (_structuredPromptReadinessSource is not null)
+                _structuredPromptReadinessSource.StructuredPromptReadyObserved -= OnStructuredPromptReadyObserved;
             if (_editorExecutionAdapter is not null && (_executionCoordinator is null || _executionCoordinator.IsRollbackEnabled))
                 _editorExecutionAdapter.EventPublished -= OnStructuredEditorExecutionEvent;
             _executionCoordinator?.Dispose();
@@ -1895,7 +1927,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             await OnStopAsync().ConfigureAwait(false);
         }
 
-        public async Task RunSelectionAsync(string selectedScriptText)
+        public async Task RunSelectionAsync(string selectedScriptText, EditorExecutionSourceInfo? sourceInfo = null)
         {
             if (SelectedTab is null)
             {
@@ -1923,7 +1955,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                     selectedScriptText,
                     EditorExecutionMode.RunSelection,
                     executeInCurrentScope: true,
-                    sourceFilePath: null).ConfigureAwait(false);
+                    sourceFilePath: null,
+                    sourceInfo: sourceInfo).ConfigureAwait(false);
                 return;
             }
 
@@ -1941,7 +1974,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                     selectedScriptText,
                     EditorExecutionMode.RunSelection,
                     executeInCurrentScope: true,
-                    sourceFilePath: null).ConfigureAwait(false);
+                    sourceFilePath: null,
+                    sourceInfo: sourceInfo).ConfigureAwait(false);
                 return;
             }
 
@@ -2181,20 +2215,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             // already-running PowerShell process.
             TerminalStartupTrace.Write("PRESENTATION_RENDERER_READY", $"viewModelId={GetHashCode():X8}; backendRunning={_liveConsoleService.IsSessionRunning}; activeRuntime={_liveConsoleService.ActiveRuntime?.LaunchExecutablePath ?? "(none)"}; uiThread={_uiSynchronizationContext is null || SynchronizationContext.Current == _uiSynchronizationContext}");
             UpdateConsoleSessionPresentation();
-            var generation = Volatile.Read(ref _currentTerminalGeneration);
-            var coordinatorSnapshot = _interactiveTerminalCoordinator.Snapshot;
-            if (coordinatorSnapshot.Generation != generation ||
-                coordinatorSnapshot.State != InteractiveTerminalState.InteractiveIdleAtPrompt)
-            {
-                _interactiveTerminalCoordinator.TryReplaceGeneration(
-                    generation,
-                    InteractiveTerminalState.Starting,
-                    "Renderer reported ready; waiting for backend prompt observation.");
-                _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
-                    generation,
-                    InteractiveTerminalState.Starting,
-                    "Renderer reported ready; waiting for backend prompt observation.");
-            }
+            // Renderer readiness is presentation-only. Backend session-start and
+            // prompt observations own interactive admission state.
             RequestTerminalFocusAfterReset(Volatile.Read(ref _currentTerminalGeneration), "RendererReady");
         }
 
@@ -2248,14 +2270,6 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void TryPromoteRenderedPromptReadiness(int generation, string rawOutput)
         {
-            if (!_liveConsoleService.IsSessionRunning ||
-                !_liveConsoleService.IsInputWritable ||
-                _liveConsoleService.IsCommandInProgress ||
-                IsExecutionRunning)
-            {
-                return;
-            }
-
             var cleaned = Regex.Replace(rawOutput, @"\x1B\].*?(?:\x07|\x1B\\)", string.Empty, RegexOptions.Singleline);
             cleaned = Regex.Replace(cleaned, @"\x1B\[[0-?]*[ -/]*[@-~]", string.Empty);
             var match = RenderedPromptReadinessRegex.Match(cleaned);
@@ -2271,6 +2285,36 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             var snapshot = _interactiveTerminalCoordinator.Snapshot;
+            var facts = GetEditorExecutionAdmissionFacts();
+            if (_liveConsoleService.IsCommandInProgress ||
+                Volatile.Read(ref _resetConsoleInProgress) != 0 ||
+                !TryBindCurrentTerminalGeneration(generation) ||
+                !EditorExecutionAdmissionPolicy.CanAcceptPromptObservation(
+                    snapshot.State,
+                    generation == Volatile.Read(ref _currentTerminalGeneration) &&
+                    generation == _liveConsoleService.CurrentSessionGeneration &&
+                    snapshot.Generation <= generation &&
+                    _terminalOutputMultiplexer.InteractiveSnapshot.Generation <= generation,
+                    facts,
+                    isNewerTerminalGeneration: snapshot.Generation < generation))
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "RenderedPromptObservationRejected",
+                    "Rendered prompt-shaped output was retained as presentation evidence because the current session did not admit an interactive-idle transition.",
+                    "OwnershipOrSessionGuard",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalGeneration"] = generation,
+                        ["currentTerminalGeneration"] = Volatile.Read(ref _currentTerminalGeneration),
+                        ["interactiveState"] = snapshot.State.ToString(),
+                        ["runtimeState"] = facts.RuntimeState?.ToString(),
+                        ["lifecyclePhase"] = facts.LifecyclePhase?.ToString(),
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
             var promoted = _interactiveTerminalCoordinator.TryReplaceGeneration(
                 generation,
                 InteractiveTerminalState.InteractiveIdleAtPrompt,
@@ -2283,10 +2327,10 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 DeveloperDiagnostics.LogStateTransition(
                     "Terminal",
-                    "InteractivePromptReady",
+                    "InteractivePromptObservation",
                     snapshot.State.ToString(),
                     InteractiveTerminalState.InteractiveIdleAtPrompt.ToString(),
-                    "Rendered prompt readiness recovery promoted the WPF execution state.",
+                    "Rendered prompt observation marked console input idle after current-session and owner checks.",
                     new Dictionary<string, object?>
                     {
                         ["generation"] = generation,
@@ -2643,8 +2687,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
-            if (string.Equals(e.PropertyName, nameof(EditorTabViewModel.Content), StringComparison.Ordinal) ||
-                string.Equals(e.PropertyName, nameof(EditorTabViewModel.IsDirty), StringComparison.Ordinal) ||
+            if (string.Equals(e.PropertyName, nameof(EditorTabViewModel.DocumentRevision), StringComparison.Ordinal) ||
+                (string.Equals(e.PropertyName, nameof(EditorTabViewModel.IsDirty), StringComparison.Ordinal) && !tab.IsDirty) ||
                 string.Equals(e.PropertyName, nameof(EditorTabViewModel.FilePath), StringComparison.Ordinal))
             {
                 ScheduleRecoverySnapshot(tab, $"PropertyChanged:{e.PropertyName}");
@@ -2692,7 +2736,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 {
                     if (pendingWrite.TryClaimSave())
                     {
-                        _documentRecoveryService.SaveSnapshot(snapshot);
+                        _documentRecoveryService.SaveSnapshot(snapshot.ToRecoverySnapshot());
                     }
                 }
                 finally
@@ -2712,7 +2756,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ["recoveryId"] = tab.RecoveryId,
                     ["reason"] = reason,
                     ["delayMilliseconds"] = interval,
-                    ["contentLength"] = snapshot.Content.Length,
+                    ["contentLength"] = snapshot.TextSnapshot.TextLength,
                     ["originalPath"] = snapshot.OriginalFilePath,
                     ["isUntitled"] = snapshot.IsUntitled
                 });
@@ -2742,13 +2786,13 @@ namespace PS7ScriptDesk.UI.ViewModels
                     {
                         ["recoveryId"] = tab.RecoveryId,
                         ["reason"] = reason,
-                        ["contentLength"] = snapshot.Content.Length
+                        ["contentLength"] = snapshot.TextSnapshot.TextLength
                     });
                 return true;
             }
 
             CancelPendingRecoveryWrite(tab.RecoveryId);
-            var saved = _documentRecoveryService.SaveSnapshot(snapshot);
+            var saved = _documentRecoveryService.SaveSnapshot(snapshot.ToRecoverySnapshot());
             DeveloperDiagnostics.LogDecision(
                 "CrashRecovery",
                 "RecoverySnapshotFlush",
@@ -2758,25 +2802,25 @@ namespace PS7ScriptDesk.UI.ViewModels
                 {
                     ["recoveryId"] = tab.RecoveryId,
                     ["reason"] = reason,
-                    ["contentLength"] = snapshot.Content.Length,
+                    ["contentLength"] = snapshot.TextSnapshot.TextLength,
                     ["originalPath"] = snapshot.OriginalFilePath,
                     ["isUntitled"] = snapshot.IsUntitled
                 });
             return saved;
         }
 
-        private DocumentRecoverySnapshot? CreateRecoverySnapshot(EditorTabViewModel tab)
+        private PendingRecoverySnapshot? CreateRecoverySnapshot(EditorTabViewModel tab)
         {
             if (tab is null || string.IsNullOrWhiteSpace(tab.RecoveryId))
             {
                 return null;
             }
 
-            return new DocumentRecoverySnapshot(
+            return new PendingRecoverySnapshot(
                 tab.RecoveryId,
                 NormalizeStoredPath(tab.FilePath),
                 tab.Title,
-                tab.Content ?? string.Empty,
+                tab.CaptureContentSnapshot(),
                 DateTime.UtcNow,
                 tab.LastKnownFileWriteTimeUtc,
                 tab.LastKnownFileLength,
@@ -4929,7 +4973,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             string scriptText,
             EditorExecutionMode mode,
             bool executeInCurrentScope,
-            string? sourceFilePath)
+            string? sourceFilePath,
+            EditorExecutionSourceInfo? sourceInfo = null)
         {
             if (_executionCoordinator is null)
             {
@@ -4950,7 +4995,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ? new ExecutionCapabilityRequirements(
                         RequiresCurrentScope: true,
                         RequiresWorkingDirectoryContinuity: true)
-                    : null);
+                    : null,
+                SourceInfo: sourceInfo);
             var decision = _executionCoordinator.Route(request);
             var structured = decision.Accepted && decision.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId;
             if (!decision.Accepted)
@@ -4971,7 +5017,10 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
-            if (structured && !_terminalOutputMultiplexer.TryBeginEditorExecution(request.RequestId, out var rejectionReason))
+            if (structured && !_terminalOutputMultiplexer.TryBeginEditorExecution(
+                    request.RequestId,
+                    GetEditorExecutionAdmissionFacts(),
+                    out var rejectionReason))
             {
                 StatusText = rejectionReason;
                 DeveloperDiagnostics.LogDecision(
@@ -4984,6 +5033,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             _activeCoordinatorExecutionRequestId = request.RequestId;
+            ClearDeferredStructuredPromptObservation("DifferentExecutionRequestStarted");
+            Interlocked.Exchange(ref _structuredPromptReconciliationInvalidated, 0);
             IsExecutionRunning = true;
             if (structured)
             {
@@ -4992,6 +5043,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 _structuredExecutionCancellation = new CancellationTokenSource();
             }
             IPowerShellRuntimeExecutionLease? runtimeExecutionLease = null;
+            var structuredRequestCompleted = false;
 
             StatusText = structured
                 ? $"Running {displayName} through the authoritative PSES session..."
@@ -5022,6 +5074,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 var result = await _executionCoordinator.ExecuteAsync(
                     request,
                     structured ? _structuredExecutionCancellation!.Token : CancellationToken.None).ConfigureAwait(false);
+                structuredRequestCompleted = structured && result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed;
                 if (result.Status == EditorExecutionStatus.Unknown)
                 {
                     runtimeExecutionLease?.MarkReadinessUnverified(result.ErrorMessage ?? "Editor execution outcome or interactive readiness was not verified.");
@@ -5100,6 +5153,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                     _activeCoordinatorExecutionRequestId = null;
                     if (_executionCoordinator?.ActiveExecution is null)
                         IsExecutionRunning = false;
+                    if (structured)
+                        ReconcileDeferredStructuredPromptObservation(request.RequestId, structuredRequestCompleted);
                     RefreshCommandStates();
                 }).ConfigureAwait(false);
             }
@@ -5216,7 +5271,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             string scriptContent,
             EditorExecutionMode mode,
             bool executeInCurrentScope,
-            string? sourceFilePath = null)
+            string? sourceFilePath = null,
+            EditorExecutionSourceInfo? sourceInfo = null)
         {
             if (_editorExecutionAdapter is null)
             {
@@ -5230,7 +5286,10 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             var requestId = Guid.NewGuid();
-            if (!_terminalOutputMultiplexer.TryBeginEditorExecution(requestId, out var rejectionReason))
+            if (!_terminalOutputMultiplexer.TryBeginEditorExecution(
+                    requestId,
+                    GetEditorExecutionAdmissionFacts(),
+                    out var rejectionReason))
             {
                 StatusText = rejectionReason;
                 AppLogger.Info("Console", $"Structured editor execution rejected by terminal admission policy. Reason={rejectionReason}");
@@ -5248,6 +5307,8 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             IsExecutionRunning = true;
+            ClearDeferredStructuredPromptObservation("DifferentExecutionRequestStarted");
+            Interlocked.Exchange(ref _structuredPromptReconciliationInvalidated, 0);
             _activeStructuredExecutionRequestId = requestId;
             _structuredExecutionCancellation?.Dispose();
             _structuredExecutionCancellation = new CancellationTokenSource();
@@ -5262,8 +5323,10 @@ namespace PS7ScriptDesk.UI.ViewModels
                 sourceFilePath,
                 !executeInCurrentScope && !string.IsNullOrWhiteSpace(sourceFilePath),
                 _liveConsoleService.CurrentWorkingDirectory,
-                executeInCurrentScope);
+                executeInCurrentScope,
+                SourceInfo: sourceInfo);
 
+            var structuredRequestCompleted = false;
             try
             {
                 AppLogger.Info("Console", $"Structured editor execution dispatching '{dispatchTitle}'. RequestId={requestId:N}, Mode={mode}, CurrentScope={executeInCurrentScope}, FallbackAttempted=False.");
@@ -5284,6 +5347,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     });
 
                 var result = await _editorExecutionAdapter.ExecuteAsync(request, _structuredExecutionCancellation.Token).ConfigureAwait(false);
+                structuredRequestCompleted = result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed;
                 PostToUi(() =>
                 {
                     StatusText = result.Status switch
@@ -5324,6 +5388,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 PostToUi(() =>
                 {
                     IsExecutionRunning = false;
+                    ReconcileDeferredStructuredPromptObservation(requestId, structuredRequestCompleted);
                     RefreshCommandStates();
                 });
             }
@@ -5345,50 +5410,165 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
-            // Add to history before clearing the input box (4A).
-            AddToCommandHistory(commandText);
-            ConsoleCommandText = string.Empty;
-            StatusText = "Sending command to the live PowerShell console...";
-
-            IsExecutionRunning = true;
-            var dispatched = false;
-
+            var requestId = Guid.NewGuid();
+            var admitted = false;
+            var generation = 0;
+            var rejectionReason = string.Empty;
             try
             {
                 await EnsureConsoleSessionAsync(runtimeToUse, forceRestart: false, logOperation: false).ConfigureAwait(false);
-                await _liveConsoleService.ExecuteConsoleCommandAsync(commandText, AppendExecutionOutput).ConfigureAwait(false);
-                dispatched = true;
+                await PostToUiAsync(() => admitted = TryBeginInternalTerminalCommand(requestId, out generation, out rejectionReason)).ConfigureAwait(false);
+                if (!admitted)
+                {
+                    PostToUi(() => StatusText = rejectionReason);
+                    return;
+                }
+                PostToUi(() =>
+                {
+                    AddToCommandHistory(commandText);
+                    ConsoleCommandText = string.Empty;
+                    StatusText = "Submitting command to the live PowerShell console...";
+                    IsExecutionRunning = true;
+                });
+
+                var result = await _liveConsoleService.ExecuteConsoleCommandAsync(commandText, AppendExecutionOutput, requestId).ConfigureAwait(false);
+                if (result.Outcome is not (LiveConsoleCommandOutcome.Submitted or LiveConsoleCommandOutcome.Completed))
+                    throw new InvalidOperationException($"The terminal did not confirm command submission (outcome: {result.Outcome}).");
 
                 PostToUi(() =>
                 {
                     UpdateConsoleSessionPresentation();
-                    StatusText = "Command sent to the live PowerShell console";
+                    if (_activeInternalTerminalCommandRequestId == requestId)
+                        StatusText = "Command submitted; waiting for a current-session prompt observation.";
                 });
             }
             catch (Exception ex)
             {
+                if (admitted && _liveConsoleService.IsInputWritable)
+                    await PostToUiAsync(() => EndInternalTerminalCommand(requestId, InteractiveTerminalState.InteractiveIdleAtPrompt, "Direct terminal command submission failed.", clearRunning: true)).ConfigureAwait(false);
                 PostToUi(() =>
                 {
-                    StatusText = "Console command failed";
+                    StatusText = _liveConsoleService.IsInputWritable
+                        ? "Console command failed"
+                        : "Console command delivery is unverified; use Reset Console before running another command.";
                     AppendOutputLine($"Console command failed: {ex.Message}");
                     UpdateConsoleSessionPresentation();
                 });
             }
-            finally
+        }
+
+        private bool TryBeginInternalTerminalCommand(Guid requestId, out int generation, out string rejectionReason)
+        {
+            generation = _liveConsoleService.CurrentSessionGeneration;
+            if (!_terminalOutputMultiplexer.TryBeginInternalCommand(
+                    requestId,
+                    generation,
+                    GetEditorExecutionAdmissionFacts(),
+                    out rejectionReason))
             {
-                if (!dispatched)
+                DeveloperDiagnostics.LogDecision("Terminal", "InternalCommandAdmissionRejected", "Internal terminal command was rejected by centralized generation-aware admission.", "AdmissionPolicy", new Dictionary<string, object?>
                 {
-                    PostToUi(() =>
-                    {
-                        IsExecutionRunning = false;
-                        RefreshCommandStates();
-                    });
-                }
+                    ["requestId"] = requestId,
+                    ["terminalGeneration"] = generation,
+                    ["processId"] = _liveConsoleService.ProcessId,
+                    ["reason"] = rejectionReason,
+                    ["contentOmitted"] = true
+                });
+                return false;
             }
+
+            _activeInternalTerminalCommandRequestId = requestId;
+            _activeInternalTerminalCommandGeneration = generation;
+            _activeInternalTerminalCommandProcessId = _liveConsoleService.ProcessId;
+            _interactiveTerminalCoordinator.TryReplaceGeneration(
+                generation,
+                InteractiveTerminalState.InteractiveCommandRunning,
+                "An internal terminal command owns interactive admission.");
+            RefreshCommandStates();
+            DeveloperDiagnostics.LogInfo("Terminal", "Internal terminal command admission acquired.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["terminalGeneration"] = generation,
+                ["processId"] = _activeInternalTerminalCommandProcessId,
+                ["contentOmitted"] = true
+            });
+            return true;
+        }
+
+        private bool EndInternalTerminalCommand(Guid requestId, InteractiveTerminalState nextState, string reason, bool clearRunning)
+        {
+            if (_activeInternalTerminalCommandRequestId != requestId)
+                return false;
+
+            var generation = _activeInternalTerminalCommandGeneration;
+            var ended = _terminalOutputMultiplexer.EndInternalCommand(requestId, generation, nextState, reason);
+            _activeInternalTerminalCommandRequestId = null;
+            _activeInternalTerminalCommandGeneration = 0;
+            _activeInternalTerminalCommandProcessId = null;
+            if (generation == _liveConsoleService.CurrentSessionGeneration)
+                _interactiveTerminalCoordinator.TryReplaceGeneration(generation, nextState, reason);
+            if (clearRunning)
+                IsExecutionRunning = false;
+            RefreshCommandStates();
+            return ended;
+        }
+
+        private void OnInteractiveCommandCompleted(LiveConsoleCommandCompletion completion)
+        {
+            PostToUi(() =>
+            {
+                var currentFacts = GetEditorExecutionAdmissionFacts();
+                if (_activeInternalTerminalCommandRequestId != completion.RequestId ||
+                    _activeInternalTerminalCommandGeneration != completion.SessionGeneration ||
+                    _activeInternalTerminalCommandProcessId != completion.ProcessId ||
+                    completion.SessionGeneration != _liveConsoleService.CurrentSessionGeneration ||
+                    completion.ProcessId != _liveConsoleService.ProcessId ||
+                    _liveConsoleService.IsCommandInProgress ||
+                    Volatile.Read(ref _resetConsoleInProgress) != 0 ||
+                    !currentFacts.RuntimeIdentityCurrent ||
+                    currentFacts.StopInProgress ||
+                    currentFacts.DebugSessionActive ||
+                    currentFacts.EditorExecutionRunning ||
+                    currentFacts.LifecyclePhase is not (null or PowerShellRuntimeLifecyclePhase.Stable))
+                {
+                    DeveloperDiagnostics.LogDecision("Terminal", "StaleInteractiveCommandCompletionIgnored", "A direct command prompt observation did not match the active request and terminal owner.", "RequestGenerationOrProcessMismatch", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = completion.RequestId,
+                        ["terminalGeneration"] = completion.SessionGeneration,
+                        ["processId"] = completion.ProcessId,
+                        ["outcome"] = completion.Outcome.ToString(),
+                        ["activeRequestId"] = _activeInternalTerminalCommandRequestId,
+                        ["contentOmitted"] = true
+                    });
+                    return;
+                }
+
+                EndInternalTerminalCommand(
+                    completion.RequestId,
+                    InteractiveTerminalState.InteractiveIdleAtPrompt,
+                    "Current direct command request observed a prompt candidate.",
+                    clearRunning: true);
+                StatusText = completion.Outcome == LiveConsoleCommandOutcome.Interrupted
+                    ? "Command interrupted; a prompt was observed."
+                    : "Command reached a prompt observation; exit status is not independently available.";
+                UpdateConsoleSessionPresentation();
+                RequestTerminalInteractiveStateNormalization("InteractiveCommandPromptObserved");
+                DeveloperDiagnostics.LogInfo("Terminal", "Request-correlated direct command prompt observation was applied.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = completion.RequestId,
+                    ["terminalGeneration"] = completion.SessionGeneration,
+                    ["processId"] = completion.ProcessId,
+                    ["promptObservationSequence"] = completion.PromptObservationSequence,
+                    ["outcome"] = completion.Outcome.ToString(),
+                    ["promptIsHeuristic"] = true,
+                    ["contentOmitted"] = true
+                });
+            });
         }
 
         private async Task OnStopAsync()
         {
+            ClearDeferredStructuredPromptObservation("StopOrInterruptRequested");
             var resetWaitingForRuntimeLease = Volatile.Read(ref _resetConsoleInProgress) != 0;
             if (IsStopInProgress && !resetWaitingForRuntimeLease)
             {
@@ -5509,8 +5689,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 var executionResolved = _executionCoordinator?.ActiveExecution is null &&
                                         (interruptResult.CompletedGracefully ||
                                         interruptResult.SessionRestarted ||
-                                        !_liveConsoleService.IsSessionRunning ||
-                                        !_liveConsoleService.IsCommandInProgress);
+                                        !_liveConsoleService.IsSessionRunning);
 
                 PostToUi(() =>
                 {
@@ -5524,9 +5703,13 @@ namespace PS7ScriptDesk.UI.ViewModels
                     }
                     else if (interruptResult.InterruptAttempted)
                     {
-                        StatusText = executionResolved
-                            ? "Interrupt attempted"
-                            : "Interrupt recovery did not complete; use Reset Console";
+                        StatusText = interruptResult.Outcome switch
+                        {
+                            LiveConsoleInterruptOutcome.TimedOutUnverified => "Interrupt recovery is unverified; use Reset Console before running another script.",
+                            LiveConsoleInterruptOutcome.SessionReplaced => "The terminal session changed during interrupt recovery.",
+                            LiveConsoleInterruptOutcome.SessionTerminated => "The PowerShell terminal ended during interrupt recovery.",
+                            _ => executionResolved ? "Interrupt attempted" : "Interrupt recovery failed; use Reset Console."
+                        };
                     }
                     else
                     {
@@ -5564,6 +5747,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     {
                         ["operationId"] = operationId,
                         ["interruptAttempted"] = interruptResult.InterruptAttempted,
+                        ["outcome"] = interruptResult.Outcome.ToString(),
                         ["completedGracefully"] = interruptResult.CompletedGracefully,
                         ["escalationRequired"] = interruptResult.EscalationRequired,
                         ["processTerminationSucceeded"] = interruptResult.ProcessTerminationSucceeded,
@@ -5581,8 +5765,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     "Interrupt or restart failed.",
                     new Dictionary<string, object?> { ["operationId"] = operationId });
                 var executionResolved = _executionCoordinator?.ActiveExecution is null &&
-                                        (!_liveConsoleService.IsSessionRunning ||
-                                         !_liveConsoleService.IsCommandInProgress);
+                                        !_liveConsoleService.IsSessionRunning;
                 PostToUi(() =>
                 {
                     StatusText = executionResolved
@@ -5616,6 +5799,8 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             try
             {
+                ClearDeferredResetPromptObservation();
+                ClearDeferredStructuredPromptObservation("ResetConsoleStarted");
                 Interlocked.Exchange(ref _resetConsoleInProgress, 1);
                 PostToUi(() => IsStopInProgress = true);
 
@@ -5675,11 +5860,12 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
             finally
             {
-                Interlocked.Exchange(ref _resetConsoleInProgress, 0);
                 _consoleRecoveryGate.Release();
                 PostToUi(() =>
                 {
+                    Interlocked.Exchange(ref _resetConsoleInProgress, 0);
                     IsStopInProgress = false;
+                    ReconcileDeferredResetPromptObservation();
                     RefreshCommandStates();
                 });
             }
@@ -5696,110 +5882,66 @@ namespace PS7ScriptDesk.UI.ViewModels
             // in agreement: PowerShell performs the clear and redraws its own prompt.
             var clearRequestId = Guid.NewGuid();
             var clearTimer = System.Diagnostics.Stopwatch.StartNew();
-            DeveloperDiagnostics.LogUserAction(
-                "Terminal",
-                "TerminalClearRequested",
-                "Clear requested through the authoritative terminal path.",
-                new Dictionary<string, object?>
-                {
-                    ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
-                    ["inputWritable"] = _liveConsoleService.IsInputWritable,
-                    ["commandInProgress"] = _liveConsoleService.IsCommandInProgress,
-                    ["processId"] = _liveConsoleService.ProcessId,
-                    ["requestId"] = clearRequestId,
-                    ["contentOmitted"] = true
-                });
-
             if (!_liveConsoleService.IsSessionRunning || !_liveConsoleService.IsInputWritable)
             {
-                const string unavailableMessage = "PowerShell session unavailable. Use Reset Console to start a new session.";
-                DeveloperDiagnostics.LogWarning("Terminal", "Clear Console rejected because the PowerShell session is unavailable or not writable.", new Dictionary<string, object?>
+                PostToUi(() => StatusText = "PowerShell session unavailable. Use Reset Console to start a new session.");
+                return;
+            }
+
+            if (!TryBeginInternalTerminalCommand(clearRequestId, out var generation, out var rejectionReason))
+            {
+                PostToUi(() => StatusText = rejectionReason);
+                DeveloperDiagnostics.LogDecision("Terminal", "TerminalClearRejected", "Clear Console did not acquire centralized interactive command admission.", "AdmissionPolicy", new Dictionary<string, object?>
                 {
-                    ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
-                    ["inputWritable"] = _liveConsoleService.IsInputWritable,
-                    ["processId"] = _liveConsoleService.ProcessId,
                     ["requestId"] = clearRequestId,
+                    ["terminalGeneration"] = generation,
+                    ["processId"] = _liveConsoleService.ProcessId,
+                    ["reason"] = rejectionReason,
                     ["contentOmitted"] = true
                 });
-                PostToUi(() => StatusText = unavailableMessage);
                 return;
             }
 
-            if (_liveConsoleService.IsCommandInProgress || IsStopInProgress)
+            IsExecutionRunning = true;
+            PostToUi(() => _focusTerminalSink?.Invoke());
+            try
             {
-                PostToUi(() => StatusText = "Wait for the current PowerShell operation to finish before clearing the terminal.");
-                DeveloperDiagnostics.LogInfo("Terminal", "Clear Console rejected because an operation is active.", new Dictionary<string, object?>
+                var result = await _liveConsoleService.ExecuteConsoleCommandAsync("cls", AppendExecutionOutput, clearRequestId).ConfigureAwait(false);
+                if (result.Outcome is not (LiveConsoleCommandOutcome.Submitted or LiveConsoleCommandOutcome.Completed))
+                    throw new InvalidOperationException($"Clear Console was not accepted by the terminal transport (outcome: {result.Outcome}).");
+
+                // Preserve the existing PowerShell-owned clear and xterm viewport
+                // reconciliation, but only after the coordinated request is accepted.
+                PostToUi(() => _reconcileAuthoritativeClearSink?.Invoke());
+                PostToUi(() =>
                 {
-                    ["commandInProgress"] = _liveConsoleService.IsCommandInProgress,
-                    ["stopInProgress"] = IsStopInProgress,
-                    ["processId"] = _liveConsoleService.ProcessId
+                    _focusTerminalSink?.Invoke();
+                    if (_activeInternalTerminalCommandRequestId == clearRequestId)
+                        StatusText = "Clear command submitted; waiting for a current-session prompt observation.";
                 });
-                return;
+                DeveloperDiagnostics.LogInfo("Terminal", "Coordinated Clear Console input was submitted.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = clearRequestId,
+                    ["terminalGeneration"] = generation,
+                    ["processId"] = result.ProcessId,
+                    ["elapsedMilliseconds"] = clearTimer.Elapsed.TotalMilliseconds,
+                    ["outcome"] = result.Outcome.ToString(),
+                    ["contentOmitted"] = true
+                });
             }
-
-            if (_liveConsoleService.IsInputWritable)
+            catch (Exception ex)
             {
-                try
+                if (_liveConsoleService.IsInputWritable)
+                    await PostToUiAsync(() => EndInternalTerminalCommand(clearRequestId, InteractiveTerminalState.InteractiveIdleAtPrompt, "Clear Console submission failed.", clearRunning: true)).ConfigureAwait(false);
+                DeveloperDiagnostics.LogException("Terminal", ex, "Coordinated Clear Console submission failed; terminal rendering was preserved.", new Dictionary<string, object?>
                 {
-                    if (!_liveConsoleService.IsSessionRunning || !_liveConsoleService.IsInputWritable)
-                    {
-                        PostToUi(() => StatusText = "PowerShell session unavailable. Use Reset Console to start a new session.");
-                        DeveloperDiagnostics.LogWarning("Terminal", "Clear Console rejected after admission because the session stopped before its input write.", new Dictionary<string, object?>
-                        {
-                            ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
-                            ["inputWritable"] = _liveConsoleService.IsInputWritable,
-                            ["processId"] = _liveConsoleService.ProcessId,
-                            ["requestId"] = clearRequestId,
-                            ["contentOmitted"] = true
-                        });
-                        return;
-                    }
-                    PostToUi(() => _focusTerminalSink?.Invoke());
-
-                    await _liveConsoleService.WriteRawInputAsync("cls\r").ConfigureAwait(false);
-
-                    // PowerShell/ConPTY owns the clear operation. xterm.js still
-                    // owns viewport position, so reconcile it after the command
-                    // is accepted without resetting the session or scrollback.
-                    PostToUi(() => _reconcileAuthoritativeClearSink?.Invoke());
-
-                    PostToUi(() =>
-                    {
-                        _focusTerminalSink?.Invoke();
-                        StatusText = "PowerShell clear command sent.";
-                    });
-
-                    DeveloperDiagnostics.LogInfo("Terminal", "PowerShell clear command was accepted by the live terminal input transport.", new Dictionary<string, object?>
-                    {
-                        ["requestId"] = clearRequestId,
-                        ["processId"] = _liveConsoleService.ProcessId,
-                        ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
-                        ["inputWritable"] = _liveConsoleService.IsInputWritable,
-                        ["elapsedMilliseconds"] = clearTimer.Elapsed.TotalMilliseconds,
-                        ["contentOmitted"] = true
-                    });
-                    AppLogger.Info("Console", "The PowerShell cls clear command was sent through the live ConPTY session.");
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.Warning("Console", $"PowerShell cls clear failed; terminal output was preserved. Reason={ex.Message}");
-                    DeveloperDiagnostics.LogException(
-                        "Terminal",
-                        ex,
-                        "Authoritative terminal clear failed.",
-                        new Dictionary<string, object?>
-                        {
-                            ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
-                            ["inputWritable"] = _liveConsoleService.IsInputWritable,
-                            ["processId"] = _liveConsoleService.ProcessId,
-                            ["requestId"] = clearRequestId,
-                            ["elapsedMilliseconds"] = clearTimer.Elapsed.TotalMilliseconds,
-                            ["contentOmitted"] = true
-                        });
-                    PostToUi(() => StatusText = "Terminal clear failed; existing output was preserved. Use Reset Console if the session is unavailable.");
-                    return;
-                }
+                    ["requestId"] = clearRequestId,
+                    ["terminalGeneration"] = generation,
+                    ["processId"] = _liveConsoleService.ProcessId,
+                    ["elapsedMilliseconds"] = clearTimer.Elapsed.TotalMilliseconds,
+                    ["contentOmitted"] = true
+                });
+                PostToUi(() => StatusText = "Terminal clear failed; existing output was preserved. Use Reset Console if the session is unavailable.");
             }
         }
 
@@ -7836,6 +7978,14 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void OnTerminalSessionStarted(int generation)
         {
+            ClearDeferredResetPromptObservation(generation, keepMatchingGeneration: true);
+            var previousGeneration = Volatile.Read(ref _currentTerminalGeneration);
+            if (!TryBindCurrentTerminalGeneration(generation))
+            {
+                AppLogger.Warning("Terminal", $"Ignored terminal-session start whose generation is not the current backend generation. Generation={generation}, CurrentGeneration={previousGeneration}, BackendGeneration={_liveConsoleService.CurrentSessionGeneration}.");
+                return;
+            }
+
             _beginTerminalOutputGenerationSink?.Invoke(generation);
             _interactiveTerminalCoordinator.TryReplaceGeneration(
                 generation,
@@ -7845,24 +7995,6 @@ namespace PS7ScriptDesk.UI.ViewModels
                 generation,
                 InteractiveTerminalState.Starting,
                 "Interactive terminal session started.");
-            var previousGeneration = Volatile.Read(ref _currentTerminalGeneration);
-            if (generation < previousGeneration)
-            {
-                AppLogger.Warning("Terminal", $"Ignored stale terminal-session start for focus restoration. Generation={generation}, CurrentGeneration={previousGeneration}.");
-                DeveloperDiagnostics.LogDecision(
-                    "Terminal",
-                    "ResetConsoleFocusRestore",
-                    "Ignored a stale terminal-session start callback.",
-                    "StaleGeneration",
-                    new Dictionary<string, object?>
-                    {
-                        ["generation"] = generation,
-                        ["currentGeneration"] = previousGeneration
-                    });
-                return;
-            }
-
-            Volatile.Write(ref _currentTerminalGeneration, generation);
             var bound = _terminalFocusRestorePolicy.BindReplacementGeneration(generation);
             if (bound)
             {
@@ -7879,6 +8011,27 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void OnTerminalSessionStopping(int generation)
         {
+            ClearDeferredStructuredPromptObservation("TerminalSessionStopping");
+            ClearDeferredResetPromptObservation(generation, keepMatchingGeneration: false);
+            if (_activeInternalTerminalCommandRequestId is { } internalRequest &&
+                _activeInternalTerminalCommandGeneration == generation)
+            {
+                _terminalOutputMultiplexer.EndInternalCommand(
+                    internalRequest,
+                    generation,
+                    InteractiveTerminalState.Stopping,
+                    "Terminal generation changed while an internal command was pending.");
+                _activeInternalTerminalCommandRequestId = null;
+                _activeInternalTerminalCommandGeneration = 0;
+                _activeInternalTerminalCommandProcessId = null;
+                IsExecutionRunning = false;
+                DeveloperDiagnostics.LogInfo("Terminal", "Pending internal command invalidated by terminal teardown.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = internalRequest,
+                    ["terminalGeneration"] = generation,
+                    ["contentOmitted"] = true
+                });
+            }
             _invalidateTerminalOutputGenerationSink?.Invoke(generation);
             _interactiveTerminalCoordinator.TryReplaceGeneration(
                 generation,
@@ -7890,12 +8043,12 @@ namespace PS7ScriptDesk.UI.ViewModels
                 "Interactive terminal session is stopping.");
         }
 
-        private void OnTerminalPromptReadyObserved(int generation, string path)
+        private void OnTerminalPromptReadyObserved(int generation, string? path)
         {
-            TerminalStartupTrace.Write("BACKEND_PROMPT_READY", $"generation={generation}; pathLength={path?.Length ?? 0}; uiThread={_uiSynchronizationContext is null || SynchronizationContext.Current == _uiSynchronizationContext}");
+            TerminalStartupTrace.Write("BACKEND_PROMPT_OBSERVED", $"generation={generation}; pathLength={path?.Length ?? 0}; uiThread={_uiSynchronizationContext is null || SynchronizationContext.Current == _uiSynchronizationContext}");
             DeveloperDiagnostics.LogInfo(
                 "Phase2CProof",
-                "PSES_READY",
+                "PSES_PROMPT_OBSERVED",
                 new Dictionary<string, object?>
                 {
                     ["generation"] = generation,
@@ -7904,10 +8057,201 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ["interactiveStateBefore"] = _interactiveTerminalCoordinator.State.ToString(),
                     ["contentOmitted"] = true
                 });
-            var currentGeneration = Volatile.Read(ref _currentTerminalGeneration);
-            if (generation < currentGeneration)
+
+            if (Volatile.Read(ref _resetConsoleInProgress) != 0)
             {
-                AppLogger.Warning("Terminal", $"Ignored stale prompt-ready observation. Generation={generation}, CurrentGeneration={currentGeneration}, PathLength={path?.Length ?? 0}, ContentOmitted=True.");
+                TryDeferResetPromptObservation(generation, path);
+                return;
+            }
+
+            ApplyTerminalPromptReadyObservation(generation, path);
+        }
+
+        private void OnStructuredPromptReadyObserved(StructuredPromptReadyObservation observation)
+        {
+            var runtime = _runtimeSessionCoordinator?.Snapshot;
+            var sessionCurrent = observation.RequestId != Guid.Empty &&
+                observation.TerminalGeneration > 0 &&
+                observation.TerminalGeneration == _liveConsoleService.CurrentSessionGeneration &&
+                observation.TerminalGeneration == Volatile.Read(ref _currentTerminalGeneration) &&
+                observation.ProcessId > 0 &&
+                observation.ProcessId == _liveConsoleService.ProcessId &&
+                _liveConsoleService.IsSessionRunning &&
+                _liveConsoleService.IsInputWritable &&
+                _activeStructuredExecutionRequestId == observation.RequestId &&
+                Volatile.Read(ref _structuredPromptReconciliationInvalidated) == 0 &&
+                Volatile.Read(ref _resetConsoleInProgress) == 0 &&
+                !IsStopInProgress &&
+                !IsDebugSessionActive &&
+                (runtime is null
+                    ? _runtimeSessionCoordinator is null
+                    : runtime.SessionId != Guid.Empty &&
+                      runtime.ProcessId == observation.ProcessId &&
+                      runtime.TerminalTransportAttached &&
+                      runtime.InputWritable &&
+                      _runtimeSessionCoordinator!.IsCurrent(runtime.SessionId, runtime.Generation));
+
+            if (!sessionCurrent)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "StructuredPromptReadinessDeferred",
+                    "Request-verified prompt was ignored because its structured request or current writable session identity did not match.",
+                    "RequestOrSessionGuard",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = observation.RequestId,
+                        ["promptGeneration"] = observation.TerminalGeneration,
+                        ["currentGeneration"] = _liveConsoleService.CurrentSessionGeneration,
+                        ["processId"] = observation.ProcessId,
+                        ["runtimeGeneration"] = runtime?.Generation,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            var deferred = new DeferredStructuredPromptObservation(
+                observation.RequestId,
+                observation.TerminalGeneration,
+                observation.Path ?? string.Empty,
+                runtime?.SessionId ?? Guid.Empty,
+                runtime?.Generation,
+                observation.ProcessId);
+            lock (_deferredStructuredPromptSync)
+            {
+                // A structured observation is tied to exactly one current owner.
+                _deferredStructuredPromptObservation = deferred;
+            }
+            DeveloperDiagnostics.LogInfo(
+                "Terminal",
+                "Request-verified structured prompt retained until its matching editor execution releases ownership.",
+                new Dictionary<string, object?>
+                {
+                    ["requestId"] = observation.RequestId,
+                    ["terminalGeneration"] = observation.TerminalGeneration,
+                    ["runtimeSessionId"] = runtime?.SessionId,
+                    ["runtimeGeneration"] = runtime?.Generation,
+                    ["processId"] = observation.ProcessId,
+                    ["pathLength"] = observation.Path?.Length ?? 0,
+                    ["contentOmitted"] = true
+                });
+        }
+
+        private void ReconcileDeferredStructuredPromptObservation(Guid completedRequestId, bool requestCompleted)
+        {
+            DeferredStructuredPromptObservation? deferred;
+            lock (_deferredStructuredPromptSync)
+            {
+                deferred = _deferredStructuredPromptObservation;
+                if (deferred?.RequestId == completedRequestId)
+                    _deferredStructuredPromptObservation = null;
+                else
+                    deferred = null;
+            }
+
+            if (deferred is null)
+                return;
+
+            var runtime = _runtimeSessionCoordinator?.Snapshot;
+            var identityMatches = requestCompleted &&
+                _activeStructuredExecutionRequestId is null &&
+                _activeCoordinatorExecutionRequestId is null &&
+                _executionCoordinator?.ActiveExecution is null &&
+                Volatile.Read(ref _resetConsoleInProgress) == 0 &&
+                !IsStopInProgress &&
+                !IsDebugSessionActive &&
+                deferred.RequestId == completedRequestId &&
+                deferred.TerminalGeneration == _liveConsoleService.CurrentSessionGeneration &&
+                deferred.TerminalGeneration == Volatile.Read(ref _currentTerminalGeneration) &&
+                deferred.ProcessId == _liveConsoleService.ProcessId &&
+                _liveConsoleService.IsSessionRunning &&
+                _liveConsoleService.IsInputWritable &&
+                (runtime is null
+                    ? deferred.RuntimeSessionId == Guid.Empty
+                    : runtime.SessionId == deferred.RuntimeSessionId &&
+                      runtime.Generation == deferred.RuntimeGeneration &&
+                      runtime.ProcessId == deferred.ProcessId &&
+                      _runtimeSessionCoordinator!.IsCurrent(runtime.SessionId, runtime.Generation));
+
+            if (!identityMatches)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "StructuredPromptReadinessReconciliation",
+                    "Deferred request prompt was discarded because the request did not settle normally or a request, owner, or session identity changed.",
+                    "RequestOrSessionIdentityChanged",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = completedRequestId,
+                        ["observationRequestId"] = deferred.RequestId,
+                        ["terminalGeneration"] = deferred.TerminalGeneration,
+                        ["backendGeneration"] = _liveConsoleService.CurrentSessionGeneration,
+                        ["processId"] = deferred.ProcessId,
+                        ["currentProcessId"] = _liveConsoleService.ProcessId,
+                        ["runtimeGeneration"] = runtime?.Generation,
+                        ["requestCompleted"] = requestCompleted,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            var stateBefore = _interactiveTerminalCoordinator.State;
+            ApplyTerminalPromptReadyObservation(deferred.TerminalGeneration, deferred.Path);
+            var accepted = _interactiveTerminalCoordinator.State == InteractiveTerminalState.InteractiveIdleAtPrompt;
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "StructuredPromptReadinessReconciliation",
+                accepted
+                    ? "Matching request prompt passed existing prompt-admission checks after execution ownership release."
+                    : "Matching request prompt did not pass the existing prompt-admission checks after ownership release.",
+                accepted ? "Accepted" : "PromptAdmissionRejected",
+                new Dictionary<string, object?>
+                {
+                    ["requestId"] = completedRequestId,
+                    ["terminalGeneration"] = deferred.TerminalGeneration,
+                    ["stateBefore"] = stateBefore.ToString(),
+                    ["stateAfter"] = _interactiveTerminalCoordinator.State.ToString(),
+                    ["contentOmitted"] = true
+                });
+        }
+
+        private void ClearDeferredStructuredPromptObservation(string reason)
+        {
+            Interlocked.Exchange(ref _structuredPromptReconciliationInvalidated, 1);
+            var cleared = false;
+            lock (_deferredStructuredPromptSync)
+            {
+                cleared = _deferredStructuredPromptObservation is not null;
+                _deferredStructuredPromptObservation = null;
+            }
+            if (cleared)
+            {
+                DeveloperDiagnostics.LogInfo("Terminal", "Deferred structured prompt was invalidated before reconciliation.", new Dictionary<string, object?>
+                {
+                    ["reason"] = reason,
+                    ["contentOmitted"] = true
+                });
+            }
+        }
+
+        private void ApplyTerminalPromptReadyObservation(int generation, string? path)
+        {
+            path ??= string.Empty;
+            var snapshot = _interactiveTerminalCoordinator.Snapshot;
+            var facts = GetEditorExecutionAdmissionFacts();
+            if (_liveConsoleService.IsCommandInProgress ||
+                Volatile.Read(ref _resetConsoleInProgress) != 0 ||
+                !TryBindCurrentTerminalGeneration(generation) ||
+                !EditorExecutionAdmissionPolicy.CanAcceptPromptObservation(
+                    snapshot.State,
+                    generation == Volatile.Read(ref _currentTerminalGeneration) &&
+                    generation == _liveConsoleService.CurrentSessionGeneration &&
+                    snapshot.Generation <= generation &&
+                    _terminalOutputMultiplexer.InteractiveSnapshot.Generation <= generation,
+                    facts,
+                    isNewerTerminalGeneration: snapshot.Generation < generation))
+            {
+                AppLogger.Warning("Terminal", $"Ignored prompt-ready observation that failed current-session/owner checks. Generation={generation}, CurrentGeneration={Volatile.Read(ref _currentTerminalGeneration)}, BackendGeneration={_liveConsoleService.CurrentSessionGeneration}, RuntimeState={facts.RuntimeState?.ToString() ?? "(none)"}, LifecyclePhase={facts.LifecyclePhase?.ToString() ?? "(none)"}, PathLength={path?.Length ?? 0}, ContentOmitted=True.");
                 return;
             }
 
@@ -7922,10 +8266,10 @@ namespace PS7ScriptDesk.UI.ViewModels
             PromptReadyForTerminalDiagnostics?.Invoke(generation);
             DeveloperDiagnostics.LogStateTransition(
                 "Terminal",
-                "InteractivePromptReady",
+                "InteractivePromptObservation",
                 "StartingOrRunning",
                 "InteractiveIdleAtPrompt",
-                "Backend prompt heuristic marked the interactive terminal idle.",
+                "Backend prompt observation marked console input idle after current-session and owner checks.",
                 new Dictionary<string, object?>
                 {
                     ["generation"] = generation,
@@ -7935,34 +8279,251 @@ namespace PS7ScriptDesk.UI.ViewModels
                 });
         }
 
-        private void OnTerminalCommandCompleted()
+        private void TryDeferResetPromptObservation(int generation, string? path)
+        {
+            var runtime = _runtimeSessionCoordinator?.Snapshot;
+            var processId = _liveConsoleService.ProcessId;
+            var runtimeIdentityMatches = runtime is null ||
+                (runtime.SessionId != Guid.Empty &&
+                 runtime.ProcessId == processId &&
+                 runtime.TerminalTransportAttached &&
+                 runtime.InputWritable &&
+                 runtime.State is PowerShellRuntimeSessionState.Starting or PowerShellRuntimeSessionState.Ready);
+            var currentSessionMatches = generation > 0 &&
+                generation == _liveConsoleService.CurrentSessionGeneration &&
+                generation == Volatile.Read(ref _currentTerminalGeneration) &&
+                processId.HasValue &&
+                _liveConsoleService.IsSessionRunning &&
+                _liveConsoleService.IsInputWritable &&
+                runtimeIdentityMatches &&
+                !_liveConsoleService.IsCommandInProgress &&
+                !IsDebugSessionActive &&
+                !_activeCoordinatorExecutionRequestId.HasValue &&
+                !_activeStructuredExecutionRequestId.HasValue &&
+                _executionCoordinator?.ActiveExecution is null;
+
+            if (!currentSessionMatches)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "ResetPromptReadinessDeferred",
+                    "Reset-time prompt was not retained because it did not identify a current writable replacement session without an active execution owner.",
+                    "SessionOrOwnerGuard",
+                    new Dictionary<string, object?>
+                    {
+                        ["promptGeneration"] = generation,
+                        ["backendGeneration"] = _liveConsoleService.CurrentSessionGeneration,
+                        ["runtimeGeneration"] = runtime?.Generation,
+                        ["processIdPresent"] = processId.HasValue,
+                        ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                        ["inputWritable"] = _liveConsoleService.IsInputWritable,
+                        ["runtimeIdentityMatches"] = runtimeIdentityMatches,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            var deferred = new DeferredResetPromptObservation(
+                generation,
+                path ?? string.Empty,
+                runtime?.SessionId ?? Guid.Empty,
+                runtime?.Generation,
+                processId!.Value);
+            var retained = false;
+            lock (_deferredResetPromptSync)
+            {
+                if (_deferredResetPromptObservation is null ||
+                    _deferredResetPromptObservation.Generation <= generation)
+                {
+                    _deferredResetPromptObservation = deferred;
+                    retained = true;
+                }
+            }
+
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "ResetPromptReadinessDeferred",
+                retained
+                    ? "Current replacement prompt was retained until Reset completes."
+                    : "Reset-time prompt was ignored because a newer replacement prompt is already pending.",
+                retained ? "Deferred" : "NewerObservationPending",
+                new Dictionary<string, object?>
+                {
+                    ["promptGeneration"] = generation,
+                    ["runtimeSessionId"] = deferred.RuntimeSessionId,
+                    ["processId"] = deferred.ProcessId,
+                    ["pathLength"] = deferred.Path.Length,
+                    ["contentOmitted"] = true
+                });
+        }
+
+        private void ReconcileDeferredResetPromptObservation()
+        {
+            DeferredResetPromptObservation? deferred;
+            lock (_deferredResetPromptSync)
+            {
+                deferred = _deferredResetPromptObservation;
+                _deferredResetPromptObservation = null;
+            }
+
+            if (deferred is null)
+            {
+                return;
+            }
+
+            var runtime = _runtimeSessionCoordinator?.Snapshot;
+            var identityMatches = Volatile.Read(ref _resetConsoleInProgress) == 0 &&
+                deferred.Generation == _liveConsoleService.CurrentSessionGeneration &&
+                deferred.Generation == Volatile.Read(ref _currentTerminalGeneration) &&
+                deferred.ProcessId == _liveConsoleService.ProcessId &&
+                _liveConsoleService.IsSessionRunning &&
+                _liveConsoleService.IsInputWritable &&
+                (runtime is null
+                    ? deferred.RuntimeSessionId == Guid.Empty
+                    : runtime.SessionId == deferred.RuntimeSessionId &&
+                      runtime.Generation == deferred.RuntimeGeneration &&
+                      runtime.ProcessId == deferred.ProcessId &&
+                      _runtimeSessionCoordinator!.IsCurrent(runtime.SessionId, runtime.Generation));
+
+            if (!identityMatches)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "ResetPromptReadinessReconciliation",
+                    "Deferred replacement prompt was discarded because its session identity is no longer current and writable.",
+                    "SessionIdentityChanged",
+                    new Dictionary<string, object?>
+                    {
+                        ["promptGeneration"] = deferred.Generation,
+                        ["backendGeneration"] = _liveConsoleService.CurrentSessionGeneration,
+                        ["runtimeGeneration"] = runtime?.Generation,
+                        ["processId"] = deferred.ProcessId,
+                        ["currentProcessId"] = _liveConsoleService.ProcessId,
+                        ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                        ["inputWritable"] = _liveConsoleService.IsInputWritable,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            var stateBefore = _interactiveTerminalCoordinator.State;
+            ApplyTerminalPromptReadyObservation(deferred.Generation, deferred.Path);
+            var accepted = _interactiveTerminalCoordinator.State == InteractiveTerminalState.InteractiveIdleAtPrompt;
+            DeveloperDiagnostics.LogDecision(
+                "Terminal",
+                "ResetPromptReadinessReconciliation",
+                accepted
+                    ? "Deferred replacement prompt was accepted after Reset completed."
+                    : "Deferred replacement prompt did not pass the existing prompt-admission checks.",
+                accepted ? "Accepted" : "PromptAdmissionRejected",
+                new Dictionary<string, object?>
+                {
+                    ["promptGeneration"] = deferred.Generation,
+                    ["stateBefore"] = stateBefore.ToString(),
+                    ["stateAfter"] = _interactiveTerminalCoordinator.State.ToString(),
+                    ["pathLength"] = deferred.Path.Length,
+                    ["contentOmitted"] = true
+                });
+        }
+
+        private void ClearDeferredResetPromptObservation(int generation, bool keepMatchingGeneration)
+        {
+            var cleared = false;
+            lock (_deferredResetPromptSync)
+            {
+                if (_deferredResetPromptObservation is { } pending &&
+                    (keepMatchingGeneration
+                        ? pending.Generation < generation
+                        : pending.Generation <= generation))
+                {
+                    _deferredResetPromptObservation = null;
+                    cleared = true;
+                }
+            }
+
+            if (cleared)
+            {
+                DeveloperDiagnostics.LogInfo("Terminal", "Deferred reset prompt was cleared because its terminal generation was replaced or stopped.", new Dictionary<string, object?>
+                {
+                    ["terminalGeneration"] = generation,
+                    ["keepMatchingGeneration"] = keepMatchingGeneration,
+                    ["contentOmitted"] = true
+                });
+            }
+        }
+
+        private void ClearDeferredResetPromptObservation()
+        {
+            var cleared = false;
+            lock (_deferredResetPromptSync)
+            {
+                cleared = _deferredResetPromptObservation is not null;
+                _deferredResetPromptObservation = null;
+            }
+
+            if (cleared)
+            {
+                DeveloperDiagnostics.LogInfo("Terminal", "Deferred reset prompt was cleared because recovery restarted or the terminal session terminated.", new Dictionary<string, object?>
+                {
+                    ["contentOmitted"] = true
+                });
+            }
+        }
+
+        private void OnTerminalCommandCompleted(int generation)
         {
             // Fired on a thread-pool thread by LiveConsoleService when the sentinel token
             // is detected in terminal output.  Marshal to the UI thread before touching
             // UI-bound state.
+            if (!CanApplyTerminalCommandCompletion(generation))
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "TerminalCommandCompletionIgnored",
+                    "Uncorrelated terminal completion did not mutate editor/debugger-owned or lifecycle-protected state.",
+                    "OwnerOrLifecycleGuard",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalGeneration"] = generation,
+                        ["runtimeState"] = _runtimeSessionCoordinator?.Snapshot.State.ToString(),
+                        ["lifecyclePhase"] = _runtimeSessionCoordinator?.Snapshot.LifecyclePhase.ToString(),
+                        ["editorOwnerActive"] = _activeCoordinatorExecutionRequestId.HasValue ||
+                                                _activeStructuredExecutionRequestId.HasValue ||
+                                                _executionCoordinator?.ActiveExecution is not null ||
+                                                _runtimeSessionCoordinator?.Snapshot.State is PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging ||
+                                                IsDebugSessionActive,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
             PostToUi(() =>
             {
+                // Recheck at mutation time; a lease may have been acquired after the
+                // thread-pool completion callback was first observed.
+                if (!CanApplyTerminalCommandCompletion(generation)) return;
                 IsExecutionRunning = false;
                 RefreshCommandStates();
                 UpdateConsoleSessionPresentation();
+                _interactiveTerminalCoordinator.TryReplaceGeneration(
+                    generation,
+                    InteractiveTerminalState.InteractiveIdleAtPrompt,
+                    "Unowned interactive terminal command completed.");
+                _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
+                    generation,
+                    InteractiveTerminalState.InteractiveIdleAtPrompt,
+                    "Unowned interactive terminal command completed.");
+
+                RequestTerminalInteractiveStateNormalization("CommandCompleted");
+                if (Volatile.Read(ref _resetConsoleInProgress) == 0)
+                    RequestTerminalFocusAfterExecutionCompletion();
             });
-            _interactiveTerminalCoordinator.SetState(
-                InteractiveTerminalState.InteractiveIdleAtPrompt,
-                "Interactive command completed.");
-            _terminalOutputMultiplexer.SetInteractiveState(
-                InteractiveTerminalState.InteractiveIdleAtPrompt,
-                "Interactive command completed.");
-
-            RequestTerminalInteractiveStateNormalization("CommandCompleted");
-
-            if (Volatile.Read(ref _resetConsoleInProgress) == 0)
-            {
-                RequestTerminalFocusAfterExecutionCompletion();
-            }
         }
 
         private void OnSessionTerminated()
         {
+            ClearDeferredResetPromptObservation();
+            ClearDeferredStructuredPromptObservation("TerminalSessionTerminated");
             _interactiveTerminalCoordinator.SetState(
                 InteractiveTerminalState.Unavailable,
                 "Interactive terminal session terminated.");
@@ -7976,8 +8537,16 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 var hadExecutionState = IsExecutionRunning;
                 var hadStopState = IsStopInProgress;
+                var editorOwnerActive = _activeCoordinatorExecutionRequestId.HasValue ||
+                                        _activeStructuredExecutionRequestId.HasValue ||
+                                        _executionCoordinator?.ActiveExecution is not null ||
+                                        _runtimeSessionCoordinator?.Snapshot.State is PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging ||
+                                        IsDebugSessionActive;
 
-                IsExecutionRunning = false;
+                // The terminal can terminate while an editor/debugger request still
+                // owns its completion path. Keep that state until the owner releases it.
+                if (!editorOwnerActive)
+                    IsExecutionRunning = false;
                 IsStopInProgress = false;
 
                 StatusText = runtimeToRestart is null
@@ -7990,7 +8559,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     + Environment.NewLine);
                 AppLogger.Info(
                     "Console",
-                    $"PowerShell terminal session termination observed by ViewModel. Cleared execution state. HadExecutionState={hadExecutionState}, HadStopState={hadStopState}, SessionRunning={_liveConsoleService.IsSessionRunning}, CommandInProgress={_liveConsoleService.IsCommandInProgress}.");
+                    $"PowerShell terminal session termination observed by ViewModel. EditorOwnerActive={editorOwnerActive}, ClearedExecutionState={!editorOwnerActive}, HadExecutionState={hadExecutionState}, HadStopState={hadStopState}, SessionRunning={_liveConsoleService.IsSessionRunning}, CommandInProgress={_liveConsoleService.IsCommandInProgress}.");
 
                 RefreshCommandStates();
                 UpdateConsoleSessionPresentation();
@@ -8057,6 +8626,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             try
             {
+                ClearDeferredResetPromptObservation();
                 Interlocked.Exchange(ref _resetConsoleInProgress, 1);
                 PostToUi(() => IsStopInProgress = true);
 
@@ -8136,11 +8706,12 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
             finally
             {
-                Interlocked.Exchange(ref _resetConsoleInProgress, 0);
                 _consoleRecoveryGate.Release();
                 PostToUi(() =>
                 {
+                    Interlocked.Exchange(ref _resetConsoleInProgress, 0);
                     IsStopInProgress = false;
+                    ReconcileDeferredResetPromptObservation();
                     RefreshCommandStates();
                 });
             }
@@ -8421,8 +8992,13 @@ namespace PS7ScriptDesk.UI.ViewModels
         private void AppendExecutionOutput(ExecutionOutputRecord record)
         {
             var text = record.Text ?? string.Empty;
+            if (record.StreamKind != ExecutionOutputStreamKind.Lifecycle)
+            {
+                return;
+            }
+
             TerminalCriticalTrace.LogStage(
-                "MainWindowViewModel.AppendExecutionOutput.Post",
+                "MainWindowViewModel.AppendExecutionOutput.LifecyclePost",
                 new Dictionary<string, object?>
                 {
                     ["streamKind"] = record.StreamKind.ToString(),
@@ -8743,16 +9319,15 @@ namespace PS7ScriptDesk.UI.ViewModels
         {
             var hasSelectedTab = SelectedTab is not null;
             var hasRuntime = SelectedRuntimeItem is not null || _preferredRuntimeItem is not null;
-            var canStartEditorExecution = _interactiveTerminalCoordinator.CanStartEditorExecution;
-            var runtimeSnapshot = _runtimeSessionCoordinator?.Snapshot;
-            var runtimeInputCurrent = runtimeSnapshot is null ||
-                _runtimeSessionCoordinator!.IsCurrent(runtimeSnapshot.SessionId, runtimeSnapshot.Generation);
+            var admissionFacts = GetEditorExecutionAdmissionFacts();
+            var canStartEditorExecution = EditorExecutionAdmissionPolicy.CanStart(
+                admissionFacts.InteractiveState,
+                admissionFacts);
             var canRun = hasSelectedTab &&
                          SelectedTab!.IsPowerShellDocument &&
                          hasRuntime &&
                          !IsExecutionRunning &&
                          _executionCoordinator?.ActiveExecution is null &&
-                         runtimeInputCurrent &&
                          !_liveConsoleService.IsCommandInProgress &&
                          canStartEditorExecution &&
                          !IsStopInProgress &&
@@ -8760,6 +9335,65 @@ namespace PS7ScriptDesk.UI.ViewModels
                          !IsDebugSessionActive;
 
             return canRun;
+        }
+
+        private EditorExecutionAdmissionFacts GetEditorExecutionAdmissionFacts()
+        {
+            var runtime = _runtimeSessionCoordinator?.Snapshot;
+            var runtimeIdentityCurrent = runtime is null ||
+                (runtime.SessionId != Guid.Empty &&
+                 _runtimeSessionCoordinator!.IsCurrent(runtime.SessionId, runtime.Generation) &&
+                 runtime.ProcessId.HasValue && runtime.ProcessId == _liveConsoleService.ProcessId);
+            return new EditorExecutionAdmissionFacts(
+                InteractiveState: _interactiveTerminalCoordinator.Snapshot.State,
+                SessionRunning: _liveConsoleService.IsSessionRunning,
+                TransportWritable: _liveConsoleService.IsInputWritable && (runtime?.InputWritable ?? true),
+                RuntimeIdentityCurrent: runtimeIdentityCurrent,
+                RuntimeState: runtime?.State,
+                LifecyclePhase: runtime?.LifecyclePhase,
+                EditorExecutionRunning: _activeCoordinatorExecutionRequestId.HasValue ||
+                                        _activeStructuredExecutionRequestId.HasValue ||
+                                        _executionCoordinator?.ActiveExecution is not null ||
+                                        runtime?.State is PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging,
+                StopInProgress: IsStopInProgress,
+                DebugSessionActive: IsDebugSessionActive);
+        }
+
+        private bool CanApplyTerminalCommandCompletion(int generation)
+        {
+            var facts = GetEditorExecutionAdmissionFacts();
+            var hasEditorOwner = _activeCoordinatorExecutionRequestId.HasValue ||
+                                 _activeStructuredExecutionRequestId.HasValue ||
+                                 _activeInternalTerminalCommandRequestId.HasValue ||
+                                 _executionCoordinator?.ActiveExecution is not null ||
+                                 _runtimeSessionCoordinator?.Snapshot.State is PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging ||
+                                 IsDebugSessionActive;
+            return generation == Volatile.Read(ref _currentTerminalGeneration) &&
+                   Volatile.Read(ref _resetConsoleInProgress) == 0 &&
+                   _interactiveTerminalCoordinator.Snapshot.Generation == generation &&
+                   EditorExecutionAdmissionPolicy.CanApplyInteractiveCommandCompletion(
+                       callbackMatchesCurrentTerminalSession:
+                           _liveConsoleService.IsSessionRunning &&
+                           _liveConsoleService.IsInputWritable &&
+                           generation == _liveConsoleService.CurrentSessionGeneration &&
+                           (_runtimeSessionCoordinator is null ||
+                            (_runtimeSessionCoordinator.IsCurrent(_runtimeSessionCoordinator.Snapshot.SessionId,
+                                _runtimeSessionCoordinator.Snapshot.Generation) &&
+                             _runtimeSessionCoordinator.Snapshot.ProcessId == _liveConsoleService.ProcessId)),
+                        hasEditorOwner,
+                       facts);
+        }
+
+        private bool TryBindCurrentTerminalGeneration(int generation)
+        {
+            if (generation != _liveConsoleService.CurrentSessionGeneration) return false;
+            while (true)
+            {
+                var current = Volatile.Read(ref _currentTerminalGeneration);
+                if (generation < current) return false;
+                if (generation == current || Interlocked.CompareExchange(ref _currentTerminalGeneration, generation, current) == current)
+                    return true;
+            }
         }
 
         private string? GetRunDisabledReason(bool runSelection = false)
@@ -9066,17 +9700,41 @@ namespace PS7ScriptDesk.UI.ViewModels
         {
             private int _saveClaimed;
 
-            public PendingRecoveryWrite(DocumentRecoverySnapshot snapshot)
+            public PendingRecoveryWrite(PendingRecoverySnapshot snapshot)
             {
                 Snapshot = snapshot;
             }
 
-            public DocumentRecoverySnapshot Snapshot { get; }
+            public PendingRecoverySnapshot Snapshot { get; }
 
             public System.Timers.Timer? Timer { get; set; }
 
             public bool TryClaimSave()
                 => Interlocked.CompareExchange(ref _saveClaimed, 1, 0) == 0;
+        }
+
+        private sealed record PendingRecoverySnapshot(
+            string RecoveryId,
+            string? OriginalFilePath,
+            string DisplayName,
+            IEditorTextSnapshot TextSnapshot,
+            DateTime SnapshotUtc,
+            DateTime? LastKnownFileWriteTimeUtc,
+            long? LastKnownFileLength,
+            string? LastKnownFileContentSha256,
+            bool IsUntitled)
+        {
+            public DocumentRecoverySnapshot ToRecoverySnapshot()
+                => new(
+                    RecoveryId,
+                    OriginalFilePath,
+                    DisplayName,
+                    TextSnapshot.MaterializeText(),
+                    SnapshotUtc,
+                    LastKnownFileWriteTimeUtc,
+                    LastKnownFileLength,
+                    LastKnownFileContentSha256,
+                    IsUntitled);
         }
 
         private sealed class NoOpDocumentRecoveryService : IDocumentRecoveryService

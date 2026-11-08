@@ -8,7 +8,6 @@ namespace PS7ScriptDesk.Application.Services;
 public sealed class TerminalOutputMultiplexer
 {
     private readonly object _syncRoot = new();
-    private readonly List<TerminalOutputEnvelope> _published = [];
     private readonly Queue<TerminalOutputEnvelope> _pendingNotifications = new();
     private long _sequence;
     private InteractiveTerminalSnapshot _interactiveSnapshot = new(
@@ -17,6 +16,7 @@ public sealed class TerminalOutputMultiplexer
         "Terminal state has not been initialized.",
         DateTimeOffset.UtcNow);
     private Guid? _activeEditorRequestId;
+    private Guid? _activeInternalCommandRequestId;
     private bool _isPublishingNotifications;
 
     public event Action<TerminalOutputEnvelope>? OutputPublished;
@@ -39,17 +39,6 @@ public sealed class TerminalOutputMultiplexer
             lock (_syncRoot)
             {
                 return _interactiveSnapshot.State;
-            }
-        }
-    }
-
-    public IReadOnlyList<TerminalOutputEnvelope> Published
-    {
-        get
-        {
-            lock (_syncRoot)
-            {
-                return _published.ToArray();
             }
         }
     }
@@ -87,28 +76,37 @@ public sealed class TerminalOutputMultiplexer
                 return true;
             }
 
+            var generationChanged = generation != _interactiveSnapshot.Generation;
             _interactiveSnapshot = new InteractiveTerminalSnapshot(
                 generation,
                 state,
                 reason,
                 DateTimeOffset.UtcNow);
+            if (generationChanged)
+            {
+                _activeInternalCommandRequestId = null;
+            }
             return true;
         }
     }
 
-    public bool TryBeginEditorExecution(Guid requestId, out string rejectionReason)
+    public bool TryBeginEditorExecution(
+        Guid requestId,
+        EditorExecutionAdmissionFacts admissionFacts,
+        out string rejectionReason)
     {
+        ArgumentNullException.ThrowIfNull(admissionFacts);
         lock (_syncRoot)
         {
-            if (!EditorExecutionAdmissionPolicy.CanStart(_interactiveSnapshot.State))
+            if (!EditorExecutionAdmissionPolicy.CanStart(admissionFacts.InteractiveState, admissionFacts))
             {
-                rejectionReason = EditorExecutionAdmissionPolicy.ExplainRejection(_interactiveSnapshot.State);
+                rejectionReason = EditorExecutionAdmissionPolicy.ExplainRejection(admissionFacts.InteractiveState);
                 return false;
             }
 
-            if (_activeEditorRequestId.HasValue)
+            if (_activeEditorRequestId.HasValue || _activeInternalCommandRequestId.HasValue)
             {
-                rejectionReason = "Another editor execution is already active.";
+                rejectionReason = "Another editor or internal terminal operation is already active.";
                 return false;
             }
 
@@ -126,6 +124,62 @@ public sealed class TerminalOutputMultiplexer
             {
                 _activeEditorRequestId = null;
             }
+        }
+    }
+
+    public bool TryBeginInternalCommand(
+        Guid requestId,
+        int generation,
+        EditorExecutionAdmissionFacts admissionFacts,
+        out string rejectionReason)
+    {
+        ArgumentNullException.ThrowIfNull(admissionFacts);
+        lock (_syncRoot)
+        {
+            if (generation != _interactiveSnapshot.Generation ||
+                !EditorExecutionAdmissionPolicy.CanStart(admissionFacts.InteractiveState, admissionFacts))
+            {
+                rejectionReason = generation != _interactiveSnapshot.Generation
+                    ? "The terminal generation changed before internal command admission."
+                    : EditorExecutionAdmissionPolicy.ExplainRejection(admissionFacts.InteractiveState);
+                return false;
+            }
+
+            if (_activeEditorRequestId.HasValue || _activeInternalCommandRequestId.HasValue)
+            {
+                rejectionReason = "Another editor or internal terminal operation already owns admission.";
+                return false;
+            }
+
+            _activeInternalCommandRequestId = requestId;
+            _interactiveSnapshot = _interactiveSnapshot with
+            {
+                State = InteractiveTerminalState.InteractiveCommandRunning,
+                Reason = "An internal terminal command owns interactive admission.",
+                Timestamp = DateTimeOffset.UtcNow
+            };
+            rejectionReason = string.Empty;
+            return true;
+        }
+    }
+
+    public bool EndInternalCommand(Guid requestId, int generation, InteractiveTerminalState nextState, string? reason = null)
+    {
+        lock (_syncRoot)
+        {
+            if (_activeInternalCommandRequestId != requestId || _interactiveSnapshot.Generation != generation)
+            {
+                return false;
+            }
+
+            _activeInternalCommandRequestId = null;
+            _interactiveSnapshot = _interactiveSnapshot with
+            {
+                State = nextState,
+                Reason = reason,
+                Timestamp = DateTimeOffset.UtcNow
+            };
+            return true;
         }
     }
 
@@ -219,7 +273,6 @@ public sealed class TerminalOutputMultiplexer
                 streamKind,
                 payload!,
                 DateTimeOffset.UtcNow);
-            _published.Add(envelope);
             _pendingNotifications.Enqueue(envelope);
             if (!_isPublishingNotifications)
             {

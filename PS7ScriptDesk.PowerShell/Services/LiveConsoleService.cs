@@ -201,7 +201,9 @@ namespace PS7ScriptDesk.PowerShell.Services
         public event Action? ScriptExecutionCompleted;
 
         /// <inheritdoc />
-        public event Action? CommandExecutionCompleted;
+        public event Action<int>? CommandExecutionCompleted;
+
+        public event Action<LiveConsoleCommandCompletion>? InteractiveCommandCompleted;
 
         /// <inheritdoc />
         public event Action? SessionTerminated;
@@ -237,6 +239,11 @@ namespace PS7ScriptDesk.PowerShell.Services
                     return TryGetProcessId(_process);
                 }
             }
+        }
+
+        public int CurrentSessionGeneration
+        {
+            get { lock (_syncRoot) return _terminalSessionGeneration; }
         }
 
         public string? CurrentWorkingDirectory { get; private set; }
@@ -699,6 +706,45 @@ namespace PS7ScriptDesk.PowerShell.Services
                 CancelPendingCommandDispatch(deleteSnapshot: false);
                 throw;
             }
+        }
+
+        public async Task<LiveConsoleCommandResult> ExecuteConsoleCommandAsync(
+            string commandText,
+            Action<ExecutionOutputRecord> onOutput,
+            Guid requestId,
+            CancellationToken cancellationToken = default)
+        {
+            var result = await ExecuteConsoleCommandAsync(commandText, onOutput, cancellationToken).ConfigureAwait(false);
+            var generation = CurrentSessionGeneration;
+            if (ProcessId is { } processId)
+            {
+                var handlers = InteractiveCommandCompleted;
+                if (handlers is not null)
+                {
+                    var completion = new LiveConsoleCommandCompletion(
+                        requestId,
+                        generation,
+                        processId,
+                        LiveConsoleCommandOutcome.Completed,
+                        0,
+                        DateTimeOffset.UtcNow);
+                    foreach (Action<LiveConsoleCommandCompletion> handler in handlers.GetInvocationList())
+                    {
+                        try { handler(completion); }
+                        catch (Exception ex)
+                        {
+                            DeveloperDiagnostics.LogException("Terminal", ex, "Legacy direct command completion subscriber failed.", new Dictionary<string, object?>
+                            {
+                                ["requestId"] = requestId,
+                                ["terminalGeneration"] = generation,
+                                ["processId"] = processId,
+                                ["contentOmitted"] = true
+                            });
+                        }
+                    }
+                }
+            }
+            return result;
         }
 
         public async Task<LiveConsoleCommandResult> ExecuteScriptAsync(
@@ -3105,7 +3151,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 ScriptExecutionCompleted?.Invoke();
             }
 
-            CommandExecutionCompleted?.Invoke();
+            CommandExecutionCompleted?.Invoke(sessionGeneration);
         }
 
         private static string FilterRecoveredPreStartOutput(
@@ -3459,7 +3505,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                 ScriptExecutionCompleted?.Invoke();
             }
 
-            CommandExecutionCompleted?.Invoke();
+            CommandExecutionCompleted?.Invoke(completedSessionGeneration);
         }
 
         private void ResetPendingCommandState(bool deleteSnapshots)

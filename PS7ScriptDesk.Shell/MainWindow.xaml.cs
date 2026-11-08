@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -96,7 +97,7 @@ namespace PS7ScriptDesk.Shell
             typeof(MainWindow));
 
         private const double MinimumExplorerWidth = 190;
-        private const double MinimumConsoleHeight = 160;
+        private const double MinimumConsoleContentHeight = 160;
         private const double MinimumConsoleSideWidth = 220;
         private const double MinimumBottomToolWindowHeight = 120;
         private const double BottomToolWindowSplitterThickness = 6;
@@ -113,6 +114,7 @@ namespace PS7ScriptDesk.Shell
         private const int LiveSyntaxDiagnosticsLargeFileMinimumIntervalMilliseconds = 250;
         private const int LiveSyntaxDiagnosticsLargeFileCharacterThreshold = 45000;
         private const int LiveSyntaxDiagnosticsLargeFileLineThreshold = 800;
+        private double EffectiveMinimumConsoleHeight => _effectiveMinimumConsoleHeight;
         private const int AuthoringDiagnosticsSmallDocumentDelayMilliseconds = 1400;
         private const int AuthoringDiagnosticsMediumDocumentDelayMilliseconds = 2200;
         private const int AuthoringDiagnosticsLargeDocumentDelayMilliseconds = 4000;
@@ -123,6 +125,9 @@ namespace PS7ScriptDesk.Shell
         private const int AuthoringDiagnosticsVeryLargeCharacterThreshold = 120000;
         private const int AuthoringDiagnosticsVeryLargeLineThreshold = 2000;
         private const int MaximumQueuedTerminalOutputEnvelopes = 8192;
+        private const int MaximumTerminalOutputDrainEnvelopes = 128;
+        private const int MaximumTerminalOutputDrainCharacters = 64 * 1024;
+        private const double MaximumTerminalOutputDrainMilliseconds = 2;
         private const int EditorFoldingDebounceMilliseconds = 350;
         private const int EditorHoverDelayMilliseconds = 450;
         private const int EditorMetadataWarmupDebounceMilliseconds = 150;
@@ -237,7 +242,8 @@ namespace PS7ScriptDesk.Shell
         private readonly UserPromptService _userPromptService = new();
         private readonly HashSet<TextEditor> _configuredEditors = new();
         private readonly Dictionary<EditorTabViewModel, TextEditor> _editorByTab = new();
-        private readonly Dictionary<EditorTabViewModel, TextDocument> _documentByTab = new();
+        private readonly Dictionary<EditorTabViewModel, EditorDocumentSession> _documentSessionsByTab = new();
+        private readonly HashSet<TextEditor> _postUpdateDiagnosticsQueued = new();
         private long _editorFocusRequestVersion;
         // _pendingScrollToEnd removed: no longer needed (xterm.js handles scroll).
         private readonly Dictionary<TextEditor, EditorTabViewModel> _tabByEditor = new();
@@ -263,6 +269,7 @@ namespace PS7ScriptDesk.Shell
         private readonly Dictionary<TextEditor, int> _editorRegistrationVersions = new();
         private readonly Dictionary<TextEditor, FoldingManager> _foldingManagers = new();
         private readonly Dictionary<TextEditor, CancellationTokenSource> _foldingCancellationSources = new();
+        private readonly Dictionary<TextEditor, long> _foldingRequestGenerations = new();
         private readonly Dictionary<string, DebugVariableInfo> _liveDebugVariableCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly BraceFoldingStrategy _foldingStrategy = new();
         private readonly HashSet<TextEditor> _editorTextSynchronizationInProgress = new();
@@ -286,6 +293,9 @@ namespace PS7ScriptDesk.Shell
 
         private CompletionWindow? _activeCompletionWindow;
         private CancellationTokenSource? _activeCompletionCts;
+        private CompletionRequestState? _completionRequestState;
+        private PendingCompletionCycle? _pendingCompletionCycle;
+        private EditorCompletionCycleSession? _completionCycleSession;
         private CancellationTokenSource? _quickInfoCts;
         private WpfToolTip? _activeEditorToolTip;
         private TextView? _pendingHoverTextView;
@@ -301,6 +311,7 @@ namespace PS7ScriptDesk.Shell
         private bool _shellLayoutApplied;
         private double _lastKnownExplorerWidth = 220;
         private double _lastKnownConsoleHeight = DefaultConsoleHeight;
+        private double _effectiveMinimumConsoleHeight = MinimumConsoleContentHeight;
         private double _lastKnownConsoleSideWidth = DefaultConsoleSideWidth;
         private double _lastKnownBottomToolWindowHeight = DefaultBottomToolWindowHeight;
         private double _lastKnownDebugPanelWidth = DebugPanelWidth;
@@ -539,7 +550,7 @@ namespace PS7ScriptDesk.Shell
                 _lastKnownExplorerWidth = _loadedSettings.ExplorerWidth!.Value;
             }
 
-            if (IsUsableLength(_loadedSettings.ConsoleHeight, MinimumConsoleHeight))
+            if (IsUsableLength(_loadedSettings.ConsoleHeight, EffectiveMinimumConsoleHeight))
             {
                 _lastKnownConsoleHeight = _loadedSettings.ConsoleHeight!.Value;
             }
@@ -647,6 +658,7 @@ namespace PS7ScriptDesk.Shell
             ArgumentNullException.ThrowIfNull(viewModel);
             Dispatcher.VerifyAccess();
             Volatile.Write(ref _viewModel, viewModel);
+            viewModel.OpenTabs.CollectionChanged += OpenTabs_CollectionChanged;
             DataContext = viewModel;
             StartupLifecycleTrace.Write("MainWindow.AttachViewModel", "DATACONTEXT", $"windowId={GetHashCode():X8}; dataContextId={viewModel.GetHashCode():X8}; gitText={viewModel.GitStatusText}; consoleText={viewModel.ConsoleSessionText}");
             StartupLifecycleTrace.Write("MainWindow.AttachViewModel", "EXIT", $"viewModelId={viewModel.GetHashCode():X8}");
@@ -660,6 +672,27 @@ namespace PS7ScriptDesk.Shell
         }
 
         private MainWindowViewModel? ViewModel => Volatile.Read(ref _viewModel);
+
+        private void OpenTabs_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+        {
+            Dispatcher.VerifyAccess();
+            foreach (var tab in _documentSessionsByTab.Keys.ToArray())
+            {
+                if (ViewModel?.OpenTabs.Contains(tab) == true) continue;
+                if (_editorByTab.TryGetValue(tab, out var editor))
+                {
+                    IncrementEditorRegistrationVersion(editor);
+                    CancelPendingFolding(editor);
+                    if (ReferenceEquals(_completionRequestState?.Snapshot.Editor, editor))
+                    {
+                        CloseEditorCompletion("Document tab closed");
+                    }
+                }
+                _documentSessionsByTab.Remove(tab, out var session);
+                if (session is not null) session.EditorMutationCommitted -= EditorDocumentSession_EditorMutationCommitted;
+                session?.Dispose();
+            }
+        }
 
         public DebugOutputPresentationModel DebugOutputPresentation => _debugOutputPresentation;
 
@@ -1150,6 +1183,67 @@ namespace PS7ScriptDesk.Shell
                     }));
         }
 
+        private void ConsoleHeaderBorder_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            UpdateEffectiveConsoleMinimumHeight("ConsoleHeaderSizeChanged");
+        }
+
+        private void UpdateEffectiveConsoleMinimumHeight(string source)
+        {
+            var headerHeight = ConsoleHeaderBorder.ActualHeight;
+            if (headerHeight <= 0)
+            {
+                headerHeight = ConsoleHeaderBorder.DesiredSize.Height;
+            }
+
+            var chromeHeight = ConsolePaneBorder.Padding.Top + ConsolePaneBorder.Padding.Bottom
+                + ConsolePaneBorder.BorderThickness.Top + ConsolePaneBorder.BorderThickness.Bottom
+                + ConsoleHeaderBorder.Margin.Top + ConsoleHeaderBorder.Margin.Bottom
+                + headerHeight;
+            var minimumHeight = MinimumConsoleContentHeight + chromeHeight;
+            if (!double.IsFinite(minimumHeight) || minimumHeight < MinimumConsoleContentHeight)
+            {
+                return;
+            }
+
+            var changed = Math.Abs(_effectiveMinimumConsoleHeight - minimumHeight) > 0.5;
+            var previousConsoleHeight = _lastKnownConsoleHeight;
+            _effectiveMinimumConsoleHeight = minimumHeight;
+            _lastKnownConsoleHeight = Math.Max(_lastKnownConsoleHeight, minimumHeight);
+            SetConsoleRowMinimumHeight();
+
+            if (changed)
+            {
+                DeveloperDiagnostics.LogInfo(
+                    "UI",
+                    "Effective console minimum updated from measured console content and layout chrome.",
+                    new Dictionary<string, object?>
+                    {
+                        ["source"] = source,
+                        ["contentMinimum"] = MinimumConsoleContentHeight,
+                        ["headerHeight"] = headerHeight,
+                        ["consolePaddingVertical"] = ConsolePaneBorder.Padding.Top + ConsolePaneBorder.Padding.Bottom,
+                        ["consoleBorderVertical"] = ConsolePaneBorder.BorderThickness.Top + ConsolePaneBorder.BorderThickness.Bottom,
+                        ["headerMarginVertical"] = ConsoleHeaderBorder.Margin.Top + ConsoleHeaderBorder.Margin.Bottom,
+                        ["effectiveConsoleMinimum"] = minimumHeight,
+                        ["savedConsoleHeightRaisedToMinimum"] = previousConsoleHeight < minimumHeight
+                    });
+            }
+        }
+
+        private void SetConsoleRowMinimumHeight()
+        {
+            var isHorizontalConsoleLayout = _workspaceLayoutMode is WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit;
+            var dockedBottomToolHeight = isHorizontalConsoleLayout
+                && BottomToolWindowBorder.Visibility == Visibility.Visible
+                && !_isBottomToolWindowFloating
+                    ? BottomToolWindowSplitterThickness + Math.Max(_lastKnownBottomToolWindowHeight, MinimumBottomToolWindowHeight)
+                    : 0;
+            ConsoleRowDefinition.MinHeight = isHorizontalConsoleLayout
+                ? EffectiveMinimumConsoleHeight + dockedBottomToolHeight
+                : 0;
+        }
+
         private Dictionary<string, object?> BuildResizeLayoutDiagnostics(
             string source,
             Dictionary<string, object?>? additional = null)
@@ -1381,6 +1475,9 @@ namespace PS7ScriptDesk.Shell
 
         private void DrainTerminalOutputForRenderer()
         {
+            var drainStartedAt = Stopwatch.GetTimestamp();
+            var drainedEnvelopeCount = 0;
+            long drainedCharacterCount = 0;
             TerminalCriticalTrace.LogStage(
                 "DISPATCHER_CALLBACK_ENTER",
                 new Dictionary<string, object?>
@@ -1400,6 +1497,8 @@ namespace PS7ScriptDesk.Shell
                 while (_terminalOutputEnvelopeQueue.TryDequeue(out var envelope))
                 {
                     Interlocked.Decrement(ref _terminalOutputQueuedEnvelopeCount);
+                    drainedEnvelopeCount++;
+                    drainedCharacterCount += envelope.Payload.Length;
                     try
                     {
                         TerminalCriticalTrace.LogStage(
@@ -1414,18 +1513,19 @@ namespace PS7ScriptDesk.Shell
                             TerminalCriticalTrace.LogStage(
                                 "MainWindow.DrainTerminalOutputForRenderer.EnvelopeEnd",
                                 CreateTerminalEnvelopeMetadata(envelope));
-                            continue;
                         }
-
-                        TerminalOutputCorrelationTrace.Record(
-                            "WpfEnvelopeDrainedToTerminalControl",
-                            envelope.RendererGeneration,
-                            envelope.Payload,
-                            envelopeSequence: envelope.Sequence);
-                        TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload);
-                        TerminalCriticalTrace.LogStage(
-                            "MainWindow.DrainTerminalOutputForRenderer.EnvelopeEnd",
-                            CreateTerminalEnvelopeMetadata(envelope));
+                        else
+                        {
+                            TerminalOutputCorrelationTrace.Record(
+                                "WpfEnvelopeDrainedToTerminalControl",
+                                envelope.RendererGeneration,
+                                envelope.Payload,
+                                envelopeSequence: envelope.Sequence);
+                            TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload);
+                            TerminalCriticalTrace.LogStage(
+                                "MainWindow.DrainTerminalOutputForRenderer.EnvelopeEnd",
+                                CreateTerminalEnvelopeMetadata(envelope));
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -1451,6 +1551,13 @@ namespace PS7ScriptDesk.Shell
                                 ["contentOmitted"] = true
                             });
                     }
+
+                    if (drainedEnvelopeCount >= MaximumTerminalOutputDrainEnvelopes ||
+                        drainedCharacterCount >= MaximumTerminalOutputDrainCharacters ||
+                        Stopwatch.GetElapsedTime(drainStartedAt).TotalMilliseconds >= MaximumTerminalOutputDrainMilliseconds)
+                    {
+                        break;
+                    }
                 }
             }
             finally
@@ -1460,6 +1567,12 @@ namespace PS7ScriptDesk.Shell
                     new Dictionary<string, object?>
                     {
                         ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
+                        ["drainedEnvelopeCount"] = drainedEnvelopeCount,
+                        ["drainedCharacterCount"] = drainedCharacterCount,
+                        ["elapsedMilliseconds"] = Stopwatch.GetElapsedTime(drainStartedAt).TotalMilliseconds,
+                        ["drainBudgetEnvelopes"] = MaximumTerminalOutputDrainEnvelopes,
+                        ["drainBudgetCharacters"] = MaximumTerminalOutputDrainCharacters,
+                        ["drainBudgetMilliseconds"] = MaximumTerminalOutputDrainMilliseconds,
                         ["queueIsEmpty"] = _terminalOutputEnvelopeQueue.IsEmpty
                     });
                 TerminalCriticalTrace.LogStage(
@@ -1595,6 +1708,7 @@ namespace PS7ScriptDesk.Shell
 
             try
             {
+                UpdateEffectiveConsoleMinimumHeight("WindowLoaded");
                 ApplyShellLayoutFromSettings();
                 // Apply saved theme (5B) and zoom (2B) before anything is shown.
                 _themeService.ApplyTheme(ViewModel?.CurrentThemeName ?? "Dark");
@@ -2567,8 +2681,9 @@ namespace PS7ScriptDesk.Shell
                     !editorTextEditor.IsLoaded ||
                     !ReferenceEquals(editorTextEditor.DataContext, targetTab) ||
                     editorTextEditor.Document is null ||
-                    !_documentByTab.TryGetValue(targetTab, out var targetDocument) ||
-                    !ReferenceEquals(editorTextEditor.Document, targetDocument) ||
+                    !_documentSessionsByTab.TryGetValue(targetTab, out var targetSession) ||
+                    targetSession.IsDisposed ||
+                    !ReferenceEquals(editorTextEditor.Document, targetSession.Document) ||
                     !_tabByEditor.TryGetValue(editorTextEditor, out var registeredTab) ||
                     !ReferenceEquals(registeredTab, targetTab) ||
                     !_foldingManagers.ContainsKey(editorTextEditor))
@@ -2887,6 +3002,39 @@ namespace PS7ScriptDesk.Shell
             UpdateEditorCaretMetrics(editorTextEditor);
         }
 
+        private void EditorDocumentSession_EditorMutationCommitted(object? sender, EventArgs e)
+        {
+            if (sender is not EditorDocumentSession session) return;
+            var tab = ViewModel?.OpenTabs.FirstOrDefault(candidate =>
+                candidate.DiagnosticDocument.DocumentId == session.DocumentId);
+            if (tab is null || !_editorByTab.TryGetValue(tab, out var editor)) return;
+            HandleEditorDocumentMutationCommitted(tab, editor);
+        }
+
+        private void HandleEditorDocumentMutationCommitted(EditorTabViewModel tab, TextEditor editor)
+        {
+            RefreshDebugStaleTabState("EditorDocumentChanged");
+            _liveAnalyzerEligibleRevisions.Add((tab.DiagnosticDocument.DocumentId, tab.DiagnosticDocument.Revision));
+
+            if (tab.CurrentDebugLine <= 0) return;
+            var clearedLine = tab.CurrentDebugLine;
+            tab.ClearCurrentDebugLine();
+            editor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+            RefreshBreakpointGlyphMargin(editor);
+            DeveloperDiagnostics.LogDecision(
+                "Debugger",
+                "ExecutionHighlight",
+                "Current execution highlight was cleared because the visible editor buffer changed.",
+                "ClearedOnDocumentEdit",
+                new Dictionary<string, object?>
+                {
+                    ["editorLineCleared"] = clearedLine,
+                    ["editorRevision"] = tab.DiagnosticDocument.Revision,
+                    ["debugSessionState"] = _debugSession?.CurrentState.ToString(),
+                    ["reason"] = "The current editor revision can no longer be treated as the runtime source revision."
+                });
+        }
+
         private void EditorTextEditor_TextChanged(object? sender, EventArgs e)
         {
             if (sender is not TextEditor editorTextEditor)
@@ -2932,35 +3080,36 @@ namespace PS7ScriptDesk.Shell
             if (!_editorTextSynchronizationInProgress.Contains(editorTextEditor) &&
                 editorTextEditor.DataContext is EditorTabViewModel tab)
             {
-                var editorText = editorTextEditor.Text ?? string.Empty;
-                var contentChanged = !string.Equals(tab.Content, editorText, StringComparison.Ordinal);
                 var lineCount = editorTextEditor.Document?.LineCount ?? 1;
-                tab.UpdateContentFromEditor(editorText, lineCount);
-                if (contentChanged)
+                bool contentChanged;
+                if (_documentSessionsByTab.TryGetValue(tab, out var documentSession))
+                {
+                    contentChanged = documentSession.CommitEditorMutation(lineCount);
+                }
+                else
+                {
+                    if (DeveloperDiagnostics.IsEnabled)
+                    {
+                        DeveloperDiagnostics.LogDecision("EditorSession", "ContentSynchronization",
+                            "Registered editor had no document session; the R48 mirror path was used.",
+                            "MissingSession", new Dictionary<string, object?>
+                            {
+                                ["documentId"] = tab.DiagnosticDocument.DocumentId,
+                                ["documentLength"] = documentLengthAfter
+                            });
+                    }
+                    var editorText = editorTextEditor.Text ?? string.Empty;
+                    contentChanged = !string.Equals(tab.Content, editorText, StringComparison.Ordinal);
+                    tab.UpdateContentFromEditor(editorText, lineCount);
+                }
+                if (contentChanged && !_documentSessionsByTab.ContainsKey(tab))
                 {
                     RefreshDebugStaleTabState("EditorDocumentChanged");
                 }
                 contentSynchronizationExecuted = true;
-                if (contentChanged) _liveAnalyzerEligibleRevisions.Add((tab.DiagnosticDocument.DocumentId, tab.DiagnosticDocument.Revision));
-
-                if (contentChanged && tab.CurrentDebugLine > 0)
+                if (contentChanged && !_documentSessionsByTab.ContainsKey(tab))
                 {
-                    var clearedLine = tab.CurrentDebugLine;
-                    tab.ClearCurrentDebugLine();
-                    editorTextEditor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
-                    RefreshBreakpointGlyphMargin(editorTextEditor);
-                    DeveloperDiagnostics.LogDecision(
-                        "Debugger",
-                        "ExecutionHighlight",
-                        "Current execution highlight was cleared because the visible editor buffer changed.",
-                        "ClearedOnDocumentEdit",
-                        new Dictionary<string, object?>
-                        {
-                            ["editorLineCleared"] = clearedLine,
-                            ["editorRevision"] = tab.DiagnosticDocument.Revision,
-                            ["debugSessionState"] = _debugSession?.CurrentState.ToString(),
-                            ["reason"] = "The current editor revision can no longer be treated as the runtime source revision."
-                        });
+                    HandleEditorDocumentMutationCommitted(tab, editorTextEditor);
                 }
             }
             contentSynchronizationStopwatch?.Stop();
@@ -3119,7 +3268,12 @@ namespace PS7ScriptDesk.Shell
             // recreating the popup after every typed character.
             if (ch == '$' || ch == '-' || ch == '.' || ch == ':' || ch == '\\' || ch == '/')
             {
-                ShowCompletionAsync(editorTextEditor, autoTriggered: false, includeEngine: ch is '-' or '.' or ':' or '\\' or '/');
+                var includeEngine = ch is '-' or '.' or ':' or '\\' or '/';
+                ShowCompletionAsync(
+                    editorTextEditor,
+                    autoTriggered: false,
+                    includeEngine,
+                    providerOnly: includeEngine);
             }
             else if (_activeCompletionWindow is null && char.IsLetter(ch))
             {
@@ -3128,7 +3282,7 @@ namespace PS7ScriptDesk.Shell
                     IsCaretInsideParameterToken(editorTextEditor);
                 if (isParameterToken)
                 {
-                    ShowCompletionAsync(editorTextEditor, autoTriggered: true, includeEngine: isParameterToken);
+                    ShowCompletionAsync(editorTextEditor, autoTriggered: true, includeEngine: isParameterToken, providerOnly: isParameterToken);
                 }
                 else if (fragment.Length >= 2)
                 {
@@ -3300,18 +3454,93 @@ namespace PS7ScriptDesk.Shell
                 SetTerminalActive(false, "EditorPreviewKeyDownFocusedEditor");
             }
 
-            if (_activeCompletionWindow is not null && modifiers == ModifierKeys.None && key is Key.Tab or Key.Enter)
+            var isMultilineTab = HasMultiLineEditorSelection(editorTextEditor);
+            var isForwardCompletionTab = modifiers == ModifierKeys.None && key == Key.Tab && !isMultilineTab;
+            var isReverseCompletionTab = modifiers == ModifierKeys.Shift && key == Key.Tab && !isMultilineTab;
+
+            if (_activeCompletionWindow is { } completionWindowForEnter &&
+                HasCompletionWindowFor(editorTextEditor) && modifiers == ModifierKeys.None && key == Key.Enter)
             {
-                if (_activeCompletionWindow.CompletionList.SelectedItem is not null)
+                if (completionWindowForEnter.CompletionList.SelectedItem is not null)
                 {
                     e.Handled = true;
                     AppLogger.Debug("EditorCompletion", $"Completion commit requested by key. Key={key}, SelectionActive=true.");
-                    _activeCompletionWindow.CompletionList.RequestInsertion(e);
+                    completionWindowForEnter.CompletionList.RequestInsertion(e);
                 }
                 return;
             }
 
-            if (_activeCompletionWindow is not null && modifiers == ModifierKeys.None && key == Key.Escape)
+            if (isForwardCompletionTab &&
+                _activeCompletionWindow is { IsVisible: true } completionWindowForTab &&
+                HasCompletionWindowFor(editorTextEditor))
+            {
+                e.Handled = true;
+                var selectedItem = completionWindowForTab.CompletionList.SelectedItem;
+                var selectedIndex = completionWindowForTab.CompletionList.ListBox.SelectedIndex;
+                var hadPendingCycle = _pendingCompletionCycle is not null;
+                var hadCycleSession = _completionCycleSession is not null;
+
+                var popupSnapshot = CompletionRequestSnapshot.Capture(this, editorTextEditor);
+                if (selectedItem is PowerShellCompletionData selectedCompletionData &&
+                    TryCreateCompletionCycleSession(editorTextEditor, popupSnapshot, completionWindowForTab, out var popupCycleSession) &&
+                    popupCycleSession.TryFindCandidateIndex(selectedCompletionData.Text, out var selectedCandidateIndex))
+                {
+                    _completionCycleSession = popupCycleSession;
+                    CloseCompletionWindowIfShown(completionWindowForTab);
+                    ApplyCompletionCycleCandidate(editorTextEditor, popupCycleSession, selectedCandidateIndex);
+                    AppLogger.Debug(
+                        "EditorCompletion",
+                        $"Completion cycle started from popup selection. Key={key}, SelectedIndex={selectedIndex}, CandidateCount={popupCycleSession.Count}.");
+                }
+                else
+                {
+                    if (selectedItem is not null)
+                    {
+                        AppLogger.Debug("EditorCompletion", "Popup Tab used the standard insertion path because the selected item could not join a cycle.");
+                        completionWindowForTab.CompletionList.RequestInsertion(e);
+                    }
+                    else
+                    {
+                        AppLogger.Debug("EditorCompletion", "Popup Tab acceptance skipped because no completion item was selected.");
+                    }
+                    _completionCycleSession = null;
+                }
+                _pendingCompletionCycle = null;
+
+                EditorInputTrace.Log("CompletionPopupTabAcceptance", inputTraceId, new Dictionary<string, object?>
+                {
+                    ["requestId"] = _completionRequestState?.RequestId,
+                    ["accepted"] = selectedItem is not null,
+                    ["selectedIndex"] = selectedIndex,
+                    ["itemCount"] = completionWindowForTab.CompletionList.CompletionData.Count,
+                    ["hadPendingCycle"] = hadPendingCycle,
+                    ["hadCycleSession"] = hadCycleSession,
+                    ["cycleStarted"] = _completionCycleSession is not null,
+                    ["caretOffsetAfter"] = editorTextEditor.CaretOffset
+                });
+                return;
+            }
+
+            if (isForwardCompletionTab &&
+                (HasCompletionWindowFor(editorTextEditor) || ReferenceEquals(_pendingCompletionCycle?.Snapshot.Editor, editorTextEditor) || IsCompletionCycleSessionCurrent(editorTextEditor) || HasCompletionContext(editorTextEditor)))
+            {
+                e.Handled = true;
+                _ = HandleCompletionCycleKeyAsync(editorTextEditor, direction: 1);
+                return;
+            }
+
+            if (isReverseCompletionTab &&
+                (HasCompletionWindowFor(editorTextEditor) || ReferenceEquals(_pendingCompletionCycle?.Snapshot.Editor, editorTextEditor) || IsCompletionCycleSessionCurrent(editorTextEditor)))
+            {
+                e.Handled = true;
+                _ = HandleCompletionCycleKeyAsync(editorTextEditor, direction: -1);
+                return;
+            }
+
+            if ((HasCompletionWindowFor(editorTextEditor) ||
+                 ReferenceEquals(_pendingCompletionCycle?.Snapshot.Editor, editorTextEditor) ||
+                 (_completionRequestState is { Task.IsCompleted: false } pendingRequest && ReferenceEquals(pendingRequest.Snapshot.Editor, editorTextEditor))) &&
+                modifiers == ModifierKeys.None && key == Key.Escape)
             {
                 e.Handled = true;
                 CloseEditorCompletion("Escape pressed");
@@ -4745,12 +4974,13 @@ namespace PS7ScriptDesk.Shell
 
         private void ApplyHorizontalConsoleRegionHeight(bool dockedBottomToolVisible)
         {
+            SetConsoleRowMinimumHeight();
             if (_workspaceLayoutMode is not (WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit))
             {
                 return;
             }
 
-            var consoleHeight = Math.Max(_lastKnownConsoleHeight, MinimumConsoleHeight);
+            var consoleHeight = Math.Max(_lastKnownConsoleHeight, EffectiveMinimumConsoleHeight);
             if (dockedBottomToolVisible)
             {
                 consoleHeight += BottomToolWindowSplitterThickness + Math.Max(_lastKnownBottomToolWindowHeight, MinimumBottomToolWindowHeight);
@@ -5885,6 +6115,10 @@ namespace PS7ScriptDesk.Shell
             if (_tabByEditor.TryGetValue(editorTextEditor, out var previousTab))
             {
                 previousTab.PropertyChanged -= EditorTab_PropertyChanged;
+                if (_documentSessionsByTab.TryGetValue(previousTab, out var previousSession))
+                {
+                    previousSession.Unregister();
+                }
                 if (_breakpointTrackers.Remove(previousTab, out var previousBreakpointTracker))
                 {
                     previousBreakpointTracker.Dispose();
@@ -5898,11 +6132,14 @@ namespace PS7ScriptDesk.Shell
             tab.PropertyChanged -= EditorTab_PropertyChanged;
             tab.PropertyChanged += EditorTab_PropertyChanged;
 
-            if (!_documentByTab.TryGetValue(tab, out var document))
+            if (!_documentSessionsByTab.TryGetValue(tab, out var session))
             {
-                document = new TextDocument(tab.Content ?? string.Empty);
-                _documentByTab[tab] = document;
+                session = new EditorDocumentSession(tab, Dispatcher);
+                session.EditorMutationCommitted += EditorDocumentSession_EditorMutationCommitted;
+                _documentSessionsByTab[tab] = session;
             }
+            session.Register();
+            var document = session.Document;
 
             try
             {
@@ -5959,7 +6196,7 @@ namespace PS7ScriptDesk.Shell
                 foldingManager = FoldingManager.Install(editorTextEditor.TextArea);
                 _foldingManagers[editorTextEditor] = foldingManager;
             }
-            _foldingStrategy.UpdateFoldings(foldingManager, editorTextEditor.Document);
+            ScheduleFolding(editorTextEditor);
 
             editorTextEditor.TextArea.TextView.MouseMove -= OnTextViewMouseMove;
             editorTextEditor.TextArea.TextView.MouseMove += OnTextViewMouseMove;
@@ -6070,71 +6307,178 @@ namespace PS7ScriptDesk.Shell
         {
             if (_foldingCancellationSources.TryGetValue(editorTextEditor, out var cts))
             {
-                cts.Cancel();
-                cts.Dispose();
                 _foldingCancellationSources.Remove(editorTextEditor);
+                try { cts.Cancel(); }
+                catch (ObjectDisposedException) { }
             }
         }
 
         private void ScheduleFolding(TextEditor editorTextEditor)
         {
-            if (editorTextEditor.Document is null || !_foldingManagers.ContainsKey(editorTextEditor))
+            if (editorTextEditor.Document is null ||
+                !_foldingManagers.TryGetValue(editorTextEditor, out var foldingManager) ||
+                editorTextEditor.DataContext is not EditorTabViewModel tab ||
+                !_documentSessionsByTab.TryGetValue(tab, out var session) ||
+                !session.IsRegistered)
             {
                 return;
             }
 
             CancelPendingFolding(editorTextEditor);
-
-            var cts = new CancellationTokenSource();
-            var token = cts.Token;
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(session.LifetimeToken);
             _foldingCancellationSources[editorTextEditor] = cts;
             var registrationVersion = _editorRegistrationVersions.TryGetValue(editorTextEditor, out var version) ? version : 0;
+            var requestGeneration = _foldingRequestGenerations.TryGetValue(editorTextEditor, out var generation)
+                ? generation + 1
+                : 1;
+            _foldingRequestGenerations[editorTextEditor] = requestGeneration;
+            var scheduleStopwatch = Stopwatch.StartNew();
+            scheduleStopwatch.Stop();
+            if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+            {
+                DeveloperDiagnostics.LogDebug("EditorFolding", "Folding request scheduled.", new Dictionary<string, object?>
+                {
+                    ["documentId"] = tab.DiagnosticDocument.DocumentId,
+                    ["revision"] = session.Revision,
+                    ["registrationGeneration"] = session.RegistrationGeneration,
+                    ["editorRegistrationVersion"] = registrationVersion,
+                    ["requestGeneration"] = requestGeneration,
+                    ["scheduleMicroseconds"] = scheduleStopwatch.ElapsedTicks * 1_000_000d / Stopwatch.Frequency
+                });
+            }
 
-            _ = ObserveFireAndForget(Task.Run(async () =>
+            _ = ObserveFireAndForget(ProcessFoldingRequestAsync(
+                editorTextEditor, tab, session, foldingManager, registrationVersion, requestGeneration, cts),
+                "editor folding update",
+                new Dictionary<string, object?>
+                {
+                    ["editorRegistrationVersion"] = registrationVersion,
+                    ["requestGeneration"] = requestGeneration,
+                    ["editorIdentity"] = RuntimeHelpers.GetHashCode(editorTextEditor)
+                });
+        }
+
+        private async Task ProcessFoldingRequestAsync(
+            TextEditor editor,
+            EditorTabViewModel tab,
+            EditorDocumentSession session,
+            FoldingManager manager,
+            int registrationVersion,
+            long requestGeneration,
+            CancellationTokenSource cancellation)
+        {
+            var token = cancellation.Token;
+            EditorDocumentSnapshot? snapshot = null;
+            try
+            {
+                await Task.Delay(EditorFoldingDebounceMilliseconds, token).ConfigureAwait(false);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (token.IsCancellationRequested ||
+                        !IsFoldingRequestCurrent(editor, tab, session, manager, registrationVersion, requestGeneration, cancellation))
+                        return;
+                    snapshot = session.CaptureSnapshot();
+                }, DispatcherPriority.Background);
+
+                if (snapshot is null || token.IsCancellationRequested) return;
+
+                var calculationSnapshot = snapshot;
+                var calculationStopwatch = Stopwatch.StartNew();
+                var ranges = await Task.Run(
+                    () => _foldingStrategy.CreateFoldings(calculationSnapshot.MaterializeText(), token), token).ConfigureAwait(false);
+                calculationStopwatch.Stop();
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (token.IsCancellationRequested ||
+                        !IsFoldingRequestCurrent(editor, tab, session, manager, registrationVersion, requestGeneration, cancellation) ||
+                        !session.IsRegistrationCurrent(snapshot))
+                    {
+                        if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+                            DeveloperDiagnostics.LogDebug("EditorFolding", "Stale folding result rejected.", new Dictionary<string, object?>
+                            {
+                                ["documentId"] = snapshot.DocumentId,
+                                ["revision"] = snapshot.Revision,
+                                ["requestGeneration"] = requestGeneration
+                            });
+                        return;
+                    }
+
+                    var applyStopwatch = Stopwatch.StartNew();
+                    manager.UpdateFoldings(ranges.Select(range =>
+                    {
+                        var folding = new NewFolding(range.StartOffset, range.EndOffset);
+                        if (range.Name is not null) folding.Name = range.Name;
+                        return folding;
+                    }), -1);
+                    applyStopwatch.Stop();
+                    if (DeveloperDiagnostics.IsEnabled)
+                        DeveloperDiagnostics.LogInfo("EditorFolding", "Folding result applied.", new Dictionary<string, object?>
+                        {
+                            ["documentId"] = snapshot.DocumentId,
+                            ["revision"] = snapshot.Revision,
+                            ["foldCount"] = ranges.Count,
+                            ["calculationMilliseconds"] = calculationStopwatch.Elapsed.TotalMilliseconds,
+                            ["dispatcherApplyMilliseconds"] = applyStopwatch.Elapsed.TotalMilliseconds,
+                            ["requestGeneration"] = requestGeneration
+                        });
+                }, DispatcherPriority.Background);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
+                    DeveloperDiagnostics.LogDebug("EditorFolding", "Folding request canceled.", new Dictionary<string, object?>
+                    {
+                        ["requestGeneration"] = requestGeneration,
+                        ["documentId"] = tab.DiagnosticDocument.DocumentId
+                    });
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("EditorFolding", ex, "Folding request failed.", new Dictionary<string, object?>
+                {
+                    ["documentId"] = tab.DiagnosticDocument.DocumentId,
+                    ["revision"] = snapshot?.Revision,
+                    ["requestGeneration"] = requestGeneration
+                });
+            }
+            finally
             {
                 try
                 {
-                    await Task.Delay(EditorFoldingDebounceMilliseconds, token).ConfigureAwait(false);
-
-                    await Dispatcher.InvokeAsync(() =>
-                    {
-                        if (token.IsCancellationRequested)
-                        {
-                            return;
-                        }
-
-                        if (!_editorRegistrationVersions.TryGetValue(editorTextEditor, out var currentVersion) ||
-                            currentVersion != registrationVersion ||
-                            !_foldingManagers.TryGetValue(editorTextEditor, out var foldingManager) ||
-                            editorTextEditor.Document is null)
-                        {
-                            return;
-                        }
-
-                        _foldingStrategy.UpdateFoldings(foldingManager, editorTextEditor.Document);
-                    });
-                }
-                catch (OperationCanceledException) { }
-                finally
-                {
-                    try
-                    {
+                    if (!Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished)
                         await Dispatcher.InvokeAsync(() =>
                         {
-                            if (_foldingCancellationSources.TryGetValue(editorTextEditor, out var active) && ReferenceEquals(active, cts))
-                            {
-                                _foldingCancellationSources.Remove(editorTextEditor);
-                                active.Dispose();
-                            }
-                        });
-                    }
-                    catch { /* Application is closing or dispatcher is unavailable. */ }
+                            if (_foldingCancellationSources.TryGetValue(editor, out var active) && ReferenceEquals(active, cancellation))
+                                _foldingCancellationSources.Remove(editor);
+                        }, DispatcherPriority.Background);
                 }
-            }, token), "editor folding update", new Dictionary<string, object?>
-            {
-                ["editorRegistrationVersion"] = registrationVersion,
-                ["editorIdentity"] = RuntimeHelpers.GetHashCode(editorTextEditor)
-            });
+                catch (InvalidOperationException) { }
+                catch (TaskCanceledException) { }
+                cancellation.Dispose();
+            }
+        }
+
+        private bool IsFoldingRequestCurrent(
+            TextEditor editor,
+            EditorTabViewModel tab,
+            EditorDocumentSession session,
+            FoldingManager manager,
+            int registrationVersion,
+            long requestGeneration,
+            CancellationTokenSource cancellation)
+        {
+            return !cancellation.IsCancellationRequested &&
+                   !session.IsDisposed &&
+                   session.IsRegistered &&
+                   ReferenceEquals(editor.DataContext, tab) &&
+                   ReferenceEquals(editor.Document, session.Document) &&
+                   _documentSessionsByTab.TryGetValue(tab, out var currentSession) && ReferenceEquals(currentSession, session) &&
+                   _editorByTab.TryGetValue(tab, out var currentEditor) && ReferenceEquals(currentEditor, editor) &&
+                   _foldingManagers.TryGetValue(editor, out var currentManager) && ReferenceEquals(currentManager, manager) &&
+                   _foldingCancellationSources.TryGetValue(editor, out var activeCancellation) && ReferenceEquals(activeCancellation, cancellation) &&
+                   _editorRegistrationVersions.TryGetValue(editor, out var currentVersion) && currentVersion == registrationVersion &&
+                   _foldingRequestGenerations.TryGetValue(editor, out var currentGeneration) && currentGeneration == requestGeneration;
         }
 
         private static void EnsureBackgroundRendererAttached(TextEditor editorTextEditor, IBackgroundRenderer renderer)
@@ -6252,7 +6596,12 @@ namespace PS7ScriptDesk.Shell
                 _editorTextSynchronizationInProgress.Add(editorTextEditor);
                 if (editorTextEditor.Document is null)
                 {
-                    editorTextEditor.Document = new TextDocument(targetText);
+                    if (editorTextEditor.DataContext is not EditorTabViewModel tab ||
+                        !_documentSessionsByTab.TryGetValue(tab, out var session))
+                    {
+                        throw new InvalidOperationException("The editor has no registered document session.");
+                    }
+                    editorTextEditor.Document = session.Document;
                 }
                 else
                 {
@@ -6277,16 +6626,16 @@ namespace PS7ScriptDesk.Shell
 
             if (_tabByEditor.TryGetValue(editorTextEditor, out var tab))
             {
+                if (_documentSessionsByTab.TryGetValue(tab, out var session))
+                {
+                    session.Unregister();
+                }
                 CaptureEditorViewState(editorTextEditor, tab);
                 _liveAnalyzerEligibleRevisions.RemoveWhere(item => item.DocumentId == tab.DiagnosticDocument.DocumentId);
                 _scriptDiagnosticStore.ClearDocument(tab.DiagnosticDocument.DocumentId);
                 tab.PropertyChanged -= EditorTab_PropertyChanged;
                 _editorByTab.Remove(tab);
                 _tabByEditor.Remove(editorTextEditor);
-                if (ViewModel is null || !ViewModel.OpenTabs.Contains(tab))
-                {
-                    _documentByTab.Remove(tab);
-                }
             }
 
             if (_breakpointRenderers.TryGetValue(editorTextEditor, out var renderer))
@@ -6355,7 +6704,16 @@ namespace PS7ScriptDesk.Shell
 
             if (e.PropertyName == nameof(EditorTabViewModel.Content))
             {
+                if (tab.IsEditorDocumentMutationNotification)
+                {
+                    return;
+                }
+
                 SynchronizeEditorTextFromViewModel(editorTextEditor, tab.Content);
+                if (_documentSessionsByTab.TryGetValue(tab, out var session))
+                {
+                    session.CompleteProgrammaticSynchronization();
+                }
                 if (ViewModel is not null && ReferenceEquals(ViewModel.SelectedTab, tab))
                 {
                     RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
@@ -6602,7 +6960,8 @@ namespace PS7ScriptDesk.Shell
         {
             var hadPendingRequest = _activeCompletionCts is not null;
             var hadCompletionWindow = _activeCompletionWindow is not null;
-            if (!hadPendingRequest && !hadCompletionWindow)
+            var hadCycle = _completionCycleSession is not null || _pendingCompletionCycle is not null;
+            if (!hadPendingRequest && !hadCompletionWindow && !hadCycle)
             {
                 return;
             }
@@ -6617,6 +6976,17 @@ namespace PS7ScriptDesk.Shell
 
             _activeCompletionWindow?.Close();
             _activeCompletionWindow = null;
+            _completionRequestState = null;
+            _pendingCompletionCycle = null;
+            _completionCycleSession = null;
+        }
+
+        private static void CloseCompletionWindowIfShown(CompletionWindow? window)
+        {
+            if (window?.IsVisible == true)
+            {
+                window.Close();
+            }
         }
 
         private string DescribeEditor(TextEditor editorTextEditor)
@@ -6644,15 +7014,284 @@ namespace PS7ScriptDesk.Shell
             ShowCompletionAsync(editorTextEditor, autoTriggered: false, includeEngine: true, forceCompletion: true);
         }
 
-        private async void ShowCompletionAsync(TextEditor editorTextEditor, bool autoTriggered, bool includeEngine = true, bool forceCompletion = false)
+        private Task<CompletionWindow?> ShowCompletionAsync(TextEditor editorTextEditor, bool autoTriggered, bool includeEngine = true, bool forceCompletion = false, bool showPopup = true, bool providerOnly = false)
         {
             if (ShouldSuppressEditorInputFeatures(editorTextEditor, "ShowCompletionAsync"))
+            {
+                return Task.FromResult<CompletionWindow?>(null);
+            }
+
+            var snapshot = CompletionRequestSnapshot.Capture(this, editorTextEditor);
+            if (_completionRequestState is { } existing &&
+                !existing.Task.IsCompleted &&
+                existing.Snapshot.Matches(snapshot) &&
+                (!includeEngine || existing.IncludeEngine) &&
+                (!providerOnly || existing.ProviderOnly) &&
+                (!forceCompletion || existing.ForceCompletion || (providerOnly && existing.ProviderOnly)))
+            {
+                EditorInputTrace.Log("CompletionRequestReused", properties: new Dictionary<string, object?>
+                {
+                    ["requestId"] = existing.RequestId,
+                    ["includeEngine"] = existing.IncludeEngine,
+                    ["caretOffset"] = snapshot.CaretOffset
+                });
+                return existing.Task;
+            }
+
+            _activeCompletionCts?.Cancel();
+            _activeCompletionCts?.Dispose();
+            _activeCompletionWindow?.Close();
+            _activeCompletionWindow = null;
+            _pendingCompletionCycle = null;
+            _completionCycleSession = null;
+
+            var cts = new CancellationTokenSource();
+            _activeCompletionCts = cts;
+            var requestId = $"EC-{Guid.NewGuid():N}";
+            var task = RunCompletionRequestAsync(
+                editorTextEditor,
+                autoTriggered,
+                includeEngine,
+                forceCompletion,
+                snapshot,
+                requestId,
+                cts,
+                showPopup,
+                providerOnly);
+            _completionRequestState = new CompletionRequestState(requestId, snapshot, includeEngine, forceCompletion, providerOnly, task);
+            return task;
+        }
+
+        private bool HasCompletionContext(TextEditor editor)
+        {
+            return editor.DataContext is EditorTabViewModel tab && tab.IsPowerShellDocument &&
+                   editor.Document is not null &&
+                   (GetCurrentWordFragment(editor).Length > 0 || IsCaretInsideParameterToken(editor));
+        }
+
+        private bool HasCompletionWindowFor(TextEditor editor)
+        {
+            return _activeCompletionWindow is not null &&
+                   _completionRequestState is { } request &&
+                   ReferenceEquals(request.Snapshot.Editor, editor);
+        }
+
+        private bool IsCompletionCycleSessionCurrent(TextEditor editor)
+        {
+            var session = _completionCycleSession;
+            var document = editor.Document;
+            return session is not null && document is not null &&
+                   ReferenceEquals(FindActiveEditor(), editor) &&
+                   session.IsValid(editor, document, document.Version, editor.CaretOffset);
+        }
+
+        private async Task HandleCompletionCycleKeyAsync(TextEditor editor, int direction)
+        {
+            if (editor.Document is null || editor.IsReadOnly || !ReferenceEquals(FindActiveEditor(), editor))
             {
                 return;
             }
 
+            var snapshot = CompletionRequestSnapshot.Capture(this, editor);
+            if (_pendingCompletionCycle is { } pending && pending.Snapshot.Matches(snapshot))
+            {
+                pending.QueuedDirectionDelta += direction;
+                EditorInputTrace.Log("CompletionCycleKeyQueued", properties: new Dictionary<string, object?>
+                {
+                    ["requestId"] = pending.RequestId,
+                    ["direction"] = direction,
+                    ["queuedDirectionDelta"] = pending.QueuedDirectionDelta
+                });
+                return;
+            }
+
+            if (IsCompletionCycleSessionCurrent(editor) && _completionCycleSession is { } activeSession)
+            {
+                ApplyCompletionCycleCandidate(editor, activeSession, activeSession.GetNextIndex(direction));
+                return;
+            }
+
+            if (_activeCompletionWindow is { } providerCompletionWindow &&
+                _completionRequestState?.ProviderOnly == true &&
+                HasCompletionWindowFor(editor) &&
+                TryCreateCompletionCycleSession(editor, snapshot, providerCompletionWindow, out var popupSession))
+            {
+                _completionCycleSession = popupSession;
+                ApplyCompletionCycleCandidate(editor, popupSession, popupSession.GetIndexAfterMoves(direction, queuedDirectionDelta: 0));
+                return;
+            }
+
+            var request = _completionRequestState;
+            Task<CompletionWindow?> requestTask;
+            if (request is not null && request.Snapshot.Matches(snapshot) && request.IncludeEngine && request.ProviderOnly)
+            {
+                requestTask = request.Task;
+            }
+            else
+            {
+                requestTask = ShowCompletionAsync(editor, autoTriggered: false, includeEngine: true, forceCompletion: true, showPopup: false, providerOnly: true);
+                request = _completionRequestState;
+            }
+
+            if (request is null)
+            {
+                if (direction > 0 && snapshot.IsCurrent(this)) editor.TextArea.PerformTextInput("\t");
+                return;
+            }
+
+            var cycle = new PendingCompletionCycle(request.RequestId, snapshot, requestTask, direction);
+            _pendingCompletionCycle = cycle;
+            EditorInputTrace.Log("CompletionCycleAwaitStarted", properties: new Dictionary<string, object?>
+            {
+                ["requestId"] = cycle.RequestId,
+                ["direction"] = direction,
+                ["caretOffset"] = snapshot.CaretOffset,
+                ["documentLength"] = snapshot.TextLength
+            });
+
+            CompletionWindow? window = null;
+            try
+            {
+                window = await requestTask.ConfigureAwait(true);
+            }
+            catch (OperationCanceledException)
+            {
+                // A newer request, Escape, or a context change owns the completion state now.
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("EditorCompletion", "Explicit Tab completion request failed.", ex);
+            }
+
+            if (!ReferenceEquals(_pendingCompletionCycle, cycle))
+            {
+                CloseCompletionWindowIfShown(window);
+                return;
+            }
+
+            _pendingCompletionCycle = null;
+            if (!snapshot.IsCurrent(this))
+            {
+                CloseCompletionWindowIfShown(window);
+                EditorInputTrace.Log("CompletionCycleResultRejectedAsStale", properties: new Dictionary<string, object?>
+                {
+                    ["requestId"] = cycle.RequestId,
+                    ["caretOffset"] = editor.CaretOffset,
+                    ["snapshotCaretOffset"] = snapshot.CaretOffset
+                });
+                return;
+            }
+
+            if (window is null || !TryCreateCompletionCycleSession(editor, snapshot, window, out var session))
+            {
+                CloseCompletionWindowIfShown(window);
+                if (direction > 0 && snapshot.IsCurrent(this))
+                {
+                    EditorInputTrace.Log("CompletionCycleFallbackToIndent", properties: new Dictionary<string, object?>
+                    {
+                        ["requestId"] = cycle.RequestId,
+                        ["reason"] = window is null ? "NoResults" : "NoCycleCandidates"
+                    });
+                    editor.TextArea.PerformTextInput("\t");
+                }
+                return;
+            }
+
+            CloseCompletionWindowIfShown(window);
+            _completionCycleSession = session;
+            var targetIndex = session.GetIndexAfterMoves(cycle.FirstDirection, cycle.QueuedDirectionDelta);
+            ApplyCompletionCycleCandidate(editor, session, targetIndex);
+        }
+
+        private bool TryCreateCompletionCycleSession(
+            TextEditor editor,
+            CompletionRequestSnapshot snapshot,
+            CompletionWindow window,
+            out EditorCompletionCycleSession session)
+        {
+            session = null!;
+            if (editor.Document is null || !snapshot.IsCurrent(this)) return false;
+
+            var items = window.CompletionList.CompletionData
+                .OfType<PowerShellCompletionData>()
+                .ToArray();
+            if (items.Length == 0) return false;
+
+            var first = items[0];
+            var start = first.ReplacementOffset;
+            var length = first.ReplacementLength;
+            if (start < 0 || length < 0 || start + length > snapshot.TextLength) return false;
+
+            // AvalonEdit's live completion segment includes characters typed after the request opened.
+            if (window.StartOffset >= 0 && window.StartOffset <= start &&
+                window.EndOffset >= start + length && window.EndOffset <= snapshot.CaretOffset)
+            {
+                length = window.EndOffset - start;
+            }
+
+            var candidates = items
+                .Where(item => item.ReplacementOffset == first.ReplacementOffset && item.ReplacementLength == first.ReplacementLength)
+                .Select(item => new EditorCompletionCycleCandidate(item.Text, start, length))
+                .ToArray();
+            if (candidates.Length == 0) return false;
+
+            session = new EditorCompletionCycleSession(
+                editor,
+                editor.Document,
+                editor.Document.Version,
+                snapshot.CaretOffset,
+                start,
+                length,
+                candidates);
+            return true;
+        }
+
+        private void ApplyCompletionCycleCandidate(TextEditor editor, EditorCompletionCycleSession session, int index)
+        {
+            var document = editor.Document;
+            if (document is null || !IsCompletionCycleSessionCurrent(editor))
+            {
+                _completionCycleSession = null;
+                return;
+            }
+
+            var replacementLength = session.GetCurrentReplacementLength();
+            if (!session.TryApplyCandidate(document, index, out var caretOffset))
+            {
+                _completionCycleSession = null;
+                return;
+            }
+
+            editor.CaretOffset = caretOffset;
+            _completionCycleSession = session;
+            EditorInputTrace.Log("CompletionCycleCandidateApplied", properties: new Dictionary<string, object?>
+            {
+                ["candidateIndex"] = index,
+                ["candidateCount"] = session.Count,
+                ["replacementOffset"] = session.ReplacementOffset,
+                ["replacementLength"] = replacementLength,
+                ["insertedLength"] = session.GetCurrentReplacementLength(),
+                ["caretOffset"] = caretOffset
+            });
+        }
+
+        private async Task<CompletionWindow?> RunCompletionRequestAsync(
+            TextEditor editorTextEditor,
+            bool autoTriggered,
+            bool includeEngine,
+            bool forceCompletion,
+            CompletionRequestSnapshot snapshot,
+            string completionRequestId,
+            CancellationTokenSource cts,
+            bool showPopup,
+            bool providerOnly)
+        {
+            if (ShouldSuppressEditorInputFeatures(editorTextEditor, "ShowCompletionAsync"))
+            {
+                return null;
+            }
+
             var inputTraceId = EditorInputTrace.CurrentCorrelationId;
-            var completionRequestId = $"EC-{Guid.NewGuid():N}";
             using var performanceScope = PerformanceTrace.Begin(
                 "IntelliSense",
                 "CompletionRequest",
@@ -6674,14 +7313,11 @@ namespace PS7ScriptDesk.Shell
                 ["forceCompletion"] = forceCompletion,
                 ["editorIdentity"] = GetEditorInputIdentity(editorTextEditor),
                 ["documentIdentity"] = GetEditorInputDocumentIdentity(editorTextEditor),
-                ["documentLength"] = editorTextEditor.Document?.TextLength,
+                ["documentVersionIdentity"] = RuntimeHelpers.GetHashCode(snapshot.DocumentVersion),
+                ["registrationVersion"] = snapshot.RegistrationVersion,
+                ["documentLength"] = snapshot.TextLength,
                 ["caretOffset"] = editorTextEditor.CaretOffset
             });
-
-            _activeCompletionCts?.Cancel();
-            _activeCompletionCts?.Dispose();
-            var cts = new CancellationTokenSource();
-            _activeCompletionCts = cts;
 
             try
             {
@@ -6703,12 +7339,17 @@ namespace PS7ScriptDesk.Shell
                 if (cts.Token.IsCancellationRequested)
                 {
                     AppLogger.Debug("EditorCompletion", $"Completion request canceled before popup generation began. AutoTriggered={autoTriggered}, ForceCompletion={forceCompletion}.");
-                    return;
+                    return null;
                 }
 
-                if (ShouldSuppressEditorInputFeatures(editorTextEditor, "ShowCompletionAsync.BeforePopup"))
+                if (ShouldSuppressEditorInputFeatures(editorTextEditor, "ShowCompletionAsync.BeforePopup") || !snapshot.IsCurrent(this))
                 {
-                    return;
+                    EditorInputTrace.Log("CompletionResultRejectedAsStale", inputTraceId, new Dictionary<string, object?>
+                    {
+                        ["completionRequestId"] = completionRequestId,
+                        ["phase"] = "before-provider"
+                    });
+                    return null;
                 }
 
                 _activeCompletionWindow?.Close();
@@ -6717,11 +7358,13 @@ namespace PS7ScriptDesk.Shell
                 var fragment = GetCurrentWordFragment(editorTextEditor);
                 var insideParameterToken = IsCaretInsideParameterToken(editorTextEditor);
                 var engineWaitMilliseconds = includeEngine
-                    ? (forceCompletion
+                    ? (providerOnly
                         ? (insideParameterToken ? 650 : 350)
-                        : (autoTriggered
-                        ? (IsCaretInsideParameterToken(editorTextEditor) ? 450 : 120)
-                        : 220))
+                        : forceCompletion
+                            ? (insideParameterToken ? 650 : 350)
+                            : autoTriggered
+                                ? (IsCaretInsideParameterToken(editorTextEditor) ? 450 : 120)
+                                : 220)
                     : 0;
 
                 AppLogger.Debug(
@@ -6734,7 +7377,9 @@ namespace PS7ScriptDesk.Shell
                         includeEngine,
                         engineWaitMilliseconds,
                         forceCompletion,
-                        cts.Token)
+                        cts.Token,
+                        providerOnly,
+                        snapshot.TextSource)
                     .ConfigureAwait(true);
 
                 EditorInputTrace.Log("CompletionResultReturned", inputTraceId, new Dictionary<string, object?>
@@ -6745,6 +7390,18 @@ namespace PS7ScriptDesk.Shell
                     ["focusedElementBeforePopup"] = Keyboard.FocusedElement?.GetType().Name
                 });
 
+                if (cts.Token.IsCancellationRequested || !snapshot.IsCurrent(this))
+                {
+                    CloseCompletionWindowIfShown(window);
+                    EditorInputTrace.Log("CompletionResultRejectedAsStale", inputTraceId, new Dictionary<string, object?>
+                    {
+                        ["completionRequestId"] = completionRequestId,
+                        ["phase"] = "after-provider",
+                        ["resultAvailable"] = window is not null
+                    });
+                    return null;
+                }
+
                 if (window is null)
                 {
                     AppLogger.Debug(
@@ -6752,13 +7409,18 @@ namespace PS7ScriptDesk.Shell
                         $"Completion request produced no popup. AutoTriggered={autoTriggered}, ForceCompletion={forceCompletion}, Fragment='{fragment}', InsideParameterToken={insideParameterToken}.");
                     if (!autoTriggered && ViewModel is not null)
                         ViewModel.StatusText = "No IntelliSense suggestions were available";
-                    return;
+                    return null;
                 }
 
                 if (ShouldSuppressEditorInputFeatures(editorTextEditor, "ShowCompletionAsync.AfterResults"))
                 {
-                    window.Close();
-                    return;
+                    CloseCompletionWindowIfShown(window);
+                    return null;
+                }
+
+                if (!showPopup)
+                {
+                    return window;
                 }
 
                 _activeCompletionWindow = window;
@@ -6770,7 +7432,10 @@ namespace PS7ScriptDesk.Shell
                         ["completionRequestId"] = completionRequestId,
                         ["focusedElementAfter"] = Keyboard.FocusedElement?.GetType().Name
                     });
-                    _activeCompletionWindow = null;
+                    if (ReferenceEquals(_activeCompletionWindow, window))
+                    {
+                        _activeCompletionWindow = null;
+                    }
                 };
                 EditorInputTrace.Log("CompletionPopupShowRequested", inputTraceId, new Dictionary<string, object?>
                 {
@@ -6787,6 +7452,7 @@ namespace PS7ScriptDesk.Shell
                 AppLogger.Debug(
                     "EditorCompletion",
                     $"Completion popup shown. AutoTriggered={autoTriggered}, ForceCompletion={forceCompletion}, Fragment='{fragment}', InsideParameterToken={insideParameterToken}, Items={window.CompletionList.CompletionData.Count}.");
+                return window;
             }
             catch (OperationCanceledException)
             {
@@ -6796,10 +7462,12 @@ namespace PS7ScriptDesk.Shell
                     ["elapsedMicroseconds"] = (Stopwatch.GetTimestamp() - completionStarted) * 1_000_000d / Stopwatch.Frequency
                 });
                 AppLogger.Debug("EditorCompletion", $"Completion request canceled while waiting for IntelliSense results. AutoTriggered={autoTriggered}, ForceCompletion={forceCompletion}.");
+                return null;
             }
             catch (ObjectDisposedException)
             {
                 AppLogger.Debug("EditorCompletion", $"Completion request aborted because the editor or completion window was disposed. AutoTriggered={autoTriggered}, ForceCompletion={forceCompletion}.");
+                return null;
             }
             catch (Exception ex)
             {
@@ -6809,6 +7477,7 @@ namespace PS7ScriptDesk.Shell
                 {
                     ViewModel.StatusText = "IntelliSense request failed.";
                 }
+                return null;
             }
         }
 
@@ -7115,18 +7784,18 @@ namespace PS7ScriptDesk.Shell
         private static string GetCurrentWordFragment(TextEditor editor)
         {
             if (editor.Document is null) return string.Empty;
-            var offset = editor.CaretOffset;
-            var text = editor.Text ?? string.Empty;
+            var document = editor.Document;
+            var offset = Math.Clamp(editor.CaretOffset, 0, document.TextLength);
             var start = offset;
             while (start > 0)
             {
-                var ch = text[start - 1];
+                var ch = document.GetCharAt(start - 1);
                 if (char.IsLetterOrDigit(ch) || ch == '_' || ch == '-' || ch == '$')
                     start--;
                 else
                     break;
             }
-            return text.Substring(start, offset - start);
+            return offset > start ? document.GetText(start, offset - start) : string.Empty;
         }
 
         private static bool IsCaretInsideParameterToken(TextEditor editor)
@@ -7136,12 +7805,12 @@ namespace PS7ScriptDesk.Shell
                 return false;
             }
 
-            var text = editor.Text ?? string.Empty;
-            var offset = Math.Clamp(editor.CaretOffset, 0, text.Length);
+            var document = editor.Document;
+            var offset = Math.Clamp(editor.CaretOffset, 0, document.TextLength);
             var start = offset;
             while (start > 0)
             {
-                var ch = text[start - 1];
+                var ch = document.GetCharAt(start - 1);
                 if (char.IsLetterOrDigit(ch) || ch == '_' || ch == '-')
                 {
                     start--;
@@ -7151,7 +7820,7 @@ namespace PS7ScriptDesk.Shell
                 break;
             }
 
-            return start < offset && text[start] == '-';
+            return start < offset && document.GetCharAt(start) == '-';
         }
 
         private static void ToggleCommentForEditor(TextEditor editor)
@@ -7207,6 +7876,8 @@ namespace PS7ScriptDesk.Shell
             }
 
             var selectedText = editorTextEditor.SelectedText;
+            var selectionStart = editorTextEditor.SelectionStart;
+            var selectionLength = editorTextEditor.SelectionLength;
 
             // Match legacy ISE behavior more closely: Run Selection/F8 runs selected
             // text when a selection exists; otherwise it runs the current line. This
@@ -7216,7 +7887,17 @@ namespace PS7ScriptDesk.Shell
             {
                 var caretLine = editorTextEditor.Document.GetLineByOffset(editorTextEditor.CaretOffset);
                 selectedText = editorTextEditor.Document.GetText(caretLine.Offset, caretLine.Length);
+                selectionStart = caretLine.Offset;
+                selectionLength = caretLine.Length;
             }
+
+            var sourceInfo = editorTextEditor.DataContext is EditorTabViewModel sourceTab
+                ? new EditorExecutionSourceInfo(
+                    sourceTab.DiagnosticDocument.DocumentId,
+                    sourceTab.DiagnosticDocument.Revision,
+                    selectionStart,
+                    selectionLength)
+                : null;
 
             using var scope = DeveloperDiagnostics.BeginScope(operationId: $"RunSelection-{Guid.NewGuid():N}");
             DeveloperDiagnostics.LogUserAction(
@@ -7228,7 +7909,7 @@ namespace PS7ScriptDesk.Shell
                     ["filePath"] = (editorTextEditor.DataContext as EditorTabViewModel)?.FilePath,
                     ["caretOffset"] = editorTextEditor.CaretOffset
                 });
-            await ViewModel.RunSelectionAsync(selectedText).ConfigureAwait(true);
+            await ViewModel.RunSelectionAsync(selectedText, sourceInfo).ConfigureAwait(true);
             DeveloperDiagnostics.LogInfo("Execution", "Run Selection dispatched to ViewModel.");
         }
 
@@ -8904,7 +9585,16 @@ namespace PS7ScriptDesk.Shell
                 return false;
             }
 
-            return !string.IsNullOrWhiteSpace(ViewModel.SelectedTab.Content);
+            _documentSessionsByTab.TryGetValue(ViewModel.SelectedTab, out var documentSession);
+            return HasDebuggableContent(ViewModel.SelectedTab, documentSession);
+        }
+
+        internal static bool HasDebuggableContent(EditorTabViewModel tab, EditorDocumentSession? documentSession)
+        {
+            ArgumentNullException.ThrowIfNull(tab);
+            return documentSession is { IsDisposed: false }
+                ? documentSession.Document.TextLength > 0
+                : !string.IsNullOrWhiteSpace(tab.Content);
         }
 
         private bool TryBuildDebugLaunchPlan(EditorTabViewModel tab, out string launchScriptPath)
@@ -10031,12 +10721,21 @@ namespace PS7ScriptDesk.Shell
             DeveloperDiagnostics.LogEventHandlerEntry("UI", "Window_Closing", "Window_Closing entered.");
             if (_allowWindowClose)
             {
+                foreach (var editor in _foldingCancellationSources.Keys.ToArray())
+                    CancelPendingFolding(editor);
                 if (ViewModel is not null)
                 {
+                    ViewModel.OpenTabs.CollectionChanged -= OpenTabs_CollectionChanged;
                     ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
                     ViewModel.ExeExportProgressChanged -= ViewModel_ExeExportProgressChanged;
                     ViewModel.Dispose();
                 }
+                foreach (var session in _documentSessionsByTab.Values)
+                {
+                    session.EditorMutationCommitted -= EditorDocumentSession_EditorMutationCommitted;
+                    session.Dispose();
+                }
+                _documentSessionsByTab.Clear();
 
                 if (_runtimeSessionCoordinator is not null)
                 {
@@ -10235,7 +10934,7 @@ namespace PS7ScriptDesk.Shell
                 ExplorerColumnDefinition.Width = new GridLength(_lastKnownExplorerWidth, GridUnitType.Pixel);
             }
 
-            if (IsUsableLength(_loadedSettings.ConsoleHeight, MinimumConsoleHeight))
+            if (IsUsableLength(_loadedSettings.ConsoleHeight, EffectiveMinimumConsoleHeight))
             {
                 _lastKnownConsoleHeight = _loadedSettings.ConsoleHeight!.Value;
             }
@@ -11505,7 +12204,7 @@ namespace PS7ScriptDesk.Shell
             EditorConsoleRowSplitter.Visibility = Visibility.Visible;
             EditorConsoleRowSplitterDefinition.Height = new GridLength(6, GridUnitType.Pixel);
             EditorRowDefinition.Height = new GridLength(1, GridUnitType.Star);
-            ConsoleRowDefinition.Height = new GridLength(Math.Max(_lastKnownConsoleHeight, MinimumConsoleHeight), GridUnitType.Pixel);
+            ConsoleRowDefinition.Height = new GridLength(Math.Max(_lastKnownConsoleHeight, EffectiveMinimumConsoleHeight), GridUnitType.Pixel);
 
             switch (mode)
             {
@@ -11554,6 +12253,8 @@ namespace PS7ScriptDesk.Shell
                 Grid.SetColumnSpan(ConsolePaneBorder, 1);
                 ConsolePaneBorder.BorderThickness = new Thickness(0, 1, 0, 0);
             }
+
+            UpdateEffectiveConsoleMinimumHeight($"WorkspaceLayout:{source}");
 
             ApplyDebugPanelGridPlacement();
             if (DebugPanelBorder.Visibility == Visibility.Visible)
@@ -11635,7 +12336,7 @@ namespace PS7ScriptDesk.Shell
         private void CaptureWorkspaceLayoutSizes()
         {
             if ((_workspaceLayoutMode is WorkspaceLayoutMode.Default or WorkspaceLayoutMode.HorizontalSplit) &&
-                ConsoleRowDefinition.ActualHeight >= MinimumConsoleHeight)
+                ConsoleRowDefinition.ActualHeight >= EffectiveMinimumConsoleHeight)
             {
                 var consoleHeight = ConsoleRowDefinition.ActualHeight;
                 if (BottomToolWindowBorder.Visibility == Visibility.Visible && !_isBottomToolWindowFloating)
@@ -11644,7 +12345,7 @@ namespace PS7ScriptDesk.Shell
                     consoleHeight -= BottomToolWindowRowDefinition.ActualHeight;
                 }
 
-                if (consoleHeight >= MinimumConsoleHeight)
+                if (consoleHeight >= EffectiveMinimumConsoleHeight)
                 {
                     _lastKnownConsoleHeight = consoleHeight;
                 }
@@ -12477,8 +13178,37 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            var scriptSnapshot = editorTextEditor.Text ?? string.Empty;
-            var lineCount = editorTextEditor.Document?.LineCount ?? CountLines(scriptSnapshot);
+            if (!_documentSessionsByTab.TryGetValue(tab, out var documentSession))
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "EditorSession",
+                    "DiagnosticsSnapshot",
+                    "Diagnostics were not queued because the registered editor has no document session.",
+                    "MissingSession",
+                    new Dictionary<string, object?> { ["documentId"] = tab.DiagnosticDocument.DocumentId });
+                return;
+            }
+
+            if (documentSession.Document.IsInUpdate)
+            {
+                QueueDiagnosticsAfterDocumentUpdate(editorTextEditor, tab, documentSession, registrationVersion);
+                return;
+            }
+
+            EditorDocumentSnapshot documentSnapshot;
+            try
+            {
+                documentSnapshot = documentSession.CaptureSnapshot();
+            }
+            catch (InvalidOperationException)
+            {
+                // A parser callback can arrive during an AvalonEdit update; the next
+                // committed TextChanged event will queue a stable snapshot.
+                return;
+            }
+
+            var textMaterialization = new EditorTextSnapshotMaterialization(documentSnapshot);
+            var lineCount = editorTextEditor.Document?.LineCount ?? 1;
 
             if (string.Equals(tab.SyntaxDiagnosticsStatusText, "Syntax checking is waiting for a PowerShell runtime", StringComparison.Ordinal))
             {
@@ -12490,7 +13220,7 @@ namespace PS7ScriptDesk.Shell
                 tab,
                 pwshPath,
                 registrationVersion,
-                scriptSnapshot,
+                textMaterialization,
                 lineCount);
 
             ScheduleAuthoringDiagnostics(
@@ -12499,8 +13229,30 @@ namespace PS7ScriptDesk.Shell
                 errorRenderer,
                 pwshPath,
                 registrationVersion,
-                scriptSnapshot,
+                textMaterialization,
                 lineCount);
+        }
+
+        private void QueueDiagnosticsAfterDocumentUpdate(
+            TextEditor editor,
+            EditorTabViewModel tab,
+            EditorDocumentSession session,
+            int registrationVersion)
+        {
+            if (!_postUpdateDiagnosticsQueued.Add(editor)) return;
+            Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(() =>
+            {
+                _postUpdateDiagnosticsQueued.Remove(editor);
+                if (_terminalShutdownInProgress || _allowWindowClose || session.IsDisposed || session.Document.IsInUpdate ||
+                    !_documentSessionsByTab.TryGetValue(tab, out var currentSession) || !ReferenceEquals(currentSession, session) ||
+                    !_tabByEditor.TryGetValue(editor, out var currentTab) || !ReferenceEquals(currentTab, tab) ||
+                    !_editorRegistrationVersions.TryGetValue(editor, out var currentRegistrationVersion) || currentRegistrationVersion != registrationVersion)
+                {
+                    return;
+                }
+
+                ScheduleDiagnostics(editor);
+            }));
         }
 
         private void QueueLiveSyntaxDiagnostics(
@@ -12508,13 +13260,13 @@ namespace PS7ScriptDesk.Shell
             EditorTabViewModel tab,
             string pwshPath,
             int registrationVersion,
-            string scriptSnapshot,
+            EditorTextSnapshotMaterialization textMaterialization,
             int lineCount)
         {
             var requestVersion = IncrementLiveSyntaxRequestVersion(editorTextEditor);
             var state = GetOrCreateLiveSyntaxPumpState(editorTextEditor);
             var workItem = new LiveSyntaxWorkItem(
-                scriptSnapshot,
+                textMaterialization,
                 pwshPath,
                 registrationVersion,
                 requestVersion,
@@ -12534,7 +13286,7 @@ namespace PS7ScriptDesk.Shell
                         ["documentTitle"] = tab.Title,
                         ["filePath"] = tab.FilePath,
                         ["requestVersion"] = requestVersion,
-                        ["textLength"] = scriptSnapshot.Length,
+                        ["textLength"] = textMaterialization.TextLength,
                         ["lineCount"] = lineCount
                     });
             }
@@ -12544,12 +13296,17 @@ namespace PS7ScriptDesk.Shell
         {
             if (_liveSyntaxPumpStates.TryGetValue(editorTextEditor, out var state) && !state.IsDisposed)
             {
+                if (state.WorkerTask is { IsCompleted: true } completedWorker)
+                {
+                    ScheduleLiveSyntaxPumpRecovery(editorTextEditor, state, completedWorker);
+                }
+
                 return state;
             }
 
             state = new LiveSyntaxPumpState();
             _liveSyntaxPumpStates[editorTextEditor] = state;
-            state.WorkerTask = Task.Run(() => RunLiveSyntaxPumpAsync(editorTextEditor, state), state.CancellationToken);
+            StartLiveSyntaxPump(editorTextEditor, state);
 
             if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
             {
@@ -12563,6 +13320,103 @@ namespace PS7ScriptDesk.Shell
             }
 
             return state;
+        }
+
+        private void StartLiveSyntaxPump(TextEditor editorTextEditor, LiveSyntaxPumpState state)
+        {
+            if (state.IsDisposed) return;
+
+            var workerTask = Task.Run(() => RunLiveSyntaxPumpAsync(editorTextEditor, state), state.CancellationToken);
+            if (!state.SetWorkerTask(workerTask)) return;
+
+            _ = workerTask.ContinueWith(
+                completed => ObserveLiveSyntaxPumpCompletion(editorTextEditor, state, completed),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        private void ObserveLiveSyntaxPumpCompletion(
+            TextEditor editorTextEditor,
+            LiveSyntaxPumpState state,
+            Task completedWorker)
+        {
+            if (state.IsDisposed || state.CancellationToken.IsCancellationRequested) return;
+
+            var exception = completedWorker.Exception?.GetBaseException();
+            if (exception is not null)
+            {
+                DeveloperDiagnostics.LogException(
+                    "Editor",
+                    exception,
+                    "Live syntax diagnostics worker terminated unexpectedly.",
+                    new Dictionary<string, object?>
+                    {
+                        ["documentTitle"] = state.LatestWorkItem?.DocumentTitle,
+                        ["filePath"] = state.LatestWorkItem?.FilePath,
+                        ["requestVersion"] = state.LatestWorkItem?.RequestVersion,
+                        ["recoveryAttempts"] = state.RecoveryAttempts
+                    });
+            }
+
+            ScheduleLiveSyntaxPumpRecovery(editorTextEditor, state, completedWorker);
+        }
+
+        private void ScheduleLiveSyntaxPumpRecovery(
+            TextEditor editorTextEditor,
+            LiveSyntaxPumpState state,
+            Task completedWorker)
+        {
+            if (!state.TryClaimRecovery(completedWorker))
+            {
+                if (!state.IsDisposed && state.RecoveryAttempts >= LiveSyntaxPumpState.MaximumRecoveryAttempts &&
+                    state.TryMarkRecoveryLimitLogged() &&
+                    DeveloperDiagnostics.IsEnabled)
+                {
+                    DeveloperDiagnostics.LogWarning("Editor", "Live syntax diagnostics worker recovery limit reached; no further worker will be started.",
+                        new Dictionary<string, object?>
+                        {
+                            ["documentTitle"] = state.LatestWorkItem?.DocumentTitle,
+                            ["filePath"] = state.LatestWorkItem?.FilePath,
+                            ["requestVersion"] = state.LatestWorkItem?.RequestVersion,
+                            ["recoveryAttempts"] = state.RecoveryAttempts
+                        });
+                }
+
+                return;
+            }
+
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                DeveloperDiagnostics.LogWarning("Editor", "Starting the single bounded recovery worker for live syntax diagnostics.",
+                    new Dictionary<string, object?>
+                    {
+                        ["documentTitle"] = state.LatestWorkItem?.DocumentTitle,
+                        ["filePath"] = state.LatestWorkItem?.FilePath,
+                        ["requestVersion"] = state.LatestWorkItem?.RequestVersion,
+                        ["recoveryAttempts"] = state.RecoveryAttempts
+                    });
+            }
+
+            try
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+                {
+                    if (state.IsDisposed ||
+                        !_liveSyntaxPumpStates.TryGetValue(editorTextEditor, out var registeredState) ||
+                        !ReferenceEquals(registeredState, state))
+                    {
+                        return;
+                    }
+
+                    StartLiveSyntaxPump(editorTextEditor, state);
+                    state.SignalLatestWorkItem();
+                }));
+            }
+            catch (InvalidOperationException ex)
+            {
+                DeveloperDiagnostics.LogException("Editor", ex, "Could not schedule live syntax worker recovery because the dispatcher is shutting down.");
+            }
         }
 
         private async Task RunLiveSyntaxPumpAsync(TextEditor editorTextEditor, LiveSyntaxPumpState state)
@@ -12629,10 +13483,6 @@ namespace PS7ScriptDesk.Shell
             {
                 // The editor was closed or the app is shutting down.
             }
-            catch (Exception ex)
-            {
-                DeveloperDiagnostics.LogException("Editor", ex, "Live syntax diagnostics pump failed unexpectedly.");
-            }
         }
 
         private void ApplyLiveSyntaxDiagnosticsResult(
@@ -12697,7 +13547,7 @@ namespace PS7ScriptDesk.Shell
                         ["filePath"] = workItem.FilePath,
                         ["requestVersion"] = workItem.RequestVersion,
                         ["elapsedMilliseconds"] = elapsedMilliseconds,
-                        ["textLength"] = workItem.ScriptSnapshot.Length,
+                        ["textLength"] = workItem.TextLength,
                         ["lineCount"] = workItem.LineCount,
                         ["syntaxErrorCount"] = syntaxParseResult.Errors.Count,
                         ["syntaxTokenCount"] = syntaxParseResult.SyntaxTokens.Count
@@ -12711,10 +13561,10 @@ namespace PS7ScriptDesk.Shell
             ErrorMarkerRenderer errorRenderer,
             string pwshPath,
             int registrationVersion,
-            string scriptSnapshot,
+            EditorTextSnapshotMaterialization textMaterialization,
             int lineCount)
         {
-            if (ShouldSkipAuthoringDiagnostics(scriptSnapshot, lineCount))
+            if (ShouldSkipAuthoringDiagnostics(textMaterialization.TextLength, lineCount))
             {
                 if (DeveloperDiagnostics.IsEnabled && DeveloperDiagnostics.IsVerboseEditorEnabled())
                 {
@@ -12725,7 +13575,7 @@ namespace PS7ScriptDesk.Shell
                         {
                             ["documentTitle"] = tab.Title,
                             ["filePath"] = tab.FilePath,
-                            ["textLength"] = scriptSnapshot.Length,
+                            ["textLength"] = textMaterialization.TextLength,
                             ["lineCount"] = lineCount
                         });
                 }
@@ -12736,7 +13586,7 @@ namespace PS7ScriptDesk.Shell
             var requestVersion = IncrementDiagnosticsRequestVersion(editorTextEditor);
             var state = GetOrCreateAuthoringDiagnosticsPumpState(editorTextEditor);
             var workItem = new AuthoringDiagnosticsWorkItem(
-                scriptSnapshot,
+                textMaterialization,
                 pwshPath,
                 registrationVersion,
                 requestVersion,
@@ -12756,8 +13606,8 @@ namespace PS7ScriptDesk.Shell
                         ["documentTitle"] = tab.Title,
                         ["filePath"] = tab.FilePath,
                         ["requestVersion"] = requestVersion,
-                        ["delayMilliseconds"] = GetAuthoringDiagnosticsDelay(scriptSnapshot, lineCount).TotalMilliseconds,
-                        ["textLength"] = scriptSnapshot.Length,
+                        ["delayMilliseconds"] = GetAuthoringDiagnosticsDelay(textMaterialization.TextLength, lineCount).TotalMilliseconds,
+                        ["textLength"] = textMaterialization.TextLength,
                         ["lineCount"] = lineCount
                     });
             }
@@ -12810,7 +13660,7 @@ namespace PS7ScriptDesk.Shell
 
                     try
                     {
-                        var authoringDelay = GetAuthoringDiagnosticsDelay(workItem.ScriptSnapshot, workItem.LineCount);
+                        var authoringDelay = GetAuthoringDiagnosticsDelay(workItem.TextLength, workItem.LineCount);
                         await Task.Delay(authoringDelay, workToken).ConfigureAwait(false);
 
                         state.DrainSignals();
@@ -12841,7 +13691,7 @@ namespace PS7ScriptDesk.Shell
                                         ["filePath"] = workItem.FilePath,
                                         ["requestVersion"] = workItem.RequestVersion,
                                         ["delayMilliseconds"] = authoringDelay.TotalMilliseconds,
-                                        ["textLength"] = workItem.ScriptSnapshot.Length,
+                                        ["textLength"] = workItem.TextLength,
                                         ["lineCount"] = workItem.LineCount
                                     });
                             }
@@ -12914,7 +13764,7 @@ namespace PS7ScriptDesk.Shell
                                         ["requestVersion"] = workItem.RequestVersion,
                                         ["delayMilliseconds"] = authoringDelay.TotalMilliseconds,
                                         ["elapsedMilliseconds"] = authoringStopwatch.ElapsedMilliseconds,
-                                        ["textLength"] = workItem.ScriptSnapshot.Length,
+                                        ["textLength"] = workItem.TextLength,
                                         ["lineCount"] = workItem.LineCount,
                                         ["syntaxErrorCount"] = fullParseResult.Errors.Count,
                                         ["syntaxTokenCount"] = fullParseResult.SyntaxTokens.Count,
@@ -12974,15 +13824,15 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        private static TimeSpan GetAuthoringDiagnosticsDelay(string scriptSnapshot, int lineCount)
+        private static TimeSpan GetAuthoringDiagnosticsDelay(int textLength, int lineCount)
         {
-            if (scriptSnapshot.Length >= AuthoringDiagnosticsLargeCharacterThreshold ||
+            if (textLength >= AuthoringDiagnosticsLargeCharacterThreshold ||
                 lineCount >= AuthoringDiagnosticsLargeLineThreshold)
             {
                 return TimeSpan.FromMilliseconds(AuthoringDiagnosticsLargeDocumentDelayMilliseconds);
             }
 
-            if (scriptSnapshot.Length >= AuthoringDiagnosticsMediumCharacterThreshold ||
+            if (textLength >= AuthoringDiagnosticsMediumCharacterThreshold ||
                 lineCount >= AuthoringDiagnosticsMediumLineThreshold)
             {
                 return TimeSpan.FromMilliseconds(AuthoringDiagnosticsMediumDocumentDelayMilliseconds);
@@ -12991,9 +13841,9 @@ namespace PS7ScriptDesk.Shell
             return TimeSpan.FromMilliseconds(AuthoringDiagnosticsSmallDocumentDelayMilliseconds);
         }
 
-        private static bool ShouldSkipAuthoringDiagnostics(string scriptSnapshot, int lineCount)
+        private static bool ShouldSkipAuthoringDiagnostics(int textLength, int lineCount)
         {
-            return scriptSnapshot.Length >= AuthoringDiagnosticsVeryLargeCharacterThreshold ||
+            return textLength >= AuthoringDiagnosticsVeryLargeCharacterThreshold ||
                 lineCount >= AuthoringDiagnosticsVeryLargeLineThreshold;
         }
 
@@ -13012,7 +13862,7 @@ namespace PS7ScriptDesk.Shell
                 && currentRegistrationVersion == workItem.RegistrationVersion
                 && _liveSyntaxRequestVersions.TryGetValue(editorTextEditor, out var currentRequestVersion)
                 && currentRequestVersion == workItem.RequestVersion
-                && string.Equals(editorTextEditor.Text ?? string.Empty, workItem.ScriptSnapshot, StringComparison.Ordinal);
+                && IsEditorDocumentSnapshotCurrent(tab, workItem.DocumentSnapshot);
         }
 
         private static TimeSpan GetLiveSyntaxQuietDelay(LiveSyntaxWorkItem workItem)
@@ -13041,7 +13891,7 @@ namespace PS7ScriptDesk.Shell
 
         private static bool IsLargeLiveSyntaxDocument(LiveSyntaxWorkItem workItem)
         {
-            return workItem.ScriptSnapshot.Length >= LiveSyntaxDiagnosticsLargeFileCharacterThreshold ||
+            return workItem.TextLength >= LiveSyntaxDiagnosticsLargeFileCharacterThreshold ||
                 workItem.LineCount >= LiveSyntaxDiagnosticsLargeFileLineThreshold;
         }
 
@@ -13079,7 +13929,13 @@ namespace PS7ScriptDesk.Shell
                 && currentRegistrationVersion == workItem.RegistrationVersion
                 && _diagnosticsRequestVersions.TryGetValue(editorTextEditor, out var currentRequestVersion)
                 && currentRequestVersion == workItem.RequestVersion
-                && string.Equals(editorTextEditor.Text ?? string.Empty, workItem.ScriptSnapshot, StringComparison.Ordinal);
+                && IsEditorDocumentSnapshotCurrent(tab, workItem.DocumentSnapshot);
+        }
+
+        private bool IsEditorDocumentSnapshotCurrent(EditorTabViewModel tab, EditorDocumentSnapshot snapshot)
+        {
+            return _documentSessionsByTab.TryGetValue(tab, out var session) &&
+                session.IsRegistrationCurrent(snapshot);
         }
 
         private void RescheduleDiagnosticsForAllEditors()
@@ -15841,7 +16697,7 @@ namespace PS7ScriptDesk.Shell
         private sealed class AuthoringDiagnosticsWorkItem
         {
             public AuthoringDiagnosticsWorkItem(
-                string scriptSnapshot,
+                EditorTextSnapshotMaterialization textMaterialization,
                 string pwshPath,
                 int registrationVersion,
                 int requestVersion,
@@ -15849,7 +16705,7 @@ namespace PS7ScriptDesk.Shell
                 string documentTitle,
                 string? filePath)
             {
-                ScriptSnapshot = scriptSnapshot ?? string.Empty;
+                TextMaterialization = textMaterialization;
                 PwshPath = pwshPath;
                 RegistrationVersion = registrationVersion;
                 RequestVersion = requestVersion;
@@ -15858,7 +16714,13 @@ namespace PS7ScriptDesk.Shell
                 FilePath = filePath;
             }
 
-            public string ScriptSnapshot { get; }
+            public EditorTextSnapshotMaterialization TextMaterialization { get; }
+
+            public EditorDocumentSnapshot DocumentSnapshot => TextMaterialization.DocumentSnapshot;
+
+            public string ScriptSnapshot => TextMaterialization.Text;
+
+            public int TextLength => TextMaterialization.TextLength;
 
             public string PwshPath { get; }
 
@@ -16022,149 +16884,6 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        private sealed class LiveSyntaxWorkItem
-        {
-            public LiveSyntaxWorkItem(
-                string scriptSnapshot,
-                string pwshPath,
-                int registrationVersion,
-                int requestVersion,
-                int lineCount,
-                string documentTitle,
-                string? filePath)
-            {
-                ScriptSnapshot = scriptSnapshot ?? string.Empty;
-                PwshPath = pwshPath;
-                RegistrationVersion = registrationVersion;
-                RequestVersion = requestVersion;
-                LineCount = Math.Max(1, lineCount);
-                DocumentTitle = documentTitle;
-                FilePath = filePath;
-            }
-
-            public string ScriptSnapshot { get; }
-
-            public string PwshPath { get; }
-
-            public int RegistrationVersion { get; }
-
-            public int RequestVersion { get; }
-
-            public int LineCount { get; }
-
-            public string DocumentTitle { get; }
-
-            public string? FilePath { get; }
-        }
-
-        private sealed class LiveSyntaxPumpState : IDisposable
-        {
-            private readonly object _syncRoot = new();
-            private int _signalPending;
-
-            public LiveSyntaxPumpState()
-            {
-                CancellationTokenSource = new CancellationTokenSource();
-                Signal = new SemaphoreSlim(0, 1);
-            }
-
-            public CancellationTokenSource CancellationTokenSource { get; }
-
-            public CancellationToken CancellationToken => CancellationTokenSource.Token;
-
-            public SemaphoreSlim Signal { get; }
-
-            public Task? WorkerTask { get; set; }
-
-            public DateTimeOffset LastParseStartedUtc { get; set; } = DateTimeOffset.MinValue;
-
-            public bool IsDisposed { get; private set; }
-
-            public LiveSyntaxWorkItem? LatestWorkItem
-            {
-                get
-                {
-                    lock (_syncRoot)
-                    {
-                        return _latestWorkItem;
-                    }
-                }
-            }
-
-            private LiveSyntaxWorkItem? _latestWorkItem;
-
-            public void Publish(LiveSyntaxWorkItem workItem)
-            {
-                if (IsDisposed)
-                {
-                    return;
-                }
-
-                lock (_syncRoot)
-                {
-                    _latestWorkItem = workItem;
-                }
-
-                if (Interlocked.Exchange(ref _signalPending, 1) == 0)
-                {
-                    try
-                    {
-                        Signal.Release();
-                    }
-                    catch (SemaphoreFullException)
-                    {
-                        // A wake signal is already pending; latest-work-item storage is authoritative.
-                    }
-                    catch (ObjectDisposedException)
-                    {
-                    }
-                }
-            }
-
-            public async Task WaitForSignalAsync(CancellationToken cancellationToken)
-            {
-                await Signal.WaitAsync(cancellationToken).ConfigureAwait(false);
-                Interlocked.Exchange(ref _signalPending, 0);
-            }
-
-            public void DrainSignals()
-            {
-                while (Signal.Wait(0))
-                {
-                }
-
-                Interlocked.Exchange(ref _signalPending, 0);
-            }
-
-            public void Dispose()
-            {
-                if (IsDisposed)
-                {
-                    return;
-                }
-
-                IsDisposed = true;
-
-                try
-                {
-                    CancellationTokenSource.Cancel();
-                }
-                catch
-                {
-                }
-
-                try
-                {
-                    Signal.Dispose();
-                }
-                catch
-                {
-                }
-
-                CancellationTokenSource.Dispose();
-            }
-        }
-
         /// <summary>Row model for the Breakpoints DataGrid.</summary>
         private sealed class BreakpointRow : INotifyPropertyChanged
         {
@@ -16216,6 +16935,75 @@ namespace PS7ScriptDesk.Shell
             }
 
             RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
+        }
+
+        private sealed record CompletionRequestSnapshot(
+            TextEditor Editor,
+            TextDocument Document,
+            ITextSourceVersion DocumentVersion,
+            ITextSource TextSource,
+            int TextLength,
+            int CaretOffset,
+            int RegistrationVersion)
+        {
+            public static CompletionRequestSnapshot Capture(MainWindow owner, TextEditor editor)
+            {
+                var document = editor.Document ?? throw new InvalidOperationException("Completion requires an editor document.");
+                var registrationVersion = owner._editorRegistrationVersions.TryGetValue(editor, out var version) ? version : 0;
+                var textSource = document.CreateSnapshot();
+                return new CompletionRequestSnapshot(
+                    editor,
+                    document,
+                    document.Version,
+                    textSource,
+                    textSource.TextLength,
+                    editor.CaretOffset,
+                    registrationVersion);
+            }
+
+            public bool Matches(CompletionRequestSnapshot other)
+            {
+                return ReferenceEquals(Editor, other.Editor) &&
+                       ReferenceEquals(Document, other.Document) &&
+                       ReferenceEquals(DocumentVersion, other.DocumentVersion) &&
+                       CaretOffset == other.CaretOffset &&
+                       RegistrationVersion == other.RegistrationVersion;
+            }
+
+            public bool IsCurrent(MainWindow owner)
+            {
+                if (!ReferenceEquals(owner.FindActiveEditor(), Editor) ||
+                    !ReferenceEquals(Editor.Document, Document) ||
+                    !ReferenceEquals(Document.Version, DocumentVersion) ||
+                    Editor.CaretOffset != CaretOffset)
+                {
+                    return false;
+                }
+
+                var currentRegistrationVersion = owner._editorRegistrationVersions.TryGetValue(Editor, out var version) ? version : 0;
+                return RegistrationVersion == currentRegistrationVersion;
+            }
+        }
+
+        private sealed record CompletionRequestState(
+            string RequestId,
+            CompletionRequestSnapshot Snapshot,
+            bool IncludeEngine,
+            bool ForceCompletion,
+            bool ProviderOnly,
+            Task<CompletionWindow?> Task);
+
+        private sealed class PendingCompletionCycle(
+            string requestId,
+            CompletionRequestSnapshot snapshot,
+            Task<CompletionWindow?> requestTask,
+            int firstDirection)
+        {
+            public string RequestId { get; } = requestId;
+            public CompletionRequestSnapshot Snapshot { get; } = snapshot;
+            public Task<CompletionWindow?> RequestTask { get; } = requestTask;
+            public int FirstDirection { get; } = firstDirection;
+            public int QueuedDirectionDelta { get; set; }
         }
 
         private void ShowIdeMessage(string title, string message)

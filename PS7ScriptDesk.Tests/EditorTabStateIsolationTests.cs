@@ -40,7 +40,7 @@ public sealed class EditorTabStateIsolationTests
     {
         var main = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
 
-        Assert.Contains("Dictionary<EditorTabViewModel, TextDocument>", main, StringComparison.Ordinal);
+        Assert.Contains("Dictionary<EditorTabViewModel, EditorDocumentSession>", main, StringComparison.Ordinal);
         Assert.Contains("editorTextEditor.Document = document", main, StringComparison.Ordinal);
         Assert.Contains("RestoreEditorViewState(editorTextEditor, tab)", main, StringComparison.Ordinal);
         Assert.Contains("editorTextEditor.Select(selectionStart, selectionLength)", main, StringComparison.Ordinal);
@@ -68,8 +68,8 @@ public sealed class EditorTabStateIsolationTests
 
         Assert.Contains("UninstallFoldingManager(editorTextEditor)", main, StringComparison.Ordinal);
         Assert.Contains("FoldingManager.Uninstall(foldingManager)", main, StringComparison.Ordinal);
-        Assert.Contains("_documentByTab.TryGetValue(targetTab, out var targetDocument)", main, StringComparison.Ordinal);
-        Assert.Contains("ReferenceEquals(editorTextEditor.Document, targetDocument)", main, StringComparison.Ordinal);
+        Assert.Contains("_documentSessionsByTab.TryGetValue(targetTab, out var targetSession)", main, StringComparison.Ordinal);
+        Assert.Contains("ReferenceEquals(editorTextEditor.Document, targetSession.Document)", main, StringComparison.Ordinal);
         Assert.Contains("focusRequestVersion != Volatile.Read", main, StringComparison.Ordinal);
         Assert.Contains("EnsureVisualLines", main, StringComparison.Ordinal);
         var focusStart = main.IndexOf("private void FocusActiveEditorSoon(", StringComparison.Ordinal);

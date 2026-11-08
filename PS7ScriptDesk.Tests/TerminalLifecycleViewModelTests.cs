@@ -34,6 +34,22 @@ public sealed class TerminalLifecycleViewModelTests
     }
 
     [Fact]
+    public async Task OldGenerationCommandCompletionCannotIdleTheReplacementTerminal()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), terminal);
+        console.RaiseSessionStarted(2);
+        Assert.Equal(InteractiveTerminalState.Starting, terminal.State);
+
+        console.RaiseCommandCompleted(1);
+
+        Assert.Equal(InteractiveTerminalState.Starting, terminal.State);
+        Assert.False(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
+    [Fact]
     public async Task RejectedTerminalInputShowsARecoverableStatusInsteadOfSilentlyFailing()
     {
         var interactive = new InteractiveTerminalCoordinator();
@@ -60,7 +76,7 @@ public sealed class TerminalLifecycleViewModelTests
     [Fact]
     public async Task ProductionViewModelDispatchHoldsRuntimeLeaseUntilBackendCompletesAndRestartWaits()
     {
-        var console = new RecordingLiveConsoleService();
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
         var runtime = CreateRuntime();
         await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
         var initial = await runtimeCoordinator.AcquireAsync(runtime, _ => { });
@@ -72,12 +88,17 @@ public sealed class TerminalLifecycleViewModelTests
             ExecutionBackendAvailability.Unavailable,
             new PowerShellExecutionRequestClassifier());
         var viewModel = await CreateViewModelAsync(console, runtime, executionCoordinator: executionCoordinator, runtimeSessionCoordinator: runtimeCoordinator);
+        console.RaiseSessionStarted(console.CurrentSessionGeneration);
         var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(dispatch);
 
         var executeTask = (Task)dispatch!.Invoke(viewModel, ["lease-test.ps1", "Write-Output 'ok'", EditorExecutionMode.ScriptCall, false, null])!;
         await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(PowerShellRuntimeSessionState.Executing, runtimeCoordinator.Snapshot.State);
+        console.RaisePromptReady(console.CurrentSessionGeneration, "C:\\");
+        Assert.Equal(InteractiveTerminalState.Starting, ((IInteractiveTerminalCoordinator?)typeof(MainWindowViewModel)
+            .GetField("_interactiveTerminalCoordinator", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(viewModel))!.State);
 
         var restart = runtimeCoordinator.RestartAsync(runtime, _ => { });
         await Task.Delay(50);
@@ -103,6 +124,7 @@ public sealed class TerminalLifecycleViewModelTests
             [backend], new EditorExecutionFeatureGate(false), shadowMode: false,
             ExecutionBackendAvailability.Unavailable, new PowerShellExecutionRequestClassifier());
         var viewModel = await CreateViewModelAsync(console, runtime, executionCoordinator: executionCoordinator, runtimeSessionCoordinator: runtimeCoordinator);
+        console.RaiseSessionStarted(console.CurrentSessionGeneration);
         var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         var executeTask = (Task)dispatch!.Invoke(viewModel, ["fault-test.ps1", "throw 'fault'", EditorExecutionMode.ScriptCall, false, null])!;
         await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -136,6 +158,9 @@ public sealed class TerminalLifecycleViewModelTests
         Assert.True(console.IsInputWritable);
         Assert.Equal(PowerShellRuntimeSessionState.Faulted, runtimeCoordinator.Snapshot.State);
         Assert.False(runtimeCoordinator.IsCurrent(current.SessionId, current.Generation));
+        console.RaisePromptReady(console.CurrentSessionGeneration, "C:\\");
+        Assert.Equal(PowerShellRuntimeSessionState.Faulted, runtimeCoordinator.Snapshot.State);
+        Assert.False(viewModel.IsRunAvailable);
         viewModel.Dispose();
     }
 
@@ -146,13 +171,35 @@ public sealed class TerminalLifecycleViewModelTests
     {
         var coordinator = new InteractiveTerminalCoordinator();
         coordinator.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "test-idle");
-        var viewModel = await CreateViewModelAsync(new RecordingLiveConsoleService(), CreateRuntime(), coordinator);
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
 
         await viewModel.WriteRawInputAsync(input);
 
+        Assert.Equal([input], console.RawInputs);
         Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
         Assert.True(coordinator.CanStartEditorExecution);
         Assert.True(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
+    [Theory]
+    [InlineData("\u001b[M!!")]
+    [InlineData("\u001b[<0;10;4M")]
+    [InlineData("\u001b[<0;10;4m")]
+    public async Task MouseProtocolInput_IsForwardedWithoutDisablingRun(string input)
+    {
+        var coordinator = new InteractiveTerminalCoordinator();
+        coordinator.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "test-idle");
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+
+        await viewModel.WriteRawInputAsync(input);
+
+        Assert.Equal([input], console.RawInputs);
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.Null(viewModel.RunDisabledReason);
         viewModel.Dispose();
     }
 
@@ -180,7 +227,7 @@ public sealed class TerminalLifecycleViewModelTests
     [Fact]
     public async Task CtrlCAfterHistoryNavigationWaitsForPromptBeforeReenablingRun()
     {
-        var console = new RecordingLiveConsoleService();
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
         var coordinator = new InteractiveTerminalCoordinator();
         coordinator.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "test-idle");
         var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
@@ -237,6 +284,7 @@ public sealed class TerminalLifecycleViewModelTests
         var coordinator = new InteractiveTerminalCoordinator();
         var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
 
+        console.SetCurrentGeneration(9);
         console.RaisePromptReady(9, "C:\\");
         Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
         Assert.True(viewModel.RunCommand.CanExecute(null));
@@ -734,10 +782,131 @@ public sealed class TerminalLifecycleViewModelTests
     }
 
     [Fact]
+    public async Task ResetPromptObservedDuringReset_IsReconciledAfterReplacementStarts()
+    {
+        var coordinator = new InteractiveTerminalCoordinator();
+        var console = new RecordingLiveConsoleService();
+        var runtime = CreateRuntime();
+        await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
+        await runtimeCoordinator.AcquireAsync(runtime, _ => { });
+        var viewModel = await CreateViewModelAsync(
+            console,
+            runtime,
+            coordinator,
+            runtimeSessionCoordinator: runtimeCoordinator);
+        InteractiveTerminalState stateWhenPromptObserved = InteractiveTerminalState.Unavailable;
+        PowerShellRuntimeLifecyclePhase? lifecycleWhenPromptObserved = null;
+        console.SessionStartCallback = (session, generation) =>
+        {
+            if (generation != 2) return;
+            lifecycleWhenPromptObserved = runtimeCoordinator.Snapshot.LifecyclePhase;
+            session.RaisePromptReady(generation, "C:\\");
+            stateWhenPromptObserved = coordinator.State;
+        };
+
+        viewModel.RestartConsoleCommand.Execute(null);
+        await WaitUntilAsync(() => coordinator.State == InteractiveTerminalState.InteractiveIdleAtPrompt);
+
+        Assert.Equal(InteractiveTerminalState.Starting, stateWhenPromptObserved);
+        Assert.Equal(PowerShellRuntimeLifecyclePhase.Replacing, lifecycleWhenPromptObserved);
+        Assert.Equal(2, console.CurrentSessionGeneration);
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task ResetPromptFromOldGeneration_IsNotDeferredOrAccepted()
+    {
+        var coordinator = new InteractiveTerminalCoordinator();
+        var console = new RecordingLiveConsoleService();
+        console.PrimeSession(1);
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+        console.SessionStartCallback = (session, generation) =>
+        {
+            if (generation == 2) session.RaisePromptReady(1, "C:\\");
+        };
+
+        viewModel.RestartConsoleCommand.Execute(null);
+        await WaitUntilAsync(() => console.CurrentSessionGeneration == 2 && viewModel.RestartConsoleCommand.CanExecute(null));
+
+        Assert.Equal(InteractiveTerminalState.Starting, coordinator.State);
+        Assert.False(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task ResetWithoutPrompt_DoesNotManufactureReadiness()
+    {
+        var coordinator = new InteractiveTerminalCoordinator();
+        var console = new RecordingLiveConsoleService();
+        console.PrimeSession(1);
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+
+        viewModel.RestartConsoleCommand.Execute(null);
+        await WaitUntilAsync(() => console.CurrentSessionGeneration == 2 && viewModel.RestartConsoleCommand.CanExecute(null));
+
+        Assert.Equal(InteractiveTerminalState.Starting, coordinator.State);
+        Assert.False(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task TerminatedReplacement_DiscardsPromptDeferredDuringReset()
+    {
+        var coordinator = new InteractiveTerminalCoordinator();
+        var console = new RecordingLiveConsoleService();
+        console.PrimeSession(1);
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+        console.SessionStartCallback = (session, generation) =>
+        {
+            if (generation != 2) return;
+            session.RaisePromptReady(generation, "C:\\");
+            session.IsSessionRunning = false;
+            session.ClearProcessIdentity();
+            session.RaiseSessionTerminated();
+        };
+
+        viewModel.RestartConsoleCommand.Execute(null);
+        await WaitUntilAsync(() => console.CurrentSessionGeneration == 2 && viewModel.RestartConsoleCommand.CanExecute(null));
+
+        Assert.Equal(InteractiveTerminalState.Unavailable, coordinator.State);
+        Assert.False(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task RepeatedReset_DoesNotReusePriorGenerationPrompt()
+    {
+        var coordinator = new InteractiveTerminalCoordinator();
+        var console = new RecordingLiveConsoleService();
+        console.PrimeSession(1);
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+        console.SessionStartCallback = (session, generation) =>
+        {
+            if (generation == 2) session.RaisePromptReady(generation, "C:\\");
+        };
+
+        viewModel.RestartConsoleCommand.Execute(null);
+        await WaitUntilAsync(() => coordinator.State == InteractiveTerminalState.InteractiveIdleAtPrompt);
+        await WaitUntilAsync(() => viewModel.RestartConsoleCommand.CanExecute(null));
+        viewModel.RestartConsoleCommand.Execute(null);
+        await WaitUntilAsync(() => console.CurrentSessionGeneration == 3 && viewModel.RestartConsoleCommand.CanExecute(null));
+
+        Assert.Equal(InteractiveTerminalState.Starting, coordinator.State);
+        Assert.False(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
+    [Fact]
     public async Task ClearConsoleLiveSession_SendsClsAndKeepsRendererResetUnused()
     {
         var console = new RecordingLiveConsoleService { IsSessionRunning = true };
-        var viewModel = await CreateViewModelAsync(console, CreateRuntime());
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), terminal);
+        console.PrimeSession(1);
+        console.RaisePromptReady(1, "C:\\");
+        await WaitUntilAsync(() => terminal.State == InteractiveTerminalState.InteractiveIdleAtPrompt);
         var rendererClearCount = 0;
         var reconcileCount = 0;
         viewModel.SetTerminalSessionControls(
@@ -746,10 +915,40 @@ public sealed class TerminalLifecycleViewModelTests
 
         viewModel.ClearConsoleCommand.Execute(null);
 
-        await WaitUntilAsync(() => viewModel.StatusText == "PowerShell clear command sent.");
-        Assert.Equal(new[] { "cls\r" }, console.RawInputs);
+        await WaitUntilAsync(() => viewModel.StatusText.Contains("Clear command submitted", StringComparison.Ordinal));
+        Assert.Equal(new[] { "cls" }, console.CommandTexts);
+        Assert.True(console.IsCommandInProgress);
         Assert.Equal(0, rendererClearCount);
         Assert.Equal(1, reconcileCount);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task DirectConsoleSubmissionKeepsAdmissionOwnedUntilMatchingPromptObservation()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), terminal);
+        console.PrimeSession(1);
+        console.RaisePromptReady(1, "C:\\");
+        await WaitUntilAsync(() => terminal.State == InteractiveTerminalState.InteractiveIdleAtPrompt);
+        viewModel.ConsoleCommandText = "Start-Sleep 20";
+
+        await viewModel.SubmitConsoleCommandAsync();
+
+        Assert.Single(console.CommandRequestIds);
+        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, terminal.State);
+        Assert.True(viewModel.IsExecutionRunning);
+        Assert.False(viewModel.IsRunAvailable);
+
+        console.RaiseInteractiveCommandCompleted(Guid.NewGuid());
+        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, terminal.State);
+        Assert.True(viewModel.IsExecutionRunning);
+
+        console.RaiseInteractiveCommandCompleted(console.CommandRequestIds[0]);
+        await WaitUntilAsync(() => terminal.State == InteractiveTerminalState.InteractiveIdleAtPrompt);
+        Assert.False(viewModel.IsExecutionRunning);
+        Assert.Contains("exit status is not independently available", viewModel.StatusText, StringComparison.Ordinal);
         viewModel.Dispose();
     }
 
@@ -757,7 +956,11 @@ public sealed class TerminalLifecycleViewModelTests
     public async Task ClearConsoleWriteFailure_PreservesRendererAndReportsFailure()
     {
         var console = new RecordingLiveConsoleService { IsSessionRunning = true, RawInputException = new IOException("session closed") };
-        var viewModel = await CreateViewModelAsync(console, CreateRuntime());
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), terminal);
+        console.PrimeSession(1);
+        console.RaisePromptReady(1, "C:\\");
+        await WaitUntilAsync(() => terminal.State == InteractiveTerminalState.InteractiveIdleAtPrompt);
         var originalOutput = viewModel.TerminalDisplayText;
         var rendererClearCount = 0;
         viewModel.SetTerminalSessionControls(() => rendererClearCount++);
@@ -779,7 +982,11 @@ public sealed class TerminalLifecycleViewModelTests
             console.IsSessionRunning = false;
             throw new IOException("session stopped during clear admission");
         };
-        var viewModel = await CreateViewModelAsync(console, CreateRuntime());
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), terminal);
+        console.PrimeSession(1);
+        console.RaisePromptReady(1, "C:\\");
+        await WaitUntilAsync(() => terminal.State == InteractiveTerminalState.InteractiveIdleAtPrompt);
         var originalOutput = viewModel.TerminalDisplayText;
         var rendererClearCount = 0;
         viewModel.SetTerminalSessionControls(() => rendererClearCount++);
@@ -892,6 +1099,7 @@ public sealed class TerminalLifecycleViewModelTests
 internal sealed class RecordingLiveConsoleService : ILiveConsoleService
 {
     public int? ProcessId { get; private set; }
+    public int CurrentSessionGeneration { get; private set; }
     public bool IsSessionRunning { get; set; }
     public bool? InputWritableOverride { get; set; }
     public bool IsInputWritable => InputWritableOverride ?? IsSessionRunning;
@@ -901,6 +1109,8 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public string? CurrentWorkingDirectory => null;
     public List<string> Operations { get; } = new();
     public List<string> RawInputs { get; } = new();
+    public List<string> CommandTexts { get; } = new();
+    public List<Guid> CommandRequestIds { get; } = new();
     public Exception? RawInputException { get; set; }
     public Action? BeforeRawInputWrite { get; set; }
     public LiveConsoleInterruptResult InterruptResult { get; set; } = new(
@@ -919,9 +1129,11 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public TaskCompletionSource<LiveConsoleInterruptResult>? InterruptCompletion { get; set; }
     public bool StopResult { get; set; } = true;
     public Exception? StartException { get; set; }
+    public Action<RecordingLiveConsoleService, int>? SessionStartCallback { get; set; }
 
     public event Action? ScriptExecutionCompleted;
-    public event Action? CommandExecutionCompleted;
+    public event Action<int>? CommandExecutionCompleted;
+    public event Action<LiveConsoleCommandCompletion>? InteractiveCommandCompleted;
     public event Action? SessionTerminated;
     public event Action<int>? TerminalSessionStarted;
     public event Action<int>? TerminalSessionStopping;
@@ -954,10 +1166,12 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
             throw StartException;
         }
 
-        TerminalSessionStarted?.Invoke(1);
+        CurrentSessionGeneration++;
         ActiveRuntime = runtime;
         IsSessionRunning = true;
-        ProcessId = 4321;
+        ProcessId = 4321 + CurrentSessionGeneration;
+        TerminalSessionStarted?.Invoke(CurrentSessionGeneration);
+        SessionStartCallback?.Invoke(this, CurrentSessionGeneration);
         StartObserved.TrySetResult(true);
         return Task.CompletedTask;
     }
@@ -966,6 +1180,23 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
         string commandText,
         Action<ExecutionOutputRecord> onOutput,
         CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+    public Task<LiveConsoleCommandResult> ExecuteConsoleCommandAsync(
+        string commandText,
+        Action<ExecutionOutputRecord> onOutput,
+        Guid requestId,
+        CancellationToken cancellationToken = default)
+    {
+        BeforeRawInputWrite?.Invoke();
+        if (RawInputException is not null) throw RawInputException;
+        CommandTexts.Add(commandText);
+        CommandRequestIds.Add(requestId);
+        IsCommandInProgress = true;
+        var now = DateTime.UtcNow;
+        return Task.FromResult(new LiveConsoleCommandResult(
+            "test direct command", false, CurrentWorkingDirectory, now, now,
+            requestId, CurrentSessionGeneration, ProcessId, LiveConsoleCommandOutcome.Submitted));
+    }
 
     public Task<LiveConsoleCommandResult> ExecuteScriptAsync(
         string documentDisplayName,
@@ -982,7 +1213,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
             return Task.FromResult(false);
         }
 
-        TerminalSessionStopping?.Invoke(1);
+        TerminalSessionStopping?.Invoke(CurrentSessionGeneration);
         IsCommandInProgress = false;
         IsSessionRunning = false;
         ActiveRuntime = null;
@@ -993,7 +1224,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public Task<bool> ShutdownAsync(CancellationToken cancellationToken = default)
     {
         Operations.Add("shutdown");
-        TerminalSessionStopping?.Invoke(1);
+        TerminalSessionStopping?.Invoke(CurrentSessionGeneration);
         IsCommandInProgress = false;
         IsSessionRunning = false;
         ActiveRuntime = null;
@@ -1019,9 +1250,29 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService
     public void Dispose() { }
 
     public void RaiseScriptCompleted() => ScriptExecutionCompleted?.Invoke();
-    public void RaiseCommandCompleted() => CommandExecutionCompleted?.Invoke();
+    public void RaiseCommandCompleted() => RaiseCommandCompleted(CurrentSessionGeneration);
+    public void RaiseCommandCompleted(int generation) => CommandExecutionCompleted?.Invoke(generation);
+    public void RaiseInteractiveCommandCompleted(Guid requestId, LiveConsoleCommandOutcome outcome = LiveConsoleCommandOutcome.PromptObserved)
+    {
+        IsCommandInProgress = false;
+        if (ProcessId is { } processId)
+            InteractiveCommandCompleted?.Invoke(new LiveConsoleCommandCompletion(requestId, CurrentSessionGeneration, processId, outcome, 1, DateTimeOffset.UtcNow));
+    }
     public void RaiseSessionTerminated() => SessionTerminated?.Invoke();
-    public void RaiseSessionStarted(int generation) => TerminalSessionStarted?.Invoke(generation);
+    public void RaiseSessionStarted(int generation)
+    {
+        CurrentSessionGeneration = generation;
+        TerminalSessionStarted?.Invoke(generation);
+    }
+    public void SetCurrentGeneration(int generation) => CurrentSessionGeneration = generation;
+    public void PrimeSession(int generation)
+    {
+        CurrentSessionGeneration = generation;
+        IsSessionRunning = true;
+        ProcessId = 4321 + generation;
+        TerminalSessionStarted?.Invoke(generation);
+    }
+    public void ClearProcessIdentity() => ProcessId = null;
     public void RaiseRawOutput(string text) => RawOutputReceived?.Invoke(1, text);
 
     public void RaisePromptReady(int generation, string path) => PromptReadyObserved?.Invoke(generation, path);

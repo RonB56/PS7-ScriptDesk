@@ -38,6 +38,13 @@ namespace PS7ScriptDesk.UI.ViewModels
         private bool _isDebugSourceStale;
         private string _recoveryNoticeText = string.Empty;
         private DocumentLanguage _language;
+        private Func<IEditorTextSnapshot>? _contentSnapshotProvider;
+        private bool _isPublishingProgrammaticContent;
+        private bool _isEditorDocumentMutationNotification;
+        private string? _snapshotContentCache;
+        private long _snapshotContentCacheRevision = -1;
+        private int _propertyChangedDeferralDepth;
+        private readonly List<DeferredPropertyChangedNotification> _deferredPropertyChangedNotifications = new();
 
         public ScriptDocumentIdentity DiagnosticDocument { get; } = new();
 
@@ -110,23 +117,94 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public string Content
         {
-            get => _content;
+            get
+            {
+                if (_isPublishingProgrammaticContent || _contentSnapshotProvider is null) return _content;
+                var snapshot = _contentSnapshotProvider();
+                if (_snapshotContentCache is not null && _snapshotContentCacheRevision == snapshot.Revision)
+                {
+                    return _snapshotContentCache;
+                }
+
+                _snapshotContentCache = snapshot.MaterializeText();
+                _snapshotContentCacheRevision = snapshot.Revision;
+                return _snapshotContentCache;
+            }
             set
             {
-                if (_content != value)
+                var normalizedContent = value ?? string.Empty;
+                if (!string.Equals(Content, normalizedContent, StringComparison.Ordinal))
                 {
-                    _content = value;
+                    _content = normalizedContent;
+                    ClearSnapshotContentCache();
+                    _isPublishingProgrammaticContent = true;
                     DiagnosticDocument.AdvanceRevision();
-                    OnPropertyChanged();
-
-                    RecalculateEditorMetrics();
-
-                    if (!IsDirty)
+                    try
                     {
-                        IsDirty = true;
+                        OnPropertyChanged(nameof(Content));
                     }
+                    finally
+                    {
+                        _isPublishingProgrammaticContent = false;
+                    }
+
+                    RecalculateEditorMetrics(normalizedContent);
+                    if (!IsDirty) IsDirty = true;
+                    OnPropertyChanged(nameof(DocumentRevision));
                 }
             }
+        }
+
+        public long DocumentRevision => DiagnosticDocument.Revision;
+
+        public bool IsEditorDocumentMutationNotification => _isEditorDocumentMutationNotification;
+
+        public void AttachContentSnapshotProvider(Func<IEditorTextSnapshot> snapshotProvider)
+        {
+            _contentSnapshotProvider = snapshotProvider ?? throw new ArgumentNullException(nameof(snapshotProvider));
+            _content = string.Empty;
+            ClearSnapshotContentCache();
+        }
+
+        public void DetachContentSnapshotProvider()
+        {
+            if (_contentSnapshotProvider is null) return;
+            var currentContent = _contentSnapshotProvider().MaterializeText();
+            _contentSnapshotProvider = null;
+            _content = currentContent;
+            ClearSnapshotContentCache();
+        }
+
+        public IEditorTextSnapshot CaptureContentSnapshot()
+            => _contentSnapshotProvider?.Invoke() ?? new StringEditorTextSnapshot(DiagnosticDocument.Revision, _content);
+
+        /// <summary>Commits one AvalonEdit TextChanged event without copying document text.</summary>
+        public void UpdateDocumentStateFromEditor(int editorLineCount)
+        {
+            DiagnosticDocument.AdvanceRevision();
+            ClearSnapshotContentCache();
+            _isEditorDocumentMutationNotification = true;
+            try
+            {
+                OnPropertyChanged(nameof(Content));
+            }
+            finally
+            {
+                _isEditorDocumentMutationNotification = false;
+            }
+            if (!IsDirty) IsDirty = true;
+            UpdateLineCount(editorLineCount);
+            OnPropertyChanged(nameof(DocumentRevision));
+        }
+
+        /// <summary>
+        /// Defers synchronous property observers until the editor session has finalized
+        /// its revision and snapshot state for a document mutation.
+        /// </summary>
+        public IDisposable DeferPropertyChangedNotifications()
+        {
+            _propertyChangedDeferralDepth++;
+            return new PropertyChangedNotificationDeferral(this);
         }
 
         /// <summary>
@@ -144,12 +222,14 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 _content = normalizedContent;
                 DiagnosticDocument.AdvanceRevision();
+                ClearSnapshotContentCache();
                 OnPropertyChanged(nameof(Content));
 
                 if (!IsDirty)
                 {
                     IsDirty = true;
                 }
+                OnPropertyChanged(nameof(DocumentRevision));
             }
 
             UpdateLineCount(editorLineCount);
@@ -705,9 +785,15 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
         }
 
-        private void RecalculateEditorMetrics()
+        private void RecalculateEditorMetrics(string? content = null)
         {
-            UpdateLineCount(CalculateLineCount(_content));
+            UpdateLineCount(CalculateLineCount(content ?? _content));
+        }
+
+        private void ClearSnapshotContentCache()
+        {
+            _snapshotContentCache = null;
+            _snapshotContentCacheRevision = -1;
         }
 
         private void UpdateLineCount(int lineCount)
@@ -751,6 +837,12 @@ namespace PS7ScriptDesk.UI.ViewModels
             return lineCount;
         }
 
+        private sealed record StringEditorTextSnapshot(long Revision, string Text) : IEditorTextSnapshot
+        {
+            public int TextLength => Text.Length;
+            public string MaterializeText() => Text;
+        }
+
         private void NotifyBreakpointsChanged()
         {
             _enabledBreakpointCount = 0;
@@ -768,7 +860,58 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         protected virtual void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
+            if (_propertyChangedDeferralDepth > 0)
+            {
+                _deferredPropertyChangedNotifications.Add(new DeferredPropertyChangedNotification(
+                    propertyName,
+                    _isEditorDocumentMutationNotification && propertyName == nameof(Content)));
+                return;
+            }
+
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+
+        private void EndPropertyChangedNotificationDeferral()
+        {
+            if (_propertyChangedDeferralDepth <= 0)
+            {
+                throw new InvalidOperationException("Property change notification deferral is unbalanced.");
+            }
+
+            _propertyChangedDeferralDepth--;
+            if (_propertyChangedDeferralDepth != 0 || _deferredPropertyChangedNotifications.Count == 0)
+            {
+                return;
+            }
+
+            var notifications = _deferredPropertyChangedNotifications.ToArray();
+            _deferredPropertyChangedNotifications.Clear();
+            foreach (var notification in notifications)
+            {
+                _isEditorDocumentMutationNotification = notification.IsEditorDocumentMutation;
+                try
+                {
+                    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(notification.PropertyName));
+                }
+                finally
+                {
+                    _isEditorDocumentMutationNotification = false;
+                }
+            }
+        }
+
+        private sealed record DeferredPropertyChangedNotification(string? PropertyName, bool IsEditorDocumentMutation);
+
+        private sealed class PropertyChangedNotificationDeferral(EditorTabViewModel owner) : IDisposable
+        {
+            private EditorTabViewModel? _owner = owner;
+
+            public void Dispose()
+            {
+                var currentOwner = _owner;
+                _owner = null;
+                currentOwner?.EndPropertyChangedNotificationDeferral();
+            }
         }
     }
 }

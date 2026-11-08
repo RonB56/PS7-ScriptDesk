@@ -351,15 +351,20 @@ public sealed class PersistentPowerShellSessionBrokerTests
     public void OutputMultiplexerSerializesInteractiveAndEditorOutput()
     {
         var multiplexer = new TerminalOutputMultiplexer();
+        var observed = new List<TerminalOutputEnvelope>();
+        multiplexer.OutputPublished += observed.Add;
         var requestId = Guid.NewGuid();
         multiplexer.SetInteractiveState(InteractiveTerminalState.InteractiveIdleAtPrompt);
-        Assert.True(multiplexer.TryBeginEditorExecution(requestId, out _));
+        Assert.True(multiplexer.TryBeginEditorExecution(
+            requestId,
+            new EditorExecutionAdmissionFacts(
+                InteractiveTerminalState.InteractiveIdleAtPrompt, true, true, true, null, null), out _));
 
         var interactive = multiplexer.PublishInteractive(EditorOutputStreamKind.VirtualTerminal, "prompt");
         var editor = multiplexer.PublishEditor(new EditorOutputRecord(requestId, 1, 1, EditorOutputStreamKind.Success, "output", DateTimeOffset.UtcNow));
 
         Assert.True(interactive.Sequence < editor.Sequence);
-        Assert.Equal(2, multiplexer.Published.Count);
+        Assert.Equal([interactive, editor], observed);
         multiplexer.EndEditorExecution(requestId);
     }
 

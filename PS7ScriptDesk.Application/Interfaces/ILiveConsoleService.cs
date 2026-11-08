@@ -21,6 +21,9 @@ namespace PS7ScriptDesk.Application.Interfaces
         /// <summary>PID of the currently authoritative terminal-owned pwsh.exe, when running.</summary>
         int? ProcessId { get; }
 
+        /// <summary>Current backend terminal generation, distinct from the runtime broker generation.</summary>
+        int CurrentSessionGeneration { get; }
+
         string? CurrentWorkingDirectory { get; }
 
         /// <summary>
@@ -30,10 +33,17 @@ namespace PS7ScriptDesk.Application.Interfaces
         event Action? ScriptExecutionCompleted;
 
         /// <summary>
-        /// Fires on the thread-pool when any dispatched terminal operation (script or console
-        /// command) reaches its completion sentinel.
+        /// Fires on the thread-pool when a structured terminal operation completes, tagged
+        /// with the backend terminal generation that owned it. Direct PSES ConPTY command
+        /// submission is reported separately and does not raise this event on input flush.
         /// </summary>
-        event Action? CommandExecutionCompleted;
+        event Action<int>? CommandExecutionCompleted;
+
+        /// <summary>
+        /// Fires when a request-correlated direct terminal command reaches a post-submission
+        /// prompt candidate. Prompt observation does not establish script success.
+        /// </summary>
+        event Action<LiveConsoleCommandCompletion>? InteractiveCommandCompleted;
 
         /// <summary>
         /// Fires on the thread-pool when the underlying pwsh.exe process exits for any
@@ -92,6 +102,13 @@ namespace PS7ScriptDesk.Application.Interfaces
             Action<ExecutionOutputRecord> onOutput,
             CancellationToken cancellationToken = default);
 
+        Task<LiveConsoleCommandResult> ExecuteConsoleCommandAsync(
+            string commandText,
+            Action<ExecutionOutputRecord> onOutput,
+            Guid requestId,
+            CancellationToken cancellationToken = default) =>
+            ExecuteConsoleCommandAsync(commandText, onOutput, cancellationToken);
+
         Task<LiveConsoleCommandResult> ExecuteScriptAsync(
             string documentDisplayName,
             string scriptContent,
@@ -99,6 +116,7 @@ namespace PS7ScriptDesk.Application.Interfaces
             bool executeInCurrentScope = false,
             CancellationToken cancellationToken = default);
 
+        /// <summary>Sends Ctrl+C and returns true only when a post-signal prompt candidate was observed.</summary>
         Task<bool> StopConsoleAsync(Action<ExecutionOutputRecord>? onOutput = null);
 
         /// <summary>

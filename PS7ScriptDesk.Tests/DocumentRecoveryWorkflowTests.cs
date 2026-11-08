@@ -2,10 +2,14 @@ using System.Text.Json;
 using PS7ScriptDesk.Application.Interfaces;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.Infrastructure.Services;
+using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.UI.ViewModels;
+using ICSharpCode.AvalonEdit;
+using System.Windows.Threading;
 
 namespace PS7ScriptDesk.Tests;
 
+[Collection("WpfUi")]
 public sealed class DocumentRecoveryWorkflowTests : IDisposable
 {
     private readonly string _testDirectory = Path.Combine(Path.GetTempPath(), $"PS7ScriptDesk.RecoveryTests-{Guid.NewGuid():N}");
@@ -91,6 +95,137 @@ public sealed class DocumentRecoveryWorkflowTests : IDisposable
 
         var candidate = Assert.Single(service.GetRecoverableDocuments());
         Assert.Equal("second", candidate.Content);
+    }
+
+    [Fact]
+    public void EditorPasteRecoveryObserversSeeOnlyTheCommittedDocumentSnapshot()
+    {
+        var recoveryService = CreateRecoveryService();
+        WpfTestDispatcher.Run(() =>
+        {
+            var viewModel = CreateViewModel(recoveryService).ViewModel;
+            viewModel.NewScriptCommand.Execute(null);
+            var tab = Assert.IsType<EditorTabViewModel>(viewModel.SelectedTab);
+            using var session = new EditorDocumentSession(tab, WpfTestDispatcher.Dispatcher);
+            session.Register();
+            var editor = new TextEditor { Document = session.Document };
+            const string pastedText = "param($Name)\r\nWrite-Output $Name\r\n";
+            var observedSnapshots = new List<(string PropertyName, long Revision, string Text)>();
+            var mutationCommitEventObserved = false;
+            session.EditorMutationCommitted += (_, _) =>
+            {
+                var snapshot = session.CaptureSnapshot();
+                Assert.Equal(session.Revision, snapshot.Revision);
+                Assert.Equal(pastedText, snapshot.MaterializeText());
+                mutationCommitEventObserved = true;
+            };
+            tab.PropertyChanged += (_, args) =>
+            {
+                if (args.PropertyName is not (nameof(EditorTabViewModel.Content) or nameof(EditorTabViewModel.IsDirty) or
+                    nameof(EditorTabViewModel.LineCount) or nameof(EditorTabViewModel.DocumentRevision)))
+                {
+                    return;
+                }
+
+                var snapshot = session.CaptureSnapshot();
+                observedSnapshots.Add((args.PropertyName!, snapshot.Revision, snapshot.MaterializeText()));
+            };
+            editor.TextChanged += (_, _) => session.CommitEditorMutation(editor.Document.LineCount);
+
+            editor.Document.Replace(0, 0, pastedText);
+
+            // The real AvalonEdit event defers the commit until update completion.
+            Assert.Equal(0, session.Revision);
+            WpfTestDispatcher.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
+
+            Assert.Equal(1, session.Revision);
+            Assert.Equal(1, tab.DocumentRevision);
+            Assert.True(mutationCommitEventObserved);
+            Assert.NotEmpty(observedSnapshots);
+            Assert.All(observedSnapshots, observed =>
+            {
+                Assert.Equal(1, observed.Revision);
+                Assert.Equal(pastedText, observed.Text);
+            });
+
+            viewModel.FlushPendingRecoveryWrites();
+            var recovery = Assert.Single(recoveryService.GetRecoverableDocuments());
+            Assert.Equal(pastedText, recovery.Content);
+            viewModel.Dispose();
+        });
+    }
+
+    [Fact]
+    public void RapidPastesUndoRedoAndImmediateSessionDisposalKeepRecoveryAtLatestRevision()
+    {
+        var recoveryService = CreateRecoveryService();
+        WpfTestDispatcher.Run(() =>
+        {
+            var viewModel = CreateViewModel(recoveryService).ViewModel;
+            viewModel.NewScriptCommand.Execute(null);
+            var tab = Assert.IsType<EditorTabViewModel>(viewModel.SelectedTab);
+            var session = new EditorDocumentSession(tab, WpfTestDispatcher.Dispatcher);
+            session.Register();
+            var editor = new TextEditor { Document = session.Document };
+            editor.TextChanged += (_, _) => session.CommitEditorMutation(editor.Document.LineCount);
+
+            void PasteAsOneAvalonEditOperation(string text)
+            {
+                editor.Document.BeginUpdate();
+                try
+                {
+                    editor.Document.Insert(editor.Document.TextLength, text);
+                }
+                finally
+                {
+                    editor.Document.EndUpdate();
+                }
+                WpfTestDispatcher.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
+            }
+
+            const string firstPaste = "Write-Output 'first'\r\n";
+            const string secondPaste = "Write-Output 'second'\r\n";
+            PasteAsOneAvalonEditOperation(firstPaste);
+            Assert.Equal(1, session.Revision);
+            Assert.Equal(session.Revision, tab.CaptureContentSnapshot().Revision);
+
+            PasteAsOneAvalonEditOperation(secondPaste);
+            Assert.Equal(2, session.Revision);
+            Assert.Equal(firstPaste + secondPaste, session.CaptureSnapshot().MaterializeText());
+            viewModel.FlushPendingRecoveryWrites();
+            Assert.Equal(firstPaste + secondPaste, Assert.Single(recoveryService.GetRecoverableDocuments()).Content);
+
+            editor.Document.UndoStack.Undo();
+            WpfTestDispatcher.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
+            Assert.Equal(3, session.Revision);
+            Assert.Equal(firstPaste, session.CaptureSnapshot().MaterializeText());
+            viewModel.FlushPendingRecoveryWrites();
+            Assert.Equal(firstPaste, Assert.Single(recoveryService.GetRecoverableDocuments()).Content);
+
+            editor.Document.UndoStack.Redo();
+            WpfTestDispatcher.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
+            Assert.Equal(4, session.Revision);
+            Assert.Equal(firstPaste + secondPaste, session.CaptureSnapshot().MaterializeText());
+
+            const string finalPaste = "Write-Output 'close-now'\r\n";
+            editor.Document.BeginUpdate();
+            try
+            {
+                editor.Document.Insert(editor.Document.TextLength, finalPaste);
+            }
+            finally
+            {
+                editor.Document.EndUpdate();
+            }
+
+            // Disposal is the immediate-close path: it must finalize and publish the
+            // pending revision before detaching the snapshot provider.
+            session.Dispose();
+            Assert.Equal(5, tab.DocumentRevision);
+            viewModel.FlushPendingRecoveryWrites();
+            Assert.Equal(firstPaste + secondPaste + finalPaste, Assert.Single(recoveryService.GetRecoverableDocuments()).Content);
+            viewModel.Dispose();
+        });
     }
 
     [Fact]

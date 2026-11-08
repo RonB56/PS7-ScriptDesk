@@ -1007,7 +1007,7 @@
             <Grid.RowDefinitions>
                 <RowDefinition x:Name="EditorRowDefinition" Height="*" />
                 <RowDefinition x:Name="EditorConsoleRowSplitterDefinition" Height="6" />
-                <RowDefinition x:Name="ConsoleRowDefinition" Height="180" />
+                <RowDefinition x:Name="ConsoleRowDefinition" Height="180" MinHeight="160" />
             </Grid.RowDefinitions>
 
             <Grid.ColumnDefinitions>
@@ -1665,10 +1665,12 @@
                         <RowDefinition x:Name="BottomToolWindowRowDefinition" Height="0" MinHeight="0" />
                     </Grid.RowDefinitions>
 
-                    <Border Grid.Row="0"
+                    <Border x:Name="ConsoleHeaderBorder"
+                            Grid.Row="0"
                             Style="{StaticResource IdeHeaderPanelStyle}"
                             Padding="8,4"
-                            Margin="0,0,0,4">
+                            Margin="0,0,0,4"
+                            SizeChanged="ConsoleHeaderBorder_SizeChanged">
                         <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />

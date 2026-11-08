@@ -441,6 +441,7 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
         public bool IsHostAttached => true;
         public PowerShellRuntimeInfo? ActiveRuntime { get; private set; }
         public int? ProcessId { get; private set; }
+        public int CurrentSessionGeneration { get; private set; }
         public string? CurrentWorkingDirectory => null;
         public int StartCount { get; private set; }
         public int ShutdownCount { get; private set; }
@@ -452,7 +453,8 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
         public TaskCompletionSource<bool> EarlyStartNotificationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource<bool>? _heldStartCompletion;
         public event Action? ScriptExecutionCompleted { add { } remove { } }
-        public event Action? CommandExecutionCompleted { add { } remove { } }
+        public event Action<int>? CommandExecutionCompleted { add { } remove { } }
+        public event Action<LiveConsoleCommandCompletion>? InteractiveCommandCompleted { add { } remove { } }
         public event Action? SessionTerminated { add { } remove { } }
         public event Action<int>? TerminalSessionStarted;
         public event Action<int>? TerminalSessionStopping;
@@ -464,8 +466,10 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
             cancellationToken.ThrowIfCancellationRequested();
             if (FailStart) throw new InvalidOperationException("simulated startup failure");
             StartCount++;
+            CurrentSessionGeneration = StartCount;
             if (HoldStartAfterEarlyNotification)
             {
+                CurrentSessionGeneration = StartCount;
                 TerminalSessionStarted?.Invoke(StartCount);
                 EarlyStartNotificationObserved.TrySetResult(true);
                 _heldStartCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);

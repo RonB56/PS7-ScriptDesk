@@ -28,6 +28,44 @@ public sealed class PromptRestorationSignalTests
     }
 
     [Fact]
+    public async Task PromptPrintedByRunningScriptCannotCompleteButLaterPromptCanRecover()
+    {
+        var signal = new PromptRestorationSignal(expectedGeneration: 21);
+
+        // Simulates `Write-Host 'PS C:\\>'` while the request-owned script is
+        // still executing. A status boundary and a subsequent prompt are both
+        // required before readiness can be published.
+        Assert.True(signal.ObservePrompt(21, statusFileExists: false, invocationEchoRemoved: true, cursorVisible: true));
+        Assert.False(signal.Completion.IsCompleted);
+        signal.ObserveStatusFileVisible();
+        Assert.False(signal.Completion.IsCompleted);
+
+        var recovered = signal.Completion;
+        Assert.False(recovered.IsCompleted);
+        signal.ObservePrompt(21, statusFileExists: true, invocationEchoRemoved: true, cursorVisible: true);
+
+        Assert.True(await recovered.WaitAsync(TimeSpan.FromMilliseconds(100)));
+    }
+
+    [Fact]
+    public void StructuredPromptTimeoutIsDiagnosticOnlyAndRetainsLateRecoveryHandlers()
+    {
+        var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.PowerShell", "Services", "PsesOwnedInteractiveSessionService.cs");
+        var restoreStart = source.IndexOf("private async Task<bool> RestoreInteractivePromptAsync(", StringComparison.Ordinal);
+        var restoreEnd = source.IndexOf("private static IReadOnlyDictionary<string, object?> ToFrameDiagnosticProperties", restoreStart, StringComparison.Ordinal);
+        Assert.True(restoreStart >= 0 && restoreEnd > restoreStart);
+        var restore = source[restoreStart..restoreEnd];
+
+        Assert.Contains("await promptSignal.Completion.WaitAsync(PromptRecoveryTimeout, cancellationToken)", restore, StringComparison.Ordinal);
+        Assert.Contains("await promptSignal.Completion.WaitAsync(cancellationToken)", restore, StringComparison.Ordinal);
+        Assert.Contains("recoveryWaitContinues\"] = true", restore, StringComparison.Ordinal);
+        Assert.Contains("owner.ProcessId != expectedProcessId.Value", restore, StringComparison.Ordinal);
+        Assert.Contains("_activeStructuredRequestId == requestId && File.Exists(statusPath)", restore, StringComparison.Ordinal);
+        Assert.True(restore.IndexOf("PromptReadyObserved -= promptHandler", StringComparison.Ordinal) >
+                    restore.IndexOf("await promptSignal.Completion.WaitAsync(cancellationToken)", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task DuplicateAndStaleEvents_CompleteOnlyCurrentExecutionOnce()
     {
         var signal = new PromptRestorationSignal(expectedGeneration: 12);
@@ -119,10 +157,10 @@ public sealed class PromptRestorationSignalTests
         Assert.Contains("Request-specific prompt pattern recognized and predicate evaluated.", source, StringComparison.Ordinal);
         Assert.Contains("rejectionReason", source, StringComparison.Ordinal);
         Assert.Contains("elapsedMilliseconds", source, StringComparison.Ordinal);
-        Assert.Contains("Interactive readiness remains unverified after prompt recognition timed out", source, StringComparison.Ordinal);
+        Assert.Contains("Interactive readiness remains unverified after request-correlated prompt verification failed", source, StringComparison.Ordinal);
         Assert.Contains("sessionPreservedAfterTimeout", source, StringComparison.Ordinal);
         Assert.Contains("Prompt-ready subscriber callback failed", source, StringComparison.Ordinal);
-        Assert.Contains("request-specific prompt restoration timed out", source, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("request-specific prompt verification ended without a verified ready prompt", source, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("completed without an observable ConPTY prompt boundary", source, StringComparison.OrdinalIgnoreCase);
     }
 

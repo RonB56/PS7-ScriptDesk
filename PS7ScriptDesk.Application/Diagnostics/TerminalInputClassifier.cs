@@ -31,7 +31,8 @@ public static class TerminalInputClassifier
 
     public static bool EstablishesUserEditOwnership(string inputClass) =>
         !string.Equals(inputClass, "FocusIn", StringComparison.Ordinal) &&
-        !string.Equals(inputClass, "FocusOut", StringComparison.Ordinal);
+        !string.Equals(inputClass, "FocusOut", StringComparison.Ordinal) &&
+        !string.Equals(inputClass, "MouseProtocol", StringComparison.Ordinal);
 
     private static bool IsMouseProtocol(string data) =>
         (data.StartsWith("\u001b[M", StringComparison.Ordinal) && data.Length >= 6) ||

@@ -360,6 +360,18 @@ public sealed class PersistentPowerShellSessionBroker : IEditorExecutionBroker
         var currentScope = request.Mode == EditorExecutionMode.CurrentScope || request.ExecuteInCurrentScope;
         var invocationOperator = currentScope ? "." : "&";
         var script = BuildInvocationScript(request, artifact, invocationOperator);
+        if (request.IsRunSelection && request.SourceInfo is not null && RunSelectionEvidenceCapture.IsEnabled)
+        {
+            RunSelectionEvidenceCapture.TryQueue(
+                request.RequestId,
+                request.SessionGeneration,
+                request.DocumentDisplayName,
+                request.ScriptText,
+                request.ScriptText,
+                artifact.ExecutionPath,
+                request.SourceInfo,
+                script);
+        }
         powerShell.AddScript(script, useLocalScope: !currentScope);
 
         using var cancellationRegistration = cancellationToken.Register(static state =>

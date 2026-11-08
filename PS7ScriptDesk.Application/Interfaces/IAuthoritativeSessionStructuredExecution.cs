@@ -23,7 +23,8 @@ public interface IAuthoritativeSessionStructuredExecution
         string scriptContent,
         bool executeInCurrentScope,
         Action<ExecutionOutputRecord> onOutput,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        EditorExecutionSourceInfo? sourceInfo = null);
 }
 
 public sealed record AuthoritativeStructuredExecutionResult(

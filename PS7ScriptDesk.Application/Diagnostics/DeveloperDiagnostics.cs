@@ -516,6 +516,14 @@ namespace PS7ScriptDesk.Application.Diagnostics
             var appLogDir = Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Logs");
             AddDirectoryToArchive(archive, appLogDir, Path.Combine("Support", "Logs"), addedEntryPaths);
 
+            // Run Selection source evidence is captured only after explicit opt-in.
+            // Include it only when the user manually creates a support package.
+            AddDirectoryToArchive(
+                archive,
+                Path.Combine(RootDirectory, "RunSelectionEvidence"),
+                Path.Combine("DeveloperDiagnostics", "RunSelectionEvidence"),
+                addedEntryPaths);
+
             foreach (var supportFilePath in GetPackagedSupportFilePaths())
             {
                 AddFileToArchive(archive, supportFilePath, Path.Combine("Support", Path.GetFileName(supportFilePath)), addedEntryPaths);
@@ -535,6 +543,7 @@ namespace PS7ScriptDesk.Application.Diagnostics
                 writer.WriteLine("Send this entire ZIP file to support/developer for troubleshooting.");
                 writer.WriteLine("It includes normal app logs, metadata startup/load logs, startup error logs, and the most recent developer diagnostics sessions when present.");
                 writer.WriteLine("Raw terminal capture directories are intentionally excluded. Terminal diagnostics record content-free metadata only.");
+                writer.WriteLine("Opt-in Run Selection evidence may include selected script contents and generated execution scripts when that capture was explicitly enabled.");
                 writer.WriteLine();
                 writer.WriteLine($"Created local time: {DateTimeOffset.Now:O}");
                 writer.WriteLine($"App data root: {ApplicationBranding.LocalApplicationDataRoot}");

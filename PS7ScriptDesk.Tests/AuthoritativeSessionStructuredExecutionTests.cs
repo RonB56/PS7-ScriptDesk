@@ -12,7 +12,8 @@ public sealed class AuthoritativeSessionStructuredExecutionTests
     {
         var session = new FakeAuthoritativeSession();
         var adapter = new AuthoritativeSessionStructuredExecutionAdapter(session, new EditorExecutionFeatureGate(true));
-        var request = new EditorExecutionRequest(Guid.NewGuid(), session.SessionGeneration, EditorExecutionMode.ScriptCall, "Test.ps1", "Write-Output proof");
+        var sourceInfo = new EditorExecutionSourceInfo(Guid.NewGuid(), 12, 25, 40);
+        var request = new EditorExecutionRequest(Guid.NewGuid(), session.SessionGeneration, EditorExecutionMode.ScriptCall, "Test.ps1", "Write-Output proof", SourceInfo: sourceInfo);
 
         var result = await adapter.ExecuteAsync(request);
 
@@ -22,6 +23,7 @@ public sealed class AuthoritativeSessionStructuredExecutionTests
         Assert.Equal(session.ProcessId, session.LastProcessId);
         Assert.Equal(request.SessionGeneration, session.LastGeneration);
         Assert.Equal(request.RequestId, session.LastRequestId);
+        Assert.Same(sourceInfo, session.LastSourceInfo);
         Assert.Equal(1, session.InvocationCount);
     }
 
@@ -60,6 +62,7 @@ public sealed class AuthoritativeSessionStructuredExecutionTests
         public int? LastProcessId { get; private set; }
         public int LastGeneration { get; private set; }
         public Guid LastRequestId { get; private set; }
+        public EditorExecutionSourceInfo? LastSourceInfo { get; private set; }
 
         public Task<AuthoritativeStructuredExecutionResult> ExecuteStructuredScriptAsync(
             Guid requestId,
@@ -68,12 +71,14 @@ public sealed class AuthoritativeSessionStructuredExecutionTests
             string scriptContent,
             bool executeInCurrentScope,
             Action<ExecutionOutputRecord> onOutput,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            EditorExecutionSourceInfo? sourceInfo = null)
         {
             InvocationCount++;
             LastRequestId = requestId;
             LastGeneration = sessionGeneration;
             LastProcessId = ProcessId;
+            LastSourceInfo = sourceInfo;
             onOutput(new ExecutionOutputRecord(ExecutionOutputStreamKind.StandardOutput, "authoritative-proof\r\n", DateTime.UtcNow));
             return Task.FromResult(new AuthoritativeStructuredExecutionResult(EditorExecutionStatus.Completed, CurrentWorkingDirectory, null, true));
         }

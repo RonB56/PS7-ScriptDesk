@@ -29,6 +29,9 @@ public sealed class TerminalInputCoordinatorTests
     [Theory]
     [InlineData("\u001b[I", "FocusIn")]
     [InlineData("\u001b[O", "FocusOut")]
+    [InlineData("\u001b[M!!", "MouseProtocol")]
+    [InlineData("\u001b[<0;10;4M", "MouseProtocol")]
+    [InlineData("\u001b[<0;10;4m", "MouseProtocol")]
     [InlineData("Get-Date", "PrintableText")]
     [InlineData("\u001b[A", "ArrowUp")]
     [InlineData("\u001bOA", "ArrowUp")]
@@ -38,6 +41,7 @@ public sealed class TerminalInputCoordinatorTests
     [InlineData("\u001bOC", "ArrowRight")]
     [InlineData("\u001b[D", "ArrowLeft")]
     [InlineData("\u001bOD", "ArrowLeft")]
+    [InlineData("\u001b[3~", "OtherControlSequence")]
     [InlineData("\u001b[H", "Home")]
     [InlineData("\u001b[1~", "Home")]
     [InlineData("\u001b[F", "End")]
@@ -45,6 +49,25 @@ public sealed class TerminalInputCoordinatorTests
     public void ClassifierUsesExplicitSemanticCategories(string input, string expected)
     {
         Assert.Equal(expected, TerminalInputClassifier.Classify(input));
+    }
+
+    [Theory]
+    [InlineData("FocusIn")]
+    [InlineData("FocusOut")]
+    [InlineData("MouseProtocol")]
+    public void FocusAndMouseControlInput_DoNotClaimCommandEditOwnership(string inputClass)
+    {
+        Assert.False(TerminalInputClassifier.EstablishesUserEditOwnership(inputClass));
+    }
+
+    [Theory]
+    [InlineData("PrintableText")]
+    [InlineData("Backspace")]
+    [InlineData("ArrowUp")]
+    [InlineData("OtherControlSequence")]
+    public void ExistingCommandLineInputClasses_KeepEditOwnership(string inputClass)
+    {
+        Assert.True(TerminalInputClassifier.EstablishesUserEditOwnership(inputClass));
     }
 
     [Theory]

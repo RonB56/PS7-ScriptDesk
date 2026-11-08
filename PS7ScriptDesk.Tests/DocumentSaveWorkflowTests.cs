@@ -416,6 +416,7 @@ internal sealed class FakeExeExportService : IExeExportService
 internal sealed class FakeLiveConsoleService : ILiveConsoleService
 {
     public int? ProcessId => null;
+    public int CurrentSessionGeneration => 0;
     public bool IsSessionRunning { get; set; }
     public bool IsInputWritable => IsSessionRunning;
     public bool IsCommandInProgress { get; set; }
@@ -424,7 +425,8 @@ internal sealed class FakeLiveConsoleService : ILiveConsoleService
     public string? CurrentWorkingDirectory => null;
     public int RawInputWriteCount { get; private set; }
     public event Action? ScriptExecutionCompleted { add { } remove { } }
-    public event Action? CommandExecutionCompleted { add { } remove { } }
+    public event Action<int>? CommandExecutionCompleted { add { } remove { } }
+    public event Action<LiveConsoleCommandCompletion>? InteractiveCommandCompleted { add { } remove { } }
     public event Action? SessionTerminated { add { } remove { } }
     public event Action<int>? TerminalSessionStarted { add { } remove { } }
     public event Action<int>? TerminalSessionStopping { add { } remove { } }

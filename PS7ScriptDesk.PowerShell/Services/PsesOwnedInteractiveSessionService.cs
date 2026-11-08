@@ -15,7 +15,7 @@ namespace PS7ScriptDesk.PowerShell.Services;
 /// console-repl stdio is the terminal transport. This type intentionally does
 /// not create a second PowerShell process for debugging.
 /// </summary>
-public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IAuthoritativeSessionStructuredExecution, IAuthoritativePsesDebugEndpoint, IAuthoritativeLiveCompletionProvider
+public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IStructuredPromptReadinessSource, IAuthoritativeSessionStructuredExecution, IAuthoritativePsesDebugEndpoint, IAuthoritativeLiveCompletionProvider
 {
     private const string FallbackPsesHostVersion = "2025.4.0";
     private const int StartupOutputCaptureLimit = 32 * 1024;
@@ -51,6 +51,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     private CancellationTokenSource? _activeCommandCancellation;
     private InputOutputProbe? _pendingInputOutputProbe;
     private StructuredEchoFilter? _activeStructuredEchoFilter;
+    private Guid? _activeStructuredRequestId;
     private StructuredExecutionState? _activeStructuredExecutionState;
     private long _promptReadyObservation;
     private readonly PromptRecoveryFrameDiagnostics _promptFrameDiagnostics = new();
@@ -60,6 +61,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     private string _promptAnsiCarry = string.Empty;
     private string _cursorVisibilitySequenceTail = string.Empty;
     private bool _interactiveReadinessUnverified;
+    private PendingInteractiveCommand? _pendingInteractiveCommand;
     private bool _cursorVisible;
     private event Action<int, bool>? CursorVisibilityChanged;
     private FileStream? _rawConPtyCapture;
@@ -82,6 +84,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     public bool IsHostAttached => IsSessionRunning;
     public PowerShellRuntimeInfo? ActiveRuntime => _activeRuntime;
     public int? ProcessId => _conPty is { HasExited: false } p ? p.ProcessId : null;
+    public int CurrentSessionGeneration => SessionGeneration;
     public DateTimeOffset? ProcessStartTimeUtc => _conPty is { HasExited: false } p ? p.ProcessStartTimeUtc : null;
     public int SessionGeneration => _generation;
     public string? CurrentWorkingDirectory => _workingDirectory;
@@ -106,11 +109,13 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     }
 
     public event Action? ScriptExecutionCompleted;
-    public event Action? CommandExecutionCompleted;
+    public event Action<int>? CommandExecutionCompleted;
+    public event Action<LiveConsoleCommandCompletion>? InteractiveCommandCompleted;
     public event Action? SessionTerminated;
     public event Action<int>? TerminalSessionStarted;
     public event Action<int>? TerminalSessionStopping;
     public event Action<int, string>? PromptReadyObserved;
+    public event Action<StructuredPromptReadyObservation>? StructuredPromptReadyObserved;
     public event Action<int, string>? RawOutputReceived;
     internal event Action<int, string>? OutputObservedBeforeDisplayFiltering;
 
@@ -189,6 +194,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             _workingDirectory = workingDirectory;
             _sessionDetailsPath = sessionDetailsPath;
             _generation++;
+            _pendingInteractiveCommand = null;
+            _commandInProgress = false;
             _shutdownRequested = false;
             _sessionFaulted = false;
             _promptReadyObservation = 0;
@@ -366,7 +373,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         return WriteInputCoreAsync(data, cancellationToken);
     }
 
-    public Task<LiveConsoleCommandResult> ExecuteConsoleCommandAsync(string commandText, Action<ExecutionOutputRecord> onOutput, CancellationToken cancellationToken = default)
+    public Task<LiveConsoleCommandResult> ExecuteConsoleCommandAsync(string commandText, Action<ExecutionOutputRecord> onOutput, CancellationToken cancellationToken = default) =>
+        ExecuteConsoleCommandAsync(commandText, onOutput, Guid.NewGuid(), cancellationToken);
+
+    public Task<LiveConsoleCommandResult> ExecuteConsoleCommandAsync(string commandText, Action<ExecutionOutputRecord> onOutput, Guid requestId, CancellationToken cancellationToken = default)
     {
         // Direct terminal commands are intentionally interactive ConPTY input.
         // Only editor-owned Run File/Run Selection requests use structured LSP
@@ -380,7 +390,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             ["structuredEvaluation"] = false,
             ["contentOmitted"] = true
         });
-        return ExecuteTextAsync(commandText, onOutput, cancellationToken);
+        return ExecuteTextAsync(commandText, onOutput, requestId, cancellationToken);
     }
 
     public async Task<LiveConsoleCommandResult> ExecuteScriptAsync(string documentDisplayName, string scriptContent, Action<ExecutionOutputRecord> onOutput, bool executeInCurrentScope = false, CancellationToken cancellationToken = default)
@@ -442,7 +452,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 startedAt.LocalDateTime,
                 DateTime.Now);
             ScriptExecutionCompleted?.Invoke();
-            CommandExecutionCompleted?.Invoke();
+            CommandExecutionCompleted?.Invoke(sessionGeneration);
             return commandResult;
         }
         finally
@@ -477,7 +487,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         string scriptContent,
         bool executeInCurrentScope,
         Action<ExecutionOutputRecord> onOutput,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        EditorExecutionSourceInfo? sourceInfo = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(documentDisplayName);
         ArgumentNullException.ThrowIfNull(scriptContent);
@@ -535,6 +546,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     return new AuthoritativeStructuredExecutionResult(EditorExecutionStatus.Rejected, CurrentWorkingDirectory, "The authoritative PSES session is stopping or faulted.", false);
                 if (sessionGeneration != _generation || _languageServiceClient is null)
                     return new AuthoritativeStructuredExecutionResult(EditorExecutionStatus.Rejected, CurrentWorkingDirectory, "The authoritative PSES session generation changed before execution admission.", false);
+                _activeStructuredRequestId = requestId;
             }
             cancellationToken.ThrowIfCancellationRequested();
             // The user text is an intact file-level PowerShell execution unit. In
@@ -596,6 +608,18 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 $"Remove-Variable -Name '{statusVariable}' -ErrorAction SilentlyContinue\n" +
                 $"Remove-Variable -Name '{stagedScriptVariable}' -Scope Global -ErrorAction SilentlyContinue\n" +
                 "}\n}\n}";
+            if (sourceInfo is not null && RunSelectionEvidenceCapture.IsEnabled)
+            {
+                RunSelectionEvidenceCapture.TryQueue(
+                    requestId,
+                    sessionGeneration,
+                    documentDisplayName,
+                    scriptContent,
+                    scriptContent,
+                    snapshotPath,
+                    sourceInfo,
+                    stagedExpression);
+            }
             protocolResult = await PsesDapEvaluationClient.EvaluateAsync(debugPipe, requestId, sessionGeneration, stagedExpression, cancellationToken).ConfigureAwait(false);
             DeveloperDiagnostics.LogInfo("PSES", "Private DAP script staging returned before foreground host execution.", new Dictionary<string, object?>
             {
@@ -677,13 +701,13 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                             ["statusFileExists"] = File.Exists(statusPath)
                         });
                         status = EditorExecutionStatus.Unknown;
-                        errorMessage = "PSES request-specific prompt restoration timed out or was rejected; inspect correlated prompt predicate diagnostics.";
-                        // The private status file proves the script's completion, but the
-                        // prompt timeout does not prove that the REPL is ready. Preserve
-                        // the shared process and mark input readiness unverified so the
-                        // runtime coordinator faults admission instead of destroying it.
+                        errorMessage = "PSES request-specific prompt restoration was not verified; inspect correlated prompt predicate diagnostics.";
+                        // A missing request-specific prompt is not proof that the session
+                        // can never recover. Keep readiness conservative, but only latch
+                        // it when the request/session was actually invalidated; the prompt
+                        // waiter remains active until its correlated event arrives.
                         lock (_syncRoot) _interactiveReadinessUnverified = true;
-                        DeveloperDiagnostics.LogWarning("PSES", "Interactive readiness remains unverified after prompt recognition timed out; preserving the live session and blocking input/editor admission.", new Dictionary<string, object?>
+                        DeveloperDiagnostics.LogWarning("PSES", "Interactive readiness remains unverified after request-correlated prompt verification failed; preserving the live session and blocking input/editor admission.", new Dictionary<string, object?>
                         {
                             ["requestId"] = requestId,
                             ["sessionGeneration"] = sessionGeneration,
@@ -760,7 +784,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            var promptRecovered = await StopConsoleForGenerationAsync(sessionGeneration, requirePromptRecovery: true).ConfigureAwait(false);
+            var promptRecovered = (await StopConsoleForGenerationAsync(sessionGeneration).ConfigureAwait(false)).Outcome == LiveConsoleInterruptOutcome.RecoveredAtPrompt;
             var requestStatusObserved = File.Exists(statusPath) && sessionGeneration == SessionGeneration;
             var sessionTerminated = false;
             if (!promptRecovered || !requestStatusObserved)
@@ -861,6 +885,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             string filteredEchoRemainder;
             lock (_syncRoot)
             {
+                if (_activeStructuredRequestId == requestId)
+                    _activeStructuredRequestId = null;
                 var discardEcho = cancellationToken.IsCancellationRequested || protocolResult?.Status == EditorExecutionStatus.Cancelled;
                 var filteredRemainder = string.Empty;
                 if (requestEchoFilter is not null && ReferenceEquals(_activeStructuredEchoFilter, requestEchoFilter))
@@ -894,13 +920,13 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
 
     public async Task<bool> StopConsoleAsync(Action<ExecutionOutputRecord>? onOutput = null)
     {
-        if (!IsInputWritable) return true;
+        if (!IsInputWritable) return false;
         int generation;
         lock (_syncRoot) generation = _generation;
-        return await StopConsoleForGenerationAsync(generation).ConfigureAwait(false);
+        return (await StopConsoleForGenerationAsync(generation).ConfigureAwait(false)).Outcome == LiveConsoleInterruptOutcome.RecoveredAtPrompt;
     }
 
-    private async Task<bool> StopConsoleForGenerationAsync(int expectedGeneration, bool requirePromptRecovery = false)
+    private async Task<InterruptRecoveryResult> StopConsoleForGenerationAsync(int expectedGeneration)
     {
         ConPtyProcess? expectedConPty;
         TaskCompletionSource<long> promptRecoveryWaiter;
@@ -908,23 +934,32 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         lock (_syncRoot)
         {
             expectedConPty = _conPty;
-            if (_shutdownRequested || _sessionFaulted || expectedGeneration != _generation || expectedConPty is null || expectedConPty.HasExited)
-                return false;
+            if (expectedGeneration != _generation)
+                return new InterruptRecoveryResult(LiveConsoleInterruptOutcome.SessionReplaced, false);
+            if (expectedConPty is null || expectedConPty.HasExited)
+                return new InterruptRecoveryResult(LiveConsoleInterruptOutcome.SessionTerminated, false);
+            if (_shutdownRequested || _sessionFaulted)
+                return new InterruptRecoveryResult(LiveConsoleInterruptOutcome.Failed, false);
 
             promptObservationBeforeInterrupt = _promptReadyObservation;
+            _promptAnsiCarry = string.Empty;
+            if (_pendingInteractiveCommand is { } pending && pending.Generation == expectedGeneration)
+            {
+                pending.InterruptRequested = true;
+            }
             _promptRecognitionBuffer = string.Empty;
             promptRecoveryWaiter = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
             _promptRecoveryGeneration = expectedGeneration;
             _promptRecoveryWaiter = promptRecoveryWaiter;
         }
+        var signalDelivered = false;
         try
         {
             await WriteInputCoreAsync("\u0003", CancellationToken.None, expectedConPty, expectedGeneration).ConfigureAwait(false);
-            var promptRecovered = false;
+            signalDelivered = true;
             try
             {
                 var observed = await promptRecoveryWaiter.Task.WaitAsync(PromptRecoveryTimeout).ConfigureAwait(false);
-                promptRecovered = true;
                 DeveloperDiagnostics.LogInfo("PSES", "PSES console-repl interrupt reached a post-interrupt prompt boundary.", new Dictionary<string, object?>
                 {
                     ["sessionGeneration"] = expectedGeneration,
@@ -932,23 +967,49 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     ["promptObservationAfterInterrupt"] = observed,
                     ["promptRecoveryObserved"] = true
                 });
+                return new InterruptRecoveryResult(LiveConsoleInterruptOutcome.RecoveredAtPrompt, signalDelivered);
             }
             catch (TimeoutException)
             {
+                var timeoutOutcome = LiveConsoleInterruptOutcome.TimedOutUnverified;
+                lock (_syncRoot)
+                {
+                    if (!ReferenceEquals(_conPty, expectedConPty) || _generation != expectedGeneration)
+                    {
+                        timeoutOutcome = LiveConsoleInterruptOutcome.SessionReplaced;
+                    }
+                    else if (expectedConPty.HasExited)
+                    {
+                        timeoutOutcome = LiveConsoleInterruptOutcome.SessionTerminated;
+                    }
+                    else
+                    {
+                        _interactiveReadinessUnverified = true;
+                    }
+                }
                 DeveloperDiagnostics.LogWarning("PSES", "PSES console-repl interrupt was sent but no post-interrupt prompt boundary was observed within the bounded recovery interval.", new Dictionary<string, object?>
                 {
                     ["sessionGeneration"] = expectedGeneration,
                     ["promptObservationBeforeInterrupt"] = promptObservationBeforeInterrupt,
                     ["promptRecoveryObserved"] = false,
+                    ["outcome"] = timeoutOutcome.ToString(),
                     ["recoveryTimeoutMilliseconds"] = (int)PromptRecoveryTimeout.TotalMilliseconds
                 });
+                return new InterruptRecoveryResult(timeoutOutcome, signalDelivered);
             }
-            return !requirePromptRecovery || promptRecovered;
         }
         catch (Exception ex)
         {
+            if (!signalDelivered)
+            {
+                lock (_syncRoot)
+                {
+                    if (_pendingInteractiveCommand is { } pending && pending.Generation == expectedGeneration)
+                        pending.InterruptRequested = false;
+                }
+            }
             DeveloperDiagnostics.LogException("PSES", ex, "PSES console-repl interrupt failed.");
-            return false;
+            return new InterruptRecoveryResult(LiveConsoleInterruptOutcome.Failed, signalDelivered);
         }
         finally
         {
@@ -963,9 +1024,12 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         }
     }
 
+    private sealed record InterruptRecoveryResult(LiveConsoleInterruptOutcome Outcome, bool SignalDelivered);
+
     private async Task<bool> RestoreInteractivePromptAsync(Guid requestId, int expectedGeneration, string invocation, string statusPath, CancellationToken cancellationToken)
     {
         PsesLanguageServiceClient? client;
+        int? expectedProcessId;
         var verificationStarted = System.Diagnostics.Stopwatch.StartNew();
         var invocationObserved = false;
         var invocationTail = string.Empty;
@@ -1082,6 +1146,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         lock (_syncRoot)
         {
             client = _languageServiceClient;
+            expectedProcessId = _conPty is { HasExited: false } owner ? owner.ProcessId : null;
             if (_shutdownRequested || _sessionFaulted || expectedGeneration != _generation || client is null || !client.IsInitialized)
                 return false;
 
@@ -1166,7 +1231,44 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     ["contentOmitted"] = true
                 });
             }
-            await promptSignal.Completion.WaitAsync(PromptRecoveryTimeout, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await promptSignal.Completion.WaitAsync(PromptRecoveryTimeout, cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                // This is an observation threshold for diagnostics, not an execution
+                // deadline. Keep the request handlers attached and await the matching
+                // post-status prompt so a slow but healthy PSES session can recover.
+                DeveloperDiagnostics.LogWarning("PSES", "Structured execution exceeded the prompt observation threshold; retaining request-correlated late recovery.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = requestId,
+                    ["sessionGeneration"] = expectedGeneration,
+                    ["processId"] = ProcessId,
+                    ["observationThresholdMilliseconds"] = (int)PromptRecoveryTimeout.TotalMilliseconds,
+                    ["statusFileExists"] = File.Exists(statusPath),
+                    ["signal"] = promptSignal.Snapshot(),
+                    ["recoveryWaitContinues"] = true,
+                    ["contentOmitted"] = true
+                });
+                await promptSignal.Completion.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            lock (_syncRoot)
+            {
+                if (_shutdownRequested || _sessionFaulted || expectedGeneration != _generation ||
+                    expectedProcessId is null || _conPty is not { HasExited: false } owner || owner.ProcessId != expectedProcessId.Value)
+                {
+                    return false;
+                }
+                if (_activeStructuredRequestId == requestId && File.Exists(statusPath))
+                    _interactiveReadinessUnverified = false;
+            }
+            NotifyStructuredPromptReadyObserved(new StructuredPromptReadyObservation(
+                requestId,
+                expectedGeneration,
+                ProcessId ?? 0,
+                CurrentWorkingDirectory ?? string.Empty));
             DeveloperDiagnostics.LogInfo("PSES", "Request-specific prompt restoration predicate accepted.", new Dictionary<string, object?>
             {
                 ["requestId"] = requestId,
@@ -1199,7 +1301,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         catch (TimeoutException)
         {
             var frameSnapshot = _promptFrameDiagnostics.Snapshot();
-            DeveloperDiagnostics.LogWarning("PSES", "Request-specific prompt restoration timed out after prompt-pattern observation or rejection.", new Dictionary<string, object?>
+            DeveloperDiagnostics.LogWarning("PSES", "Request-specific prompt verification ended without a verified ready prompt.", new Dictionary<string, object?>
             {
                 ["requestId"] = requestId,
                 ["sessionGeneration"] = expectedGeneration,
@@ -1441,18 +1543,27 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
     {
         var processId = ProcessId;
         var attempted = IsInputWritable;
+        if (!attempted)
+        {
+            return new LiveConsoleInterruptResult(
+                false, false, false, false, false, processId, PromptRecoveryTimeout,
+                LiveConsoleInterruptOutcome.NotAttempted, signalDelivered: false);
+        }
         CancellationTokenSource? activeCommandCancellation;
         lock (_syncRoot) activeCommandCancellation = _activeCommandCancellation;
         try { activeCommandCancellation?.Cancel(); } catch (ObjectDisposedException) { }
-        var completed = await StopConsoleAsync(onOutput).ConfigureAwait(false);
+        var recovery = await StopConsoleForGenerationAsync(CurrentSessionGeneration).ConfigureAwait(false);
+        var outcome = recovery.Outcome;
         return new LiveConsoleInterruptResult(
             attempted,
-            completed,
+            outcome == LiveConsoleInterruptOutcome.RecoveredAtPrompt,
             escalationRequired: false,
             processTerminationSucceeded: false,
             sessionRestarted: false,
             processId,
-            TimeSpan.Zero);
+            PromptRecoveryTimeout,
+            outcome,
+            recovery.SignalDelivered);
     }
 
     public void Dispose()
@@ -1465,10 +1576,25 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         _lifecycleGate.Dispose();
     }
 
-    private async Task<LiveConsoleCommandResult> ExecuteTextAsync(string text, Action<ExecutionOutputRecord> onOutput, CancellationToken cancellationToken)
+    private async Task<LiveConsoleCommandResult> ExecuteTextAsync(string text, Action<ExecutionOutputRecord> onOutput, Guid requestId, CancellationToken cancellationToken)
     {
         var started = DateTime.UtcNow;
+        var generation = SessionGeneration;
+        var processId = ProcessId ?? throw new InvalidOperationException("PSES host is not running.");
         var command = text.TrimEnd('\r', '\n') + "\r";
+        PendingInteractiveCommand pending;
+        lock (_syncRoot)
+        {
+            if (_shutdownRequested || _sessionFaulted || generation != _generation || _conPty is not { HasExited: false } owner || owner.ProcessId != processId)
+                throw new InvalidOperationException("The authoritative PSES session changed before command admission.");
+            if (_interactiveReadinessUnverified)
+                throw new InvalidOperationException("Interactive readiness is unverified. Use Reset Console before submitting another command.");
+            if (_pendingInteractiveCommand is not null || _commandInProgress)
+                throw new InvalidOperationException("Another PSES interactive or editor operation already owns terminal admission.");
+            pending = new PendingInteractiveCommand(requestId, generation, processId, _promptReadyObservation, started);
+            _pendingInteractiveCommand = pending;
+            _commandInProgress = true;
+        }
         DeveloperDiagnostics.LogInfo(
             "Phase2CProof",
             "PSES-owned ExecuteTextAsync prepared terminal command.",
@@ -1478,22 +1604,111 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 ["commandLength"] = command.Length,
                 ["carriageReturnAppended"] = command.EndsWith('\r'),
                 ["sessionGeneration"] = _generation,
+                ["requestId"] = requestId,
                 ["processId"] = ProcessId,
                 ["inputWritable"] = IsInputWritable,
                 ["contentOmitted"] = true
             });
-        await WriteInputCoreAsync(command, cancellationToken).ConfigureAwait(false);
-        CommandExecutionCompleted?.Invoke();
-        DeveloperDiagnostics.LogInfo(
-            "Phase2CProof",
-            "PSES-owned ExecuteTextAsync declared command completion after input flush.",
-            new Dictionary<string, object?>
+        try
+        {
+            await WriteInputCoreAsync(command, cancellationToken, expectedGeneration: generation).ConfigureAwait(false);
+            var settled = false;
+            lock (_syncRoot)
             {
+                if (ReferenceEquals(_pendingInteractiveCommand, pending) &&
+                    _conPty is { HasExited: false } currentOwner && currentOwner.ProcessId == processId && _generation == generation)
+                {
+                    pending.Submitted = true;
+                    settled = pending.ObservedPromptSequence > pending.PromptSequenceAtAdmission;
+                }
+            }
+            if (settled) CompleteInteractiveCommand(pending, pending.InterruptRequested ? LiveConsoleCommandOutcome.Interrupted : LiveConsoleCommandOutcome.PromptObserved, pending.ObservedPromptSequence);
+            DeveloperDiagnostics.LogInfo("PSES", "Direct console command input was submitted; execution outcome remains pending prompt observation.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = generation,
+                ["processId"] = processId,
                 ["commandLength"] = command.Length,
-                ["sessionGeneration"] = _generation,
-                ["processId"] = ProcessId
+                ["elapsedMilliseconds"] = (DateTime.UtcNow - started).TotalMilliseconds,
+                ["outcome"] = "Submitted",
+                ["contentOmitted"] = true
             });
-        return new LiveConsoleCommandResult("PSES console-repl command", false, CurrentWorkingDirectory, started, DateTime.UtcNow);
+            return new LiveConsoleCommandResult("PSES console-repl command", false, CurrentWorkingDirectory, started, DateTime.UtcNow, requestId, generation, processId, LiveConsoleCommandOutcome.Submitted);
+        }
+        catch
+        {
+            lock (_syncRoot)
+            {
+                if (ReferenceEquals(_pendingInteractiveCommand, pending))
+                {
+                    _pendingInteractiveCommand = null;
+                    _commandInProgress = false;
+                    _interactiveReadinessUnverified = true;
+                }
+            }
+            throw;
+        }
+    }
+
+    private void CompleteInteractiveCommand(PendingInteractiveCommand pending, LiveConsoleCommandOutcome outcome, long promptSequence)
+    {
+        LiveConsoleCommandCompletion? completion = null;
+        lock (_syncRoot)
+        {
+            if (!pending.Submitted || !ReferenceEquals(_pendingInteractiveCommand, pending) ||
+                pending.Generation != _generation || _interactiveReadinessUnverified ||
+                _conPty is not { HasExited: false } owner || owner.ProcessId != pending.ProcessId)
+                return;
+            _pendingInteractiveCommand = null;
+            _commandInProgress = false;
+            completion = new LiveConsoleCommandCompletion(
+                pending.RequestId,
+                pending.Generation,
+                pending.ProcessId,
+                outcome,
+                promptSequence,
+                DateTimeOffset.UtcNow);
+        }
+
+        DeveloperDiagnostics.LogInfo("PSES", "Direct console command reached a same-generation prompt observation.", new Dictionary<string, object?>
+        {
+            ["requestId"] = completion.RequestId,
+            ["sessionGeneration"] = completion.SessionGeneration,
+            ["processId"] = completion.ProcessId,
+            ["promptObservationSequence"] = completion.PromptObservationSequence,
+            ["outcome"] = completion.Outcome.ToString(),
+            ["elapsedMilliseconds"] = (completion.ObservedAt - pending.StartedAt).TotalMilliseconds,
+            ["promptIsHeuristic"] = true,
+            ["contentOmitted"] = true
+        });
+        var handlers = InteractiveCommandCompleted;
+        if (handlers is null) return;
+        foreach (Action<LiveConsoleCommandCompletion> handler in handlers.GetInvocationList())
+        {
+            try { handler(completion); }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("PSES", ex, "Direct command completion subscriber failed.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = completion.RequestId,
+                    ["sessionGeneration"] = completion.SessionGeneration,
+                    ["processId"] = completion.ProcessId,
+                    ["contentOmitted"] = true
+                });
+            }
+        }
+    }
+
+    private sealed class PendingInteractiveCommand(Guid requestId, int generation, int processId, long promptSequenceAtAdmission, DateTime startedAt)
+    {
+        public Guid RequestId { get; } = requestId;
+        public int Generation { get; } = generation;
+        public int ProcessId { get; } = processId;
+        public long PromptSequenceAtAdmission { get; } = promptSequenceAtAdmission;
+        public DateTime StartedAt { get; } = startedAt;
+        public long ObservedPromptSequence { get; set; }
+        public bool Submitted { get; set; }
+        public bool InterruptRequested { get; set; }
     }
 
     private async Task WriteInputCoreAsync(string data, CancellationToken cancellationToken, ConPtyProcess? expectedConPty = null, int? expectedGeneration = null)
@@ -1636,6 +1851,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                 if (promptBoundaryObserved)
                 {
                     TaskCompletionSource<long>? promptRecoveryWaiter;
+                    PendingInteractiveCommand? pendingInteractiveCommand;
                     long promptObservation;
                     lock (_syncRoot)
                     {
@@ -1643,8 +1859,20 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                         promptRecoveryWaiter = generation == _promptRecoveryGeneration
                             ? this._promptRecoveryWaiter
                             : null;
+                        pendingInteractiveCommand = _pendingInteractiveCommand;
+                        if (pendingInteractiveCommand is not null && pendingInteractiveCommand.Generation == generation)
+                        {
+                            pendingInteractiveCommand.ObservedPromptSequence = promptObservation;
+                        }
                     }
                     promptRecoveryWaiter?.TrySetResult(promptObservation);
+                    if (pendingInteractiveCommand is not null && pendingInteractiveCommand.Generation == generation)
+                    {
+                        CompleteInteractiveCommand(
+                            pendingInteractiveCommand,
+                            pendingInteractiveCommand.InterruptRequested ? LiveConsoleCommandOutcome.Interrupted : LiveConsoleCommandOutcome.PromptObserved,
+                            promptObservation);
+                    }
                     NotifyPromptReadyObserved(generation, text);
                 }
             }
@@ -2188,6 +2416,27 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
                     ["requestId"] = activeRequestId,
                     ["subscriberMethod"] = handler.Method.Name,
                     ["promptTextLength"] = text.Length,
+                    ["contentOmitted"] = true
+                });
+            }
+        }
+    }
+
+    private void NotifyStructuredPromptReadyObserved(StructuredPromptReadyObservation observation)
+    {
+        var handlers = StructuredPromptReadyObserved;
+        if (handlers is null) return;
+        foreach (Action<StructuredPromptReadyObservation> handler in handlers.GetInvocationList())
+        {
+            try { handler(observation); }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("PSES", ex, "Structured prompt-ready subscriber callback failed.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = observation.RequestId,
+                    ["sessionGeneration"] = observation.TerminalGeneration,
+                    ["processId"] = observation.ProcessId,
+                    ["subscriberMethod"] = handler.Method.Name,
                     ["contentOmitted"] = true
                 });
             }

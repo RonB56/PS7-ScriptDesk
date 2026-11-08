@@ -82,7 +82,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
 
         ConfigureScriptDispatch(service, startToken, completionToken, locationToken);
         service.RawOutputReceived += (_, output) => rawOutput.Add(output);
-        service.CommandExecutionCompleted += () => commandCompletions++;
+        service.CommandExecutionCompleted += _ => commandCompletions++;
         service.ScriptExecutionCompleted += () => scriptCompletions++;
 
         Publish(service, "PS C:\\> hidden dispatch echo\r\n##PSSTUDIO_EXEC_STA", _ => { });
@@ -113,7 +113,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         SetField(service, "_isCommandInProgress", true);
         SetField(service, "_currentCommandIsScript", false);
         SetField<string?>(service, "_pendingCompletionToken", null);
-        service.CommandExecutionCompleted += () => commandCompletions++;
+        service.CommandExecutionCompleted += _ => commandCompletions++;
 
         InvokePrivate(
             service,
@@ -134,7 +134,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         SetField(service, "_isCommandInProgress", true);
         SetField(service, "_currentCommandIsScript", false);
         SetField(service, "_pendingCompletionToken", "##PSSTUDIO_EXEC_DONE_pending");
-        service.CommandExecutionCompleted += () => commandCompletions++;
+        service.CommandExecutionCompleted += _ => commandCompletions++;
 
         InvokePrivate(service, "UpdateCurrentDirectoryFromPrompt", "PS C:\\Work>");
 
@@ -242,7 +242,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         var visible = new List<string>();
         var completions = 0;
         service.RawOutputReceived += (_, output) => visible.Add(output);
-        service.CommandExecutionCompleted += () => completions++;
+        service.CommandExecutionCompleted += _ => completions++;
         var encodedLocation = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(@"D:\OscConfirmed"));
 
         var startFrame = $"\x1b]7777;PS7SD;START;{startToken}\a";
@@ -269,7 +269,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         var visible = new List<string>();
         var completions = 0;
         service.RawOutputReceived += (_, output) => visible.Add(output);
-        service.CommandExecutionCompleted += () => completions++;
+        service.CommandExecutionCompleted += _ => completions++;
 
         var startFrame = $"\x1b]7777;PS7SD;START;{startToken}\a";
         var doneFrame = $"\x1b]7777;PS7SD;DONE;{completionToken}\a";
@@ -451,7 +451,7 @@ public sealed class LiveConsoleServiceCharacterizationTests
         var lifecycle = new List<ExecutionOutputRecord>();
         var completions = 0;
         service.RawOutputReceived += (_, output) => visible.Add(output);
-        service.CommandExecutionCompleted += () => completions++;
+        service.CommandExecutionCompleted += _ => completions++;
 
         InvokePrivate(
             service,

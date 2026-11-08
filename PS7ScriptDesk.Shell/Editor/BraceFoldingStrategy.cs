@@ -1,124 +1,117 @@
-using System;
-using System.Collections.Generic;
-using ICSharpCode.AvalonEdit.Document;
-using ICSharpCode.AvalonEdit.Folding;
+using System.Management.Automation.Language;
 
-namespace PS7ScriptDesk.Shell.Editor
+namespace PS7ScriptDesk.Shell.Editor;
+
+/// <summary>Computes immutable fold descriptors from one immutable script snapshot.</summary>
+internal sealed class BraceFoldingStrategy
 {
-    /// <summary>
-    /// Produces fold regions for:
-    /// <list type="bullet">
-    ///   <item><c>{ ... }</c> brace blocks (functions, if, foreach, try/catch, …)</item>
-    ///   <item><c>#region … #endregion</c> named regions</item>
-    /// </list>
-    /// Only multi-line blocks become foldable so single-line hash-tables and inline
-    /// closures are not cluttered with fold arrows.
-    /// </summary>
-    public sealed class BraceFoldingStrategy
+    public IReadOnlyList<FoldingRange> CreateFoldings(string text, CancellationToken cancellationToken = default)
     {
-        /// <summary>
-        /// Recomputes fold sections for <paramref name="document"/> and pushes them to
-        /// <paramref name="manager"/>.  Existing folded sections remain folded where possible.
-        /// </summary>
-        public void UpdateFoldings(FoldingManager manager, TextDocument document)
+        ArgumentNullException.ThrowIfNull(text);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        Token[] tokens;
+        ParseError[] errors;
+        Parser.ParseInput(text, out tokens, out errors);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var foldings = new List<FoldingRange>();
+        var openBraces = new Stack<int>();
+        var openRegions = new Stack<(int Offset, string Name)>();
+        var lineStarts = new List<int> { 0 };
+        for (var i = 0; i < text.Length; i++)
         {
-            manager.UpdateFoldings(CreateFoldings(document), -1);
+            if (text[i] == '\r')
+            {
+                if (i + 1 < text.Length && text[i + 1] == '\n') i++;
+                lineStarts.Add(i + 1);
+            }
+            else if (text[i] == '\n')
+            {
+                lineStarts.Add(i + 1);
+            }
         }
 
-        private static IEnumerable<NewFolding> CreateFoldings(TextDocument document)
+        var tokenIndex = 0;
+        foreach (var token in tokens)
         {
-            var foldings = new List<NewFolding>();
-            var openBraces = new Stack<int>();
-            var openRegions = new Stack<(int Offset, string Name)>();
-            var text = document.Text;
+            if ((tokenIndex++ & 0x3ff) == 0) cancellationToken.ThrowIfCancellationRequested();
+            var start = token.Extent.StartOffset;
+            var end = token.Extent.EndOffset;
+            if (start < 0 || end < start || end > text.Length) continue;
 
-            // Single pass: detect { } pairs and #region / #endregion pairs.
-            // We scan line-by-line for region directives and character-by-character for braces.
-            // Characters inside strings / comments are not excluded here because the folding
-            // strategy is purely structural (brace counting) — minor false positives are
-            // acceptable.
-
-            for (var i = 0; i < text.Length; i++)
+            if (token.Kind == TokenKind.LCurly)
             {
-                var ch = text[i];
-
-                if (ch == '{')
-                {
-                    openBraces.Push(i);
-                    continue;
-                }
-
-                if (ch == '}')
-                {
-                    if (openBraces.Count > 0)
-                    {
-                        var startOffset = openBraces.Pop();
-                        var endOffset = i + 1;
-                        if (ContainsNewline(text, startOffset, endOffset))
-                            foldings.Add(new NewFolding(startOffset, endOffset));
-                    }
-                    continue;
-                }
-
-                if (ch == '#')
-                {
-                    // Check for #region or #endregion at the start of the logical line
-                    var lineStart = GetLineStart(text, i);
-                    var lineEnd = GetLineEnd(text, i);
-                    var lineContent = text.Substring(lineStart, lineEnd - lineStart).TrimStart();
-
-                    if (lineContent.StartsWith("#region", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var regionName = lineContent.Length > 7 ? lineContent[7..].Trim() : string.Empty;
-                        openRegions.Push((lineStart, regionName));
-                        // Skip to end of line
-                        i = lineEnd - 1;
-                        continue;
-                    }
-
-                    if (lineContent.StartsWith("#endregion", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (openRegions.Count > 0)
-                        {
-                            var (regionStart, regionName) = openRegions.Pop();
-                            var regionEnd = lineEnd;
-                            if (ContainsNewline(text, regionStart, regionEnd))
-                            {
-                                var fold = new NewFolding(regionStart, regionEnd);
-                                if (!string.IsNullOrWhiteSpace(regionName))
-                                    fold.Name = $"#region {regionName}";
-                                foldings.Add(fold);
-                            }
-                        }
-                        i = lineEnd - 1;
-                        continue;
-                    }
-                }
+                openBraces.Push(start);
+                continue;
             }
 
-            foldings.Sort((a, b) => a.StartOffset.CompareTo(b.StartOffset));
-            return foldings;
+            if (token.Kind == TokenKind.RCurly)
+            {
+                if (openBraces.Count == 0) continue;
+                var regionStart = openBraces.Pop();
+                var regionEnd = end;
+                if (IsMultiline(lineStarts, regionStart, regionEnd))
+                    foldings.Add(new FoldingRange(regionStart, regionEnd));
+                continue;
+            }
+
+            if (token.Kind != TokenKind.Comment) continue;
+            var lineIndex = FindLineIndex(lineStarts, start);
+            var lineStart = lineStarts[lineIndex];
+            var lineEnd = FindLineEnd(text, end);
+            if (!IsOnlyWhitespace(text, lineStart, start)) continue;
+
+            var comment = text.AsSpan(start, end - start).Trim();
+            if (comment.StartsWith("#region", StringComparison.OrdinalIgnoreCase) &&
+                (comment.Length == 7 || char.IsWhiteSpace(comment[7])))
+            {
+                var name = comment.Length > 7 ? comment[7..].Trim().ToString() : string.Empty;
+                openRegions.Push((lineStart, name));
+            }
+            else if (comment.StartsWith("#endregion", StringComparison.OrdinalIgnoreCase) &&
+                     (comment.Length == 10 || char.IsWhiteSpace(comment[10])))
+            {
+                if (openRegions.Count == 0) continue;
+                var (regionStart, name) = openRegions.Pop();
+                if (!IsMultiline(lineStarts, regionStart, lineEnd)) continue;
+                foldings.Add(new FoldingRange(regionStart, lineEnd, string.IsNullOrWhiteSpace(name) ? null : $"#region {name}"));
+            }
         }
 
-        private static bool ContainsNewline(string text, int start, int end)
-        {
-            for (var i = start; i < end && i < text.Length; i++)
-                if (text[i] == '\n') return true;
-            return false;
-        }
-
-        private static int GetLineStart(string text, int offset)
-        {
-            var i = offset;
-            while (i > 0 && text[i - 1] != '\n') i--;
-            return i;
-        }
-
-        private static int GetLineEnd(string text, int offset)
-        {
-            var i = offset;
-            while (i < text.Length && text[i] != '\r' && text[i] != '\n') i++;
-            return i;
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+        foldings.Sort(static (left, right) => left.StartOffset.CompareTo(right.StartOffset));
+        return foldings;
     }
+
+    private static int FindLineIndex(IReadOnlyList<int> lineStarts, int offset)
+    {
+        var low = 0;
+        var high = lineStarts.Count - 1;
+        while (low <= high)
+        {
+            var middle = low + ((high - low) / 2);
+            if (lineStarts[middle] <= offset) low = middle + 1;
+            else high = middle - 1;
+        }
+        return Math.Max(0, high);
+    }
+
+    private static int FindLineEnd(string text, int offset)
+    {
+        while (offset < text.Length && text[offset] is not ('\r' or '\n')) offset++;
+        return offset;
+    }
+
+    private static bool IsOnlyWhitespace(string text, int start, int end)
+    {
+        for (var i = start; i < end; i++)
+            if (!char.IsWhiteSpace(text[i])) return false;
+        return true;
+    }
+
+    private static bool IsMultiline(IReadOnlyList<int> lineStarts, int start, int end)
+        => FindLineIndex(lineStarts, start) != FindLineIndex(lineStarts, Math.Max(start, end - 1));
 }
+
+internal sealed record FoldingRange(int StartOffset, int EndOffset, string? Name = null);
