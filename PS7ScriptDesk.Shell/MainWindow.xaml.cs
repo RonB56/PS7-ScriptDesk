@@ -241,6 +241,7 @@ namespace PS7ScriptDesk.Shell
 
         private readonly UserPromptService _userPromptService = new();
         private readonly HashSet<TextEditor> _configuredEditors = new();
+        private readonly HashSet<TextEditor> _automaticIndentationUndoGroups = new();
         private readonly Dictionary<EditorTabViewModel, TextEditor> _editorByTab = new();
         private readonly Dictionary<EditorTabViewModel, EditorDocumentSession> _documentSessionsByTab = new();
         private readonly HashSet<TextEditor> _postUpdateDiagnosticsQueued = new();
@@ -531,6 +532,7 @@ namespace PS7ScriptDesk.Shell
             _layoutCoordinator = new WorkspaceLayoutCoordinator(WorkspaceLayoutSettingsAdapter.FromSettings(_loadedSettings));
             _scriptDiagnosticStore.Changed += ScriptDiagnosticStore_Changed;
             UpdateAnalyzerSettingsMenu();
+            UpdateAutomaticIndentationMenu();
             _uiScaleService = uiScaleService ?? UiScaleServiceHost.Current;
             var processElevation = CurrentProcessElevation.TryGetIsElevated();
             _administratorModeBannerState = AdministratorModeBannerState.Create(processElevation == true);
@@ -2987,6 +2989,7 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            EndAutomaticIndentationUndoGroup(editorTextEditor);
             UnregisterEditor(editorTextEditor);
         }
 
@@ -3205,6 +3208,8 @@ namespace PS7ScriptDesk.Shell
         private void EditorTextArea_TextEntered(object? sender, TextCompositionEventArgs e)
         {
             var editorTextEditor = ResolveEditorFromEventSender(sender);
+            if (editorTextEditor is not null)
+                EndAutomaticIndentationUndoGroup(editorTextEditor);
             if (editorTextEditor is null || string.IsNullOrEmpty(e.Text))
             {
                 return;
@@ -3303,6 +3308,8 @@ namespace PS7ScriptDesk.Shell
             {
                 return;
             }
+
+            TryApplyLazyAutomaticIndentation(editor, e.Text);
 
             var inputTrace = GetTraceForEditor(editor);
             using var inputTraceScope = EditorInputTrace.PushCorrelation(inputTrace?.CorrelationId);
@@ -6080,7 +6087,7 @@ namespace PS7ScriptDesk.Shell
             var syntaxColorizer = new PowerShellSyntaxColorizer();
             _syntaxColorizers[editorTextEditor] = syntaxColorizer;
             editorTextEditor.TextArea.TextView.LineTransformers.Add(syntaxColorizer);
-            editorTextEditor.TextArea.IndentationStrategy = new PowerShellIndentationStrategy();
+            ApplyAutomaticIndentation(editorTextEditor);
 
             // Apply current zoom level on first configuration (2B).
             editorTextEditor.FontSize = ViewModel?.EditorZoomLevel ?? 13.0;
@@ -6173,7 +6180,7 @@ namespace PS7ScriptDesk.Shell
             }
             else
             {
-                editorTextEditor.TextArea.IndentationStrategy = new PowerShellIndentationStrategy();
+                ApplyAutomaticIndentation(editorTextEditor);
                 ActivatePowerShellEditorServices(editorTextEditor, tab);
             }
 
@@ -6233,7 +6240,7 @@ namespace PS7ScriptDesk.Shell
                 _intelliSenseService.StartCompletionEngineWarmup(runtimeInfo);
             }
 
-            editorTextEditor.TextArea.IndentationStrategy = new PowerShellIndentationStrategy();
+            ApplyAutomaticIndentation(editorTextEditor);
         }
 
         private int IncrementDiagnosticsRequestVersion(TextEditor editorTextEditor)
@@ -10549,6 +10556,102 @@ namespace PS7ScriptDesk.Shell
             }
             SaveAnalyzerSettings();
             if (ViewModel is not null) ViewModel.StatusText = _loadedSettings.PSScriptAnalyzerEnabled ? "PSScriptAnalyzer enabled" : "PSScriptAnalyzer disabled";
+        }
+
+        private void AutomaticIndentation_Click(object sender, RoutedEventArgs e)
+        {
+            var enabled = AutomaticIndentationMenuItem.IsChecked;
+            _loadedSettings.AutomaticIndentationEnabled = enabled;
+            foreach (var editor in _editorByTab
+                         .Where(entry => entry.Key.IsPowerShellDocument)
+                         .Select(entry => entry.Value)
+                         .Distinct())
+            {
+                ApplyAutomaticIndentation(editor);
+            }
+
+            try
+            {
+                _applicationSettingsService.SaveSettings(_loadedSettings);
+                DeveloperDiagnostics.LogUserAction(
+                    "Editor",
+                    "AutomaticIndentationChanged",
+                    "Automatic indentation preference changed.",
+                    new Dictionary<string, object?> { ["enabled"] = enabled, ["registeredPowerShellEditorCount"] = _editorByTab.Keys.Count(tab => tab.IsPowerShellDocument) });
+                if (ViewModel is not null)
+                    ViewModel.StatusText = enabled ? "Auto Indent enabled" : "Auto Indent disabled";
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogOperationFailure("Settings", "SaveAutomaticIndentation", "Automatic indentation preference could not be saved.", ex);
+                if (ViewModel is not null)
+                    ViewModel.StatusText = "Auto Indent preference could not be saved";
+            }
+        }
+
+        private void UpdateAutomaticIndentationMenu()
+        {
+            if (AutomaticIndentationMenuItem is not null)
+                AutomaticIndentationMenuItem.IsChecked = _loadedSettings.AutomaticIndentationEnabled == true;
+        }
+
+        private void ApplyAutomaticIndentation(TextEditor editor)
+        {
+            var enabled = _loadedSettings.AutomaticIndentationEnabled == true &&
+                          _tabByEditor.TryGetValue(editor, out var tab) && tab.IsPowerShellDocument;
+            editor.TextArea.IndentationStrategy = enabled ? new PowerShellIndentationStrategy() : null;
+        }
+
+        private void TryApplyLazyAutomaticIndentation(TextEditor editor, string? inputText)
+        {
+            if (_loadedSettings.AutomaticIndentationEnabled != true ||
+                string.IsNullOrEmpty(inputText) || inputText.Length != 1 || char.IsWhiteSpace(inputText[0]) ||
+                !_tabByEditor.TryGetValue(editor, out var tab) || !tab.IsPowerShellDocument ||
+                editor.SelectionLength != 0 || _automaticIndentationUndoGroups.Contains(editor) ||
+                _activeCompletionWindow is not null || _pendingCompletionCycle is not null || _completionCycleSession is not null ||
+                HasCompletionContext(editor))
+            {
+                return;
+            }
+
+            var document = editor.Document;
+            var line = document.GetLineByOffset(editor.CaretOffset);
+            if (line.Length != 0) return;
+
+            var indentation = new PowerShellIndentationStrategy().GetIndentationForLine(document, line, inputText);
+            if (indentation.Length == 0) return;
+
+            var insertionOffset = line.Offset;
+            try
+            {
+                document.UndoStack.StartUndoGroup();
+                _automaticIndentationUndoGroups.Add(editor);
+                document.Insert(insertionOffset, indentation);
+                editor.CaretOffset = insertionOffset + indentation.Length;
+            }
+            catch (Exception ex)
+            {
+                EndAutomaticIndentationUndoGroup(editor);
+                DeveloperDiagnostics.LogOperationFailure(
+                    "Editor",
+                    "ApplyLazyAutomaticIndentation",
+                    "Automatic indentation could not be applied before text entry.",
+                    ex,
+                    additionalProperties: new Dictionary<string, object?> { ["indentationLength"] = indentation.Length });
+            }
+        }
+
+        private void EndAutomaticIndentationUndoGroup(TextEditor editor)
+        {
+            if (!_automaticIndentationUndoGroups.Remove(editor)) return;
+            try
+            {
+                editor.Document.UndoStack.EndUndoGroup();
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogOperationFailure("Editor", "EndAutomaticIndentationUndoGroup", "Automatic indentation undo group could not be closed cleanly.", ex);
+            }
         }
 
         private void AnalyzeCurrentDocument_Click(object sender, RoutedEventArgs e)

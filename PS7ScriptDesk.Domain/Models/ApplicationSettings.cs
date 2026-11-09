@@ -81,6 +81,9 @@ namespace PS7ScriptDesk.Domain.Models
         /// <summary>Whether PSScriptAnalyzer runs automatically after suitable edit pauses.</summary>
         public bool PSScriptAnalyzerAnalyzeWhileEditing { get; set; } = true;
 
+        /// <summary>Whether PowerShell editors automatically indent on Enter. Null (unset) defaults to Off.</summary>
+        public bool? AutomaticIndentationEnabled { get; set; }
+
         public string? SelectedTabFilePath { get; set; }
 
         public List<string> RecentFilePaths { get; set; } = new();

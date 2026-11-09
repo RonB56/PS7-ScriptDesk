@@ -5,8 +5,8 @@ using ICSharpCode.AvalonEdit.Indentation;
 namespace PS7ScriptDesk.Shell.Editor
 {
     /// <summary>
-    /// Smart indentation strategy for PowerShell: copies the previous line's indentation
-    /// and increases it by one level when the previous non-empty line ends with <c>{</c>.
+    /// Basic PowerShell indentation. It uses nearby line text only and deliberately
+    /// avoids brace adjustments when lexical context is uncertain.
     /// </summary>
     public sealed class PowerShellIndentationStrategy : DefaultIndentationStrategy
     {
@@ -15,37 +15,85 @@ namespace PS7ScriptDesk.Shell.Editor
         public override void IndentLine(TextDocument document, DocumentLine line)
         {
             if (document is null || line is null) return;
-            if (line.PreviousLine is null) { base.IndentLine(document, line); return; }
+            // Leave a genuinely blank line empty. This avoids generating trailing
+            // whitespace on Enter; indentation can still be applied to non-empty
+            // split lines without touching unrelated user-authored text.
+            if (line.Length == 0 || string.IsNullOrWhiteSpace(document.GetText(line))) return;
+            var newIndent = GetIndentationForLine(document, line);
 
-            // Find the nearest non-empty previous line
+            SetLeadingWhitespace(document, line, newIndent);
+        }
+
+        public string GetIndentationForLine(TextDocument document, DocumentLine line, string? incomingText = null)
+        {
+            if (document is null || line is null || line.PreviousLine is null) return string.Empty;
+
             var prev = line.PreviousLine;
-            while (prev is not null && prev.Length == 0) prev = prev.PreviousLine;
-            if (prev is null) { base.IndentLine(document, line); return; }
+            while (prev is not null && string.IsNullOrWhiteSpace(document.GetText(prev))) prev = prev.PreviousLine;
+            if (prev is null) return string.Empty;
 
             var prevText = document.GetText(prev).TrimEnd();
             var baseIndent = GetLeadingWhitespace(document, prev);
-            var currentText = document.GetText(line).TrimStart();
+            var currentText = (line.Length == 0 && incomingText is not null ? incomingText : document.GetText(line)).TrimStart();
 
-            string newIndent;
+            if (IsInsideHereString(document, prev) || IsInsideHereString(document, line)) return baseIndent;
+            if (currentText.StartsWith("}", StringComparison.Ordinal)) return baseIndent;
+            if (EndsWithCodeOpeningBrace(prevText)) return baseIndent + IndentUnit;
+            return baseIndent;
+        }
 
-            if (prevText.EndsWith("{", StringComparison.Ordinal))
+        private static bool EndsWithCodeOpeningBrace(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text) || text.TrimStart().StartsWith('#')) return false;
+
+            var quote = '\0';
+            var escaped = false;
+            var commentStart = text.Length;
+            for (var i = 0; i < text.Length; i++)
             {
-                // After an opening brace — increase indent
-                newIndent = baseIndent + IndentUnit;
-            }
-            else if (currentText.StartsWith("}", StringComparison.Ordinal) && baseIndent.Length >= IndentUnit.Length)
-            {
-                // Closing brace — decrease indent to match the opening brace level
-                newIndent = baseIndent.Length >= IndentUnit.Length
-                    ? baseIndent[..^IndentUnit.Length]
-                    : string.Empty;
-            }
-            else
-            {
-                newIndent = baseIndent;
+                var ch = text[i];
+                if (quote == '\'')
+                {
+                    if (ch == '\'' && i + 1 < text.Length && text[i + 1] == '\'') { i++; continue; }
+                    if (ch == '\'') quote = '\0';
+                    continue;
+                }
+                if (quote == '"')
+                {
+                    if (escaped) { escaped = false; continue; }
+                    if (ch == '`') { escaped = true; continue; }
+                    if (ch == '"') quote = '\0';
+                    continue;
+                }
+                if (ch == '#') { commentStart = i; break; }
+                if (ch is '\'' or '"') quote = ch;
             }
 
-            SetLeadingWhitespace(document, line, newIndent);
+            return text[..commentStart].TrimEnd().EndsWith("{", StringComparison.Ordinal) && quote == '\0';
+        }
+
+        private static bool IsInsideHereString(TextDocument document, DocumentLine line)
+        {
+            const int maximumLookbackLines = 128;
+            var firstLine = Math.Max(1, line.LineNumber - maximumLookbackLines + 1);
+            var inside = false;
+            for (var number = firstLine; number < line.LineNumber; number++)
+            {
+                var candidate = document.GetLineByNumber(number);
+                var text = document.GetText(candidate).Trim();
+                if (inside)
+                {
+                    if (text is "'@" or "\"@") inside = false;
+                }
+                else if (text.EndsWith("@'", StringComparison.Ordinal) || text.EndsWith("@\"", StringComparison.Ordinal))
+                {
+                    inside = true;
+                }
+            }
+
+            // If the bounded window begins after the document start, syntax state
+            // may have started earlier. Be conservative for brace adjustment.
+            return inside || firstLine > 1;
         }
 
         private static string GetLeadingWhitespace(TextDocument document, DocumentLine line)

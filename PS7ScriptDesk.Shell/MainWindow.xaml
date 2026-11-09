@@ -317,6 +317,7 @@
                 <MenuItem x:Name="AnalyzeCurrentDocumentMenuItem" Header="_Analyze Current Document" Click="AnalyzeCurrentDocument_Click" />
                 <MenuItem x:Name="PSScriptAnalyzerEnabledMenuItem" Header="Enable PSScriptAnalyzer" IsCheckable="True" Click="PSScriptAnalyzerEnabled_Click" />
                 <MenuItem x:Name="PSScriptAnalyzerAnalyzeWhileEditingMenuItem" Header="Analyze While Editing" IsCheckable="True" Click="PSScriptAnalyzerAnalyzeWhileEditing_Click" />
+                <MenuItem x:Name="AutomaticIndentationMenuItem" Header="Auto Indent" ToolTip="Automatically indent new PowerShell lines when enabled." IsCheckable="True" Click="AutomaticIndentation_Click" />
                 <MenuItem Header="PSScriptAnalyzer Severity">
                     <MenuItem x:Name="PSScriptAnalyzerSeverityAllMenuItem" Header="All" IsCheckable="True" Click="PSScriptAnalyzerSeverity_Click" />
                     <MenuItem x:Name="PSScriptAnalyzerSeverityErrorMenuItem" Header="Error" IsCheckable="True" Click="PSScriptAnalyzerSeverity_Click" />

@@ -32,6 +32,7 @@ TestResults/
 *.nupkg
 packages/
 project.assets.json
+.private-nuget-feed/
 
 # MSIX / installer/package output
 AppPackages/
@@ -84,3 +85,21 @@ docs/LocalOnly_NotForGitHub/
 
 # Portable release build output
 PortableBuild/
+
+# ==================================================
+# Private Engineering Evidence and AvalonEdit
+# ==================================================
+
+# All Codex engineering evidence
+/evidence/
+
+# Private development workspaces anywhere in repo
+**/Codex_Work/
+**/LocalOnly_NotForGitHub/
+**/EnhancedAvalonEdit_G3/
+
+# Temporary NuGet consumer verification files
+**/consumer-packages-final/
+
+# Private AvalonEdit build output and packages
+**/PrivateAvalonEdit/
