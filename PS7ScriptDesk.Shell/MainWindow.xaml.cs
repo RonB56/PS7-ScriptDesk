@@ -240,6 +240,7 @@ namespace PS7ScriptDesk.Shell
 
 
         private readonly UserPromptService _userPromptService = new();
+        private readonly EditorClipboardService _editorClipboardService = new(new WpfEditorClipboard());
         private readonly HashSet<TextEditor> _configuredEditors = new();
         private readonly HashSet<TextEditor> _automaticIndentationUndoGroups = new();
         private readonly Dictionary<EditorTabViewModel, TextEditor> _editorByTab = new();
@@ -5725,7 +5726,7 @@ namespace PS7ScriptDesk.Shell
 
         private void EditorCut_Click(object sender, RoutedEventArgs e)
         {
-            if (FindActiveEditor() is TextEditor editorTextEditor)
+            if ((ResolveEditorForContextMenuCommand(sender) ?? FindActiveEditor()) is TextEditor editorTextEditor)
             {
                 _ = TryCutSelectedEditorTextToClipboard(editorTextEditor);
             }
@@ -5733,7 +5734,7 @@ namespace PS7ScriptDesk.Shell
 
         private void EditorCopy_Click(object sender, RoutedEventArgs e)
         {
-            if (FindActiveEditor() is TextEditor editorTextEditor)
+            if ((ResolveEditorForContextMenuCommand(sender) ?? FindActiveEditor()) is TextEditor editorTextEditor)
             {
                 _ = TryCopySelectedEditorTextToClipboard(editorTextEditor);
             }
@@ -5741,15 +5742,35 @@ namespace PS7ScriptDesk.Shell
 
         private void EditorPaste_Click(object sender, RoutedEventArgs e)
         {
-            if (FindActiveEditor() is TextEditor editorTextEditor)
+            var placementTargetEditor = ResolveEditorForContextMenuCommand(sender);
+            var editorTextEditor = placementTargetEditor ?? FindActiveEditor();
+            DeveloperDiagnostics.LogInfo("Editor", "Editor context-menu Paste routed to the shared clipboard service.", new Dictionary<string, object?>
+            {
+                ["placementTargetResolved"] = placementTargetEditor is not null,
+                ["multiCaretCount"] = editorTextEditor?.TextArea.MultiCaretCount,
+                ["documentIdentity"] = editorTextEditor is not null ? GetEditorInputDocumentIdentity(editorTextEditor) : null
+            });
+            if (editorTextEditor is not null)
             {
                 _ = TryPasteClipboardTextIntoEditor(editorTextEditor);
             }
         }
 
+        private static TextEditor? ResolveEditorForContextMenuCommand(object? sender)
+        {
+            if (sender is not WpfMenuItem menuItem)
+            {
+                return null;
+            }
+
+            var contextMenu = menuItem.Parent as System.Windows.Controls.ContextMenu ??
+                              System.Windows.Controls.ItemsControl.ItemsControlFromItemContainer(menuItem) as System.Windows.Controls.ContextMenu;
+            return contextMenu?.PlacementTarget as TextEditor;
+        }
+
         private void EditorSelectAll_Click(object sender, RoutedEventArgs e)
         {
-            if (FindActiveEditor() is not TextEditor editorTextEditor)
+            if ((ResolveEditorForContextMenuCommand(sender) ?? FindActiveEditor()) is not TextEditor editorTextEditor)
             {
                 return;
             }
@@ -5760,74 +5781,94 @@ namespace PS7ScriptDesk.Shell
 
         private bool TryCopySelectedEditorTextToClipboard(TextEditor editorTextEditor)
         {
-            var selectedText = editorTextEditor.SelectedText;
-            if (string.IsNullOrEmpty(selectedText))
-            {
-                return false;
-            }
-
-            try
-            {
-                System.Windows.Clipboard.SetText(selectedText);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                if (ViewModel is not null)
-                {
-                    ViewModel.StatusText = $"Copy failed: {ex.Message}";
-                }
-
-                return true;
-            }
+            return ExecuteEditorClipboardCommand(editorTextEditor, "Copy", () => _editorClipboardService.Copy(editorTextEditor));
         }
 
         private bool TryCutSelectedEditorTextToClipboard(TextEditor editorTextEditor)
         {
-            var selectedText = editorTextEditor.SelectedText;
-            if (string.IsNullOrEmpty(selectedText))
-            {
-                return false;
-            }
-
-            if (!TryCopySelectedEditorTextToClipboard(editorTextEditor))
-            {
-                return false;
-            }
-
-            ReplaceEditorSelection(editorTextEditor, string.Empty);
-            return true;
+            return ExecuteEditorClipboardCommand(editorTextEditor, "Cut", () =>
+                _editorClipboardService.Cut(editorTextEditor, ReplaceEditorSelection));
         }
 
         private bool TryPasteClipboardTextIntoEditor(TextEditor editorTextEditor)
         {
-            string clipboardText;
-            try
+            return ExecuteEditorClipboardCommand(editorTextEditor, "Paste", () =>
+                _editorClipboardService.Paste(editorTextEditor, ReplaceEditorSelection));
+        }
+
+        private bool ExecuteEditorClipboardCommand(TextEditor editor, string command, Func<EditorClipboardResult> execute)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var result = execute();
+            stopwatch.Stop();
+
+            if (!result.Succeeded)
             {
-                if (!System.Windows.Clipboard.ContainsText())
+                var detail = result.Exception?.Message;
+                var status = result.Failure switch
                 {
-                    if (ViewModel is not null)
+                    EditorClipboardFailure.EmptyClipboard => "Paste skipped: clipboard does not contain text",
+                    EditorClipboardFailure.ReadOnly => $"{command} skipped: the document is read-only",
+                    EditorClipboardFailure.EditRejected => $"{command} skipped: one or more target selections are read-only",
+                    EditorClipboardFailure.ClipboardUnavailable => $"{command} failed: {detail ?? "clipboard access failed"}",
+                    EditorClipboardFailure.EditFailed => $"{command} failed while applying the atomic multi-caret edit",
+                    _ => null
+                };
+                if (status is not null && ViewModel is not null)
+                    ViewModel.StatusText = status;
+
+                if (result.Exception is not null)
+                {
+                    DeveloperDiagnostics.LogOperationFailure(
+                        "Editor",
+                        $"MultiCaret{command}",
+                        status ?? $"The editor {command.ToLowerInvariant()} operation failed.",
+                        result.Exception,
+                        elapsedMilliseconds: (long)stopwatch.Elapsed.TotalMilliseconds,
+                        additionalProperties: new Dictionary<string, object?>
+                        {
+                            ["caretCount"] = editor.TextArea.MultiCaretCount,
+                            ["rangeCount"] = result.RangeCount,
+                            ["textLength"] = result.TextLength,
+                            ["durationMilliseconds"] = stopwatch.Elapsed.TotalMilliseconds
+                        });
+                }
+                else
+                {
+                    DeveloperDiagnostics.LogDecision(
+                        "Editor",
+                        $"MultiCaret{command}",
+                        status ?? $"The editor {command.ToLowerInvariant()} operation was not applied.",
+                        result.Failure.ToString(),
+                        new Dictionary<string, object?>
+                        {
+                            ["caretCount"] = editor.TextArea.MultiCaretCount,
+                            ["rangeCount"] = result.RangeCount,
+                            ["textLength"] = result.TextLength
+                        });
+                }
+            }
+            else if (result.Handled)
+            {
+                DeveloperDiagnostics.LogUserAction(
+                    "Editor",
+                    $"Clipboard{command}",
+                    $"Editor {command.ToLowerInvariant()} command completed.",
+                    new Dictionary<string, object?>
                     {
-                        ViewModel.StatusText = "Paste skipped: clipboard does not contain text";
-                    }
-
-                    return true;
-                }
-
-                clipboardText = System.Windows.Clipboard.GetText();
+                        ["caretCount"] = editor.TextArea.MultiCaretCount,
+                        ["rangeCount"] = result.RangeCount,
+                        ["textLength"] = result.TextLength,
+                        ["durationMilliseconds"] = stopwatch.Elapsed.TotalMilliseconds
+                    });
             }
-            catch (Exception ex)
+
+            if (result.Succeeded && result.Handled && command != "Copy" && result.RangeCount > 0)
             {
-                if (ViewModel is not null)
-                {
-                    ViewModel.StatusText = $"Paste failed: {ex.Message}";
-                }
-
-                return true;
+                UpdateEditorCaretMetrics(editor);
+                editor.Focus();
             }
-
-            ReplaceEditorSelection(editorTextEditor, clipboardText);
-            return true;
+            return result.Handled;
         }
 
         private void ReplaceEditorSelection(TextEditor editorTextEditor, string replacementText)
