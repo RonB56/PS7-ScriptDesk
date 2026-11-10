@@ -3220,6 +3220,12 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
+            if (editorTextEditor.TextArea.MultiCaretCount > 1)
+            {
+                CloseEditorCompletion("Multi-caret editing does not invoke single-caret IntelliSense");
+                return;
+            }
+
             var ch = e.Text[0];
             var inputTrace = GetTraceForEditor(editorTextEditor);
             using var inputTraceScope = EditorInputTrace.PushCorrelation(inputTrace?.CorrelationId);
@@ -3309,7 +3315,8 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            TryApplyLazyAutomaticIndentation(editor, e.Text);
+            if (editor.TextArea.MultiCaretCount <= 1)
+                TryApplyLazyAutomaticIndentation(editor, e.Text);
 
             var inputTrace = GetTraceForEditor(editor);
             using var inputTraceScope = EditorInputTrace.PushCorrelation(inputTrace?.CorrelationId);
@@ -3399,6 +3406,30 @@ namespace PS7ScriptDesk.Shell
         internal static bool ShouldCommitCompletionForTextInput(char ch)
             => false;
 
+        private void AddMultiCaret(TextEditor editor, int lineDelta)
+        {
+            if (editor.Document is null) return;
+            if (!EditorShortcutRouting.TryAddCaret(editor.TextArea, lineDelta))
+            {
+                DeveloperDiagnostics.LogUserAction("Editor", "MultiCaretAddRejected", "No adjacent-line caret was added because the next target is outside the document or already occupied.",
+                    new Dictionary<string, object?>
+                    {
+                        ["direction"] = lineDelta < 0 ? "above" : "below",
+                        ["caretCount"] = editor.TextArea.MultiCaretCount,
+                        ["documentLineCount"] = editor.Document.LineCount
+                    });
+                return;
+            }
+            CloseEditorCompletion("Additional caret created");
+            DeveloperDiagnostics.LogUserAction("Editor", "MultiCaretAdded", "A secondary caret was added on an adjacent line.",
+                new Dictionary<string, object?>
+                {
+                    ["direction"] = lineDelta < 0 ? "above" : "below",
+                    ["caretCount"] = editor.TextArea.MultiCaretCount,
+                    ["documentLineCount"] = editor.Document.LineCount
+                });
+        }
+
         private async void EditorTextEditor_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (sender is not TextEditor editorTextEditor)
@@ -3459,6 +3490,52 @@ namespace PS7ScriptDesk.Shell
             if (_terminalIsActive)
             {
                 SetTerminalActive(false, "EditorPreviewKeyDownFocusedEditor");
+            }
+
+            var multiCaretCount = editorTextEditor.TextArea.MultiCaretCount;
+            var hasMultipleCarets = multiCaretCount > 1;
+            if (hasMultipleCarets)
+            {
+                if (modifiers == ModifierKeys.None && key == Key.Escape)
+                {
+                    var caretCountBeforeReset = multiCaretCount;
+                    CloseEditorCompletion("Escape returned multi-caret editor to one caret");
+                    editorTextEditor.TextArea.ClearSecondaryCarets();
+                    e.Handled = true;
+                    DeveloperDiagnostics.LogUserAction("Editor", "MultiCaretReset", "Secondary carets were removed by Escape.",
+                        new Dictionary<string, object?> { ["caretCountBefore"] = caretCountBeforeReset });
+                    return;
+                }
+
+                if (modifiers == ModifierKeys.Control && key == Key.Space)
+                {
+                    e.Handled = true;
+                    CloseEditorCompletion("Ctrl+Space ignored while multiple carets are active");
+                    DeveloperDiagnostics.LogInfo("EditorCompletion", "Completion request skipped because multi-caret IntelliSense is deferred.",
+                        new Dictionary<string, object?> { ["caretCount"] = multiCaretCount });
+                    return;
+                }
+
+                if ((modifiers == ModifierKeys.None || modifiers == ModifierKeys.Shift) && key == Key.Tab)
+                {
+                    e.Handled = true;
+                    CloseEditorCompletion("Tab completion disabled while multiple carets are active");
+                    if (modifiers == ModifierKeys.None)
+                        editorTextEditor.TextArea.PerformTextInput("\t");
+                    else
+                        DeveloperDiagnostics.LogInfo("EditorCompletion", "Shift+Tab was consumed while multiple carets are active; single-caret completion cycling was skipped.");
+                    return;
+                }
+
+                if (modifiers == ModifierKeys.None && key == Key.Enter && HasCompletionWindowFor(editorTextEditor))
+                    CloseEditorCompletion("Completion acceptance disabled while multiple carets are active");
+            }
+
+            if (EditorShortcutRouting.TryGetAddCaretDirection(e.Key, e.SystemKey, modifiers, out var addCaretDirection))
+            {
+                e.Handled = true;
+                AddMultiCaret(editorTextEditor, addCaretDirection);
+                return;
             }
 
             var isMultilineTab = HasMultiLineEditorSelection(editorTextEditor);
@@ -3626,20 +3703,6 @@ namespace PS7ScriptDesk.Shell
                 {
                     MoveLineDown(editorTextEditor);
                 }
-                return;
-            }
-
-            if (modifiers == (ModifierKeys.Alt | ModifierKeys.Shift) && key == Key.Down)
-            {
-                e.Handled = true;
-                ApplyEditorCommand(editorTextEditor, "DuplicateDown", () => EditorProductivityCommands.DuplicateLines(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength, 1));
-                return;
-            }
-
-            if (modifiers == (ModifierKeys.Alt | ModifierKeys.Shift) && key == Key.Up)
-            {
-                e.Handled = true;
-                ApplyEditorCommand(editorTextEditor, "DuplicateUp", () => EditorProductivityCommands.DuplicateLines(editorTextEditor.Document, editorTextEditor.SelectionStart, editorTextEditor.SelectionLength, -1));
                 return;
             }
 
@@ -5439,8 +5502,14 @@ namespace PS7ScriptDesk.Shell
                 new("editor.outdent", "Outdent Selection", "Editor", "Shift+Tab", new[] { "outdent", "unindent" }, CanEdit, () => ApplyTransform("Outdent", (document, start, length) => EditorProductivityCommands.Outdent(document, start, length))),
                 new("editor.moveUp", "Move Line/Selection Up", "Editor", "Alt+Up", new[] { "move", "line", "block" }, CanEdit, () => MoveLineUp(editor!)),
                 new("editor.moveDown", "Move Line/Selection Down", "Editor", "Alt+Down", new[] { "move", "line", "block" }, CanEdit, () => MoveLineDown(editor!)),
-                new("editor.duplicateUp", "Duplicate Line/Selection Up", "Editor", "Shift+Alt+Up", new[] { "duplicate", "copy", "line" }, CanEdit, () => ApplyTransform("DuplicateUp", (document, start, length) => EditorProductivityCommands.DuplicateLines(document, start, length, -1))),
-                new("editor.duplicateDown", "Duplicate Line/Selection Down", "Editor", "Shift+Alt+Down", new[] { "duplicate", "copy", "line" }, CanEdit, () => ApplyTransform("DuplicateDown", (document, start, length) => EditorProductivityCommands.DuplicateLines(document, start, length, 1))),
+                new("editor.duplicateUp", "Duplicate Line/Selection Up", "Editor", "Ctrl+Shift+Up", new[] { "duplicate", "copy", "line" }, CanEdit, () => ApplyTransform("DuplicateUp", (document, start, length) => EditorProductivityCommands.DuplicateLines(document, start, length, -1)), ShortcutGesture: EditorShortcutDefaults.DuplicateLinesAbove)
+                {
+                    ShortcutAliases = EditorShortcutDefaults.DuplicateLinesAboveAliases
+                },
+                new("editor.duplicateDown", "Duplicate Line/Selection Down", "Editor", "Ctrl+Shift+Down", new[] { "duplicate", "copy", "line" }, CanEdit, () => ApplyTransform("DuplicateDown", (document, start, length) => EditorProductivityCommands.DuplicateLines(document, start, length, 1)), ShortcutGesture: EditorShortcutDefaults.DuplicateLinesBelow)
+                {
+                    ShortcutAliases = EditorShortcutDefaults.DuplicateLinesBelowAliases
+                },
                 new("editor.deleteLine", "Delete Current Line", "Editor", "Ctrl+Shift+K", new[] { "delete", "line" }, CanEdit, () => ApplyTransform("DeleteLine", EditorProductivityCommands.DeleteLines)),
                 new("editor.selectLine", "Select Current Line", "Selection", "", new[] { "select", "line" }, () => editor?.Document is not null, () => SelectCurrentLine(editor!)),
                 new("editor.insertLineAbove", "Insert Line Above", "Editor", "Ctrl+Shift+Enter", new[] { "insert", "line", "above" }, CanCaretEdit, () => Apply("InsertLineAbove", () => EditorProductivityCommands.InsertLineAbove(editor!.Document!, editor.CaretOffset)), ShortcutGesture: new KeyGesture(Key.Enter, ModifierKeys.Control | ModifierKeys.Shift)),
@@ -5616,6 +5685,14 @@ namespace PS7ScriptDesk.Shell
             if (FindActiveEditor() is TextEditor editor && editor.Document is not null)
             {
                 ApplyEditorCommand(editor, "DuplicateDown", () => EditorProductivityCommands.DuplicateLines(editor.Document, editor.SelectionStart, editor.SelectionLength, 1));
+            }
+        }
+
+        private void EditorDuplicateUp_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor && editor.Document is not null)
+            {
+                ApplyEditorCommand(editor, "DuplicateUp", () => EditorProductivityCommands.DuplicateLines(editor.Document, editor.SelectionStart, editor.SelectionLength, -1));
             }
         }
 

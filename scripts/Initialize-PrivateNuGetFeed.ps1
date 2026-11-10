@@ -1,23 +1,24 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
-param(
-    [Parameter(Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [string] $PackagePath
-)
+param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# USER SETTINGS
+# Keep the private workspace beside the PowerShellStudio repository. Update the
+# package identity and hash together only when staging a separately accepted version.
 $expectedPackageId = 'PS7ScriptDesk.PrivateAvalonEdit'
-$expectedVersion = '6.3.2-g3.3g.20261109'
-$expectedSha256 = 'ec7d76247581b0754cfba463684835ed51f52b98c2f188371058aaea9be72dba'
+$expectedVersion = '6.3.2-g3.4b2.20261109'
+$expectedSha256 = 'e99fdcbce4bf942d4d499059178987e744e2fa10712c324292b123063cc8f299'
 $expectedFileName = "$expectedPackageId.$expectedVersion.nupkg"
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$privateWorkspaceRoot = Join-Path (Split-Path $repositoryRoot -Parent) 'PrivateAvalonEdit'
+$packagePath = Join-Path $privateWorkspaceRoot "packaging\artifacts\$expectedFileName"
 $feedPath = Join-Path $repositoryRoot '.private-nuget-feed'
-$sourcePath = (Resolve-Path -LiteralPath $PackagePath).Path
+$sourcePath = [IO.Path]::GetFullPath($packagePath)
 
 if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-    throw "Package path is not a file: $sourcePath"
+    throw "Private package was not found at '$sourcePath'. Build it from the sibling PrivateAvalonEdit workspace first."
 }
 
 $sourceFile = Get-Item -LiteralPath $sourcePath

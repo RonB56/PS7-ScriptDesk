@@ -38,7 +38,7 @@
   <ItemGroup>
     <Using Remove="System.Drawing" />
     <Using Remove="System.Windows.Forms" />
-    <PackageReference Include="PS7ScriptDesk.PrivateAvalonEdit" Version="6.3.2-g3.3g.20261109" />
+    <PackageReference Include="PS7ScriptDesk.PrivateAvalonEdit" Version="6.3.2-g3.4c.3.20261110" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2535.41" />
     <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="2.3.12" />
     <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.9" />

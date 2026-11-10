@@ -29,6 +29,8 @@ public sealed record EditorCommandDefinition(
     public string? ContextSubgroup { get; init; }
 
     public int ContextOrder { get; init; }
+
+    public IReadOnlyList<KeyGesture> ShortcutAliases { get; init; } = Array.Empty<KeyGesture>();
 }
 
 public sealed class EditorCommandRegistry
@@ -49,6 +51,17 @@ public sealed class EditorCommandRegistry
             throw new ArgumentException("Command IDs must be unique.", nameof(commands));
         }
 
+        var gestures = materialized
+            .SelectMany(command => (command.ShortcutGesture is { } primary
+                    ? new[] { primary }.Concat(command.ShortcutAliases)
+                    : command.ShortcutAliases)
+                .Select(gesture => (gesture.Key, gesture.Modifiers)))
+            .ToArray();
+        if (gestures.GroupBy(gesture => gesture).Any(group => group.Count() > 1))
+        {
+            throw new ArgumentException("A keyboard gesture can be assigned to only one editor command.", nameof(commands));
+        }
+
         _commands = materialized;
     }
 
@@ -57,10 +70,12 @@ public sealed class EditorCommandRegistry
     public EditorCommandDefinition? FindByShortcut(Key key, ModifierKeys modifiers)
     {
         return _commands.SingleOrDefault(command =>
-            command.ShortcutGesture is { } gesture &&
-            gesture.Key == key &&
-            gesture.Modifiers == modifiers);
+            Matches(command.ShortcutGesture, key, modifiers) ||
+            command.ShortcutAliases.Any(gesture => Matches(gesture, key, modifiers)));
     }
+
+    private static bool Matches(KeyGesture? gesture, Key key, ModifierKeys modifiers)
+        => gesture is not null && gesture.Key == key && gesture.Modifiers == modifiers;
 
     public IReadOnlyList<EditorCommandDefinition> Search(string? query)
     {

@@ -334,7 +334,8 @@
                 <MenuItem Header="_Outdent" InputGestureText="Shift+Tab" Click="EditorOutdent_Click" />
                 <MenuItem Header="Move Line _Up" InputGestureText="Alt+Up" Click="EditorMoveLineUp_Click" />
                 <MenuItem Header="Move Line _Down" InputGestureText="Alt+Down" Click="EditorMoveLineDown_Click" />
-                <MenuItem Header="Duplicate Line Down" InputGestureText="Shift+Alt+Down" Click="EditorDuplicateDown_Click" />
+                <MenuItem Header="Duplicate Line/Selection Up" InputGestureText="Ctrl+Shift+Up" Click="EditorDuplicateUp_Click" />
+                <MenuItem Header="Duplicate Line/Selection Down" InputGestureText="Ctrl+Shift+Down" Click="EditorDuplicateDown_Click" />
                 <MenuItem Header="_Delete Line" InputGestureText="Ctrl+Shift+K" Click="EditorDeleteLine_Click" />
                 <MenuItem Header="Select Current Line" Click="EditorSelectCurrentLine_Click" />
                 <MenuItem Header="Transform Selection">

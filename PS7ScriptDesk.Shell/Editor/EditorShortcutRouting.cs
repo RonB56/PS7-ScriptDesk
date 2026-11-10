@@ -1,4 +1,5 @@
 using System.Windows.Input;
+using ICSharpCode.AvalonEdit.Editing;
 
 namespace PS7ScriptDesk.Shell.Editor;
 
@@ -28,4 +29,21 @@ internal static class EditorShortcutRouting
 
         return direction != 0;
     }
+
+    internal static bool TryGetAddCaretDirection(Key key, Key systemKey, ModifierKeys modifiers, out int direction)
+    {
+        var resolvedKey = ResolveKey(key, systemKey);
+        direction = Matches(EditorShortcutDefaults.AddCaretAbove, resolvedKey, modifiers)
+            ? -1
+            : Matches(EditorShortcutDefaults.AddCaretBelow, resolvedKey, modifiers)
+                ? 1
+                : 0;
+        return direction != 0;
+    }
+
+    private static bool Matches(KeyGesture gesture, Key key, ModifierKeys modifiers)
+        => gesture.Key == key && gesture.Modifiers == modifiers;
+
+    internal static bool TryAddCaret(TextArea textArea, int direction)
+        => textArea is not null && textArea.AddCaretOnAdjacentLineFromExtremeCaret(direction);
 }

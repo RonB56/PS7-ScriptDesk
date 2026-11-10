@@ -189,6 +189,27 @@ public sealed class EditorProductivityCommandsTests
         Assert.Equal("one\ntwo\ntwo", document.Text);
     }
 
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(1)]
+    public void DuplicateLines_SelectedLineRangePreservesSelectionAndUsesOneUndoStep(int direction)
+    {
+        const string source = "A\nB\nC\nD";
+        var document = new TextDocument(source);
+        var result = EditorProductivityCommands.DuplicateLines(document, 2, 3, direction);
+        const string expected = "A\nB\nC\nB\nC\nD";
+
+        Assert.Equal(expected, document.Text);
+        Assert.Equal(direction < 0 ? 2 : 6, result.SelectionStart);
+        Assert.Equal(4, result.SelectionLength);
+
+        document.UndoStack.Undo();
+        Assert.Equal(source, document.Text);
+        Assert.False(document.UndoStack.CanUndo);
+        document.UndoStack.Redo();
+        Assert.Equal(expected, document.Text);
+    }
+
     [Fact]
     public void DeleteLines_HandlesFinalLineAndUndo()
     {
