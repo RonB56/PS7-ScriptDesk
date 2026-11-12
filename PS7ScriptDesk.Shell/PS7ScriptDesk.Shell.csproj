@@ -19,10 +19,10 @@
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and ('$(Platform)' == 'AnyCPU' or '$(Platform)' == 'Any CPU' or '$(Platform)' == '')">win-x64</RuntimeIdentifier>
     <!-- The package carries the Windows App SDK lifecycle payload for each RID. -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
-    <Version>10.1.0</Version>
-    <AssemblyVersion>10.1.0.0</AssemblyVersion>
-    <FileVersion>10.1.0.0</FileVersion>
-    <InformationalVersion>10.1.0</InformationalVersion>
+    <Version>10.2.0</Version>
+    <AssemblyVersion>10.2.0.0</AssemblyVersion>
+    <FileVersion>10.2.0.0</FileVersion>
+    <InformationalVersion>10.2.0</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <AssemblyTitle>PS7 ScriptDesk</AssemblyTitle>
     <Product>PS7 ScriptDesk</Product>
@@ -38,7 +38,7 @@
   <ItemGroup>
     <Using Remove="System.Drawing" />
     <Using Remove="System.Windows.Forms" />
-    <PackageReference Include="PS7ScriptDesk.PrivateAvalonEdit" Version="6.3.2-g3.4d.p1.1.20261110.1" />
+    <PackageReference Include="PS7ScriptDesk.PrivateAvalonEdit" Version="6.3.2-g3.4d.p2.2.20261111.1" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2535.41" />
     <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="2.3.12" />
     <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.9" />

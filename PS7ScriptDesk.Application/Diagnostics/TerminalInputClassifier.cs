@@ -30,6 +30,7 @@ public static class TerminalInputClassifier
     }
 
     public static bool EstablishesUserEditOwnership(string inputClass) =>
+        !string.Equals(inputClass, "Escape", StringComparison.Ordinal) &&
         !string.Equals(inputClass, "FocusIn", StringComparison.Ordinal) &&
         !string.Equals(inputClass, "FocusOut", StringComparison.Ordinal) &&
         !string.Equals(inputClass, "MouseProtocol", StringComparison.Ordinal);

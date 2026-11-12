@@ -29,6 +29,7 @@ public sealed class TerminalInputCoordinatorTests
     [Theory]
     [InlineData("\u001b[I", "FocusIn")]
     [InlineData("\u001b[O", "FocusOut")]
+    [InlineData("\u001b", "Escape")]
     [InlineData("\u001b[M!!", "MouseProtocol")]
     [InlineData("\u001b[<0;10;4M", "MouseProtocol")]
     [InlineData("\u001b[<0;10;4m", "MouseProtocol")]
@@ -54,8 +55,9 @@ public sealed class TerminalInputCoordinatorTests
     [Theory]
     [InlineData("FocusIn")]
     [InlineData("FocusOut")]
+    [InlineData("Escape")]
     [InlineData("MouseProtocol")]
-    public void FocusAndMouseControlInput_DoNotClaimCommandEditOwnership(string inputClass)
+    public void NonEditingControlInput_DoesNotClaimCommandEditOwnership(string inputClass)
     {
         Assert.False(TerminalInputClassifier.EstablishesUserEditOwnership(inputClass));
     }
@@ -68,6 +70,34 @@ public sealed class TerminalInputCoordinatorTests
     public void ExistingCommandLineInputClasses_KeepEditOwnership(string inputClass)
     {
         Assert.True(TerminalInputClassifier.EstablishesUserEditOwnership(inputClass));
+    }
+
+    [Fact]
+    public void EscapeAtPromptIsForwardedWithoutClaimingEditableOwnership()
+    {
+        var router = new TerminalInputRouter();
+        using var coordinator = new TerminalInputCoordinator(router);
+        coordinator.BeginSession(12);
+        coordinator.ObservePromptReady(12);
+
+        coordinator.ObserveUserInput("\u001b", 12);
+
+        Assert.True(coordinator.CanAcceptInternalDispatch(12, out var reason), reason);
+    }
+
+    [Fact]
+    public void EscapeDoesNotClearExistingUnfinishedInputOwnership()
+    {
+        var router = new TerminalInputRouter();
+        using var coordinator = new TerminalInputCoordinator(router);
+        coordinator.BeginSession(13);
+        coordinator.ObservePromptReady(13);
+        coordinator.ObserveUserInput("Get-Pro", 13);
+
+        coordinator.ObserveUserInput("\u001b", 13);
+
+        Assert.False(coordinator.CanAcceptInternalDispatch(13, out var reason));
+        Assert.Contains("unfinished", reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]

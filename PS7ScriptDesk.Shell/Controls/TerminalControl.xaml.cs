@@ -3601,6 +3601,27 @@ namespace PS7ScriptDesk.Shell.Controls
                 "Terminal",
                 "xterm terminal geometry evaluated.",
                 metadata);
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                DeveloperDiagnostics.LogInfo("Terminal", "TerminalResizeDiagnosticRequest", new Dictionary<string, object?>
+                {
+                    ["resizeGeneration"] = resizeDecision.ResizeGeneration,
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration,
+                    ["requestedColumns"] = cols,
+                    ["requestedRows"] = rows,
+                    ["previousAcknowledgedColumns"] = _lastResizeCommitAcknowledgedColumns,
+                    ["previousAcknowledgedRows"] = _lastResizeCommitAcknowledgedRows,
+                    ["cursorX"] = GetIntProperty(root, "cursorX", 0),
+                    ["cursorY"] = GetIntProperty(root, "cursorY", 0),
+                    ["baseY"] = GetIntProperty(root, "baseY", 0),
+                    ["viewportY"] = GetIntProperty(root, "viewportY", 0),
+                    ["atBottom"] = GetBooleanProperty(root, "atBottom"),
+                    ["policyAccepted"] = resizeDecision.Accepted,
+                    ["reason"] = resizeDecision.Reason,
+                    ["contentOmitted"] = true
+                });
+            }
             DeveloperDiagnostics.LogInfo(
                 "Terminal",
                 resizeDecision.Accepted ? "Resize request accepted for ConPTY transaction." : "Resize request rejected by terminal resize policy.",
@@ -3792,6 +3813,27 @@ namespace PS7ScriptDesk.Shell.Controls
                     ["releasedCharacters"] = acknowledgement.BufferedCharacters,
                     ["contentOmitted"] = true
                 });
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                DeveloperDiagnostics.LogInfo("Terminal", "TerminalResizeDiagnosticRendererAcknowledgement", new Dictionary<string, object?>
+                {
+                    ["resizeGeneration"] = resizeGeneration,
+                    ["rendererGeneration"] = rendererGeneration,
+                    ["terminalSessionGeneration"] = sessionGeneration,
+                    ["requestedColumns"] = columns,
+                    ["requestedRows"] = rows,
+                    ["resultingXtermColumns"] = columns,
+                    ["resultingXtermRows"] = rows,
+                    ["cursorX"] = GetIntProperty(root, "cursorX", 0),
+                    ["cursorY"] = GetIntProperty(root, "cursorY", 0),
+                    ["baseY"] = GetIntProperty(root, "baseY", 0),
+                    ["viewportY"] = GetIntProperty(root, "viewportY", 0),
+                    ["rendererAcknowledged"] = acknowledgement.Accepted,
+                    ["rendererRefreshObserved"] = acknowledgement.Accepted,
+                    ["alternateScreen"] = "See correlated xterm screen snapshot when available",
+                    ["contentOmitted"] = true
+                });
+            }
 
             if (acknowledgement.Accepted)
             {

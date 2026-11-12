@@ -168,6 +168,27 @@ public sealed class StructuredEchoFilterContractTests
     }
 
     [Fact]
+    public void DebuggerSnapshotLaunchEcho_IsSuppressedButMatchingScriptOutputAndErrorsRemainVisible()
+    {
+        const string snapshotPath = "C:\\Users\\tester\\AppData\\Local\\PS7ScriptDesk\\Temp\\DebugSnapshots\\PS7ScriptDesk_Debug_Untitled.ps1_abcd.ps1";
+        var invocation = ". '" + snapshotPath + "'";
+        var filter = new PsesOwnedInteractiveSessionService.StructuredEchoFilter(
+            Guid.NewGuid(), preservePromptPrefix: true,
+            PsesOwnedInteractiveSessionService.BuildInvocationEchoForms(invocation, executeInCurrentScope: true));
+        var raw = "PS C:\\Work> " + invocation + "\r\n" +
+                  "USER_PATH=" + snapshotPath + "\r\n" +
+                  "At " + snapshotPath + ":4 char:1\r\n" +
+                  "PS C:\\Work> ";
+
+        var visible = filter.Filter(raw) + filter.Flush();
+
+        Assert.DoesNotContain(invocation, visible, StringComparison.Ordinal);
+        Assert.Contains("USER_PATH=" + snapshotPath, visible, StringComparison.Ordinal);
+        Assert.Contains("At " + snapshotPath + ":4", visible, StringComparison.Ordinal);
+        Assert.Contains("PS C:\\Work> ", visible, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ConsecutiveRunSelectionsAndRunFileAfterSelection_DoNotShareEchoState()
     {
         var selectionOneId = Guid.NewGuid();

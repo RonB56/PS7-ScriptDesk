@@ -132,7 +132,7 @@ namespace PS7ScriptDesk.Shell
         private const int EditorHoverDelayMilliseconds = 450;
         private const int EditorMetadataWarmupDebounceMilliseconds = 150;
         private const int MetadataToastShowDelayMilliseconds = 650;
-        private const int MetadataToastSuccessDismissMilliseconds = 2200;
+        internal const int MetadataToastSuccessDismissMilliseconds = 3000;
         private const int MetadataToastWarningDismissMilliseconds = 6500;
         private const int MetadataToastFailureDismissMilliseconds = 9000;
         private const string ThemeAccentPrimaryResourceKey = "Theme.Accent.Primary";
@@ -291,7 +291,10 @@ namespace PS7ScriptDesk.Shell
         private readonly DispatcherTimer _editorHoverTimer;
         private readonly DispatcherTimer _editorMetadataWarmupTimer;
         private readonly DispatcherTimer _metadataToastShowDelayTimer;
-        private readonly DispatcherTimer _metadataToastAutoHideTimer;
+        private DispatcherTimer? _metadataToastAutoHideTimer;
+        private EventHandler? _metadataToastAutoHideHandler;
+        private readonly MetadataToastLifecycleState _metadataToastLifecycle = new();
+        private readonly MetadataToastDismissal _metadataToastDismissal;
 
         private CompletionWindow? _activeCompletionWindow;
         private CancellationTokenSource? _activeCompletionCts;
@@ -331,6 +334,7 @@ namespace PS7ScriptDesk.Shell
         private readonly ThemeService _themeService = new();
         private IDebugSession? _debugSession;
         private IPowerShellRuntimeExecutionLease? _debugRuntimeExecutionLease;
+        private IDisposable? _debugLaunchEchoRegistration;
         private readonly DebuggerExecutionControlGate _debugExecutionControlGate = new();
         private Action<DebugSessionState>? _debugSessionStateChangedHandler;
         private Action<DebuggerEvent>? _debugSessionTypedEventHandler;
@@ -638,8 +642,9 @@ namespace PS7ScriptDesk.Shell
                 Interval = TimeSpan.FromMilliseconds(MetadataToastShowDelayMilliseconds)
             };
             _metadataToastShowDelayTimer.Tick += MetadataToastShowDelayTimer_Tick;
-            _metadataToastAutoHideTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher);
-            _metadataToastAutoHideTimer.Tick += MetadataToastAutoHideTimer_Tick;
+            _metadataToastDismissal = new MetadataToastDismissal(
+                ScheduleMetadataToastAutoHideTimer,
+                StopMetadataToastAutoHideTimer);
 
             IsContextHelpEnabled = _loadedSettings.IsContextHelpEnabled;
             DeveloperDiagnostics.RegisterSummaryProvider(BuildDeveloperDiagnosticsSnapshot);
@@ -9205,6 +9210,12 @@ namespace PS7ScriptDesk.Shell
                     ? new PsesDapDebugSession(authoritativeDebugEndpoint)
                     : new PsesDebugSession();
                 _debugSession = debugSession;
+                ViewModel.BeginDebuggerPromptReadinessReconciliation(debugSession.SessionId);
+                if (authoritativeDebugEndpoint is PsesOwnedInteractiveSessionService echoFilterService &&
+                    !string.IsNullOrWhiteSpace(_activeDebugSnapshotPath))
+                {
+                    _debugLaunchEchoRegistration = echoFilterService.RegisterDebuggerLaunchEcho(debugSession.SessionId, launchScriptPath);
+                }
                 _debugInspectionContext.BeginSession(debugSession.SessionId);
                 _activeDebugTab = selectedTab;
                 _activeDebugLaunchPath = launchScriptPath;
@@ -10240,6 +10251,7 @@ namespace PS7ScriptDesk.Shell
             DebugTeardownReason reason = DebugTeardownReason.PreLaunchCleanup)
         {
             var debugSession = _debugSession;
+            var runtimeBeforeTeardown = _runtimeSessionCoordinator?.Snapshot;
             var operationId = $"DebugTeardown-{Guid.NewGuid():N}";
             TraceDebugShell(
                 "TearDownDebugSessionAsync",
@@ -10359,6 +10371,41 @@ namespace PS7ScriptDesk.Shell
                         new Dictionary<string, object?> { ["reason"] = reason.ToString() });
                 }
             }
+
+            if (debugSession is not null)
+            {
+                ViewModel?.ReconcileDebuggerPromptReadiness(debugSession.SessionId);
+                CommandManager.InvalidateRequerySuggested();
+                var synchronizedRuntime = _runtimeSessionCoordinator?.Snapshot;
+                DeveloperDiagnostics.LogInfo("Debugger", "WPF debugger command availability refreshed after runtime lease handoff.", new Dictionary<string, object?>
+                {
+                    ["debugSessionId"] = debugSession.SessionId,
+                    ["runtimeSessionId"] = synchronizedRuntime?.SessionId,
+                    ["runtimeGeneration"] = synchronizedRuntime?.Generation,
+                    ["runtimeState"] = synchronizedRuntime?.State.ToString(),
+                    ["runtimeLifecyclePhase"] = synchronizedRuntime?.LifecyclePhase.ToString(),
+                    ["debuggerSessionInactive"] = _debugSession is null,
+                    ["startDebugCommandCanExecute"] = CanStartDebugSession(),
+                    ["contentOmitted"] = true
+                });
+            }
+
+            Interlocked.Exchange(ref _debugLaunchEchoRegistration, null)?.Dispose();
+
+            var runtimeAfterTeardown = _runtimeSessionCoordinator?.Snapshot;
+            DeveloperDiagnostics.LogInfo("Debugger", "Debugger lifecycle ownership release snapshot.", new Dictionary<string, object?>
+            {
+                ["debugSessionId"] = debugSession?.SessionId,
+                ["terminalGeneration"] = _liveConsoleServiceForObservation?.CurrentSessionGeneration,
+                ["executionReservationId"] = null,
+                ["runtimeStateBefore"] = runtimeBeforeTeardown?.State.ToString(),
+                ["runtimeStateAfter"] = runtimeAfterTeardown?.State.ToString(),
+                ["debuggerOwnershipBefore"] = debugSession is not null,
+                ["debuggerOwnershipAfter"] = _debugSession is not null,
+                ["runtimeLifecycleAfter"] = runtimeAfterTeardown?.LifecyclePhase.ToString(),
+                ["leaseReleaseAttempted"] = runtimeExecutionLease is not null,
+                ["contentOmitted"] = true
+            });
 
             TryDeleteTemporaryDebugSnapshot(snapshotToDelete);
             sourceMapToInvalidate?.Invalidate();
@@ -10942,6 +10989,8 @@ namespace PS7ScriptDesk.Shell
             DeveloperDiagnostics.LogEventHandlerEntry("UI", "Window_Closing", "Window_Closing entered.");
             if (_allowWindowClose)
             {
+                CancelPendingMetadataToast();
+                _metadataToastDismissal.Dispose();
                 foreach (var editor in _foldingCancellationSources.Keys.ToArray())
                     CancelPendingFolding(editor);
                 if (ViewModel is not null)
@@ -11336,6 +11385,8 @@ namespace PS7ScriptDesk.Shell
 
         private void Window_Closed(object? sender, EventArgs e)
         {
+            CancelPendingMetadataToast();
+            _metadataToastDismissal.Dispose();
             _metadataInitializationWindow?.Close();
             _metadataInitializationWindow = null;
             _phase2BProofCancellation?.Cancel();
@@ -11906,7 +11957,22 @@ namespace PS7ScriptDesk.Shell
                         return;
                     }
 
-                    _metadataToastAutoHideTimer.Stop();
+                    var initializationWasActive = _metadataToastLifecycle.IsInitializationActive;
+                    if (!_metadataToastLifecycle.ObserveProgress(
+                        isExplicitStart: status.Phase == EditorMetadataWarmupPhase.Scheduled))
+                    {
+                        DeveloperDiagnostics.LogDecision(
+                            "EditorCompletion",
+                            "MetadataToastProgressIgnored",
+                            "A progress refresh arrived after this initialization attempt had reached a terminal state.",
+                            "IgnoreCompletedAttempt");
+                        return;
+                    }
+
+                    if (!initializationWasActive)
+                    {
+                        _metadataToastDismissal.Cancel();
+                    }
                     _pendingMetadataToastStatus = status;
                     if (_metadataToastVisible)
                     {
@@ -11920,17 +11986,24 @@ namespace PS7ScriptDesk.Shell
                     return;
 
                 case EditorMetadataWarmupPhase.Completed:
-                    CancelPendingMetadataToast();
-                    if (!_metadataToastVisible)
+                    if (!_metadataToastLifecycle.TryCompleteInitialization())
                     {
+                        DeveloperDiagnostics.LogDecision(
+                            "EditorCompletion",
+                            "MetadataToastCompletionIgnored",
+                            "The completion status was already handled for this initialization attempt.",
+                            "IgnoreDuplicateCompletion");
                         return;
                     }
 
+                    CancelPendingMetadataToast();
                     ApplyMetadataToastContent(status);
+                    ShowMetadataToastIfNeeded(status, logReason: "metadata initialization completed");
                     ScheduleMetadataToastAutoHide(MetadataToastSuccessDismissMilliseconds);
                     return;
 
                 case EditorMetadataWarmupPhase.Warning:
+                    _metadataToastLifecycle.EndInitialization();
                     CancelPendingMetadataToast();
                     ApplyMetadataToastContent(status);
                     ShowMetadataToastIfNeeded(status, logReason: "warning");
@@ -11938,6 +12011,7 @@ namespace PS7ScriptDesk.Shell
                     return;
 
                 case EditorMetadataWarmupPhase.Failed:
+                    _metadataToastLifecycle.EndInitialization();
                     CancelPendingMetadataToast();
                     ApplyMetadataToastContent(status);
                     ShowMetadataToastIfNeeded(status, logReason: "failure");
@@ -11945,6 +12019,7 @@ namespace PS7ScriptDesk.Shell
                     return;
 
                 case EditorMetadataWarmupPhase.Canceled:
+                    _metadataToastLifecycle.EndInitialization();
                     CancelPendingMetadataToast();
                     HideMetadataToast("metadata canceled");
                     return;
@@ -11967,10 +12042,48 @@ namespace PS7ScriptDesk.Shell
             ShowMetadataToastIfNeeded(_pendingMetadataToastStatus, logReason: "background metadata build");
         }
 
-        private void MetadataToastAutoHideTimer_Tick(object? sender, EventArgs e)
+        private void ScheduleMetadataToastAutoHideTimer(TimeSpan interval, Action callback)
         {
+            StopMetadataToastAutoHideTimer();
+            var timer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+            {
+                Interval = interval
+            };
+            EventHandler handler = null!;
+            handler = (sender, args) =>
+            {
+                timer.Stop();
+                timer.Tick -= handler;
+                if (!ReferenceEquals(_metadataToastAutoHideTimer, timer))
+                {
+                    return;
+                }
+
+                _metadataToastAutoHideTimer = null;
+                _metadataToastAutoHideHandler = null;
+                callback();
+            };
+            _metadataToastAutoHideTimer = timer;
+            _metadataToastAutoHideHandler = handler;
+            timer.Tick += handler;
+            timer.Start();
+        }
+
+        private void StopMetadataToastAutoHideTimer()
+        {
+            if (_metadataToastAutoHideTimer is null)
+            {
+                return;
+            }
+
             _metadataToastAutoHideTimer.Stop();
-            HideMetadataToast("auto-dismiss");
+            if (_metadataToastAutoHideHandler is not null)
+            {
+                _metadataToastAutoHideTimer.Tick -= _metadataToastAutoHideHandler;
+            }
+
+            _metadataToastAutoHideTimer = null;
+            _metadataToastAutoHideHandler = null;
         }
 
         private void CancelPendingMetadataToast()
@@ -11981,9 +12094,9 @@ namespace PS7ScriptDesk.Shell
 
         private void ScheduleMetadataToastAutoHide(int delayMilliseconds)
         {
-            _metadataToastAutoHideTimer.Stop();
-            _metadataToastAutoHideTimer.Interval = TimeSpan.FromMilliseconds(delayMilliseconds);
-            _metadataToastAutoHideTimer.Start();
+            _metadataToastDismissal.Schedule(
+                TimeSpan.FromMilliseconds(delayMilliseconds),
+                () => HideMetadataToast("auto-dismiss"));
         }
 
         private bool ShouldShowInformationalMetadataToast(EditorMetadataWarmupStatus status)
@@ -12097,6 +12210,15 @@ namespace PS7ScriptDesk.Shell
             _metadataInitializationWindow ??= new MetadataInitializationWindow();
             ApplyMetadataToastContent(status);
             _metadataInitializationWindow.ShowForOwner(this);
+            DeveloperDiagnostics.LogInfo(
+                "EditorCompletion",
+                "Floating IntelliSense metadata notification shown.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = status.Reason.ToString(),
+                    ["phase"] = status.Phase.ToString(),
+                    ["notificationOwner"] = nameof(MetadataInitializationWindow)
+                });
             AppLogger.Info(
                 "MainWindow",
                 $"Metadata initialization window shown as an owned top-level window. Reason={status.Reason}, Phase={status.Phase}, Runtime='{status.RuntimePath ?? "(unknown)"}', Detail='{logReason}'.");
@@ -12104,7 +12226,7 @@ namespace PS7ScriptDesk.Shell
 
         private void HideMetadataToast(string dismissalReason)
         {
-            _metadataToastAutoHideTimer.Stop();
+            _metadataToastDismissal.Cancel();
             _metadataToastShowDelayTimer.Stop();
             _pendingMetadataToastStatus = null;
 
@@ -12116,6 +12238,14 @@ namespace PS7ScriptDesk.Shell
             var status = _visibleMetadataToastStatus;
             _metadataToastVisible = false;
             _metadataInitializationWindow?.HideForOwner();
+            DeveloperDiagnostics.LogInfo(
+                "EditorCompletion",
+                "Floating IntelliSense metadata notification hidden.",
+                new Dictionary<string, object?>
+                {
+                    ["reason"] = dismissalReason,
+                    ["phase"] = status?.Phase.ToString() ?? "Unknown"
+                });
             AppLogger.Info(
                 "MainWindow",
                 $"Metadata initialization window hidden. Reason={status?.Reason ?? EditorMetadataWarmupReason.None}, Phase={status?.Phase.ToString() ?? "Unknown"}, Dismissal='{dismissalReason}'.");

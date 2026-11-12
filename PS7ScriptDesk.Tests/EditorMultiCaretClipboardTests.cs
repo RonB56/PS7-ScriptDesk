@@ -1,5 +1,6 @@
 using ICSharpCode.AvalonEdit;
 using ICSharpCode.AvalonEdit.Document;
+using System.Reflection;
 using PS7ScriptDesk.Shell.Editor;
 
 namespace PS7ScriptDesk.Tests;
@@ -171,6 +172,47 @@ public sealed class EditorMultiCaretClipboardTests
             editor.Document.UndoStack.Undo();
             Assert.Equal("aa--bb--cc", editor.Text);
         });
+    }
+
+    [Fact]
+    public void CopyIncludesSecondarySelectionsWhenPrimarySelectionIsEmpty()
+    {
+        WpfTestDispatcher.Run(() =>
+        {
+            var editor = new TextEditor { Text = "aa--bb--cc" };
+            var state = CreateInternalMultiCaretState(editor.Document);
+            var managerType = state.GetType().Assembly.GetType("ICSharpCode.AvalonEdit.Editing.MultiCaretManager", throwOnError: true)!;
+            var manager = Activator.CreateInstance(managerType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null, args: new[] { state }, culture: null)!;
+            var attach = editor.TextArea.GetType().GetMethod("AttachMultiCaretManager", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            attach.Invoke(editor.TextArea, new[] { manager });
+            var primary = state.GetType().GetProperty("Primary", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(state)!;
+            Assert.False((bool)primary.GetType().GetProperty("IsSelection")!.GetValue(primary)!);
+
+            var clipboard = new FakeClipboard();
+            var result = new EditorClipboardService(clipboard).Copy(editor);
+
+            Assert.True(result.Handled);
+            Assert.True(result.Succeeded);
+            Assert.Equal(2, result.RangeCount);
+            Assert.Equal("aa\r\nbb", clipboard.Text);
+            Assert.Equal("aa--bb--cc", editor.Text);
+        });
+    }
+
+    private static object CreateInternalMultiCaretState(TextDocument document)
+    {
+        var assembly = typeof(TextEditor).Assembly;
+        var entryType = assembly.GetType("ICSharpCode.AvalonEdit.Editing.MultiCaretEntry", throwOnError: true)!;
+        var entryConstructor = entryType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).Single();
+        var entries = Array.CreateInstance(entryType, 3);
+        entries.SetValue(entryConstructor.Invoke(new object?[] { 0L, 10, 10, null, null }), 0);
+        entries.SetValue(entryConstructor.Invoke(new object?[] { 1L, 2, 0, null, null }), 1);
+        entries.SetValue(entryConstructor.Invoke(new object?[] { 2L, 6, 4, null, null }), 2);
+        var stateType = assembly.GetType("ICSharpCode.AvalonEdit.Editing.MultiCaretState", throwOnError: true)!;
+        var stateConstructor = stateType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Single(ctor => ctor.GetParameters().Length == 4);
+        return stateConstructor.Invoke(new object[] { document, entries, 0L, 0L });
     }
 
     [Fact]

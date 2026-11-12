@@ -15,6 +15,8 @@ public sealed class InitializationPopupZOrderTests
         Assert.Contains("MetadataInitializationWindow", mainWindowSource, StringComparison.Ordinal);
         Assert.Contains("ShowForOwner(this)", mainWindowSource, StringComparison.Ordinal);
         Assert.Contains("Owner = owner", popupSource, StringComparison.Ordinal);
+        Assert.Contains("_showForOwnerRequested = false", popupSource, StringComparison.Ordinal);
+        Assert.Contains("_showForOwnerRequested && _ownerWindow?.IsVisible == true", popupSource, StringComparison.Ordinal);
         Assert.Contains("PointToScreen", popupSource, StringComparison.Ordinal);
         Assert.Contains("TransformFromDevice", popupSource, StringComparison.Ordinal);
         Assert.Contains("WindowStyle=\"None\"", popupXaml, StringComparison.Ordinal);

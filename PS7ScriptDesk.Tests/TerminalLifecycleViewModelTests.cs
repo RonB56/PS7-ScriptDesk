@@ -203,6 +203,79 @@ public sealed class TerminalLifecycleViewModelTests
         viewModel.Dispose();
     }
 
+    [Fact]
+    public async Task EscapeDuringInteractiveCommand_IsForwardedAndWaitsForVerifiedPrompt()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var coordinator = new InteractiveTerminalCoordinator();
+        coordinator.SetState(InteractiveTerminalState.InteractiveCommandRunning, "interactive application owns terminal");
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+
+        await viewModel.WriteRawInputAsync("\u001b");
+
+        Assert.Equal(["\u001b"], console.RawInputs);
+        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, coordinator.State);
+        Assert.False(viewModel.IsRunAvailable);
+
+        console.RaisePromptReady(console.CurrentSessionGeneration, "C:\\");
+
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task EscapeWithDeferredOwnedPrompt_ReconcilesAfterExecutionOwnershipRelease()
+    {
+        var console = new RecordingLiveConsoleService();
+        console.PrimeSession(1);
+        var coordinator = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+        console.RaiseSessionStarted(1);
+        coordinator.SetState(InteractiveTerminalState.InteractiveCommandRunning, "structured editor request owns terminal");
+
+        var requestId = Guid.NewGuid();
+        var requestField = typeof(MainWindowViewModel).GetField("_activeStructuredExecutionRequestId", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(requestField);
+        requestField!.SetValue(viewModel, requestId);
+
+        await viewModel.WriteRawInputAsync("\u001b");
+        var promptObservation = new StructuredPromptReadyObservation(requestId, 1, console.ProcessId!.Value, "C:\\");
+        var observe = typeof(MainWindowViewModel).GetMethod("OnStructuredPromptReadyObserved", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(observe);
+        observe!.Invoke(viewModel, [promptObservation]);
+
+        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, coordinator.State);
+        Assert.False(viewModel.IsRunAvailable);
+
+        requestField.SetValue(viewModel, null);
+        var reconcile = typeof(MainWindowViewModel).GetMethod("ReconcileDeferredStructuredPromptObservation", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(reconcile);
+        reconcile!.Invoke(viewModel, [requestId, true]);
+
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task EscapeWhileEditingDoesNotPrematurelyAdmitEditorExecution()
+    {
+        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
+        var coordinator = new InteractiveTerminalCoordinator();
+        coordinator.SetState(InteractiveTerminalState.InteractiveInputEditing, "unfinished user input");
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
+
+        await viewModel.WriteRawInputAsync("\u001b");
+
+        Assert.Equal(["\u001b"], console.RawInputs);
+        Assert.Equal(InteractiveTerminalState.InteractiveInputEditing, coordinator.State);
+        Assert.False(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
     [Theory]
     [InlineData("\u001b[A")]
     [InlineData("\u001bOA")]
@@ -387,6 +460,160 @@ public sealed class TerminalLifecycleViewModelTests
         Assert.True(viewModel.RunCommand.CanExecute(null));
         Assert.Contains(nameof(MainWindowViewModel.IsRunAvailable), propertyChanges);
         Assert.True(commandChangeCount > 0);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task DebuggerLeaseReleaseRefreshesCommandsWhenTerminalIsAlreadyIdle()
+    {
+        var console = new RecordingLiveConsoleService();
+        console.PrimeSession(1);
+        var runtime = CreateRuntime();
+        await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
+        var current = await runtimeCoordinator.AcquireAsync(runtime, _ => { });
+        var startsBeforeDebug = console.Operations.Count(operation => operation == "start");
+        var processIdBeforeDebug = console.ProcessId;
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(
+            console,
+            runtime,
+            terminal,
+            runtimeSessionCoordinator: runtimeCoordinator);
+        console.RaiseSessionStarted(1);
+        terminal.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "debugger-test-idle");
+        var debugSessionId = Guid.NewGuid();
+        var debugLease = await runtimeCoordinator.AcquireExecutionAsync(
+            current.SessionId,
+            current.Generation,
+            debugger: true);
+        viewModel.IsDebugSessionActive = true;
+        viewModel.BeginDebuggerPromptReadinessReconciliation(debugSessionId);
+        console.RaisePromptReady(1, "C:\\");
+        viewModel.IsDebugSessionActive = false;
+
+        Assert.Equal(PowerShellRuntimeSessionState.Debugging, runtimeCoordinator.Snapshot.State);
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, terminal.State);
+        Assert.False(viewModel.IsRunAvailable);
+        var commandChangeCount = 0;
+        var availabilityPropertyChangeCount = 0;
+        viewModel.RunCommand.CanExecuteChanged += (_, _) => commandChangeCount++;
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName is nameof(MainWindowViewModel.IsRunAvailable) or nameof(MainWindowViewModel.RunSelectionDisabledReason))
+                availabilityPropertyChangeCount++;
+        };
+
+        await debugLease.DisposeAsync();
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, runtimeCoordinator.Snapshot.State);
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.Equal(0, commandChangeCount);
+
+        viewModel.ReconcileDebuggerPromptReadiness(debugSessionId);
+
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, terminal.State);
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+        Assert.False(viewModel.StopCommand.CanExecute(null));
+        Assert.True(commandChangeCount > 0);
+        Assert.True(availabilityPropertyChangeCount > 0);
+        Assert.Equal(startsBeforeDebug, console.Operations.Count(operation => operation == "start"));
+
+        var notificationCountAfterCompletion = commandChangeCount;
+        viewModel.ReconcileDebuggerPromptReadiness(debugSessionId);
+        Assert.Equal(notificationCountAfterCompletion, commandChangeCount);
+
+        var secondDebugSessionId = Guid.NewGuid();
+        var secondDebugLease = await runtimeCoordinator.AcquireExecutionAsync(
+            current.SessionId,
+            current.Generation,
+            debugger: true);
+        viewModel.IsDebugSessionActive = true;
+        viewModel.BeginDebuggerPromptReadinessReconciliation(secondDebugSessionId);
+        viewModel.ReconcileDebuggerPromptReadiness(debugSessionId);
+        Assert.False(viewModel.IsRunAvailable);
+        viewModel.IsDebugSessionActive = false;
+        await secondDebugLease.DisposeAsync();
+        viewModel.ReconcileDebuggerPromptReadiness(secondDebugSessionId);
+
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, runtimeCoordinator.Snapshot.State);
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.False(viewModel.StopCommand.CanExecute(null));
+        Assert.Equal(startsBeforeDebug, console.Operations.Count(operation => operation == "start"));
+        Assert.Equal(processIdBeforeDebug, console.ProcessId);
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task DebuggerCommandRefreshKeepsRunDisabledWhileTerminalIsBusy()
+    {
+        var console = new RecordingLiveConsoleService { IsCommandInProgress = true };
+        console.PrimeSession(1);
+        var runtime = CreateRuntime();
+        await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
+        var current = await runtimeCoordinator.AcquireAsync(runtime, _ => { });
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(
+            console,
+            runtime,
+            terminal,
+            runtimeSessionCoordinator: runtimeCoordinator);
+        console.RaiseSessionStarted(1);
+        terminal.SetState(InteractiveTerminalState.InteractiveCommandRunning, "debugger-test-busy");
+        var debugSessionId = Guid.NewGuid();
+        var debugLease = await runtimeCoordinator.AcquireExecutionAsync(
+            current.SessionId,
+            current.Generation,
+            debugger: true);
+        viewModel.IsDebugSessionActive = true;
+        viewModel.BeginDebuggerPromptReadinessReconciliation(debugSessionId);
+        console.RaisePromptReady(1, "C:\\");
+        viewModel.IsDebugSessionActive = false;
+        await debugLease.DisposeAsync();
+
+        viewModel.ReconcileDebuggerPromptReadiness(debugSessionId);
+
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, runtimeCoordinator.Snapshot.State);
+        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, terminal.State);
+        Assert.False(viewModel.IsRunAvailable);
+        Assert.False(viewModel.RunCommand.CanExecute(null));
+        viewModel.Dispose();
+    }
+
+    [Fact]
+    public async Task StaleDebuggerPromptGenerationCannotRestoreRunAvailability()
+    {
+        var console = new RecordingLiveConsoleService();
+        console.PrimeSession(1);
+        var runtime = CreateRuntime();
+        await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
+        var current = await runtimeCoordinator.AcquireAsync(runtime, _ => { });
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(
+            console,
+            runtime,
+            terminal,
+            runtimeSessionCoordinator: runtimeCoordinator);
+        console.RaiseSessionStarted(1);
+        terminal.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "debugger-generation-one-idle");
+        var debugSessionId = Guid.NewGuid();
+        var debugLease = await runtimeCoordinator.AcquireExecutionAsync(
+            current.SessionId,
+            current.Generation,
+            debugger: true);
+        viewModel.IsDebugSessionActive = true;
+        viewModel.BeginDebuggerPromptReadinessReconciliation(debugSessionId);
+        console.RaisePromptReady(1, "C:\\");
+
+        console.RaiseSessionStarted(2);
+        viewModel.IsDebugSessionActive = false;
+        await debugLease.DisposeAsync();
+        viewModel.ReconcileDebuggerPromptReadiness(debugSessionId);
+
+        Assert.Equal(2, console.CurrentSessionGeneration);
+        Assert.Equal(InteractiveTerminalState.Starting, terminal.State);
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, runtimeCoordinator.Snapshot.State);
+        Assert.False(viewModel.IsRunAvailable);
+        Assert.False(viewModel.RunCommand.CanExecute(null));
         viewModel.Dispose();
     }
 

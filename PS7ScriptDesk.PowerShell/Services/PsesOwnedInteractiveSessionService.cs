@@ -68,6 +68,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
     private StreamWriter? _rawConPtyMetadata;
     private long _rawConPtyOffset;
     private Guid _rawConPtyCorrelationId;
+    private long _resizeDiagnosticSequence;
+    private int _lastDiagnosticColumns;
+    private int _lastDiagnosticRows;
+    private int _lastResizeDiagnosticGeneration = -1;
 
     public bool IsSessionRunning => _conPty is { HasExited: false } && !_sessionFaulted;
     public bool IsInputWritable => IsSessionRunning && !_shutdownRequested && !_interactiveReadinessUnverified;
@@ -89,6 +93,56 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
     public int SessionGeneration => _generation;
     public string? CurrentWorkingDirectory => _workingDirectory;
     public string? SessionDetailsPath => _sessionDetailsPath;
+
+    /// <summary>Filters only the prompt-prefixed invocation used to launch one debugger snapshot.</summary>
+    public IDisposable RegisterDebuggerLaunchEcho(Guid debugSessionId, string snapshotPath)
+    {
+        if (debugSessionId == Guid.Empty) throw new ArgumentException("A debugger session ID is required.", nameof(debugSessionId));
+        ArgumentException.ThrowIfNullOrWhiteSpace(snapshotPath);
+        var generation = CurrentSessionGeneration;
+        var invocation = ". " + QuotePowerShellSingleQuotedString(snapshotPath);
+        var filter = new StructuredEchoFilter(debugSessionId, preservePromptPrefix: true, BuildInvocationEchoForms(invocation, executeInCurrentScope: true));
+        lock (_syncRoot)
+        {
+            if (_activeStructuredEchoFilter is not null)
+                throw new InvalidOperationException("A terminal echo filter is already active.");
+            _activeStructuredEchoFilter = filter;
+        }
+        DeveloperDiagnostics.LogInfo("Debugger", "Registered exact prompt-anchored debugger launch echo filter.", new Dictionary<string, object?>
+        {
+            ["debugSessionId"] = debugSessionId,
+            ["terminalGeneration"] = generation,
+            ["snapshotPathLength"] = snapshotPath.Length,
+            ["echoFormCount"] = BuildInvocationEchoForms(invocation, executeInCurrentScope: true).Length,
+            ["contentOmitted"] = true
+        });
+        return new DebuggerLaunchEchoRegistration(this, filter, generation);
+    }
+
+    private void ReleaseDebuggerLaunchEchoFilter(StructuredEchoFilter filter, int generation)
+    {
+        string remainder = string.Empty;
+        lock (_syncRoot)
+        {
+            if (ReferenceEquals(_activeStructuredEchoFilter, filter))
+            {
+                remainder = filter.Flush();
+                _activeStructuredEchoFilter = null;
+            }
+        }
+        if (!string.IsNullOrEmpty(remainder))
+            PublishVisibleOutput(ExecutionOutputStreamKind.StandardOutput, generation, remainder);
+    }
+
+    private sealed class DebuggerLaunchEchoRegistration : IDisposable
+    {
+        private PsesOwnedInteractiveSessionService? _owner;
+        private readonly StructuredEchoFilter _filter;
+        private readonly int _generation;
+        public DebuggerLaunchEchoRegistration(PsesOwnedInteractiveSessionService owner, StructuredEchoFilter filter, int generation)
+        { _owner = owner; _filter = filter; _generation = generation; }
+        public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseDebuggerLaunchEchoFilter(_filter, _generation);
+    }
     public string? LanguageServicePipeName => _languageServicePipeName;
     public string? DebugServicePipeName => _debugServicePipeName;
     public bool IsLiveCompletionAvailable => _languageServiceClient is { IsInitialized: true } && IsSessionRunning;
@@ -123,9 +177,37 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
     public void ResizeHost(int width, int height) { }
     public void ResizeConsole(int cols, int rows)
     {
+        var resizeSequence = Interlocked.Increment(ref _resizeDiagnosticSequence);
+        var generation = SessionGeneration;
+        var processId = ProcessId;
+        var resizeOwner = _conPty;
         try
         {
-            _conPty?.Resize(cols, rows);
+            resizeOwner?.Resize(cols, rows);
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                DeveloperDiagnostics.LogInfo("PSES", "NativeConPtyResizeResult", new Dictionary<string, object?>
+                {
+                    ["resizeSequence"] = resizeSequence,
+                    ["sessionGeneration"] = generation,
+                    ["requestedColumns"] = cols,
+                    ["requestedRows"] = rows,
+                    ["previousColumns"] = _lastResizeDiagnosticGeneration == generation ? _lastDiagnosticColumns : null,
+                    ["previousRows"] = _lastResizeDiagnosticGeneration == generation ? _lastDiagnosticRows : null,
+                    ["nativeResizeAttempted"] = resizeOwner is not null,
+                    ["nativeResizeSucceeded"] = resizeOwner is not null,
+                    ["processId"] = processId,
+                    ["errorType"] = null,
+                    ["errorCode"] = null,
+                    ["contentOmitted"] = true
+                });
+            }
+            if (resizeOwner is not null)
+            {
+                _lastDiagnosticColumns = cols;
+                _lastDiagnosticRows = rows;
+                _lastResizeDiagnosticGeneration = generation;
+            }
             DeveloperDiagnostics.LogInfo("PSES", "Resized authoritative PSES ConPTY.", new Dictionary<string, object?>
             {
                 ["columns"] = cols, ["rows"] = rows, ["processId"] = ProcessId
@@ -133,6 +215,24 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
         }
         catch (Exception ex)
         {
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                DeveloperDiagnostics.LogInfo("PSES", "NativeConPtyResizeResult", new Dictionary<string, object?>
+                {
+                    ["resizeSequence"] = resizeSequence,
+                    ["sessionGeneration"] = generation,
+                    ["requestedColumns"] = cols,
+                    ["requestedRows"] = rows,
+                    ["previousColumns"] = _lastResizeDiagnosticGeneration == generation ? _lastDiagnosticColumns : null,
+                    ["previousRows"] = _lastResizeDiagnosticGeneration == generation ? _lastDiagnosticRows : null,
+                    ["nativeResizeAttempted"] = resizeOwner is not null,
+                    ["nativeResizeSucceeded"] = false,
+                    ["processId"] = processId,
+                    ["errorType"] = ex.GetType().FullName,
+                    ["errorCode"] = ex.HResult,
+                    ["contentOmitted"] = true
+                });
+            }
             DeveloperDiagnostics.LogException("PSES", ex, "Authoritative PSES ConPTY resize failed.", new Dictionary<string, object?>
             {
                 ["columns"] = cols, ["rows"] = rows, ["processId"] = ProcessId

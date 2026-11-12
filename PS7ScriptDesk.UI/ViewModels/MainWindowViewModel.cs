@@ -167,6 +167,16 @@ namespace PS7ScriptDesk.UI.ViewModels
             Guid RuntimeSessionId,
             long? RuntimeGeneration,
             int ProcessId);
+        private sealed record DeferredDebuggerPromptObservation(
+            Guid DebugSessionId,
+            int TerminalGeneration,
+            string Path,
+            Guid RuntimeSessionId,
+            long? RuntimeGeneration,
+            int? ProcessId);
+        private readonly object _deferredDebuggerPromptSync = new();
+        private Guid _activeDebuggerPromptSessionId;
+        private DeferredDebuggerPromptObservation? _deferredDebuggerPromptObservation;
         private bool _isExeExportInProgress;
         private bool _isRestApiWizardOpen;
         private readonly List<string> _recentFilePaths = new();
@@ -4847,6 +4857,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (!CanRunScript())
             {
                 StatusText = GetRunDisabledReason() ?? "Run is not available right now";
+                LogRunRequestRejected();
                 return;
             }
 
@@ -4997,6 +5008,21 @@ namespace PS7ScriptDesk.UI.ViewModels
                         RequiresWorkingDirectoryContinuity: true)
                     : null,
                 SourceInfo: sourceInfo);
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                DeveloperDiagnostics.LogUserAction("Execution", "RunFileRequestAdmitted", "Run File passed command admission and is entering coordinator routing.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = request.RequestId,
+                    ["terminalGeneration"] = _liveConsoleService.CurrentSessionGeneration,
+                    ["terminalState"] = _interactiveTerminalCoordinator.State.ToString(),
+                    ["editorExecutionRunning"] = IsExecutionRunning,
+                    ["activeExecutionOwner"] = _activeCoordinatorExecutionRequestId,
+                    ["runtimeState"] = _runtimeSessionCoordinator?.Snapshot.State.ToString(),
+                    ["processId"] = _liveConsoleService.ProcessId,
+                    ["scriptLength"] = scriptText?.Length ?? 0,
+                    ["contentOmitted"] = true
+                });
+            }
             var decision = _executionCoordinator.Route(request);
             var structured = decision.Accepted && decision.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId;
             if (!decision.Accepted)
@@ -5036,6 +5062,23 @@ namespace PS7ScriptDesk.UI.ViewModels
             ClearDeferredStructuredPromptObservation("DifferentExecutionRequestStarted");
             Interlocked.Exchange(ref _structuredPromptReconciliationInvalidated, 0);
             IsExecutionRunning = true;
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                DeveloperDiagnostics.LogInfo("Execution", "EditorScriptDispatchBegan", new Dictionary<string, object?>
+                {
+                    ["requestId"] = request.RequestId,
+                    ["backendId"] = decision.SelectedBackend,
+                    ["sessionGeneration"] = request.SessionGeneration,
+                    ["terminalGeneration"] = _liveConsoleService.CurrentSessionGeneration,
+                    ["structured"] = structured,
+                    ["executionReservationHeld"] = true,
+                    ["activeCoordinatorRequestId"] = _activeCoordinatorExecutionRequestId,
+                    ["activeStructuredRequestId"] = _activeStructuredExecutionRequestId,
+                    ["runtimeState"] = _runtimeSessionCoordinator?.Snapshot.State.ToString(),
+                    ["processId"] = _liveConsoleService.ProcessId,
+                    ["contentOmitted"] = true
+                });
+            }
             if (structured)
             {
                 _activeStructuredExecutionRequestId = request.RequestId;
@@ -5049,6 +5092,17 @@ namespace PS7ScriptDesk.UI.ViewModels
                 ? $"Running {displayName} through the authoritative PSES session..."
                 : $"Running {displayName} through the active PowerShell session...";
             AppLogger.Info("Console", $"Coordinator dispatching '{displayName}'. RequestId={request.RequestId:N}; Backend={decision.SelectedBackend}; Reason={decision.SelectionReason}; Downgrade={decision.FallbackOrDowngradeReason ?? "(none)"}.");
+            DeveloperDiagnostics.LogUserAction("Execution", "EditorExecutionRequestAdmitted", "Editor execution request was admitted and ownership is reserved.", new Dictionary<string, object?>
+            {
+                ["requestId"] = request.RequestId,
+                ["mode"] = mode.ToString(),
+                ["sessionGeneration"] = request.SessionGeneration,
+                ["terminalGeneration"] = _interactiveTerminalCoordinator.Snapshot.Generation,
+                ["backendId"] = decision.SelectedBackend,
+                ["executionRunning"] = IsExecutionRunning,
+                ["runtimeGeneration"] = _runtimeSessionCoordinator?.Snapshot.Generation,
+                ["contentOmitted"] = true
+            });
 
             try
             {
@@ -5075,6 +5129,33 @@ namespace PS7ScriptDesk.UI.ViewModels
                     request,
                     structured ? _structuredExecutionCancellation!.Token : CancellationToken.None).ConfigureAwait(false);
                 structuredRequestCompleted = structured && result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed;
+                DeveloperDiagnostics.LogInfo("Execution", "Editor execution completion was detected by the coordinator.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = request.RequestId,
+                    ["sessionGeneration"] = request.SessionGeneration,
+                    ["status"] = result.Status.ToString(),
+                    ["structured"] = structured,
+                    ["terminalGeneration"] = _interactiveTerminalCoordinator.Snapshot.Generation,
+                    ["terminalState"] = _interactiveTerminalCoordinator.State.ToString(),
+                    ["commandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                    ["contentOmitted"] = true
+                });
+                if (DeveloperDiagnostics.IsEnabled)
+                {
+                    DeveloperDiagnostics.LogInfo("Execution", "EditorScriptCompletionDetected", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = request.RequestId,
+                        ["status"] = result.Status.ToString(),
+                        ["completionObserved"] = result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed,
+                        ["structured"] = structured,
+                        ["executionReservationHeld"] = _activeCoordinatorExecutionRequestId == request.RequestId,
+                        ["terminalGeneration"] = _liveConsoleService.CurrentSessionGeneration,
+                        ["terminalState"] = _interactiveTerminalCoordinator.State.ToString(),
+                        ["runtimeState"] = _runtimeSessionCoordinator?.Snapshot.State.ToString(),
+                        ["processId"] = _liveConsoleService.ProcessId,
+                        ["contentOmitted"] = true
+                    });
+                }
                 if (result.Status == EditorExecutionStatus.Unknown)
                 {
                     runtimeExecutionLease?.MarkReadinessUnverified(result.ErrorMessage ?? "Editor execution outcome or interactive readiness was not verified.");
@@ -5153,8 +5234,37 @@ namespace PS7ScriptDesk.UI.ViewModels
                     _activeCoordinatorExecutionRequestId = null;
                     if (_executionCoordinator?.ActiveExecution is null)
                         IsExecutionRunning = false;
+                    DeveloperDiagnostics.LogInfo("Execution", "Editor execution ownership was released.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = request.RequestId,
+                        ["sessionGeneration"] = request.SessionGeneration,
+                        ["structuredRequestCompleted"] = structuredRequestCompleted,
+                        ["executionRunning"] = IsExecutionRunning,
+                        ["activeCoordinatorRequestId"] = _activeCoordinatorExecutionRequestId,
+                        ["activeStructuredRequestId"] = _activeStructuredExecutionRequestId,
+                        ["terminalGeneration"] = _interactiveTerminalCoordinator.Snapshot.Generation,
+                        ["terminalState"] = _interactiveTerminalCoordinator.State.ToString(),
+                        ["contentOmitted"] = true
+                    });
                     if (structured)
                         ReconcileDeferredStructuredPromptObservation(request.RequestId, structuredRequestCompleted);
+                    if (DeveloperDiagnostics.IsEnabled)
+                    {
+                        DeveloperDiagnostics.LogInfo("Execution", "EditorExecutionOwnershipReleased", new Dictionary<string, object?>
+                        {
+                            ["requestId"] = request.RequestId,
+                            ["structured"] = structured,
+                            ["executionRunning"] = IsExecutionRunning,
+                            ["activeCoordinatorRequestId"] = _activeCoordinatorExecutionRequestId,
+                            ["activeStructuredRequestId"] = _activeStructuredExecutionRequestId,
+                            ["coordinatorOwnerActive"] = _executionCoordinator?.ActiveExecution is not null,
+                            ["terminalGeneration"] = _liveConsoleService.CurrentSessionGeneration,
+                            ["terminalState"] = _interactiveTerminalCoordinator.State.ToString(),
+                            ["runtimeState"] = _runtimeSessionCoordinator?.Snapshot.State.ToString(),
+                            ["promptValidation"] = "See correlated structured/legacy prompt events",
+                            ["contentOmitted"] = true
+                        });
+                    }
                     RefreshCommandStates();
                 }).ConfigureAwait(false);
             }
@@ -5329,6 +5439,16 @@ namespace PS7ScriptDesk.UI.ViewModels
             var structuredRequestCompleted = false;
             try
             {
+                DeveloperDiagnostics.LogUserAction("Execution", "EditorExecutionRequestAdmitted", "Editor execution request was admitted and ownership is reserved.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = requestId,
+                    ["mode"] = mode.ToString(),
+                    ["sessionGeneration"] = request.SessionGeneration,
+                    ["terminalGeneration"] = _terminalOutputMultiplexer.InteractiveSnapshot.Generation,
+                    ["backendId"] = "PSES",
+                    ["executionRunning"] = IsExecutionRunning,
+                    ["contentOmitted"] = true
+                });
                 AppLogger.Info("Console", $"Structured editor execution dispatching '{dispatchTitle}'. RequestId={requestId:N}, Mode={mode}, CurrentScope={executeInCurrentScope}, FallbackAttempted=False.");
                 DeveloperDiagnostics.LogUserAction(
                     "Terminal",
@@ -5348,6 +5468,16 @@ namespace PS7ScriptDesk.UI.ViewModels
 
                 var result = await _editorExecutionAdapter.ExecuteAsync(request, _structuredExecutionCancellation.Token).ConfigureAwait(false);
                 structuredRequestCompleted = result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed;
+                DeveloperDiagnostics.LogInfo("Execution", "Editor execution completion was detected by the structured adapter.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = requestId,
+                    ["sessionGeneration"] = request.SessionGeneration,
+                    ["status"] = result.Status.ToString(),
+                    ["terminalGeneration"] = _terminalOutputMultiplexer.InteractiveSnapshot.Generation,
+                    ["terminalState"] = _terminalOutputMultiplexer.InteractiveSnapshot.State.ToString(),
+                    ["commandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                    ["contentOmitted"] = true
+                });
                 PostToUi(() =>
                 {
                     StatusText = result.Status switch
@@ -5385,6 +5515,17 @@ namespace PS7ScriptDesk.UI.ViewModels
                 _activeStructuredExecutionRequestId = null;
                 _structuredExecutionCancellation?.Dispose();
                 _structuredExecutionCancellation = null;
+                DeveloperDiagnostics.LogInfo("Execution", "Editor execution ownership was released.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = requestId,
+                    ["sessionGeneration"] = request.SessionGeneration,
+                    ["structuredRequestCompleted"] = structuredRequestCompleted,
+                    ["executionRunning"] = false,
+                    ["activeStructuredRequestId"] = _activeStructuredExecutionRequestId,
+                    ["terminalGeneration"] = _terminalOutputMultiplexer.InteractiveSnapshot.Generation,
+                    ["terminalState"] = _terminalOutputMultiplexer.InteractiveSnapshot.State.ToString(),
+                    ["contentOmitted"] = true
+                });
                 PostToUi(() =>
                 {
                     IsExecutionRunning = false;
@@ -5568,6 +5709,23 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task OnStopAsync()
         {
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                var runtime = _runtimeSessionCoordinator?.Snapshot;
+                DeveloperDiagnostics.LogUserAction("Execution", "TerminalInterruptRequested", "User requested terminal interruption.", new Dictionary<string, object?>
+                {
+                    ["terminalGeneration"] = _interactiveTerminalCoordinator.Snapshot.Generation,
+                    ["terminalState"] = _interactiveTerminalCoordinator.State.ToString(),
+                    ["executionRunning"] = IsExecutionRunning,
+                    ["activeCoordinatorRequestId"] = _activeCoordinatorExecutionRequestId,
+                    ["activeStructuredRequestId"] = _activeStructuredExecutionRequestId,
+                    ["activeTerminalCommandRequestId"] = _activeInternalTerminalCommandRequestId,
+                    ["runtimeGeneration"] = runtime?.Generation,
+                    ["runtimeState"] = runtime?.State.ToString(),
+                    ["processId"] = _liveConsoleService.ProcessId,
+                    ["contentOmitted"] = true
+                });
+            }
             ClearDeferredStructuredPromptObservation("StopOrInterruptRequested");
             var resetWaitingForRuntimeLease = Volatile.Read(ref _resetConsoleInProgress) != 0;
             if (IsStopInProgress && !resetWaitingForRuntimeLease)
@@ -8064,7 +8222,137 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
+            var runtime = _runtimeSessionCoordinator?.Snapshot;
+            if (IsDebugSessionActive || runtime?.State == PowerShellRuntimeSessionState.Debugging)
+            {
+                Guid debugSessionId;
+                lock (_deferredDebuggerPromptSync)
+                    debugSessionId = _activeDebuggerPromptSessionId;
+                if (debugSessionId != Guid.Empty &&
+                    generation == _liveConsoleService.CurrentSessionGeneration &&
+                    generation == Volatile.Read(ref _currentTerminalGeneration) &&
+                    _liveConsoleService.IsSessionRunning && _liveConsoleService.IsInputWritable &&
+                    runtime is not null && runtime.SessionId != Guid.Empty && runtime.ProcessId == _liveConsoleService.ProcessId)
+                {
+                    lock (_deferredDebuggerPromptSync)
+                    {
+                        if (_activeDebuggerPromptSessionId == debugSessionId)
+                        {
+                            _deferredDebuggerPromptObservation = new DeferredDebuggerPromptObservation(
+                                debugSessionId, generation, path ?? string.Empty, runtime.SessionId, runtime.Generation, runtime.ProcessId);
+                        }
+                    }
+                    DeveloperDiagnostics.LogInfo("Debugger", "Observed prompt retained for post-lease readiness reconciliation.", new Dictionary<string, object?>
+                    {
+                        ["debugSessionId"] = debugSessionId,
+                        ["terminalGeneration"] = generation,
+                        ["runtimeSessionId"] = runtime.SessionId,
+                        ["runtimeGeneration"] = runtime.Generation,
+                        ["promptReadinessObserved"] = true,
+                        ["promptReadinessAccepted"] = false,
+                        ["contentOmitted"] = true
+                    });
+                }
+                return;
+            }
+
             ApplyTerminalPromptReadyObservation(generation, path);
+        }
+
+        public void BeginDebuggerPromptReadinessReconciliation(Guid debugSessionId)
+        {
+            if (debugSessionId == Guid.Empty) return;
+            lock (_deferredDebuggerPromptSync)
+            {
+                _activeDebuggerPromptSessionId = debugSessionId;
+                _deferredDebuggerPromptObservation = null;
+            }
+        }
+
+        public void ReconcileDebuggerPromptReadiness(Guid debugSessionId)
+        {
+            DeferredDebuggerPromptObservation? deferred;
+            lock (_deferredDebuggerPromptSync)
+            {
+                if (debugSessionId == Guid.Empty || _activeDebuggerPromptSessionId != debugSessionId) return;
+                _activeDebuggerPromptSessionId = Guid.Empty;
+                deferred = _deferredDebuggerPromptObservation?.DebugSessionId == debugSessionId
+                    ? _deferredDebuggerPromptObservation : null;
+                _deferredDebuggerPromptObservation = null;
+            }
+
+            var runtime = _runtimeSessionCoordinator?.Snapshot;
+            var identityMatches = deferred is not null &&
+                deferred.TerminalGeneration == _liveConsoleService.CurrentSessionGeneration &&
+                deferred.TerminalGeneration == Volatile.Read(ref _currentTerminalGeneration) &&
+                deferred.ProcessId == _liveConsoleService.ProcessId && _liveConsoleService.IsSessionRunning &&
+                _liveConsoleService.IsInputWritable && !_liveConsoleService.IsCommandInProgress &&
+                Volatile.Read(ref _resetConsoleInProgress) == 0 && !IsStopInProgress && !IsDebugSessionActive &&
+                _activeStructuredExecutionRequestId is null && _activeCoordinatorExecutionRequestId is null &&
+                _executionCoordinator?.ActiveExecution is null &&
+                runtime is not null && runtime.SessionId == deferred.RuntimeSessionId &&
+                runtime.Generation == deferred.RuntimeGeneration && runtime.ProcessId == deferred.ProcessId &&
+                runtime.State == PowerShellRuntimeSessionState.Ready &&
+                runtime.LifecyclePhase == PowerShellRuntimeLifecyclePhase.Stable &&
+                runtime.TerminalTransportAttached && runtime.InputWritable &&
+                _runtimeSessionCoordinator!.IsCurrent(runtime.SessionId, runtime.Generation);
+
+            var terminalBeforeReconciliation = _interactiveTerminalCoordinator.Snapshot;
+            var before = terminalBeforeReconciliation.State;
+            var accepted = identityMatches && ApplyTerminalPromptReadyObservation(deferred!.TerminalGeneration, deferred.Path);
+            var terminalAfterReconciliation = _interactiveTerminalCoordinator.Snapshot;
+            DeveloperDiagnostics.LogInfo("Debugger", "Post-lease prompt readiness reconciliation completed.", new Dictionary<string, object?>
+            {
+                ["debugSessionId"] = debugSessionId,
+                ["terminalGeneration"] = deferred?.TerminalGeneration,
+                ["runtimeStateAfterLeaseRelease"] = runtime?.State.ToString(),
+                ["promptReadinessObserved"] = deferred is not null,
+                ["promptReadinessAccepted"] = accepted,
+                ["promptReconciliationAttempted"] = deferred is not null,
+                ["promptReconciliationResult"] = accepted ? "Accepted" : identityMatches ? "PromptAdmissionRejected" : "IdentityOrReadinessGuardRejected",
+                ["interactiveStateBefore"] = before.ToString(),
+                ["interactiveStateAfter"] = terminalAfterReconciliation.State.ToString(),
+                ["runEligibilityFailureReasons"] = GetRunEligibilityFailureSummary(),
+                ["contentOmitted"] = true
+            });
+
+            // Prompt reconciliation can legitimately leave an already-idle terminal
+            // unchanged. Publish command availability after the runtime lease has
+            // established its final state, regardless of whether prompt admission
+            // caused a terminal state transition. If reconciliation changed the
+            // terminal snapshot, its existing StateChanged path already publishes
+            // this refresh, so avoid a duplicate notification.
+            var runEligibleBeforeRefresh = CanRunScript();
+            var interruptEligibleBeforeRefresh = CanStopScript();
+            var terminalTransitionWillRefreshCommands = accepted && terminalBeforeReconciliation != terminalAfterReconciliation;
+            if (!terminalTransitionWillRefreshCommands)
+            {
+                RefreshCommandStates();
+            }
+            var runEligibleAfterRefresh = CanRunScript();
+            var interruptEligibleAfterRefresh = CanStopScript();
+            runtime = _runtimeSessionCoordinator?.Snapshot;
+            DeveloperDiagnostics.LogInfo("Execution", "Post-debugger command-state synchronization completed.", new Dictionary<string, object?>
+            {
+                ["debugSessionId"] = debugSessionId,
+                ["terminalGeneration"] = _interactiveTerminalCoordinator.Snapshot.Generation,
+                ["terminalState"] = _interactiveTerminalCoordinator.State.ToString(),
+                ["runtimeSessionId"] = runtime?.SessionId,
+                ["runtimeGeneration"] = runtime?.Generation,
+                ["runtimeState"] = runtime?.State.ToString(),
+                ["lifecyclePhase"] = runtime?.LifecyclePhase.ToString(),
+                ["debuggerActive"] = IsDebugSessionActive,
+                ["eligibilityComputedRunBefore"] = runEligibleBeforeRefresh,
+                ["eligibilityComputedInterruptBefore"] = interruptEligibleBeforeRefresh,
+                ["commandStateRefreshPath"] = terminalTransitionWillRefreshCommands ? "InteractiveTerminalStateChanged" : "PostDebuggerReconciliation",
+                ["eligibilityNotificationPublished"] = true,
+                ["commandAvailabilityUpdatedRun"] = _runCommand.CanExecute(null),
+                ["commandAvailabilityUpdatedInterrupt"] = _stopCommand.CanExecute(null),
+                ["eligibilityComputedRunAfter"] = runEligibleAfterRefresh,
+                ["eligibilityComputedInterruptAfter"] = interruptEligibleAfterRefresh,
+                ["runEligibilityFailureReasons"] = GetRunEligibilityFailureSummary(),
+                ["contentOmitted"] = true
+            });
         }
 
         private void OnStructuredPromptReadyObserved(StructuredPromptReadyObservation observation)
@@ -8196,8 +8484,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             var stateBefore = _interactiveTerminalCoordinator.State;
-            ApplyTerminalPromptReadyObservation(deferred.TerminalGeneration, deferred.Path);
-            var accepted = _interactiveTerminalCoordinator.State == InteractiveTerminalState.InteractiveIdleAtPrompt;
+            var accepted = ApplyTerminalPromptReadyObservation(deferred.TerminalGeneration, deferred.Path);
             DeveloperDiagnostics.LogDecision(
                 "Terminal",
                 "StructuredPromptReadinessReconciliation",
@@ -8234,7 +8521,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
         }
 
-        private void ApplyTerminalPromptReadyObservation(int generation, string? path)
+        private bool ApplyTerminalPromptReadyObservation(int generation, string? path)
         {
             path ??= string.Empty;
             var snapshot = _interactiveTerminalCoordinator.Snapshot;
@@ -8251,8 +8538,64 @@ namespace PS7ScriptDesk.UI.ViewModels
                     facts,
                     isNewerTerminalGeneration: snapshot.Generation < generation))
             {
+                if (DeveloperDiagnostics.IsEnabled)
+                {
+                    var failed = new List<string>();
+                    if (_liveConsoleService.IsCommandInProgress) failed.Add("BackendCommandInProgress");
+                    if (Volatile.Read(ref _resetConsoleInProgress) != 0) failed.Add("ResetInProgress");
+                    if (generation != Volatile.Read(ref _currentTerminalGeneration)) failed.Add("ViewModelGenerationMismatch");
+                    if (generation != _liveConsoleService.CurrentSessionGeneration) failed.Add("BackendGenerationMismatch");
+                    if (snapshot.Generation > generation) failed.Add("InteractiveGenerationAhead");
+                    if (_terminalOutputMultiplexer.InteractiveSnapshot.Generation > generation) failed.Add("OutputGenerationAhead");
+                    if (snapshot.Generation >= generation && snapshot.State is not (InteractiveTerminalState.Unavailable or InteractiveTerminalState.Starting or InteractiveTerminalState.InteractiveCommandRunning))
+                        failed.Add("InteractiveStateDoesNotAcceptPrompt");
+                    if (facts.EditorExecutionRunning) failed.Add("ExecutionOwnershipActive");
+                    if (!facts.SessionRunning) failed.Add("SessionNotRunning");
+                    if (!facts.TransportWritable) failed.Add("TransportNotWritable");
+                    if (!facts.RuntimeIdentityCurrent) failed.Add("RuntimeIdentityNotCurrent");
+                    if (facts.StopInProgress) failed.Add("StopInProgress");
+                    if (facts.DebugSessionActive) failed.Add("DebugSessionActive");
+                    if (facts.RuntimeState is not (null or PowerShellRuntimeSessionState.Ready)) failed.Add("RuntimeNotReady");
+                    if (facts.LifecyclePhase is not (null or PowerShellRuntimeLifecyclePhase.Stable)) failed.Add("RuntimeLifecycleNotStable");
+                    DeveloperDiagnostics.LogDecision("Terminal", "PromptReadinessEvaluation", "Prompt observation was rejected by existing owner, session, or readiness checks.", string.Join(",", failed), new Dictionary<string, object?>
+                    {
+                        ["terminalGeneration"] = generation,
+                        ["currentGeneration"] = Volatile.Read(ref _currentTerminalGeneration),
+                        ["backendGeneration"] = _liveConsoleService.CurrentSessionGeneration,
+                        ["interactiveState"] = snapshot.State.ToString(),
+                        ["runtimeState"] = facts.RuntimeState?.ToString(),
+                        ["lifecyclePhase"] = facts.LifecyclePhase?.ToString(),
+                        ["executionRunning"] = IsExecutionRunning,
+                        ["activeExecutionRequestId"] = _activeCoordinatorExecutionRequestId,
+                        ["activeStructuredRequestId"] = _activeStructuredExecutionRequestId,
+                        ["processId"] = _liveConsoleService.ProcessId,
+                        ["processAlive"] = _liveConsoleService.IsSessionRunning,
+                        ["promptDetected"] = true,
+                        ["promptValidation"] = "Rejected",
+                        ["contentOmitted"] = true
+                    });
+                }
                 AppLogger.Warning("Terminal", $"Ignored prompt-ready observation that failed current-session/owner checks. Generation={generation}, CurrentGeneration={Volatile.Read(ref _currentTerminalGeneration)}, BackendGeneration={_liveConsoleService.CurrentSessionGeneration}, RuntimeState={facts.RuntimeState?.ToString() ?? "(none)"}, LifecyclePhase={facts.LifecyclePhase?.ToString() ?? "(none)"}, PathLength={path?.Length ?? 0}, ContentOmitted=True.");
-                return;
+                return false;
+            }
+
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                DeveloperDiagnostics.LogInfo("Terminal", "PromptReadinessEvaluation", new Dictionary<string, object?>
+                {
+                    ["terminalGeneration"] = generation,
+                    ["interactiveStateBefore"] = snapshot.State.ToString(),
+                    ["runtimeState"] = facts.RuntimeState?.ToString(),
+                    ["lifecyclePhase"] = facts.LifecyclePhase?.ToString(),
+                    ["executionRunning"] = IsExecutionRunning,
+                    ["activeExecutionRequestId"] = _activeCoordinatorExecutionRequestId,
+                    ["activeStructuredRequestId"] = _activeStructuredExecutionRequestId,
+                    ["processId"] = _liveConsoleService.ProcessId,
+                    ["processAlive"] = _liveConsoleService.IsSessionRunning,
+                    ["promptDetected"] = true,
+                    ["promptValidation"] = "Accepted",
+                    ["contentOmitted"] = true
+                });
             }
 
             _interactiveTerminalCoordinator.TryReplaceGeneration(
@@ -8277,6 +8620,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ["rendererReadyOnly"] = false,
                     ["contentOmitted"] = true
                 });
+            return true;
         }
 
         private void TryDeferResetPromptObservation(int generation, string? path)
@@ -8407,8 +8751,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
 
             var stateBefore = _interactiveTerminalCoordinator.State;
-            ApplyTerminalPromptReadyObservation(deferred.Generation, deferred.Path);
-            var accepted = _interactiveTerminalCoordinator.State == InteractiveTerminalState.InteractiveIdleAtPrompt;
+            var accepted = ApplyTerminalPromptReadyObservation(deferred.Generation, deferred.Path);
             DeveloperDiagnostics.LogDecision(
                 "Terminal",
                 "ResetPromptReadinessReconciliation",
@@ -9576,7 +9919,16 @@ namespace PS7ScriptDesk.UI.ViewModels
                 IsStopInProgress,
                 IsRuntimeDiscoveryInProgress,
                 IsDebugSessionActive,
-                activeExecution?.RequestId);
+                activeExecution?.RequestId,
+                _activeCoordinatorExecutionRequestId,
+                _activeStructuredExecutionRequestId,
+                _activeInternalTerminalCommandRequestId,
+                _runtimeSessionCoordinator?.Snapshot.State,
+                _runtimeSessionCoordinator?.Snapshot.LifecyclePhase,
+                _runtimeSessionCoordinator?.Snapshot.Generation,
+                _liveConsoleService.IsSessionRunning,
+                _liveConsoleService.IsInputWritable,
+                CanStopScript());
             if (signature == _lastRunAvailabilityDiagnosticSignature)
             {
                 return;
@@ -9605,10 +9957,67 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ["isStopInProgress"] = IsStopInProgress,
                     ["isRuntimeDiscoveryInProgress"] = IsRuntimeDiscoveryInProgress,
                     ["isDebugSessionActive"] = IsDebugSessionActive,
+                    ["interruptEnabled"] = CanStopScript(),
+                    ["runEligibilityFailedConditions"] = GetRunEligibilityFailureSummary(),
+                    ["activeCoordinatorRequestId"] = _activeCoordinatorExecutionRequestId,
+                    ["activeStructuredRequestId"] = _activeStructuredExecutionRequestId,
+                    ["activeTerminalCommandRequestId"] = _activeInternalTerminalCommandRequestId,
+                    ["runtimeState"] = _runtimeSessionCoordinator?.Snapshot.State.ToString(),
+                    ["runtimeLifecyclePhase"] = _runtimeSessionCoordinator?.Snapshot.LifecyclePhase.ToString(),
+                    ["processId"] = _liveConsoleService.ProcessId,
                     ["activeExecutionId"] = activeExecution?.RequestId,
                     ["activeExecutionGeneration"] = activeExecution?.SessionGeneration,
                     ["contentOmitted"] = true
                 });
+        }
+
+        private void LogRunRequestRejected()
+        {
+            if (!DeveloperDiagnostics.IsEnabled) return;
+            var terminal = _interactiveTerminalCoordinator.Snapshot;
+            var runtime = _runtimeSessionCoordinator?.Snapshot;
+            var activeExecution = _executionCoordinator?.ActiveExecution;
+            DeveloperDiagnostics.LogDecision("Execution", "RunFileRequestRejected", "Run File request was rejected by current command eligibility.", "Rejected", new Dictionary<string, object?>
+            {
+                ["terminalGeneration"] = terminal.Generation,
+                ["terminalState"] = terminal.State.ToString(),
+                ["activeCoordinatorRequestId"] = _activeCoordinatorExecutionRequestId,
+                ["activeStructuredRequestId"] = _activeStructuredExecutionRequestId,
+                ["activeTerminalCommandRequestId"] = _activeInternalTerminalCommandRequestId,
+                ["coordinatorRequestId"] = activeExecution?.RequestId,
+                ["executionRunning"] = IsExecutionRunning,
+                ["backendCommandInProgress"] = _liveConsoleService.IsCommandInProgress,
+                ["sessionRunning"] = _liveConsoleService.IsSessionRunning,
+                ["inputWritable"] = _liveConsoleService.IsInputWritable,
+                ["runtimeGeneration"] = runtime?.Generation,
+                ["runtimeState"] = runtime?.State.ToString(),
+                ["stopInProgress"] = IsStopInProgress,
+                ["debugSessionActive"] = IsDebugSessionActive,
+                ["disabledReason"] = StatusText,
+                ["contentOmitted"] = true
+            });
+        }
+
+        private string GetRunEligibilityFailureSummary()
+        {
+            var facts = GetEditorExecutionAdmissionFacts();
+            var failed = new List<string>();
+            if (SelectedTab is null) failed.Add("NoSelectedTab");
+            else if (!SelectedTab.IsPowerShellDocument) failed.Add("NotPowerShellDocument");
+            if (SelectedRuntimeItem is null && _preferredRuntimeItem is null) failed.Add("RuntimeUnavailable");
+            if (IsExecutionRunning) failed.Add("EditorExecutionFlagActive");
+            if (_activeCoordinatorExecutionRequestId.HasValue || _activeStructuredExecutionRequestId.HasValue || _executionCoordinator?.ActiveExecution is not null)
+                failed.Add("ExecutionOwnershipActive");
+            if (_liveConsoleService.IsCommandInProgress) failed.Add("BackendCommandInProgress");
+            if (facts.InteractiveState != InteractiveTerminalState.InteractiveIdleAtPrompt) failed.Add("TerminalNotIdleAtPrompt");
+            if (!facts.SessionRunning) failed.Add("SessionNotRunning");
+            if (!facts.TransportWritable) failed.Add("TransportNotWritable");
+            if (!facts.RuntimeIdentityCurrent) failed.Add("RuntimeIdentityNotCurrent");
+            if (facts.RuntimeState is not (null or PowerShellRuntimeSessionState.Ready) || facts.LifecyclePhase is not (null or PowerShellRuntimeLifecyclePhase.Stable)) failed.Add("RuntimeNotReadyOrStable");
+            if (IsStopInProgress) failed.Add("StopInProgress");
+            if (IsRuntimeDiscoveryInProgress) failed.Add("RuntimeDiscoveryInProgress");
+            if (IsDebugSessionActive) failed.Add("DebugSessionActive");
+            return string.Join(",", failed);
         }
 
         private static string GetApplicationVersionText()

@@ -8,6 +8,7 @@ namespace PS7ScriptDesk.Shell;
 public partial class MetadataInitializationWindow : Window
 {
     private Window? _ownerWindow;
+    private bool _showForOwnerRequested;
 
     public MetadataInitializationWindow()
     {
@@ -41,6 +42,7 @@ public partial class MetadataInitializationWindow : Window
     internal void ShowForOwner(Window owner)
     {
         ArgumentNullException.ThrowIfNull(owner);
+        _showForOwnerRequested = true;
 
         if (_ownerWindow is null)
         {
@@ -61,6 +63,7 @@ public partial class MetadataInitializationWindow : Window
 
     internal void HideForOwner()
     {
+        _showForOwnerRequested = false;
         if (IsVisible)
         {
             Hide();
@@ -69,6 +72,7 @@ public partial class MetadataInitializationWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _showForOwnerRequested = false;
         if (_ownerWindow is not null)
         {
             _ownerWindow.LocationChanged -= Owner_LocationChanged;
@@ -92,7 +96,7 @@ public partial class MetadataInitializationWindow : Window
             return;
         }
 
-        if (_ownerWindow?.IsVisible == true)
+        if (_showForOwnerRequested && _ownerWindow?.IsVisible == true)
         {
             Show();
             PositionRelativeToOwner();
