@@ -596,7 +596,7 @@ namespace PS7ScriptDesk.Shell.Help
                     Section("Expected result", false,
                         "PowerShell output appears in the embedded console pane.",
                         "If the current saved `.ps1` exactly matches the visible editor text, the run can preserve that file identity. Otherwise the app runs the visible buffer from a temporary snapshot so it never executes stale disk content.",
-                        "If enabled breakpoints exist in the active script, Run can switch into the debugger path instead of plain execution.",
+                        "Enabled breakpoints do not change Run behavior. Choose Start Debug when you want the debugger to stop at breakpoints.",
                         "The shared terminal session stays alive after the run unless the script itself exits it."),
                     related: new[] { "Command.RunSelection", "Console.Area", "Console.FocusAndRecovery", "Command.StartDebug", "Help.Troubleshooting" }),
 
@@ -637,7 +637,7 @@ namespace PS7ScriptDesk.Shell.Help
                     "Toggle Breakpoint",
                     "Adds or removes a breakpoint on the current line.",
                     "Use it when you want the debugger to pause at a specific line.",
-                    "Breakpoints matter to debugging, not to plain non-debug execution. The shell can also choose to start debugging from Run if enabled breakpoints are present.",
+                    "Breakpoints affect explicit debugging. Normal Run and Run Selection execute without stopping at breakpoint markers, and they preserve the breakpoint definitions.",
                     Section("Shortcuts and gestures", false,
                         "F9 toggles the breakpoint on the current line.",
                         "Click the editor gutter near a line number to toggle a breakpoint with the mouse."),
@@ -1150,7 +1150,23 @@ namespace PS7ScriptDesk.Shell.Help
                     "Lists known breakpoints and lets you enable, disable, or remove them.",
                     "Use it when you want a central list instead of manually inspecting each tab.",
                     "A disabled breakpoint stays listed but should not be handed to the debugger as an active stop point.",
-                    related: new[] { "Command.ToggleBreakpoint", "Debug.RemoveBreakpoint" }),
+                    related: new[] { "Command.ToggleBreakpoint", "Command.RemoveAllBreakpoints", "Command.RemoveCurrentFileBreakpoints", "Debug.RemoveBreakpoint" }),
+
+                ["Command.RemoveAllBreakpoints"] = Topic(
+                    "Command.RemoveAllBreakpoints",
+                    "Remove All Breakpoints",
+                    "Removes breakpoints from every open document, including tabs that are not currently selected.",
+                    "Use the Debug menu or Command Palette to clear the workspace's open-document breakpoint set.",
+                    "The command is unavailable during an active debug session. Breakpoints are currently held in open document models and are not persisted after a document closes.",
+                    related: new[] { "Debug.Breakpoints", "Command.RemoveCurrentFileBreakpoints", "Command.ToggleBreakpoint" }),
+
+                ["Command.RemoveCurrentFileBreakpoints"] = Topic(
+                    "Command.RemoveCurrentFileBreakpoints",
+                    "Remove All Breakpoints in Current File",
+                    "Removes breakpoints only from the active document, whether or not its editor control is currently loaded.",
+                    "Use the Debug menu or Command Palette when you want to clear the active file while preserving every other document's breakpoints.",
+                    "The command is unavailable during an active debug session. It does not write to the script file.",
+                    related: new[] { "Debug.Breakpoints", "Command.RemoveAllBreakpoints", "Command.ToggleBreakpoint" }),
 
                 ["Debug.RemoveBreakpoint"] = Topic(
                     "Debug.RemoveBreakpoint",

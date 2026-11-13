@@ -95,6 +95,14 @@ namespace PS7ScriptDesk.Shell
             "Toggle Breakpoint",
             nameof(ToggleBreakpointCommand),
             typeof(MainWindow));
+        public static readonly RoutedUICommand RemoveAllBreakpointsCommand = new(
+            "Remove All Breakpoints",
+            nameof(RemoveAllBreakpointsCommand),
+            typeof(MainWindow));
+        public static readonly RoutedUICommand RemoveCurrentFileBreakpointsCommand = new(
+            "Remove All Breakpoints in Current File",
+            nameof(RemoveCurrentFileBreakpointsCommand),
+            typeof(MainWindow));
 
         private const double MinimumExplorerWidth = 190;
         private const double MinimumConsoleContentHeight = 160;
@@ -2513,7 +2521,7 @@ namespace PS7ScriptDesk.Shell
             if (isCtrl && !isShift && e.Key == Key.F5)
             {
                 e.Handled = true;
-                await RunScriptWithBreakpointAwarenessAsync().ConfigureAwait(true);
+                await RunScriptNormallyAsync().ConfigureAwait(true);
                 return;
             }
 
@@ -3795,7 +3803,7 @@ namespace PS7ScriptDesk.Shell
 
         private async void RunScript_Click(object sender, RoutedEventArgs e)
         {
-            await RunScriptWithBreakpointAwarenessAsync().ConfigureAwait(true);
+            await RunScriptNormallyAsync().ConfigureAwait(true);
         }
 
         private void NewTabPlus_Click(object sender, RoutedEventArgs e)
@@ -5442,6 +5450,12 @@ namespace PS7ScriptDesk.Shell
 
             var commands = new List<EditorCommandDefinition>
             {
+                new("debug.removeAllBreakpoints", "Remove All Breakpoints", "Debug", "", new[] { "debug", "breakpoints", "clear", "all" },
+                    () => ViewModel is not null && _debugSession is null,
+                    () => ClearBreakpointsForOpenDocuments(currentDocumentOnly: false), CommandSurfaces.CommandPalette),
+                new("debug.removeCurrentFileBreakpoints", "Remove All Breakpoints in Current File", "Debug", "", new[] { "debug", "breakpoints", "clear", "current file", "document" },
+                    () => ViewModel?.SelectedTab is not null && _debugSession is null,
+                    () => ClearBreakpointsForOpenDocuments(currentDocumentOnly: true), CommandSurfaces.CommandPalette),
                 new("git.openWorkspace", "Git: Open Git Workspace", "Git", "", new[] { "git", "workspace", "source control" },
                     () => ViewModel?.GitWorkspaceCoordinator is not null,
                     () => OpenGitWorkspace("CommandPalette")),
@@ -5583,7 +5597,9 @@ namespace PS7ScriptDesk.Shell
                 Surfaces = command.Surfaces == CommandSurfaces.CommandPalette &&
                            command.Id is not "transform.trimDocumentTrailingWhitespace" and
                            not "transform.convertToCrlf" and
-                           not "transform.convertToLf"
+                           not "transform.convertToLf" and
+                           not "debug.removeAllBreakpoints" and
+                           not "debug.removeCurrentFileBreakpoints"
                     ? CommandSurfaces.CommandPalette | CommandSurfaces.EditorContextMenu
                     : command.Surfaces
             }));
@@ -6050,6 +6066,65 @@ namespace PS7ScriptDesk.Shell
             }
 
             ToggleBreakpointForEditor(editorTextEditor);
+        }
+
+        private void RemoveAllBreakpointsCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = ViewModel is not null && _debugSession is null;
+            e.Handled = true;
+        }
+
+        private void RemoveCurrentFileBreakpointsCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = ViewModel?.SelectedTab is not null && _debugSession is null;
+            e.Handled = true;
+        }
+
+        private void RemoveAllBreakpointsCommand_Executed(object sender, ExecutedRoutedEventArgs e)
+            => ClearBreakpointsForOpenDocuments(currentDocumentOnly: false);
+
+        private void RemoveCurrentFileBreakpointsCommand_Executed(object sender, ExecutedRoutedEventArgs e)
+            => ClearBreakpointsForOpenDocuments(currentDocumentOnly: true);
+
+        private void ClearBreakpointsForOpenDocuments(bool currentDocumentOnly)
+        {
+            if (ViewModel is null || _debugSession is not null)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "Debugger",
+                    currentDocumentOnly ? "RemoveCurrentFileBreakpoints" : "RemoveAllBreakpoints",
+                    "Bulk breakpoint removal was rejected because no workspace view model was available or a debugger session is active.",
+                    _debugSession is not null ? "DebuggerSessionActive" : "NoViewModel",
+                    new Dictionary<string, object?>
+                    {
+                        ["debugSessionId"] = _debugSession?.SessionId,
+                        ["activeDocumentCount"] = ViewModel?.OpenTabs.Count ?? 0
+                    });
+                return;
+            }
+
+            var documentId = currentDocumentOnly ? ViewModel.SelectedTab?.DiagnosticDocument.DocumentId : (Guid?)null;
+            var removedCount = currentDocumentOnly
+                ? documentId.HasValue ? BreakpointBulkOperations.ClearDocument(ViewModel.OpenTabs, documentId.Value) : 0
+                : BreakpointBulkOperations.ClearAll(ViewModel.OpenTabs);
+
+            RefreshBreakpointsList();
+            CommandManager.InvalidateRequerySuggested();
+            ViewModel.StatusText = currentDocumentOnly
+                ? $"Removed {removedCount} breakpoint{(removedCount == 1 ? string.Empty : "s")} from the current file"
+                : $"Removed {removedCount} breakpoint{(removedCount == 1 ? string.Empty : "s")}";
+            DeveloperDiagnostics.LogUserAction(
+                "Debugger",
+                currentDocumentOnly ? "RemoveCurrentFileBreakpoints" : "RemoveAllBreakpoints",
+                "Bulk breakpoint removal completed for open document models.",
+                new Dictionary<string, object?>
+                {
+                    ["removedBreakpointCount"] = removedCount,
+                    ["documentCount"] = currentDocumentOnly ? (documentId.HasValue ? 1 : 0) : ViewModel.OpenTabs.Count,
+                    ["documentId"] = documentId,
+                    ["debuggerSessionActive"] = false,
+                    ["persistenceScope"] = "OpenDocumentsOnly"
+                });
         }
 
         public void ExecuteFindNext(string findText, bool matchCase, bool wholeWord = false, bool useRegex = false)
@@ -8043,7 +8118,7 @@ namespace PS7ScriptDesk.Shell
             DeveloperDiagnostics.LogInfo("Execution", "Run Selection dispatched to ViewModel.");
         }
 
-        private async Task RunScriptWithBreakpointAwarenessAsync()
+        private async Task RunScriptNormallyAsync()
         {
             if (ViewModel?.SelectedTab is null)
             {
@@ -8055,20 +8130,17 @@ namespace PS7ScriptDesk.Shell
             DeveloperDiagnostics.LogUserAction(
                 "Execution",
                 "RunScriptRequested",
-                "Run Script requested.",
+                "Run Script requested for normal shared-session execution.",
                 new Dictionary<string, object?>
                 {
                     ["filePath"] = ViewModel.SelectedTab.FilePath,
-                    ["isDirty"] = ViewModel.SelectedTab.IsDirty,
-                    ["enabledBreakpointCount"] = ViewModel.SelectedTab.EnabledBreakpointCount
+                    ["isDirty"] = ViewModel.SelectedTab.IsDirty
                 });
-            if (ViewModel.SelectedTab.EnabledBreakpointCount > 0)
-            {
-                ViewModel.StatusText = "Enabled breakpoints detected — starting a debug session instead of plain Run.";
-                DeveloperDiagnostics.LogDecision("Execution", "RunScript", "Enabled breakpoints redirected Run into Debug.", "RedirectToDebug");
-                StartDebug_Click(this, new RoutedEventArgs());
-                return;
-            }
+            DeveloperDiagnostics.LogDecision(
+                "Execution",
+                "RunScript",
+                "Run File uses normal shared-session execution; breakpoint definitions are not consulted or changed.",
+                "NormalRun");
 
             if (ViewModel.RunCommand.CanExecute(null))
             {

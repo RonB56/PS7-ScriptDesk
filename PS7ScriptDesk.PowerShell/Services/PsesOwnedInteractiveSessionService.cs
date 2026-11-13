@@ -102,6 +102,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
         var generation = CurrentSessionGeneration;
         var invocation = ". " + QuotePowerShellSingleQuotedString(snapshotPath);
         var filter = new StructuredEchoFilter(debugSessionId, preservePromptPrefix: true, BuildInvocationEchoForms(invocation, executeInCurrentScope: true));
+        filter.MarkDebuggerLaunchEcho();
         lock (_syncRoot)
         {
             if (_activeStructuredEchoFilter is not null)
@@ -111,6 +112,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
         DeveloperDiagnostics.LogInfo("Debugger", "Registered exact prompt-anchored debugger launch echo filter.", new Dictionary<string, object?>
         {
             ["debugSessionId"] = debugSessionId,
+            ["expectedCommandIdentity"] = debugSessionId,
             ["terminalGeneration"] = generation,
             ["snapshotPathLength"] = snapshotPath.Length,
             ["echoFormCount"] = BuildInvocationEchoForms(invocation, executeInCurrentScope: true).Length,
@@ -122,14 +124,30 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
     private void ReleaseDebuggerLaunchEchoFilter(StructuredEchoFilter filter, int generation)
     {
         string remainder = string.Empty;
+        var wasActive = false;
         lock (_syncRoot)
         {
             if (ReferenceEquals(_activeStructuredEchoFilter, filter))
             {
+                wasActive = true;
                 remainder = filter.Flush();
                 _activeStructuredEchoFilter = null;
             }
         }
+        DeveloperDiagnostics.LogInfo("Debugger", "Debugger launch echo filter disposed.", new Dictionary<string, object?>
+        {
+            ["debugSessionId"] = filter.RequestId,
+            ["terminalGeneration"] = generation,
+            ["filterWasActive"] = wasActive,
+            ["matchedEchoCount"] = filter.MatchedEchoCount,
+            ["candidateEchoObserved"] = filter.CandidateEchoObserved,
+            ["candidateMatchOutcome"] = filter.CandidateEchoObserved
+                ? filter.MatchedEchoCount > 0 ? "Match" : "UnmatchedAtDispose"
+                : "NoCandidate",
+            ["unmatchedRemainderLength"] = remainder.Length,
+            ["unmatchedRemainderPublished"] = !string.IsNullOrEmpty(remainder),
+            ["contentOmitted"] = true
+        });
         if (!string.IsNullOrEmpty(remainder))
             PublishVisibleOutput(ExecutionOutputStreamKind.StandardOutput, generation, remainder);
     }
@@ -2435,9 +2453,11 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
             onOutput = _onOutput;
             visibleText = _activeStructuredExecutionState is { } executionState
                 ? _activeStructuredEchoFilter is { } echoFilter
-                    ? echoFilter.Filter(string.Concat(executionState.Process(text)))
+                    ? FilterAndTraceEcho(echoFilter, generation, string.Concat(executionState.Process(text)))
                     : string.Concat(executionState.Process(text))
-                : _activeStructuredEchoFilter?.Filter(text) ?? text;
+                : _activeStructuredEchoFilter is { } directEchoFilter
+                    ? FilterAndTraceEcho(directEchoFilter, generation, text)
+                    : text;
             inputProbe = _pendingInputOutputProbe is { } pending && pending.Generation == generation
                 ? pending
                 : null;
@@ -2457,6 +2477,41 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
             });
         }
         PublishVisibleOutput(kind, generation, visibleText);
+    }
+
+    private static string FilterAndTraceEcho(StructuredEchoFilter filter, int generation, string text)
+    {
+        if (!filter.IsDebuggerLaunchEcho)
+        {
+            return filter.Filter(text);
+        }
+
+        var candidateWasObserved = filter.CandidateEchoObserved;
+        var previousMatchCount = filter.MatchedEchoCount;
+        var visible = filter.Filter(text);
+        if (!candidateWasObserved && filter.CandidateEchoObserved)
+        {
+            DeveloperDiagnostics.LogInfo("Debugger", "First candidate debugger launch echo fragment observed.", new Dictionary<string, object?>
+            {
+                ["debugSessionId"] = filter.RequestId,
+                ["terminalGeneration"] = generation,
+                ["fragmentLength"] = text.Length,
+                ["matchInFirstFragment"] = filter.MatchedEchoCount > previousMatchCount,
+                ["contentOmitted"] = true
+            });
+        }
+        if (filter.MatchedEchoCount > previousMatchCount)
+        {
+            DeveloperDiagnostics.LogInfo("Debugger", "Debugger launch echo matched and was suppressed.", new Dictionary<string, object?>
+            {
+                ["debugSessionId"] = filter.RequestId,
+                ["terminalGeneration"] = generation,
+                ["matchedEchoCount"] = filter.MatchedEchoCount,
+                ["candidateFragmentLength"] = text.Length,
+                ["contentOmitted"] = true
+            });
+        }
+        return visible;
     }
 
     private void PublishVisibleOutput(ExecutionOutputStreamKind kind, int generation, string visibleText)
@@ -2911,8 +2966,15 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
         private int _suppressedCharacters;
         private int _promptPrefixedSuppressedCharacters;
         private int _traceCallCount;
+        private int _matchedEchoCount;
+        private bool _candidateEchoObserved;
+        private bool _isDebuggerLaunchEcho;
 
         public Guid RequestId => _requestId;
+        public int MatchedEchoCount => _matchedEchoCount;
+        public bool CandidateEchoObserved => _candidateEchoObserved;
+        public bool IsDebuggerLaunchEcho => _isDebuggerLaunchEcho;
+        public void MarkDebuggerLaunchEcho() => _isDebuggerLaunchEcho = true;
 
         public StructuredEchoFilter(Guid requestId, params string[] scriptContents)
             : this(requestId, preservePromptPrefix: false, scriptContents)
@@ -2947,6 +3009,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
                 TerminalStartupTrace.Write("PSES_ECHO_FILTER_INPUT", $"requestId={_requestId}; length={text.Length}; preview={DeveloperDiagnostics.SanitizePreview(text, 120)}");
             }
             _pending.Append(text);
+            if (!_candidateEchoObserved && HasPromptAnchoredCandidate(_pending.ToString()))
+            {
+                _candidateEchoObserved = true;
+            }
             SuppressCompleteEchoes();
             if (IsAwaitingPromptPrefixedNormalizedEcho(_pending.ToString()))
             {
@@ -3013,7 +3079,25 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IS
                 if (preservedControls.Length > 0) _pending.Insert(promptPrefixedMatch.Index, preservedControls);
                 _suppressedCharacters += promptPrefixedMatch.Length;
                 _promptPrefixedSuppressedCharacters += promptPrefixedMatch.Length;
+                _matchedEchoCount++;
             }
+        }
+
+        private bool HasPromptAnchoredCandidate(string pending)
+        {
+            foreach (var expected in _expectedForms)
+            {
+                var firstLineLength = expected.IndexOf('\n');
+                var firstLine = firstLineLength >= 0 ? expected[..firstLineLength] : expected;
+                var tokenLength = Math.Min(5, firstLine.Length);
+                if (tokenLength == 0) continue;
+                var tokenIndex = pending.IndexOf(firstLine[..tokenLength], StringComparison.Ordinal);
+                if (tokenIndex < 0) continue;
+                var lineStart = pending.LastIndexOf('\n', Math.Max(0, tokenIndex - 1));
+                lineStart = lineStart < 0 ? 0 : lineStart + 1;
+                if (pending[lineStart..tokenIndex].Contains('>')) return true;
+            }
+            return false;
         }
 
         private (int Index, int Length) FindPromptPrefixedEcho(string pending)

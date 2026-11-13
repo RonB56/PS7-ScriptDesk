@@ -559,6 +559,20 @@ namespace PS7ScriptDesk.UI.ViewModels
             return removed;
         }
 
+        /// <summary>Removes every breakpoint from this document and publishes one state change.</summary>
+        public int ClearBreakpoints()
+        {
+            var removedCount = _breakpoints.Count;
+            if (removedCount == 0)
+            {
+                return 0;
+            }
+
+            _breakpoints.Clear();
+            NotifyBreakpointsChanged();
+            return removedCount;
+        }
+
         /// <summary>
         /// Replaces the editor's logical breakpoint coordinates after a document-aware
         /// tracker has followed them through an AvalonEdit mutation.

@@ -31,6 +31,8 @@
         <CommandBinding Command="{x:Static local:MainWindow.StepIntoCommand}" CanExecute="StepIntoCommand_CanExecute" Executed="StepIntoCommand_Executed" />
         <CommandBinding Command="{x:Static local:MainWindow.StepOutCommand}" CanExecute="StepOutCommand_CanExecute" Executed="StepOutCommand_Executed" />
         <CommandBinding Command="{x:Static local:MainWindow.ToggleBreakpointCommand}" CanExecute="ToggleBreakpointCommand_CanExecute" Executed="ToggleBreakpointCommand_Executed" />
+        <CommandBinding Command="{x:Static local:MainWindow.RemoveAllBreakpointsCommand}" CanExecute="RemoveAllBreakpointsCommand_CanExecute" Executed="RemoveAllBreakpointsCommand_Executed" />
+        <CommandBinding Command="{x:Static local:MainWindow.RemoveCurrentFileBreakpointsCommand}" CanExecute="RemoveCurrentFileBreakpointsCommand_CanExecute" Executed="RemoveCurrentFileBreakpointsCommand_Executed" />
     </Window.CommandBindings>
 
     <Window.Resources>
@@ -470,6 +472,8 @@
 
             <MenuItem Header="_Debug" help:ContextHelp.Key="Debug.Area">
                 <MenuItem Header="_Toggle Breakpoint" Command="{x:Static local:MainWindow.ToggleBreakpointCommand}" InputGestureText="F9" help:ContextHelp.Key="Command.ToggleBreakpoint" />
+                <MenuItem Header="Remove All Breakpoints" Command="{x:Static local:MainWindow.RemoveAllBreakpointsCommand}" help:ContextHelp.Key="Command.RemoveAllBreakpoints" />
+                <MenuItem Header="Remove All Breakpoints in Current File" Command="{x:Static local:MainWindow.RemoveCurrentFileBreakpointsCommand}" help:ContextHelp.Key="Command.RemoveCurrentFileBreakpoints" />
                 <Separator />
                 <MenuItem Header="Open Console Prototype"
                           Click="OpenConsolePrototype_Click"
