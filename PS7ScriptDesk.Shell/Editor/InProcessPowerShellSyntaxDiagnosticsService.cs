@@ -35,6 +35,20 @@ namespace PS7ScriptDesk.Shell.Editor
             return Task.FromResult(ParseSyntax(scriptText, cancellationToken));
         }
 
+        internal async Task<DiagnosticsParseResult> ParseAsync(
+            EditorDocumentSnapshot snapshot,
+            PowerShellParseCoordinator parseCoordinator,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(snapshot);
+            ArgumentNullException.ThrowIfNull(parseCoordinator);
+            var result = await parseCoordinator.GetOrParseAsync(snapshot, cancellationToken).ConfigureAwait(false);
+            if (!result.IsFor(snapshot))
+                throw new InvalidOperationException("The shared PowerShell parse result does not match the requested document snapshot.");
+
+            return new DiagnosticsParseResult(result.Errors, result.ParseFailure, result.SyntaxTokens);
+        }
+
         public Task<DiagnosticsParseResult> ParseAsync(
             string scriptText,
             string pwshExecutablePath,

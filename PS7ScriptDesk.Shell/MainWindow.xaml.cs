@@ -281,7 +281,7 @@ namespace PS7ScriptDesk.Shell
         private readonly Dictionary<TextEditor, CancellationTokenSource> _foldingCancellationSources = new();
         private readonly Dictionary<TextEditor, long> _foldingRequestGenerations = new();
         private readonly Dictionary<string, DebugVariableInfo> _liveDebugVariableCache = new(StringComparer.OrdinalIgnoreCase);
-        private readonly BraceFoldingStrategy _foldingStrategy = new();
+        private readonly PowerShellParseCoordinator _powerShellParseCoordinator = new();
         private readonly HashSet<TextEditor> _editorTextSynchronizationInProgress = new();
         private readonly IApplicationSettingsService _applicationSettingsService;
         private readonly IUiScaleService _uiScaleService;
@@ -707,10 +707,30 @@ namespace PS7ScriptDesk.Shell
                 _documentSessionsByTab.Remove(tab, out var session);
                 if (session is not null) session.EditorMutationCommitted -= EditorDocumentSession_EditorMutationCommitted;
                 session?.Dispose();
+                _powerShellParseCoordinator.ForgetDocument(tab.DiagnosticDocument.DocumentId);
             }
         }
 
         public DebugOutputPresentationModel DebugOutputPresentation => _debugOutputPresentation;
+
+        private void MainToolbar_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (sender is not ToolBar toolbar) return;
+            ApplyToolbarOverflowButtonStyle(toolbar);
+        }
+
+        internal static bool ApplyToolbarOverflowButtonStyle(ToolBar toolbar)
+        {
+            toolbar.ApplyTemplate();
+            if (toolbar.Template?.FindName("OverflowButton", toolbar) is ToggleButton overflowButton &&
+                toolbar.TryFindResource("IdeToolbarOverflowButtonStyle") is Style overflowStyle)
+            {
+                overflowButton.Style = overflowStyle;
+                return true;
+            }
+
+            return false;
+        }
 
         private WorkspaceMode ToLayoutWorkspaceMode(WorkspaceLayoutMode mode)
             => Enum.TryParse<WorkspaceMode>(mode.ToString(), out var result) ? result : WorkspaceMode.HorizontalSplit;
@@ -5432,6 +5452,13 @@ namespace PS7ScriptDesk.Shell
             bool CanEdit() => editor?.Document is not null && !editor.IsReadOnly;
             bool CanCaretEdit() => CanEdit() && editor!.SelectionLength == 0;
             bool CanSelectionEdit() => CanEdit() && editor!.SelectionLength > 0;
+            bool HasFoldingManager() => editor is not null && _foldingManagers.ContainsKey(editor);
+            // Consume Ctrl+M even when no region/manager is available: ToggleFoldAtCaret
+            // is a safe no-op and AvalonEdit must not reinterpret the chord as text input.
+            bool CanToggleFold() => true;
+            bool CanFoldAll() => HasFoldingManager() && editor!.TextArea.MultiCaretCount == 1 &&
+                _foldingManagers[editor].AllFoldings.Any(folding => !folding.IsFolded);
+            bool CanUnfoldAll() => HasFoldingManager() && _foldingManagers[editor!].AllFoldings.Any(folding => folding.IsFolded);
             void Apply(string name, Func<EditorCommandResult> command)
             {
                 if (editor is not null)
@@ -5517,6 +5544,13 @@ namespace PS7ScriptDesk.Shell
                 new("diagnostics.analyzeCurrentDocument", "Analyze Current Document", "Diagnostics", "", new[] { "analyze", "script analyzer", "psscriptanalyzer", "diagnostics" },
                     () => ViewModel?.SelectedTab is not null,
                     () => _ = AnalyzeCurrentDocumentAsync()),
+                new("editor.toggleFold", "Toggle Fold at Caret", "Folding", "Ctrl+M", new[] { "fold", "collapse", "expand", "region" },
+                    CanToggleFold, () => { if (editor is not null) ToggleFoldAtCaret(editor); },
+                    ShortcutGesture: EditorShortcutDefaults.ToggleFoldAtCaret),
+                new("editor.foldAll", "Fold All", "Folding", "", new[] { "fold", "collapse", "all" },
+                    CanFoldAll, () => { if (editor is not null) FoldAll(editor); }),
+                new("editor.unfoldAll", "Unfold All", "Folding", "", new[] { "unfold", "expand", "all" },
+                    CanUnfoldAll, () => { if (editor is not null) UnfoldAll(editor); }),
                 new("editor.toggleComment", "Toggle Line Comment", "Editor", "Ctrl+/", new[] { "comment", "uncomment", "hash" }, CanEdit, () => ToggleCommentForEditor(editor!)),
                 new("editor.indent", "Indent Selection", "Editor", "Tab", new[] { "indent", "tab" }, CanEdit, () => ApplyTransform("Indent", (document, start, length) => EditorProductivityCommands.Indent(document, start, length))),
                 new("editor.outdent", "Outdent Selection", "Editor", "Shift+Tab", new[] { "outdent", "unindent" }, CanEdit, () => ApplyTransform("Outdent", (document, start, length) => EditorProductivityCommands.Outdent(document, start, length))),
@@ -5661,6 +5695,190 @@ namespace PS7ScriptDesk.Shell
                 ApplyEditorCommand(editor, "ConvertPowerShellArrayToList", () => EditorTransformCommands.ConvertPowerShellArrayToList(editor.Document!, editor.SelectionStart, editor.SelectionLength));
             }
         }
+
+        private void EditorToggleFold_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor) ToggleFoldAtCaret(editor);
+        }
+
+        private void EditorFoldAll_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor) FoldAll(editor);
+        }
+
+        private void EditorUnfoldAll_Click(object sender, RoutedEventArgs e)
+        {
+            if (FindActiveEditor() is TextEditor editor) UnfoldAll(editor);
+        }
+
+        private void ToggleFoldAtCaret(TextEditor editor)
+        {
+            var commandStopwatch = Stopwatch.StartNew();
+            if (!_foldingManagers.TryGetValue(editor, out var manager))
+            {
+                commandStopwatch.Stop();
+                DeveloperDiagnostics.LogDebug("EditorFolding", "Ctrl+M was ignored because the active editor has no folding manager.",
+                    new Dictionary<string, object?>
+                    {
+                        ["documentId"] = (editor.DataContext as EditorTabViewModel)?.DiagnosticDocument.DocumentId,
+                        ["caretOffset"] = editor.CaretOffset,
+                        ["commandMilliseconds"] = commandStopwatch.Elapsed.TotalMilliseconds
+                    });
+                return;
+            }
+            var section = FindFoldAtCaret(manager, editor);
+            if (section is null)
+            {
+                commandStopwatch.Stop();
+                DeveloperDiagnostics.LogDebug("EditorFolding", "Ctrl+M found no fold applicable to the active caret.",
+                    new Dictionary<string, object?>
+                    {
+                        ["documentId"] = (editor.DataContext as EditorTabViewModel)?.DiagnosticDocument.DocumentId,
+                        ["caretOffset"] = editor.CaretOffset,
+                        ["foldCount"] = manager.AllFoldings.Count(),
+                        ["commandMilliseconds"] = commandStopwatch.Elapsed.TotalMilliseconds
+                    });
+                return;
+            }
+
+            if (!section.IsFolded)
+            {
+                var hasMultipleCarets = editor.TextArea.MultiCaretCount != 1;
+                var selectionIntersectsFold = !hasMultipleCarets &&
+                    SelectionIntersectsFold(editor.SelectionStart, editor.SelectionLength, section);
+                if (hasMultipleCarets || selectionIntersectsFold)
+                {
+                    commandStopwatch.Stop();
+                    DeveloperDiagnostics.LogDebug("EditorFolding", "Ctrl+M collapse was skipped for a selection or multi-caret edit.",
+                        new Dictionary<string, object?>
+                        {
+                            ["documentId"] = (editor.DataContext as EditorTabViewModel)?.DiagnosticDocument.DocumentId,
+                            ["startOffset"] = section.StartOffset,
+                            ["endOffset"] = section.EndOffset,
+                            ["caretCount"] = editor.TextArea.MultiCaretCount,
+                            ["selectionIntersectsFold"] = selectionIntersectsFold,
+                            ["commandMilliseconds"] = commandStopwatch.Elapsed.TotalMilliseconds
+                        });
+                    return;
+                }
+
+                if (section.StartOffset < editor.CaretOffset && editor.CaretOffset < section.EndOffset)
+                    editor.CaretOffset = section.StartOffset;
+                section.IsFolded = true;
+            }
+            else
+            {
+                section.IsFolded = false;
+            }
+            commandStopwatch.Stop();
+
+            DeveloperDiagnostics.LogUserAction("Editor", "ToggleFoldAtCaret", "Fold state toggled at the editor caret.",
+                new Dictionary<string, object?>
+                {
+                    ["documentId"] = (editor.DataContext as EditorTabViewModel)?.DiagnosticDocument.DocumentId,
+                    ["startOffset"] = section.StartOffset,
+                    ["endOffset"] = section.EndOffset,
+                    ["collapsed"] = section.IsFolded,
+                    ["caretCount"] = editor.TextArea.MultiCaretCount,
+                    ["commandMilliseconds"] = commandStopwatch.Elapsed.TotalMilliseconds
+                });
+        }
+
+        private void FoldAll(TextEditor editor)
+        {
+            if (!_foldingManagers.TryGetValue(editor, out var manager) || editor.TextArea.MultiCaretCount != 1) return;
+            var expanded = manager.AllFoldings.Where(folding => !folding.IsFolded).ToArray();
+            if (expanded.Length == 0) return;
+
+            var selectionStart = editor.SelectionStart;
+            var selectionLength = editor.SelectionLength;
+            if (selectionLength == 0)
+            {
+                var containing = expanded
+                    .Where(folding => folding.StartOffset < editor.CaretOffset && editor.CaretOffset < folding.EndOffset)
+                    .OrderByDescending(folding => folding.EndOffset - folding.StartOffset)
+                    .FirstOrDefault();
+                if (containing is not null) editor.CaretOffset = containing.StartOffset;
+            }
+
+            var collapsedCount = 0;
+            foreach (var folding in expanded)
+            {
+                if (SelectionIntersectsFold(selectionStart, selectionLength, folding)) continue;
+                folding.IsFolded = true;
+                collapsedCount++;
+            }
+
+            if (collapsedCount > 0)
+                DeveloperDiagnostics.LogUserAction("Editor", "FoldAll", "All eligible folding regions were collapsed.",
+                    new Dictionary<string, object?>
+                    {
+                        ["documentId"] = (editor.DataContext as EditorTabViewModel)?.DiagnosticDocument.DocumentId,
+                        ["foldCount"] = collapsedCount,
+                        ["selectionPreserved"] = selectionLength > 0
+                    });
+        }
+
+        private void UnfoldAll(TextEditor editor)
+        {
+            if (!_foldingManagers.TryGetValue(editor, out var manager)) return;
+            var folded = manager.AllFoldings.Where(folding => folding.IsFolded).ToArray();
+            foreach (var folding in folded) folding.IsFolded = false;
+            if (folded.Length > 0)
+                DeveloperDiagnostics.LogUserAction("Editor", "UnfoldAll", "All folding regions were expanded.",
+                    new Dictionary<string, object?>
+                    {
+                        ["documentId"] = (editor.DataContext as EditorTabViewModel)?.DiagnosticDocument.DocumentId,
+                        ["foldCount"] = folded.Length
+                    });
+        }
+
+        private static FoldingSection? FindFoldAtCaret(FoldingManager manager, TextEditor editor)
+        {
+            var document = editor.Document;
+            if (document is null || document.LineCount == 0) return null;
+
+            var caretOffset = Math.Clamp(editor.CaretOffset, 0, document.TextLength);
+            var caretLine = document.GetLineByOffset(caretOffset).LineNumber;
+            return FoldRegionSelector.Select(
+                manager.AllFoldings,
+                caretOffset,
+                caretLine,
+                static folding => folding.StartOffset,
+                static folding => folding.EndOffset,
+                folding => GetFoldHeaderLineNumber(document, folding));
+        }
+
+        private static int GetFoldHeaderLineNumber(TextDocument document, FoldingSection folding)
+        {
+            var startOffset = Math.Clamp(folding.StartOffset, 0, document.TextLength);
+            var startLine = document.GetLineByOffset(startOffset);
+            if (startOffset >= document.TextLength || document.GetCharAt(startOffset) != '{')
+                return startLine.LineNumber;
+
+            var firstNonWhitespace = startLine.Offset;
+            while (firstNonWhitespace < startOffset && char.IsWhiteSpace(document.GetCharAt(firstNonWhitespace)))
+                firstNonWhitespace++;
+
+            if (firstNonWhitespace < startOffset)
+                return startLine.LineNumber;
+
+            var previousLine = startLine.PreviousLine;
+            while (previousLine is not null && IsDocumentLineWhitespace(document, previousLine))
+                previousLine = previousLine.PreviousLine;
+            return previousLine?.LineNumber ?? startLine.LineNumber;
+        }
+
+        private static bool IsDocumentLineWhitespace(TextDocument document, DocumentLine line)
+        {
+            for (var offset = line.Offset; offset < line.EndOffset; offset++)
+                if (!char.IsWhiteSpace(document.GetCharAt(offset))) return false;
+            return true;
+        }
+
+        private static bool SelectionIntersectsFold(int selectionStart, int selectionLength, FoldingSection folding)
+            => selectionLength > 0 && selectionStart < folding.EndOffset &&
+               selectionStart + selectionLength > folding.StartOffset;
 
         private void EditorToggleComment_Click(object sender, RoutedEventArgs e)
         {
@@ -6401,7 +6619,7 @@ namespace PS7ScriptDesk.Shell
                 foldingManager = FoldingManager.Install(editorTextEditor.TextArea);
                 _foldingManagers[editorTextEditor] = foldingManager;
             }
-            ScheduleFolding(editorTextEditor);
+            ScheduleFolding(editorTextEditor, debounceMilliseconds: 0);
 
             editorTextEditor.TextArea.TextView.MouseMove -= OnTextViewMouseMove;
             editorTextEditor.TextArea.TextView.MouseMove += OnTextViewMouseMove;
@@ -6518,7 +6736,7 @@ namespace PS7ScriptDesk.Shell
             }
         }
 
-        private void ScheduleFolding(TextEditor editorTextEditor)
+        private void ScheduleFolding(TextEditor editorTextEditor, int debounceMilliseconds = EditorFoldingDebounceMilliseconds)
         {
             if (editorTextEditor.Document is null ||
                 !_foldingManagers.TryGetValue(editorTextEditor, out var foldingManager) ||
@@ -6553,7 +6771,7 @@ namespace PS7ScriptDesk.Shell
             }
 
             _ = ObserveFireAndForget(ProcessFoldingRequestAsync(
-                editorTextEditor, tab, session, foldingManager, registrationVersion, requestGeneration, cts),
+                editorTextEditor, tab, session, foldingManager, registrationVersion, requestGeneration, debounceMilliseconds, cts),
                 "editor folding update",
                 new Dictionary<string, object?>
                 {
@@ -6570,13 +6788,15 @@ namespace PS7ScriptDesk.Shell
             FoldingManager manager,
             int registrationVersion,
             long requestGeneration,
+            int debounceMilliseconds,
             CancellationTokenSource cancellation)
         {
             var token = cancellation.Token;
             EditorDocumentSnapshot? snapshot = null;
             try
             {
-                await Task.Delay(EditorFoldingDebounceMilliseconds, token).ConfigureAwait(false);
+                if (debounceMilliseconds > 0)
+                    await Task.Delay(debounceMilliseconds, token).ConfigureAwait(false);
                 await Dispatcher.InvokeAsync(() =>
                 {
                     if (token.IsCancellationRequested ||
@@ -6589,9 +6809,27 @@ namespace PS7ScriptDesk.Shell
 
                 var calculationSnapshot = snapshot;
                 var calculationStopwatch = Stopwatch.StartNew();
-                var ranges = await Task.Run(
-                    () => _foldingStrategy.CreateFoldings(calculationSnapshot.MaterializeText(), token), token).ConfigureAwait(false);
+                var parseResult = await _powerShellParseCoordinator
+                    .GetOrParseAsync(calculationSnapshot, token)
+                    .ConfigureAwait(false);
                 calculationStopwatch.Stop();
+
+                if (!parseResult.IsFor(calculationSnapshot) || parseResult.ParseFailure is not null || parseResult.FoldingFailure is not null)
+                {
+                    if (DeveloperDiagnostics.IsEnabled)
+                        DeveloperDiagnostics.LogWarning("EditorFolding", "Folding update was skipped because the shared parse or folding projection was unavailable.",
+                            new Dictionary<string, object?>
+                            {
+                                ["documentId"] = calculationSnapshot.DocumentId,
+                                ["revision"] = calculationSnapshot.Revision,
+                                ["parseFailure"] = parseResult.ParseFailure,
+                                ["foldingFailure"] = parseResult.FoldingFailure,
+                                ["requestGeneration"] = requestGeneration
+                            });
+                    return;
+                }
+
+                var ranges = parseResult.FoldingRanges;
 
                 await Dispatcher.InvokeAsync(() =>
                 {
@@ -6615,7 +6853,25 @@ namespace PS7ScriptDesk.Shell
                         var folding = new NewFolding(range.StartOffset, range.EndOffset);
                         if (range.Name is not null) folding.Name = range.Name;
                         return folding;
-                    }), -1);
+                    }), parseResult.Errors.Count == 0 ? -1 : parseResult.Errors.Min(error => error.StartOffset));
+
+                    var restoredFoldCount = 0;
+                    var stateSnapshot = session.FoldedRegionStateSnapshot;
+                    if (stateSnapshot is not null)
+                    {
+                        var foldedRanges = stateSnapshot.FindFoldedRanges(snapshot.TextSource, ranges);
+                        foreach (var foldedRange in foldedRanges.OrderBy(range => range.EndOffset - range.StartOffset))
+                        {
+                            var section = manager.AllFoldings.FirstOrDefault(candidate =>
+                                candidate.StartOffset == foldedRange.StartOffset &&
+                                candidate.EndOffset == foldedRange.EndOffset);
+                            if (section is null) continue;
+                            section.IsFolded = true;
+                            restoredFoldCount++;
+                        }
+
+                        session.ClearFoldedRegionState();
+                    }
                     applyStopwatch.Stop();
                     if (DeveloperDiagnostics.IsEnabled)
                         DeveloperDiagnostics.LogInfo("EditorFolding", "Folding result applied.", new Dictionary<string, object?>
@@ -6623,8 +6879,13 @@ namespace PS7ScriptDesk.Shell
                             ["documentId"] = snapshot.DocumentId,
                             ["revision"] = snapshot.Revision,
                             ["foldCount"] = ranges.Count,
+                            ["parserMilliseconds"] = parseResult.ParserMilliseconds,
+                            ["foldingCalculationMilliseconds"] = parseResult.FoldingCalculationMilliseconds,
+                            ["syntaxTokenCount"] = parseResult.SyntaxTokens.Count,
                             ["calculationMilliseconds"] = calculationStopwatch.Elapsed.TotalMilliseconds,
                             ["dispatcherApplyMilliseconds"] = applyStopwatch.Elapsed.TotalMilliseconds,
+                            ["restoredFoldCount"] = restoredFoldCount,
+                            ["parserPassSharedWithDiagnostics"] = true,
                             ["requestGeneration"] = requestGeneration
                         });
                 }, DispatcherPriority.Background);
@@ -6827,6 +7088,7 @@ namespace PS7ScriptDesk.Shell
             DisposeLiveSyntaxPump(editorTextEditor);
             ClearDiagnosticLayers(editorTextEditor);
             CancelPendingFolding(editorTextEditor);
+            CaptureFoldedRegionState(editorTextEditor);
             UninstallFoldingManager(editorTextEditor);
 
             if (_tabByEditor.TryGetValue(editorTextEditor, out var tab))
@@ -6887,6 +7149,44 @@ namespace PS7ScriptDesk.Shell
             FoldingManager.Uninstall(foldingManager);
         }
 
+        private void CaptureFoldedRegionState(TextEditor editorTextEditor)
+        {
+            if (!_foldingManagers.TryGetValue(editorTextEditor, out var manager) ||
+                editorTextEditor.Document is null ||
+                !_tabByEditor.TryGetValue(editorTextEditor, out var tab) ||
+                !_documentSessionsByTab.TryGetValue(tab, out var session))
+            {
+                return;
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var snapshot = FoldedRegionStateSnapshot.Capture(
+                    editorTextEditor.Document,
+                    manager.AllFoldings.Select(section =>
+                        (new FoldingRange(section.StartOffset, section.EndOffset, section.Title), section.IsFolded)));
+                session.CaptureFoldedRegionState(snapshot);
+                stopwatch.Stop();
+                if (DeveloperDiagnostics.IsEnabled)
+                    DeveloperDiagnostics.LogInfo("EditorFolding", "Per-document folded state captured before folding manager removal.",
+                        new Dictionary<string, object?>
+                        {
+                            ["documentId"] = session.DocumentId,
+                            ["revision"] = session.Revision,
+                            ["foldCount"] = manager.AllFoldings.Count(),
+                            ["foldedCount"] = snapshot.Count,
+                            ["documentLength"] = editorTextEditor.Document.TextLength,
+                            ["elapsedMilliseconds"] = stopwatch.Elapsed.TotalMilliseconds
+                        });
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("EditorFolding", ex, "Per-document folded state capture failed.",
+                    new Dictionary<string, object?> { ["documentId"] = session.DocumentId });
+            }
+        }
+
         private void EditorTab_PropertyChanged(object? sender, PropertyChangedEventArgs e)
         {
             if (sender is not EditorTabViewModel tab || !_editorByTab.TryGetValue(tab, out var editorTextEditor))
@@ -6914,6 +7214,10 @@ namespace PS7ScriptDesk.Shell
                     return;
                 }
 
+                if (_documentSessionsByTab.TryGetValue(tab, out var replacedDocumentSession))
+                {
+                    replacedDocumentSession.ClearFoldedRegionState();
+                }
                 SynchronizeEditorTextFromViewModel(editorTextEditor, tab.Content);
                 if (_documentSessionsByTab.TryGetValue(tab, out var session))
                 {
@@ -11110,6 +11414,7 @@ namespace PS7ScriptDesk.Shell
                 _exportProgressWindow?.CloseForOwnerShutdown();
                 DisposeLiveSyntaxPumps();
                 DisposeAuthoringDiagnosticsPumps();
+                _powerShellParseCoordinator.Dispose();
                 _liveSyntaxDiagnosticsService.Dispose();
                 _diagnosticsService.Dispose();
                 _manualAnalyzerCancellation?.Cancel();
@@ -13145,6 +13450,7 @@ namespace PS7ScriptDesk.Shell
         {
             SaveApplicationSettings();
             DeveloperDiagnostics.ConfigureFromSettings(_loadedSettings, "MainWindow updated developer diagnostics settings");
+            ExecutionCorrelationTelemetry.Shared.LogActivation();
             UpdateDeveloperDiagnosticsMenuState();
             if (ViewModel is not null)
             {
@@ -13888,7 +14194,7 @@ namespace PS7ScriptDesk.Shell
                     state.LastParseStartedUtc = DateTimeOffset.UtcNow;
                     var stopwatch = Stopwatch.StartNew();
                     var syntaxParseResult = await _liveSyntaxDiagnosticsService
-                        .ParseAsync(workItem.ScriptSnapshot, workItem.PwshPath, PowerShellDiagnosticsMode.SyntaxOnly, token)
+                        .ParseAsync(workItem.DocumentSnapshot, _powerShellParseCoordinator, token)
                         .ConfigureAwait(false);
                     stopwatch.Stop();
 

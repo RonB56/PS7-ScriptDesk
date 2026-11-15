@@ -71,11 +71,9 @@
         </Style>
 
         <DataTemplate x:Key="WrappedTooltipContentTemplate">
-            <TextBlock Text="{Binding}"
-                       MaxWidth="520"
-                       TextWrapping="Wrap"
-                       TextTrimming="None"
-                       Foreground="{DynamicResource Theme.ToolTip.Foreground}" />
+            <ContentPresenter Content="{Binding}"
+                              MaxWidth="520"
+                              TextElement.Foreground="{DynamicResource Theme.ToolTip.Foreground}" />
         </DataTemplate>
 
         <Style TargetType="ToolTip">
@@ -263,7 +261,7 @@
         <Style x:Key="EditorSurfaceBorderStyle" TargetType="Border">
             <Setter Property="Background" Value="{DynamicResource Theme.Editor.Background}" />
             <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
-            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderThickness" Value="0" />
             <Setter Property="CornerRadius" Value="0" />
             <Setter Property="Effect" Value="{x:Null}" />
         </Style>
@@ -1187,6 +1185,55 @@
             <Setter Property="VerticalContentAlignment" Value="Center" />
         </Style>
 
+        <Style x:Key="IdeToolbarOverflowButtonStyle" TargetType="{x:Type ToggleButton}">
+            <Setter Property="Background" Value="{DynamicResource Theme.Surface.Secondary}" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Button.Foreground}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border.Subtle}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="MinWidth" Value="20" />
+            <Setter Property="MinHeight" Value="22" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Focusable" Value="True" />
+            <Setter Property="ToolTip" Value="More toolbar commands" />
+            <Setter Property="AutomationProperties.Name" Value="More toolbar commands" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="OverflowBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="{StaticResource Radius.Control}"
+                                SnapsToDevicePixels="True">
+                            <Path Width="8"
+                                  Height="5"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center"
+                                  Data="M 0,0 L 4,4 L 8,0"
+                                  Stroke="{TemplateBinding Foreground}"
+                                  StrokeThickness="1.5"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="OverflowBorder" Property="Background" Value="{DynamicResource Theme.Button.HoverBackground}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="OverflowBorder" Property="Background" Value="{DynamicResource Theme.Button.PressedBackground}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="OverflowBorder" Property="BorderBrush" Value="{DynamicResource Theme.Border.Focus}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="OverflowBorder" Property="Opacity" Value="0.68" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="IdeToolbarButtonStyle" TargetType="Button">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
@@ -1271,7 +1318,7 @@
         </Style>
 
         <Style x:Key="IdeSplitterGripStyle" TargetType="GridSplitter">
-            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Background" Value="{DynamicResource Theme.Surface.Primary}" />
             <Setter Property="ShowsPreview" Value="True" />
             <Setter Property="Template">
                 <Setter.Value>

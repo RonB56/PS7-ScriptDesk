@@ -149,6 +149,8 @@ namespace PS7ScriptDesk.Shell.Editor
             var statementContext = context with { ReplacementOffset = Math.Max(0, context.ReplacementOffset - statementStart) };
 
             var parameterContext = TryGetParameterCompletionContext(statementText, statementContext);
+            var authoritativeCompletionAvailable = _authoritativeCompletionProvider is not null &&
+                                                    _authoritativeCompletionProvider.IsLiveCompletionAvailable;
             var localParameterValueContext = TryGetParameterValueCompletionContext(statementText, caretOffset - statementStart, statementContext);
             var parameterValueContext = localParameterValueContext is null
                 ? null
@@ -303,7 +305,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 }
             }
 
-            if (!providerOnly && !string.IsNullOrWhiteSpace(commandSpecificContextName) &&
+            if (!string.IsNullOrWhiteSpace(commandSpecificContextName) &&
                 _completionService.TryGetCachedCommandQuickInfo(
                     pwshExecutablePath,
                     commandSpecificContextName,
@@ -317,15 +319,19 @@ namespace PS7ScriptDesk.Shell.Editor
                 }
             }
 
-            if (!providerOnly && !string.IsNullOrWhiteSpace(commandSpecificContextName) &&
+            if (!string.IsNullOrWhiteSpace(commandSpecificContextName) &&
                 (parameterCommandInfo is null || (RequiresParameterMetadata(parameterContext, parameterValueContext) && !HasUsableParameterMetadata(parameterCommandInfo))) &&
                 !string.IsNullOrWhiteSpace(pwshExecutablePath))
             {
                 using var parameterCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                parameterCts.CancelAfter(TimeSpan.FromMilliseconds(
-                    forceCompletion
-                        ? (parameterContext is not null ? 2500 : 1200)
-                        : (parameterContext is not null ? 1500 : (includeEngine ? 450 : 650))));
+                var parameterMetadataTimeout = providerOnly && parameterContext is not null
+                    ? Math.Min(engineWaitMilliseconds, 300)
+                    : parameterContext is not null && authoritativeCompletionAvailable
+                        ? Math.Min(engineWaitMilliseconds, forceCompletion ? 500 : 300)
+                        : forceCompletion
+                            ? (parameterContext is not null ? 2500 : 1200)
+                            : (parameterContext is not null ? 1500 : (includeEngine ? 450 : 650));
+                parameterCts.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(100, parameterMetadataTimeout)));
 
                 try
                 {
@@ -361,15 +367,14 @@ namespace PS7ScriptDesk.Shell.Editor
                     isParameterContextRequest,
                     HasUsableParameterMetadata(parameterCommandInfo),
                     isVariableContextRequest);
-            var authoritativeCompletionAvailable = _authoritativeCompletionProvider is not null &&
-                                                    _authoritativeCompletionProvider.IsLiveCompletionAvailable;
             var shouldQueryAuthoritative = providerOnly
                 ? authoritativeCompletionAvailable
                 : ShouldQueryAuthoritative(
                     authoritativeCompletionAvailable,
                     shouldQueryEngine,
                     isVariableContextRequest,
-                    memberContext is not null);
+                    memberContext is not null,
+                    isParameterContextRequest);
             if (shouldQueryAuthoritative || shouldQueryEngine)
             {
                 var effectiveEngineWaitMilliseconds = memberContext is not null || staticMemberContext is not null
@@ -390,6 +395,7 @@ namespace PS7ScriptDesk.Shell.Editor
                         ["shouldQueryAuthoritative"] = shouldQueryAuthoritative,
                         ["shouldQueryLegacyEngine"] = shouldQueryEngine,
                         ["isVariableContext"] = isVariableContextRequest,
+                        ["isParameterContext"] = isParameterContextRequest,
                         ["isMemberContext"] = memberContext is not null,
                         ["authoritativeProviderAvailable"] = authoritativeCompletionAvailable,
                         ["providerOnly"] = providerOnly,
@@ -453,7 +459,20 @@ namespace PS7ScriptDesk.Shell.Editor
             if (cancellationToken.IsCancellationRequested) throw new OperationCanceledException(cancellationToken);
             if (providerOnly)
             {
-                var providerWindow = BuildProviderOnlyWindow(editor, source, engineResult);
+                var providerWindow = BuildWindow(
+                    editor,
+                    context,
+                    engineResult,
+                    GetFullDocumentText("Tab completion candidate projection"),
+                    parameterContext,
+                    parameterValueContext,
+                    memberContext,
+                    staticMemberContext,
+                    parameterCommandInfo,
+                    cachedCommandReferences,
+                    pwshExecutablePath,
+                    completionKind,
+                    forceCompletion);
                 requestStopwatch.Stop();
                 AppLogger.Debug(
                     "EditorCompletion",
@@ -597,13 +616,15 @@ namespace PS7ScriptDesk.Shell.Editor
             bool includeEngine,
             bool isVariableContext,
             bool isMemberContext,
-            bool engineWouldBeQueried)
+            bool engineWouldBeQueried,
+            bool isParameterContext = false)
         {
             return ShouldQueryAuthoritative(
                 providerAvailable,
                 engineWouldBeQueried && includeEngine,
                 isVariableContext,
-                isMemberContext);
+                isMemberContext,
+                isParameterContext);
         }
 
         internal static IReadOnlyList<PowerShellLocalCompletionCandidate> GetLocalVariableCompletionCandidatesForTesting(
@@ -791,44 +812,6 @@ namespace PS7ScriptDesk.Shell.Editor
             }
         }
 
-        private CompletionWindow? BuildProviderOnlyWindow(
-            TextEditor editor,
-            ITextSource documentText,
-            CompletionServiceResult? result)
-        {
-            if (result is not { HasItems: true }) return null;
-
-            var start = Math.Clamp(result.ReplacementIndex, 0, documentText.TextLength);
-            var end = Math.Clamp(result.ReplacementIndex + Math.Max(0, result.ReplacementLength), start, documentText.TextLength);
-            var replacementLength = end - start;
-            var window = new CompletionWindow(editor.TextArea)
-            {
-                CloseAutomatically = true,
-                MinWidth = 460,
-                MaxHeight = 360,
-                StartOffset = start,
-                EndOffset = end
-            };
-            window.CompletionList.IsFiltering = true;
-            ApplyCompletionListTheme(window);
-
-            foreach (var item in result.Items)
-            {
-                window.CompletionList.CompletionData.Add(new PowerShellCompletionData(
-                    item.CompletionText,
-                    item.ListItemText,
-                    item.Tooltip,
-                    start,
-                    replacementLength,
-                    item.Kind,
-                    GetKindPriority(item.Kind)));
-            }
-
-            var fragment = replacementLength == 0 ? string.Empty : documentText.GetText(start, replacementLength);
-            window.CompletionList.SelectItem(fragment);
-            return window;
-        }
-
         private CompletionWindow? BuildWindow(
             TextEditor editor,
             CompletionContext context,
@@ -907,6 +890,13 @@ namespace PS7ScriptDesk.Shell.Editor
             {
                 foreach (var item in engineResult.Items)
                 {
+                    if (parameterContext is not null &&
+                        item.CompletionText.StartsWith("-", StringComparison.Ordinal) &&
+                        IsParameterAlreadyUsed(parameterContext, item.CompletionText.TrimStart('-'), parameterCommandInfo))
+                    {
+                        continue;
+                    }
+
                     AddCandidate(
                         item.CompletionText,
                         item.ListItemText,
@@ -1862,10 +1852,11 @@ namespace PS7ScriptDesk.Shell.Editor
             bool providerAvailable,
             bool shouldQueryLegacyEngine,
             bool isVariableContext,
-            bool isMemberContext)
+            bool isMemberContext,
+            bool isParameterContext)
         {
             return providerAvailable &&
-                   (shouldQueryLegacyEngine || isVariableContext || isMemberContext);
+                   (shouldQueryLegacyEngine || isVariableContext || isMemberContext || isParameterContext);
         }
 
         private static ParameterCompletionContext? TryGetParameterCompletionContext(string documentText, CompletionContext context)
@@ -2284,6 +2275,22 @@ namespace PS7ScriptDesk.Shell.Editor
         private static bool IsParameterAlreadyUsed(ParameterCompletionContext context, string parameterName)
         {
             return context.UsedParameterNames.Contains(parameterName);
+        }
+
+        private static bool IsParameterAlreadyUsed(
+            ParameterCompletionContext context,
+            string parameterName,
+            PowerShellQuickInfo? commandInfo)
+        {
+            if (IsParameterAlreadyUsed(context, parameterName))
+            {
+                return true;
+            }
+
+            var parameter = commandInfo?.Parameters.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, parameterName, StringComparison.OrdinalIgnoreCase) ||
+                candidate.Aliases.Contains(parameterName, StringComparer.OrdinalIgnoreCase));
+            return parameter is not null && IsParameterAlreadyUsed(context, parameter);
         }
 
         private static IEnumerable<ScriptSegmentToken> TokenizeSegment(string segment)

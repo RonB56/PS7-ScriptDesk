@@ -28,6 +28,7 @@ internal sealed class EditorDocumentSession : IDisposable
     private long _sessionGeneration = 1;
     private long _mutationGeneration;
     private DispatcherOperation? _pendingEditorCommit;
+    private FoldedRegionStateSnapshot? _foldedRegionStateSnapshot;
 
     public EditorDocumentSession(EditorTabViewModel tab, Dispatcher dispatcher)
     {
@@ -52,6 +53,16 @@ internal sealed class EditorDocumentSession : IDisposable
     public bool IsRegistered => _isRegistered;
     public bool IsDisposed => _isDisposed;
     public CancellationToken LifetimeToken => _lifetime.Token;
+
+    public FoldedRegionStateSnapshot? FoldedRegionStateSnapshot => _foldedRegionStateSnapshot;
+
+    public void CaptureFoldedRegionState(FoldedRegionStateSnapshot snapshot)
+    {
+        VerifyActive();
+        _foldedRegionStateSnapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
+    }
+
+    public void ClearFoldedRegionState() => _foldedRegionStateSnapshot = null;
 
     public ITextSourceVersion DocumentVersion
     {
@@ -271,6 +282,7 @@ internal sealed class EditorDocumentSession : IDisposable
         var content = _tab.Content ?? string.Empty;
         if (!string.Equals(Document.Text, content, StringComparison.Ordinal))
         {
+            ClearFoldedRegionState();
             var oldLength = Document.TextLength;
             Document.Text = content;
             Document.UndoStack = new UndoStack();
@@ -323,6 +335,7 @@ internal sealed class EditorDocumentSession : IDisposable
         if (_isDisposed) return;
         if (_pendingDocumentChange && !Document.IsInUpdate) CommitPendingEditorMutation(Document.LineCount);
         _sessionGeneration++;
+        ClearFoldedRegionState();
         _pendingEditorCommit?.Abort();
         _pendingEditorCommit = null;
         _tab.DetachContentSnapshotProvider();

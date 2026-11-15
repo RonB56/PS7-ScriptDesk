@@ -37,6 +37,7 @@ public sealed class TooltipThemeResourceTests
         Assert.Contains("Property=\"TextElement.Foreground\" Value=\"{DynamicResource Theme.ToolTip.Foreground}\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("Property=\"BorderBrush\" Value=\"{DynamicResource Theme.ToolTip.Border}\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("x:Key=\"WrappedTooltipContentTemplate\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("<ContentPresenter Content=\"{Binding}\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("MaxWidth=\"520\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("TextWrapping=\"Wrap\"", appXaml, StringComparison.Ordinal);
         Assert.Contains("TextTrimming=\"None\"", appXaml, StringComparison.Ordinal);
@@ -49,7 +50,7 @@ public sealed class TooltipThemeResourceTests
     }
 
     [Fact]
-    public void EditorHoverAndCompletionDescriptions_BindNestedTextToTooltipResources()
+    public void CompletionDescriptionsRemainPlainTextForTheSharedTooltipTemplate()
     {
         var mainWindowCode = File.ReadAllText(GetRepositoryPath("PS7ScriptDesk.Shell", "MainWindow.xaml.cs"));
         var completionDataCode = File.ReadAllText(GetRepositoryPath("PS7ScriptDesk.Shell", "Editor", "PowerShellCompletionData.cs"));
@@ -61,11 +62,40 @@ public sealed class TooltipThemeResourceTests
         Assert.Contains("MaxWidth = 760", mainWindowCode, StringComparison.Ordinal);
         Assert.DoesNotContain("TextTrimming = TextTrimming.CharacterEllipsis", mainWindowCode, StringComparison.Ordinal);
 
-        Assert.DoesNotContain("Foreground = Brushes.Gray", completionDataCode, StringComparison.Ordinal);
-        Assert.Contains("SetResourceReference(TextBlock.ForegroundProperty, \"Theme.ToolTip.SecondaryForeground\")", completionDataCode, StringComparison.Ordinal);
-        Assert.Contains("SetResourceReference(TextBlock.ForegroundProperty, \"Theme.ToolTip.Foreground\")", completionDataCode, StringComparison.Ordinal);
-        Assert.Contains("TextWrapping = TextWrapping.Wrap", completionDataCode, StringComparison.Ordinal);
-        Assert.Contains("MaxWidth = 500", completionDataCode, StringComparison.Ordinal);
+        Assert.Contains("public object Description => BuildDescriptionText(RawDescription, Kind)", completionDataCode, StringComparison.Ordinal);
+        Assert.Contains("private static string BuildDescriptionText", completionDataCode, StringComparison.Ordinal);
+        Assert.Contains("private static string BuildDescriptionText", completionDataCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("new StackPanel", completionDataCode, StringComparison.Ordinal);
+        Assert.Contains("{kindLabel}{Environment.NewLine}{description}", completionDataCode, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CompletionTooltipTemplatePresentsVisualContentWithoutStringifyingIt()
+    {
+        var appXaml = File.ReadAllText(GetRepositoryPath("PS7ScriptDesk.Shell", "App.xaml"));
+        var templateStart = appXaml.IndexOf("<DataTemplate x:Key=\"WrappedTooltipContentTemplate\">", StringComparison.Ordinal);
+        var templateEnd = appXaml.IndexOf("</DataTemplate>", templateStart, StringComparison.Ordinal);
+
+        Assert.True(templateStart >= 0 && templateEnd > templateStart);
+        var template = appXaml[templateStart..templateEnd];
+        Assert.Contains("<ContentPresenter Content=\"{Binding}\"", template, StringComparison.Ordinal);
+        Assert.DoesNotContain("TextBlock Text=\"{Binding}\"", template, StringComparison.Ordinal);
+        Assert.Contains("MaxWidth=\"520\"", template, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PaneBorderResourcesResolveAcrossAllSupportedThemes()
+    {
+        foreach (var themeFile in new[] { "LightTheme.xaml", "DarkTheme.xaml", "IseBlueTheme.xaml" })
+        {
+            var resources = LoadBrushColors(Path.Combine("PS7ScriptDesk.Shell", "Themes", themeFile));
+            Assert.True(resources.ContainsKey("Theme.Border.Subtle"), $"{themeFile} is missing Theme.Border.Subtle.");
+        }
+
+        var appXaml = File.ReadAllText(GetRepositoryPath("PS7ScriptDesk.Shell", "App.xaml"));
+        Assert.Contains("x:Key=\"IdePaneBorderStyle\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Key=\"EditorSurfaceBorderStyle\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("DynamicResource Theme.Border.Subtle", appXaml, StringComparison.Ordinal);
     }
 
     private static Dictionary<string, Rgb> LoadBrushColors(string relativePath)

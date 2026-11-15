@@ -270,6 +270,37 @@ public sealed class StructuredEchoFilterContractTests
     }
 
     [Fact]
+    public void GeneratedInvocationEcho_ReadHostOutputStreamsWithoutWaitingForEnter()
+    {
+        var invocation = "& $global:__ps7sd_editor_0123456789abcdef0123456789abcdef";
+        var filter = new PsesOwnedInteractiveSessionService.StructuredEchoFilter(
+            Guid.NewGuid(), preservePromptPrefix: true, invocation);
+
+        var prompt = filter.Filter("PS C:\\> " + invocation + "\r\nEnter B1: ");
+        Assert.Contains("Enter B1: ", prompt, StringComparison.Ordinal);
+        Assert.Equal("B", filter.Filter("B"));
+        Assert.Equal("1", filter.Filter("1"));
+        Assert.Equal("\b \b", filter.Filter("\b \b"));
+        Assert.Equal("界", filter.Filter("界"));
+        Assert.Equal("\r\n", filter.Filter("\r\n"));
+        Assert.Empty(filter.Flush());
+    }
+
+    [Fact]
+    public void GeneratedInvocationEcho_DoesNotInventSecureInputEcho()
+    {
+        var invocation = "& $global:__ps7sd_editor_0123456789abcdef0123456789abcdef";
+        var filter = new PsesOwnedInteractiveSessionService.StructuredEchoFilter(
+            Guid.NewGuid(), preservePromptPrefix: true, invocation);
+
+        Assert.Contains("Password: ", filter.Filter("PS C:\\> " + invocation + "\r\nPassword: "));
+        // A secure Read-Host produces no character echo from ConPTY. The filter
+        // only forwards bytes received from that host; it never echoes input.
+        Assert.Empty(filter.Filter(string.Empty));
+        Assert.Empty(filter.Flush());
+    }
+
+    [Fact]
     public void ProductionPromptObserverReceivesOutputBeforeDisplayFilter()
     {
         var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.PowerShell", "Services", "PsesOwnedInteractiveSessionService.cs");

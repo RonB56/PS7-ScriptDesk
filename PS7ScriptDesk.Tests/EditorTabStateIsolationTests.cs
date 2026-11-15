@@ -79,6 +79,26 @@ public sealed class EditorTabStateIsolationTests
     }
 
     [Fact]
+    public void FoldingStateIsCapturedPerSessionBeforeUninstallAndRestoredAfterCurrentParse()
+    {
+        var main = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+        var unregisterStart = main.IndexOf("private void UnregisterEditor(TextEditor editorTextEditor)", StringComparison.Ordinal);
+        var unregisterEnd = main.IndexOf("private void UninstallFoldingManager", unregisterStart, StringComparison.Ordinal);
+        var unregister = main[unregisterStart..unregisterEnd];
+        Assert.True(unregister.IndexOf("CaptureFoldedRegionState(editorTextEditor)", StringComparison.Ordinal) <
+                    unregister.IndexOf("UninstallFoldingManager(editorTextEditor)", StringComparison.Ordinal));
+
+        var applyStart = main.IndexOf("manager.UpdateFoldings(ranges.Select", StringComparison.Ordinal);
+        var applyEnd = main.IndexOf("applyStopwatch.Stop();", applyStart, StringComparison.Ordinal);
+        Assert.True(applyStart >= 0 && applyEnd > applyStart);
+        var apply = main[applyStart..applyEnd];
+        Assert.Contains("session.FoldedRegionStateSnapshot", apply, StringComparison.Ordinal);
+        Assert.Contains("stateSnapshot.FindFoldedRanges(snapshot.TextSource, ranges)", apply, StringComparison.Ordinal);
+        Assert.Contains("session.ClearFoldedRegionState()", apply, StringComparison.Ordinal);
+        Assert.Contains("session.IsRegistrationCurrent(snapshot)", main, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FileOpenEntryPointUsesTheSharedDocumentOpenPathAndGuardedFocus()
     {
         var main = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");

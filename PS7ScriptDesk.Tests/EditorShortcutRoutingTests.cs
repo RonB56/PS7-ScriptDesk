@@ -71,6 +71,27 @@ public sealed class EditorShortcutRoutingTests
     }
 
     [Fact]
+    public void CtrlMIsRegisteredAsToggleFoldWithoutCollidingWithExistingDefaults()
+    {
+        var executions = 0;
+        var registry = new EditorCommandRegistry(new[]
+        {
+            Definition("editor.toggleFold", "Toggle Fold at Caret", "Ctrl+M", () => true, () => executions++,
+                EditorShortcutDefaults.ToggleFoldAtCaret),
+            Definition("editor.duplicateUp", "Duplicate Up", "Ctrl+Shift+Up", () => true, () => { },
+                EditorShortcutDefaults.DuplicateLinesAbove),
+            Definition("editor.duplicateDown", "Duplicate Down", "Ctrl+Shift+Down", () => true, () => { },
+                EditorShortcutDefaults.DuplicateLinesBelow)
+        });
+
+        Assert.True(EditorShortcutRouting.TryGetRegisteredCommand(registry, Key.M, Key.None, ModifierKeys.Control, out var fold));
+        Assert.Equal("editor.toggleFold", fold!.Id);
+        fold.Execute();
+        Assert.Equal(1, executions);
+        Assert.False(EditorShortcutRouting.TryGetRegisteredCommand(registry, Key.M, Key.None, ModifierKeys.None, out _));
+    }
+
+    [Fact]
     public void SystemKeyWithAltArrowResolvesToMoveDirection()
     {
         Assert.Equal(Key.Up, EditorShortcutRouting.ResolveKey(Key.System, Key.Up));

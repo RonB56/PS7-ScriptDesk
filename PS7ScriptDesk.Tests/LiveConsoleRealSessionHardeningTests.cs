@@ -249,6 +249,42 @@ public sealed class LiveConsoleRealSessionHardeningTests
     }
 
     [Fact]
+    public async Task RealSession_ReadHostEchoesBeforeEnterAndSecureInputStaysHidden()
+    {
+        var runtime = TryFindPwshRuntime();
+        if (runtime is null) return;
+
+        await using var harness = await RealConsoleHarness.StartAsync(runtime);
+        var marker = "PSDT_" + Guid.NewGuid().ToString("N");
+        var completion = harness.PrepareForCompletion();
+        await harness.Service.ExecuteScriptAsync(marker + "_echo.ps1",
+            "$value = Read-Host 'InputPrompt'; Write-Output ('" + marker + "_LENGTH=' + $value.Length)",
+            harness.OutputRecords.Add);
+        await harness.WaitForOutputAsync("InputPrompt");
+        harness.DrainNormalizedOutput();
+        await harness.Service.WriteRawInputAsync("界");
+        await harness.WaitForOutputAsync("界"); // Actual ConPTY output before Enter.
+        await harness.Service.WriteRawInputAsync("A");
+        await harness.Service.WriteRawInputAsync("\u007f");
+        await harness.Service.WriteRawInputAsync("B\r");
+        await completion.Task.WaitAsync(TimeSpan.FromSeconds(20));
+        Assert.Contains(marker + "_LENGTH=2", harness.DrainNormalizedOutput(), StringComparison.Ordinal);
+
+        completion = harness.PrepareForCompletion();
+        await harness.Service.ExecuteScriptAsync(marker + "_secure.ps1",
+            "$secret = Read-Host 'PasswordPrompt' -AsSecureString; Write-Output ('" + marker + "_SECURE_LENGTH=' + $secret.Length)",
+            harness.OutputRecords.Add);
+        await harness.WaitForOutputAsync("PasswordPrompt");
+        harness.DrainNormalizedOutput();
+        await harness.Service.WriteRawInputAsync("Zq9");
+        await Task.Delay(250);
+        Assert.DoesNotContain("Zq9", harness.DrainNormalizedOutput(), StringComparison.Ordinal);
+        await harness.Service.WriteRawInputAsync("\r");
+        await completion.Task.WaitAsync(TimeSpan.FromSeconds(20));
+        Assert.Contains(marker + "_SECURE_LENGTH=3", harness.DrainNormalizedOutput(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RealSession_StartupReadinessCommandCompletes()
     {
         var runtime = TryFindPwshRuntime();

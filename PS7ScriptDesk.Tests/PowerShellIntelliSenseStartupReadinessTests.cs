@@ -103,6 +103,18 @@ public sealed class PowerShellIntelliSenseStartupReadinessTests
     }
 
     [Fact]
+    public void ParameterCompletion_QueriesAuthoritativeProviderEvenWhenMetadataCanSatisfyLegacyEngineGate()
+    {
+        Assert.True(PowerShellIntelliSenseService.ShouldQueryAuthoritativeForTesting(
+            providerAvailable: true,
+            includeEngine: true,
+            isVariableContext: false,
+            isMemberContext: false,
+            engineWouldBeQueried: false,
+            isParameterContext: true));
+    }
+
+    [Fact]
     public void BottomStatusIndicator_DistinguishesBasicAndLiveReadinessWithElapsedTiming()
     {
         var source = File.ReadAllText(GetRepositoryPath("PS7ScriptDesk.Shell", "MainWindow.xaml.cs"));

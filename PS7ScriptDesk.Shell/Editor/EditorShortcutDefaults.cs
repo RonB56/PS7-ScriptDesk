@@ -5,6 +5,8 @@ namespace PS7ScriptDesk.Shell.Editor;
 /// <summary>Default editor gestures in one location for future user customization.</summary>
 internal static class EditorShortcutDefaults
 {
+    internal static KeyGesture ToggleFoldAtCaret { get; } = new(Key.M, ModifierKeys.Control);
+
     internal static KeyGesture AddCaretAbove { get; } = new(Key.Up, ModifierKeys.Alt | ModifierKeys.Shift);
     internal static KeyGesture AddCaretBelow { get; } = new(Key.Down, ModifierKeys.Alt | ModifierKeys.Shift);
 

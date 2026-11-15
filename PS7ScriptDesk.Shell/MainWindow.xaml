@@ -256,7 +256,7 @@
     </Window.Resources>
 
     <Grid>
-        <DockPanel>
+        <DockPanel Background="{DynamicResource Theme.App.Background}">
 
         <Border x:Name="AdministratorModeBanner"
                 DockPanel.Dock="Top"
@@ -316,6 +316,12 @@
 
             <MenuItem Header="_Edit" help:ContextHelp.Key="Command.Find">
                 <MenuItem Header="Command _Palette..." InputGestureText="Ctrl+Shift+P" Click="CommandPalette_Click" />
+                <MenuItem Header="_Folding">
+                    <MenuItem Header="Toggle Fold at Caret" InputGestureText="Ctrl+M" Click="EditorToggleFold_Click" />
+                    <MenuItem Header="Fold All" Click="EditorFoldAll_Click" />
+                    <MenuItem Header="Unfold All" Click="EditorUnfoldAll_Click" />
+                </MenuItem>
+                <Separator />
                 <MenuItem x:Name="AnalyzeCurrentDocumentMenuItem" Header="_Analyze Current Document" Click="AnalyzeCurrentDocument_Click" />
                 <MenuItem x:Name="PSScriptAnalyzerEnabledMenuItem" Header="Enable PSScriptAnalyzer" IsCheckable="True" Click="PSScriptAnalyzerEnabled_Click" />
                 <MenuItem x:Name="PSScriptAnalyzerAnalyzeWhileEditingMenuItem" Header="Analyze While Editing" IsCheckable="True" Click="PSScriptAnalyzerAnalyzeWhileEditing_Click" />
@@ -566,7 +572,9 @@
                      HorizontalAlignment="Stretch"
                      help:ContextHelp.Key="App.Overview">
             <ToolBar x:Name="MainToolbar"
-                     HorizontalContentAlignment="Left">
+                     ToolBarTray.IsLocked="True"
+                     HorizontalContentAlignment="Left"
+                     Loaded="MainToolbar_Loaded">
                 <!-- File/document group -->
                 <Button Command="{Binding NewScriptCommand}"
                         help:ContextHelp.Key="Command.NewScript"
@@ -1662,7 +1670,7 @@
                     Grid.Column="2"
                     Padding="6"
                     Style="{StaticResource IdePaneBorderStyle}"
-                    BorderThickness="0,1,0,0">
+                    BorderThickness="0">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />

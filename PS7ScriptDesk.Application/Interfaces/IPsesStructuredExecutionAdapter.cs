@@ -32,4 +32,8 @@ public sealed record PsesStructuredEvaluationResult(
     bool ResponseReceived,
     bool ExecutionBusyObserved,
     string? ProtocolError,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    int? ProtocolRequestId = null,
+    long? ResponseSequence = null,
+    long? IdleSequence = null,
+    int? IdleObservationCount = null);

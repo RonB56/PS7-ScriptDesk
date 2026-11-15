@@ -75,7 +75,9 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
             Publish(PowerShellRuntimeSessionState.Starting, sessionId, generation, runtime, null);
             try
             {
+                SetTerminalRuntimeIdentity(sessionId, generation);
                 await _terminal.StartSessionAsync(runtime, onOutput, startupWorkingDirectory, cancellationToken).ConfigureAwait(false);
+                SetTerminalRuntimeIdentity(sessionId, generation);
                 EnsureTerminalReady();
                 Publish(PowerShellRuntimeSessionState.Ready, sessionId, generation, runtime, null);
                 DeveloperDiagnostics.LogInfo("RuntimeBroker", "Authoritative PowerShell runtime acquired.", Metadata());
@@ -118,6 +120,10 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
             Publish(current.State, current.SessionId, current.Generation, current.Runtime, current.FaultMessage,
                 PowerShellRuntimeLifecyclePhase.ResetPending);
             resetPending = true;
+            if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+                ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("SessionReplacementRequested",
+                    RequestCorrelation: "runtime-global", RuntimeSessionId: current.SessionId,
+                    RuntimeGeneration: current.Generation, ProcessId: current.ProcessId));
             DeveloperDiagnostics.LogInfo("RuntimeBroker", "Runtime replacement requested; preserving active generation during lease drain.", Metadata());
             if (!_executionGate.Wait(0))
             {
@@ -136,7 +142,12 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
                 throw new InvalidOperationException("The authoritative PowerShell terminal did not drain cleanly; replacement was not started.");
             Publish(PowerShellRuntimeSessionState.Stopped, Guid.Empty, current.Generation, null, null,
                 PowerShellRuntimeLifecyclePhase.Replacing);
-            return await AcquireCoreAsync(runtime, onOutput, startupWorkingDirectory, cancellationToken).ConfigureAwait(false);
+            var replacement = await AcquireCoreAsync(runtime, onOutput, startupWorkingDirectory, cancellationToken).ConfigureAwait(false);
+            if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+                ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("SessionReplaced",
+                    RequestCorrelation: "runtime-global", RuntimeSessionId: replacement.SessionId,
+                    RuntimeGeneration: replacement.Generation, ProcessId: replacement.ProcessId));
+            return replacement;
         }
         catch (OperationCanceledException) when (resetPending && !executionDrained)
         {
@@ -306,7 +317,9 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
             PowerShellRuntimeLifecyclePhase.Replacing);
         try
         {
+            SetTerminalRuntimeIdentity(sessionId, generation);
             await _terminal.StartSessionAsync(runtime, onOutput, startupWorkingDirectory, cancellationToken).ConfigureAwait(false);
+            SetTerminalRuntimeIdentity(sessionId, generation);
             EnsureTerminalReady();
             Publish(PowerShellRuntimeSessionState.Ready, sessionId, generation, runtime, null,
                 PowerShellRuntimeLifecyclePhase.Stable);
@@ -337,6 +350,12 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
         }
 
         Publish(PowerShellRuntimeSessionState.Ready, current.SessionId, current.Generation, current.Runtime, null);
+    }
+
+    private void SetTerminalRuntimeIdentity(Guid sessionId, long generation)
+    {
+        if (_terminal is IRuntimeSessionIdentityAware identityAware)
+            identityAware.SetRuntimeSessionIdentity(sessionId, generation);
     }
     private void OnTerminalStopping(int _) { if (Snapshot.State is not PowerShellRuntimeSessionState.Stopping) Publish(PowerShellRuntimeSessionState.Stopping, Snapshot.SessionId, Snapshot.Generation, Snapshot.Runtime, null); }
     private void OnTerminalTerminated() { var current = Snapshot; if (current.State is not PowerShellRuntimeSessionState.Stopping) Publish(PowerShellRuntimeSessionState.Faulted, current.SessionId, current.Generation, current.Runtime, "The authoritative PowerShell process terminated unexpectedly."); }

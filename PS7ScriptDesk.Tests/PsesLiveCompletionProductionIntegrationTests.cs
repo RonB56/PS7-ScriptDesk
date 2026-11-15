@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using ICSharpCode.AvalonEdit;
 using PS7ScriptDesk.Domain.Models;
+using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.PowerShell.Services;
 
 namespace PS7ScriptDesk.Tests;
@@ -126,6 +128,72 @@ public sealed class PsesLiveCompletionProductionIntegrationTests
                 .WaitAsync(TimeSpan.FromSeconds(15));
             Assert.NotNull(functionResult);
             Assert.Contains(functionResult!.Items, item => string.Equals(item.CompletionText, functionName, StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            await service.ShutdownAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        }
+    }
+
+    [Fact(Timeout = 90_000)]
+    public async Task GetChildItemParameterCompletionRetainsValidAndCommonParameters()
+    {
+        var runtime = FindRuntime();
+        var psesRoot = Environment.GetEnvironmentVariable("PS7SCRIPTDESK_PSES_ROOT");
+        if (runtime is null || string.IsNullOrWhiteSpace(psesRoot) ||
+            !File.Exists(Path.Combine(psesRoot, "PowerShellEditorServices", "Start-EditorServices.ps1")))
+        {
+            throw Xunit.Sdk.SkipException.ForSkip("Get-ChildItem parameter completion integration requires PowerShell 7 and PSES.");
+        }
+
+        using var service = new PsesOwnedInteractiveSessionService();
+        await service.StartSessionAsync(runtime, _ => { }, Environment.CurrentDirectory).WaitAsync(TimeSpan.FromSeconds(45));
+        try
+        {
+            const string script = "Get-ChildItem -Path C:\\ -Recurse -Force";
+            var caretOffset = script.LastIndexOf("-Force", StringComparison.Ordinal) + 1;
+            var result = await service.GetLiveCompletionsAsync(
+                "untitled:ps7scriptdesk/get-childitem-parameters.ps1",
+                script,
+                caretOffset).WaitAsync(TimeSpan.FromSeconds(15));
+
+            Assert.NotNull(result);
+            var rawCompletions = result!.Items
+                .Select(item => item.ListItemText)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            Assert.Contains("-ErrorAction", rawCompletions);
+            Assert.Contains("-WarningAction", rawCompletions);
+
+            var dispatcherOperation = WpfTestDispatcher.Dispatcher.InvokeAsync(async () =>
+            {
+                var editor = new TextEditor { Document = new ICSharpCode.AvalonEdit.Document.TextDocument(script) };
+                editor.CaretOffset = caretOffset;
+                using var intelliSense = new PowerShellIntelliSenseService(service);
+                var window = await intelliSense.ShowCompletionAsync(
+                    editor,
+                    runtime.ExecutablePath,
+                    includeEngine: true,
+                    engineWaitMilliseconds: 1500);
+                try
+                {
+                    return window?.CompletionList.CompletionData
+                        .Cast<PowerShellCompletionData>()
+                        .Select(item => item.Text)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase)
+                        ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                }
+                finally
+                {
+                    window?.Close();
+                }
+            });
+            var displayTask = await dispatcherOperation.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            var displayedCompletions = await displayTask.WaitAsync(TimeSpan.FromSeconds(20));
+            Assert.Contains("-ErrorAction", displayedCompletions);
+            Assert.Contains("-WarningAction", displayedCompletions);
+            Assert.Contains("-Force", displayedCompletions);
+            Assert.DoesNotContain("-Path", displayedCompletions);
+            Assert.DoesNotContain("-Recurse", displayedCompletions);
         }
         finally
         {

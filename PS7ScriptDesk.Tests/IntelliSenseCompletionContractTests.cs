@@ -67,7 +67,8 @@ public sealed class IntelliSenseCompletionContractTests
         var service = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "Editor", "PowerShellIntelliSenseService.cs");
         Assert.Contains("var shouldQueryAuthoritative = providerOnly", service, StringComparison.Ordinal);
         Assert.Contains("? authoritativeCompletionAvailable", service, StringComparison.Ordinal);
-        Assert.Contains("BuildProviderOnlyWindow(editor, source, engineResult)", service, StringComparison.Ordinal);
+        Assert.Contains("Tab completion candidate projection", service, StringComparison.Ordinal);
+        Assert.Contains("IsParameterAlreadyUsed(parameterContext, item.CompletionText.TrimStart('-'), parameterCommandInfo)", service, StringComparison.Ordinal);
         Assert.Contains("GetCompletionsAsync(", service, StringComparison.Ordinal);
     }
 
@@ -97,6 +98,17 @@ public sealed class IntelliSenseCompletionContractTests
         Assert.Contains("ITextSource TextSource", source, StringComparison.Ordinal);
         Assert.DoesNotContain("string.Equals(Editor.Text, Text", source, StringComparison.Ordinal);
         Assert.DoesNotContain("editor.Text ?? string.Empty", source[source.IndexOf("private sealed record CompletionRequestSnapshot", StringComparison.Ordinal)..], StringComparison.Ordinal);
+        Assert.Contains("CompletionResultRejectedAsStale", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RepeatedCompletionRequestsCancelSupersededWorkAndRejectStaleSnapshots()
+    {
+        var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+
+        Assert.Contains("existing.Task.IsCompleted", source, StringComparison.Ordinal);
+        Assert.Contains("_activeCompletionCts?.Cancel()", source, StringComparison.Ordinal);
+        Assert.Contains("snapshot.IsCurrent(this)", source, StringComparison.Ordinal);
         Assert.Contains("CompletionResultRejectedAsStale", source, StringComparison.Ordinal);
     }
 

@@ -33,6 +33,45 @@ public sealed class MainWindowStructuralPolishTests
     }
 
     [Fact]
+    public void MainToolbar_HidesDragGripperAndKeepsDarkStyledOverflowAccess()
+    {
+        var mainXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml");
+        var appXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "App.xaml");
+        var mainCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+
+        Assert.Contains("ToolBarTray.IsLocked=\"True\"", mainXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ToolBar.OverflowButtonStyleKey", appXaml + mainXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Key=\"IdeToolbarOverflowButtonStyle\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("Loaded=\"MainToolbar_Loaded\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("FindName(\"OverflowButton\", toolbar)", mainCode, StringComparison.Ordinal);
+        Assert.Contains("AutomationProperties.Name\" Value=\"More toolbar commands\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("Theme.Surface.Secondary", appXaml, StringComparison.Ordinal);
+        Assert.Contains("Theme.Border.Focus", appXaml, StringComparison.Ordinal);
+        Assert.Contains("Theme.Button.HoverBackground", appXaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip=\"New Script (Ctrl+N)\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip=\"PS7 ScriptDesk Help\"", mainXaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EditorAndConsolePaneSeparatorsUseThemeAwareBordersAndSplitters()
+    {
+        var appXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "App.xaml");
+        var mainXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml");
+
+        Assert.Contains("x:Key=\"EditorSurfaceBorderStyle\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Key=\"IdePaneBorderStyle\"", appXaml, StringComparison.Ordinal);
+        Assert.Contains("Theme.Border.Subtle", appXaml, StringComparison.Ordinal);
+        Assert.Contains("Theme.Splitter.Idle", appXaml, StringComparison.Ordinal);
+        Assert.Contains("Theme.Splitter.Hover", appXaml, StringComparison.Ordinal);
+        Assert.Contains("Theme.Splitter.Focus", appXaml, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"Background\" Value=\"{DynamicResource Theme.Surface.Primary}\" />", appXaml, StringComparison.Ordinal);
+        Assert.Contains("BasedOn=\"{StaticResource EditorSurfaceBorderStyle}\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"ConsolePaneBorder\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Style=\"{StaticResource IdePaneBorderStyle}\"", mainXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ActiveBorderBrushKey", mainXaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MainWindow_TabsAndSecondaryButtonsUseSharedIdeStyles()
     {
         var appXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "App.xaml");

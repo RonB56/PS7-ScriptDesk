@@ -30,12 +30,24 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
     private bool _busy;
     private long _busyNotificationSequence;
     private long _lastIdleNotificationSequence;
+    private long _psesWireNotificationSequence;
+    private long _lastPsesWireIdleSequence;
+    private long _psesIdleNotificationCount;
     private int _nextRequestId;
     private int _disposed;
+    private int _processId;
+    private long? _processStartUtcTicks;
+    private Guid _runtimeSessionIdentity;
 
     public event Action<bool>? BusyChanged;
     public event Action<Exception>? SessionFaulted;
     public int SessionGeneration { get; private set; }
+    internal Guid RuntimeSessionIdentity => _runtimeSessionIdentity;
+    internal long? RuntimeGeneration { get; private set; }
+    internal bool RuntimeIdentityVerified { get; private set; }
+    internal long? ProcessStartUtcTicks => _processStartUtcTicks;
+    internal bool PsesLifecycleContractVerified { get; private set; }
+    internal string PsesLifecycleVersion { get; private set; } = "unverified";
     public bool IsInitialized { get; private set; }
     internal int PendingRequestCount => _pending.Count;
 
@@ -170,6 +182,10 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         if (IsInitialized || _pipe is not null) throw new InvalidOperationException("The PSES language-service client is already initialized.");
         _sendSyntheticTerminalInputAsync = sendSyntheticTerminalInputAsync;
         SessionGeneration = sessionGeneration;
+        _processId = processId;
+        _runtimeSessionIdentity = Guid.NewGuid();
+        _processStartUtcTicks = TryGetProcessStartUtcTicks(processId);
+        (PsesLifecycleContractVerified, PsesLifecycleVersion) = DetectPinnedPsesContract();
         _pipe = transport;
         _lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _readerTask = Task.Run(() => ReadLoopAsync(_lifetime.Token), CancellationToken.None);
@@ -202,6 +218,9 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         if (!IsInitialized) throw new InvalidOperationException("The PSES language-service client is not initialized.");
         await _evaluationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         var observedBusy = false;
+        int? protocolRequestId = null;
+        long? responseSequence = null;
+        long? idleCountAtResponse = null;
         try
         {
             observedBusy = IsBusy;
@@ -210,7 +229,10 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
 
             // A foreground evaluation can legitimately outlive a language-service request timeout.
             // Its owner supplies cancellation, and a lost pipe faults the pending response.
-            var response = await SendRequestAsync("evaluate", new { expression }, cancellationToken, requestId, waitForForegroundCompletion: true).ConfigureAwait(false);
+            var response = await SendRequestAsync("evaluate", new { expression }, cancellationToken, requestId,
+                waitForForegroundCompletion: true,
+                protocolIdAssigned: id => protocolRequestId = id,
+                responseObserved: (_, sequence, idleCount) => { responseSequence = sequence; idleCountAtResponse = idleCount; }).ConfigureAwait(false);
             var hasResult = response.TryGetProperty("result", out var resultElement);
             WritePipeForensics(new
             {
@@ -241,14 +263,14 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
                     : null,
                 contentOmitted = true
             });
-            if (response.TryGetProperty("error", out var protocolError)) return new(EditorExecutionStatus.Unknown, true, observedBusy || IsBusy, protocolError.GetRawText(), "PSES returned a protocol error; script outcome is unknown.");
+            if (response.TryGetProperty("error", out var protocolError)) return new(EditorExecutionStatus.Unknown, true, observedBusy || IsBusy, protocolError.GetRawText(), "PSES returned a protocol error; script outcome is unknown.", protocolRequestId, responseSequence, LastIdleSequence, CountIdleEventsSince(idleCountAtResponse));
             var completed = await WaitForPostEvaluateIdleAsync(evaluationStartNotificationSequence, cancellationToken).ConfigureAwait(false);
             if (!completed)
             {
                 return new(EditorExecutionStatus.Unknown, true, observedBusy || IsBusy, null,
-                    "PSES returned an evaluate response without a post-evaluate idle transition; script outcome is unknown.");
+                    "PSES returned an evaluate response without a post-evaluate idle transition; script outcome is unknown.", protocolRequestId, responseSequence, null, CountIdleEventsSince(idleCountAtResponse));
             }
-            return new(EditorExecutionStatus.Completed, true, observedBusy || IsBusy, null, null);
+            return new(EditorExecutionStatus.Completed, true, observedBusy || IsBusy, null, null, protocolRequestId, responseSequence, LastIdleSequence, CountIdleEventsSince(idleCountAtResponse));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         { throw; }
@@ -376,15 +398,75 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
 
     private bool IsBusy { get { lock (_stateGate) return _busy; } }
     private long BusyNotificationSequence { get { lock (_stateGate) return _busyNotificationSequence; } }
+    private long LastIdleSequence { get { lock (_stateGate) return _lastPsesWireIdleSequence; } }
+
+    private int CountIdleEventsSince(long? priorCount)
+    {
+        if (priorCount is null) return 0;
+        lock (_stateGate) return (int)Math.Clamp(_psesIdleNotificationCount - priorCount.Value, 0, int.MaxValue);
+    }
 
     internal TimeSpan ShortRequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
-    private async Task<JsonElement> SendRequestAsync(string method, object parameters, CancellationToken cancellationToken, Guid? requestId = null, bool waitForForegroundCompletion = false)
+    internal void SetRuntimeSessionIdentity(Guid sessionId, long generation)
+    {
+        if (sessionId == Guid.Empty) throw new ArgumentException("A nonempty runtime session identity is required.", nameof(sessionId));
+        if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
+        _runtimeSessionIdentity = sessionId;
+        RuntimeGeneration = generation;
+        RuntimeIdentityVerified = true;
+    }
+
+    private static long? TryGetProcessStartUtcTicks(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return process.HasExited ? null : process.StartTime.ToUniversalTime().Ticks;
+        }
+        catch { return null; }
+    }
+
+    private static (bool Verified, string Version) DetectPinnedPsesContract()
+    {
+        try
+        {
+            var configured = Environment.GetEnvironmentVariable("PS7SCRIPTDESK_PSES_ROOT");
+            string? extensionDirectory = null;
+            if (!string.IsNullOrWhiteSpace(configured))
+            {
+                var path = Path.GetFullPath(configured);
+                extensionDirectory = new DirectoryInfo(path).Parent?.FullName;
+            }
+            else
+            {
+                var extensions = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".vscode", "extensions");
+                extensionDirectory = Directory.Exists(extensions)
+                    ? Directory.GetDirectories(extensions, "ms-vscode.powershell-*")
+                        .OrderByDescending(path => path, StringComparer.OrdinalIgnoreCase)
+                        .FirstOrDefault(path => File.Exists(Path.Combine(path, "modules", "PowerShellEditorServices", "Start-EditorServices.ps1")))
+                    : null;
+            }
+
+            var manifestPath = extensionDirectory is null
+                ? null
+                : Path.Combine(extensionDirectory, "modules", "PowerShellEditorServices", "PowerShellEditorServices.psd1");
+            var manifest = manifestPath is not null && File.Exists(manifestPath) ? File.ReadAllText(manifestPath) : string.Empty;
+            var moduleVersion = System.Text.RegularExpressions.Regex.Match(manifest, "(?m)^\\s*ModuleVersion\\s*=\\s*['\"](?<v>[^'\"]+)['\"]").Groups["v"].Value;
+            var extensionVersion = extensionDirectory is null ? "unknown" : Path.GetFileName(extensionDirectory);
+            var version = $"{extensionVersion};PSES-{(string.IsNullOrWhiteSpace(moduleVersion) ? "unknown" : moduleVersion)}";
+            return (string.Equals(extensionVersion, "ms-vscode.powershell-2025.4.0", StringComparison.OrdinalIgnoreCase) && moduleVersion == "4.4.0", version);
+        }
+        catch { return (false, "unverified"); }
+    }
+
+    private async Task<JsonElement> SendRequestAsync(string method, object parameters, CancellationToken cancellationToken, Guid? requestId = null, bool waitForForegroundCompletion = false, Action<int>? protocolIdAssigned = null, Action<int, long?, long?>? responseObserved = null)
     {
         var protocolId = Interlocked.Increment(ref _nextRequestId); var pending = new PendingRequest();
         var stopwatch = DeveloperDiagnostics.IsEnabled ? Stopwatch.StartNew() : null;
         if (!_pending.TryAdd(protocolId, pending)) throw new InvalidOperationException("Duplicate PSES request identifier.");
         if (requestId is { } requestKey) _requestIds[requestKey] = protocolId;
+        protocolIdAssigned?.Invoke(protocolId);
         try
         {
             await SendMessageAsync(new { jsonrpc = "2.0", id = protocolId, method, @params = parameters }, cancellationToken).ConfigureAwait(false);
@@ -399,9 +481,11 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
                         ["timeoutPolicy"] = waitForForegroundCompletion ? "foreground-cancellation-or-session-failure" : "bounded-short-request",
                         ["timeoutMilliseconds"] = waitForForegroundCompletion ? null : ShortRequestTimeout.TotalMilliseconds
                     }));
-                return waitForForegroundCompletion
+                var response = waitForForegroundCompletion
                     ? await pending.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false)
                     : await pending.Completion.Task.WaitAsync(ShortRequestTimeout, cancellationToken).ConfigureAwait(false);
+                responseObserved?.Invoke(protocolId, pending.ResponseSequence, pending.ResponseIdleCount);
+                return response;
             }
             catch (TimeoutException) when (requestId is not null)
             {
@@ -454,9 +538,35 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
             {
                 var body = await ReadFrameAsync(cancellationToken).ConfigureAwait(false); if (body is null) throw new EndOfStreamException("PSES language-service pipe closed.");
                 using var document = JsonDocument.Parse(body); var root = document.RootElement;
-                if (root.TryGetProperty("id", out var responseId) && responseId.ValueKind == JsonValueKind.Number && _pending.TryGetValue(responseId.GetInt32(), out var pending)) { pending.Completion.TrySetResult(root.Clone()); continue; }
+                if (root.TryGetProperty("id", out var responseId) && responseId.ValueKind == JsonValueKind.Number && _pending.TryGetValue(responseId.GetInt32(), out var pending))
+                {
+                    lock (_stateGate)
+                    {
+                        pending.ResponseSequence = _psesWireNotificationSequence;
+                        pending.ResponseIdleCount = _psesIdleNotificationCount;
+                    }
+                    pending.Completion.TrySetResult(root.Clone()); continue;
+                }
                 if (root.TryGetProperty("method", out var method))
-                    _ = DispatchNotificationSafelyAsync(method.GetString() ?? string.Empty, root.TryGetProperty("params", out var parameters) ? parameters.Clone() : default, cancellationToken);
+                {
+                    var methodName = method.GetString() ?? string.Empty;
+                    var parameters = root.TryGetProperty("params", out var notificationParameters) ? notificationParameters.Clone() : default;
+                    long? wireNotificationSequence = null;
+                    if (methodName == "powerShell/executionBusyStatus" && parameters.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    {
+                        var busy = parameters.GetBoolean();
+                        lock (_stateGate)
+                        {
+                            wireNotificationSequence = ++_psesWireNotificationSequence;
+                            if (!busy)
+                            {
+                                _lastPsesWireIdleSequence = wireNotificationSequence.Value;
+                                _psesIdleNotificationCount++;
+                            }
+                        }
+                    }
+                    _ = DispatchNotificationSafelyAsync(methodName, parameters, cancellationToken, wireNotificationSequence);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -473,9 +583,9 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         }
     }
 
-    private async Task DispatchNotificationSafelyAsync(string method, JsonElement parameters, CancellationToken cancellationToken)
+    private async Task DispatchNotificationSafelyAsync(string method, JsonElement parameters, CancellationToken cancellationToken, long? wireNotificationSequence = null)
     {
-        try { await DispatchNotificationAsync(method, parameters, cancellationToken).ConfigureAwait(false); }
+        try { await DispatchNotificationAsync(method, parameters, cancellationToken, wireNotificationSequence).ConfigureAwait(false); }
         catch (Exception ex) when (ex is IOException or EndOfStreamException or ObjectDisposedException or InvalidOperationException)
         {
             IsInitialized = false;
@@ -485,17 +595,20 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         }
     }
 
-    private async Task DispatchNotificationAsync(string method, JsonElement parameters, CancellationToken cancellationToken)
+    private async Task DispatchNotificationAsync(string method, JsonElement parameters, CancellationToken cancellationToken, long? wireNotificationSequence)
     {
         if (method == "powerShell/executionBusyStatus" && parameters.ValueKind is JsonValueKind.True or JsonValueKind.False)
         {
             var busy = parameters.GetBoolean();
+            long notificationSequence;
             lock (_stateGate)
             {
                 _busy = busy;
-                _busyNotificationSequence++;
-                if (!busy) _lastIdleNotificationSequence = _busyNotificationSequence;
+                notificationSequence = ++_busyNotificationSequence;
+                if (!busy) _lastIdleNotificationSequence = notificationSequence;
             }
+            if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+                ExecutionCorrelationTelemetry.Shared.RecordPsesBusy(busy, wireNotificationSequence ?? notificationSequence);
             try { BusyChanged?.Invoke(busy); } catch (Exception ex) { DeveloperDiagnostics.LogException("PSES", ex, "PSES busy notification subscriber failed."); } return;
         }
         if (method == "powerShell/sendKeyPress" && _sendSyntheticTerminalInputAsync is not null)
@@ -577,7 +690,10 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
                 : item.TryGetProperty("textEdit", out var textEditValue) && textEditValue.TryGetProperty("newText", out var newTextElement)
                     ? newTextElement.GetString() ?? label
                     : label;
-            var tooltip = item.TryGetProperty("detail", out var detailElement) ? detailElement.GetString() ?? string.Empty : string.Empty;
+            var detail = item.TryGetProperty("detail", out var detailElement) && detailElement.ValueKind == JsonValueKind.String
+                ? detailElement.GetString()
+                : null;
+            var tooltip = string.IsNullOrWhiteSpace(detail) ? ReadCompletionDocumentation(item) : detail;
             var kind = item.TryGetProperty("kind", out var kindElement) && kindElement.TryGetInt32(out var numericKind) ? numericKind : 1;
 
             if (!replacementResolved && item.TryGetProperty("textEdit", out var textEdit) && textEdit.ValueKind == JsonValueKind.Object &&
@@ -593,6 +709,16 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         }
 
         return items.Count == 0 ? null : new AuthoritativeCompletionResult(replacementIndex, replacementLength, items);
+    }
+
+    private static string ReadCompletionDocumentation(JsonElement item)
+    {
+        if (!item.TryGetProperty("documentation", out var documentation)) return string.Empty;
+        if (documentation.ValueKind == JsonValueKind.String) return documentation.GetString() ?? string.Empty;
+        return documentation.ValueKind == JsonValueKind.Object &&
+               documentation.TryGetProperty("value", out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : string.Empty;
     }
 
     private static bool TryGetRangeOffsets(JsonElement range, string documentText, out int start, out int end)
@@ -646,5 +772,5 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
 
     private Dictionary<string, object?> Metadata(Dictionary<string, object?>? extra = null) { var result = new Dictionary<string, object?> { ["sessionGeneration"] = SessionGeneration, ["initialized"] = IsInitialized, ["busy"] = IsBusy, ["pendingCount"] = _pending.Count }; if (extra is not null) foreach (var pair in extra) result[pair.Key] = pair.Value; return result; }
     private void ThrowIfDisposed() { if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(PsesLanguageServiceClient)); }
-    private sealed class PendingRequest { public TaskCompletionSource<JsonElement> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); }
+    private sealed class PendingRequest { public TaskCompletionSource<JsonElement> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public long? ResponseSequence { get; set; } public long? ResponseIdleCount { get; set; } }
 }

@@ -162,6 +162,7 @@ public sealed class PsesAvDeterministicTransportTests
         Assert.Equal(0, result!.ReplacementIndex);
         Assert.Equal(5, result.ReplacementLength);
         Assert.Contains(result.Items, item => item.CompletionText == "$ISEProbe");
+        Assert.Contains(result.Items, item => item.CompletionText == "-ErrorAction" && item.Tooltip == "Controls error handling.");
     }
 
     private sealed class ConnectedFixture : IAsyncDisposable
@@ -185,7 +186,7 @@ public sealed class PsesAvDeterministicTransportTests
 
         public async Task WriteCompletionResponseAsync(int id)
         {
-            var body = Encoding.UTF8.GetBytes($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"isIncomplete\":false,\"items\":[{{\"label\":\"$ISEProbe\",\"insertText\":\"$ISEProbe\",\"kind\":6,\"detail\":\"live variable\",\"textEdit\":{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":5}}}},\"newText\":\"$ISEProbe\"}}}}]}}}}");
+            var body = Encoding.UTF8.GetBytes($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"isIncomplete\":false,\"items\":[{{\"label\":\"$ISEProbe\",\"insertText\":\"$ISEProbe\",\"kind\":6,\"detail\":\"live variable\",\"textEdit\":{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":5}}}},\"newText\":\"$ISEProbe\"}}}},{{\"label\":\"-ErrorAction\",\"kind\":6,\"documentation\":{{\"kind\":\"markdown\",\"value\":\"Controls error handling.\"}}}}]}}}}");
             var header = Encoding.ASCII.GetBytes($"Content-Length: {body.Length}\r\n\r\n");
             await _server.WriteAsync(header);
             await _server.WriteAsync(body);

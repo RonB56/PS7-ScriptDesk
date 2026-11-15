@@ -139,6 +139,7 @@ namespace PS7ScriptDesk.Shell.Composition
                     ["shadowMode"] = false
                 });
             DeveloperDiagnostics.ConfigureFromSettings(applicationSettings, "AppBootstrapper loaded settings");
+            ExecutionCorrelationTelemetry.Shared.LogActivation();
             DeveloperDiagnostics.LogInfo(
                 "Startup",
                 "AppBootstrapper loaded application settings and is creating MainWindow.",

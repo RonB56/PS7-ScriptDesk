@@ -46,8 +46,8 @@ namespace PS7ScriptDesk.Shell.Editor
 
         public string RawDescription { get; }
 
-        /// <summary>Rich WPF description panel shown in the tooltip alongside the completion list.</summary>
-        public object Description => BuildDescriptionPanel(RawDescription, Kind);
+        /// <summary>Plain tooltip text so the shared tooltip template never stringifies a WPF control.</summary>
+        public object Description => BuildDescriptionText(RawDescription, Kind);
 
         public double Priority { get; }
 
@@ -213,36 +213,15 @@ namespace PS7ScriptDesk.Shell.Editor
         // Rich description panel
         // ─────────────────────────────────────────────────────────────────────
 
-        private static object BuildDescriptionPanel(string description, CompletionItemKind kind)
+        private static string BuildDescriptionText(string description, CompletionItemKind kind)
         {
-            if (string.IsNullOrWhiteSpace(description))
-                return string.Empty;
-
             var kindLabel = GetKindLabel(kind);
-            var panel = new StackPanel { Margin = new Thickness(4) };
+            if (string.IsNullOrWhiteSpace(description))
+                return kindLabel;
 
-            if (!string.IsNullOrEmpty(kindLabel))
-            {
-                var kindBlock = new TextBlock
-                {
-                    Text = kindLabel,
-                    FontSize = 10,
-                    Margin = new Thickness(0, 0, 0, 4)
-                };
-                kindBlock.SetResourceReference(TextBlock.ForegroundProperty, "Theme.ToolTip.SecondaryForeground");
-                panel.Children.Add(kindBlock);
-            }
-
-            var descriptionBlock = new TextBlock
-            {
-                Text = description,
-                TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 500,
-            };
-            descriptionBlock.SetResourceReference(TextBlock.ForegroundProperty, "Theme.ToolTip.Foreground");
-            panel.Children.Add(descriptionBlock);
-
-            return panel;
+            return string.IsNullOrEmpty(kindLabel)
+                ? description
+                : $"{kindLabel}{Environment.NewLine}{description}";
         }
 
         private static string GetKindLabel(CompletionItemKind kind) => kind switch

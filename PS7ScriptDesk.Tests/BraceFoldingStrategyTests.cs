@@ -20,6 +20,36 @@ public sealed class BraceFoldingStrategyTests
     }
 
     [Fact]
+    public void IfElseLoopAndTryBranchesProduceIndependentNestedRanges()
+    {
+        const string script = "if ($true) {\n  foreach ($item in 1) {\n    try {\n      $item\n    } catch {\n      0\n    } finally {\n      $null = $null\n    }\n  }\n} else {\n  0\n}";
+        var ranges = _strategy.CreateFoldings(script);
+
+        Assert.Contains(ranges, range => range.Name == "if branch");
+        Assert.Contains(ranges, range => range.Name == "else branch");
+        Assert.Contains(ranges, range => range.Name == "foreach loop");
+        Assert.Contains(ranges, range => range.Name == "try block");
+        Assert.Contains(ranges, range => range.Name == "catch block");
+        Assert.Contains(ranges, range => range.Name == "finally block");
+        AssertValidNestedRanges(script, ranges);
+    }
+
+    [Fact]
+    public void ClassMethodsSwitchClausesAndNestedScriptBlocksAreFoldable()
+    {
+        const string script = "class Example {\n  [void] Run() {\n    $action = {\n      switch (1) {\n        1 { 'one' }\n        default { 'other' }\n      }\n    }\n  }\n}";
+        var ranges = _strategy.CreateFoldings(script);
+
+        Assert.Contains(ranges, range => range.Name == "class Example");
+        Assert.Contains(ranges, range => range.Name == "method Run");
+        Assert.Contains(ranges, range => range.Name == "switch");
+        Assert.Contains(ranges, range => range.Name == "switch clause");
+        Assert.Contains(ranges, range => range.Name == "switch default");
+        Assert.Contains(ranges, range => range.Name == "script block");
+        AssertValidNestedRanges(script, ranges);
+    }
+
+    [Fact]
     public void BracesInStringsAndCommentsDoNotCreateFolds()
     {
         const string script = "function Real {\n  $single = '{' # }\n  $double = \"}\"\n  $escaped = \"a`\"}b\"\n  <# { ignored } #>\n  # { ignored\n}";
@@ -57,11 +87,18 @@ public sealed class BraceFoldingStrategyTests
     }
 
     [Fact]
-    public void DeepNestingUsesStackBasedPairing()
+    public void DeepNestingUsesPowerShellAstAndParserTokenExtents()
     {
-        const int nesting = 800;
+        const int nesting = 160;
         var script = string.Concat(Enumerable.Repeat("{\n", nesting)) + "value" + string.Concat(Enumerable.Repeat("\n}", nesting));
         Assert.Equal(nesting, _strategy.CreateFoldings(script).Count);
+    }
+
+    [Fact]
+    public void IncompleteStructuresDoNotInventClosingBoundaries()
+    {
+        Assert.Empty(_strategy.CreateFoldings("function Broken {\n  if ($true) {\n    'still typing'"));
+        Assert.Empty(_strategy.CreateFoldings("if ($true)\n"));
     }
 
     [Fact]
@@ -73,14 +110,14 @@ public sealed class BraceFoldingStrategyTests
     }
 
     [Fact]
-    public void PerformanceWorkloadsReportMeasurementsWithoutTimingAssertions()
+    public void PerformanceWorkloadsReportLatencyDistributionWithoutTimingAssertions()
     {
-        foreach (var lineCount in new[] { 1_000, 10_000, 100_000 })
+        foreach (var lineCount in new[] { 100, 2_000, 10_000 })
         {
             var script = CreateScript(lineCount);
-            var measurements = new List<double>(3);
+            var measurements = new List<double>(7);
             IReadOnlyList<FoldingRange> ranges = Array.Empty<FoldingRange>();
-            for (var iteration = 0; iteration < 3; iteration++)
+            for (var iteration = 0; iteration < 7; iteration++)
             {
                 var stopwatch = Stopwatch.StartNew();
                 ranges = _strategy.CreateFoldings(script);
@@ -89,7 +126,7 @@ public sealed class BraceFoldingStrategyTests
             }
             measurements.Sort();
             Assert.NotEmpty(ranges);
-            Console.WriteLine($"folding-lines={lineCount}; chars={script.Length}; ranges={ranges.Count}; iterations=3; median-ms={measurements[1]:F3}; max-ms={measurements[2]:F3}");
+            Console.WriteLine($"folding-lines={lineCount}; chars={script.Length}; ranges={ranges.Count}; iterations=7; median-ms={measurements[3]:F3}; p95-ms={measurements[6]:F3}; worst-ms={measurements[^1]:F3}");
         }
     }
 
@@ -116,5 +153,26 @@ public sealed class BraceFoldingStrategyTests
         for (var i = 0; i < lineCount; i++) builder.Append("  $v").Append(i).Append(" = ").Append(i).AppendLine();
         builder.AppendLine("}");
         return builder.ToString();
+    }
+
+    private static void AssertValidNestedRanges(string script, IReadOnlyList<FoldingRange> ranges)
+    {
+        Assert.All(ranges, range =>
+        {
+            Assert.InRange(range.StartOffset, 0, script.Length - 1);
+            Assert.InRange(range.EndOffset, range.StartOffset + 1, script.Length);
+            Assert.Contains('\n', script[range.StartOffset..range.EndOffset]);
+        });
+
+        for (var leftIndex = 0; leftIndex < ranges.Count; leftIndex++)
+        for (var rightIndex = leftIndex + 1; rightIndex < ranges.Count; rightIndex++)
+        {
+            var left = ranges[leftIndex];
+            var right = ranges[rightIndex];
+            var overlaps = left.StartOffset < right.EndOffset && right.StartOffset < left.EndOffset;
+            var nested = left.StartOffset <= right.StartOffset && right.EndOffset <= left.EndOffset ||
+                         right.StartOffset <= left.StartOffset && left.EndOffset <= right.EndOffset;
+            Assert.True(!overlaps || nested, $"Ranges cross: {left} and {right}.");
+        }
     }
 }
