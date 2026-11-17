@@ -41,6 +41,7 @@ public static class HostForegroundTaskEndedCandidate
         if (!facts.RequestCorrelationMatches) return new(false, "invalid", "wrong-request-id");
         if (!facts.ProtocolSucceeded) return new(false, "invalid", "evaluate-protocol-error");
         if (facts.IdleObservationCount > 1) return new(false, "ambiguous", "duplicate-idle-observation");
+        if (facts.IdleObservationCount < 1) return Incomplete("post-evaluate-idle-missing");
         if (facts.ResponseSequence is null || facts.IdleSequence is null)
             return Incomplete(facts.ResponseSequence is null ? "evaluate-response-missing" : "post-evaluate-idle-missing");
         if (facts.IdleSequence <= facts.ResponseSequence)

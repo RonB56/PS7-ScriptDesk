@@ -408,6 +408,143 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
         Assert.False(coordinator.IsCurrent(current.SessionId, current.Generation));
     }
 
+    [Fact]
+    public async Task CleanupUnknownRequiresControlledRecoveryWithoutClaimingNativeRuntimeFault()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+
+        lease.MarkRecoveryRequired("DAP cleanup was not acknowledged.");
+        await lease.DisposeAsync();
+
+        Assert.Equal(PowerShellRuntimeSessionState.RecoveryRequired, coordinator.Snapshot.State);
+        Assert.True(terminal.IsSessionRunning);
+        Assert.False(coordinator.IsCurrent(current.SessionId, current.Generation));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.WriteRawInputAsync(current.SessionId, current.Generation, "Write-Output 'blocked'\r"));
+        terminal.RaiseTerminalStarted(terminal.CurrentSessionGeneration);
+        Assert.Equal(PowerShellRuntimeSessionState.RecoveryRequired, coordinator.Snapshot.State);
+
+        var recovered = await coordinator.RestartAsync(CreateRuntime(), _ => { });
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, recovered.State);
+        Assert.True(recovered.Generation > current.Generation);
+        Assert.Equal(1, terminal.ShutdownCount);
+        Assert.Equal(2, terminal.StartCount);
+        Assert.True(coordinator.IsCurrent(recovered.SessionId, recovered.Generation));
+    }
+
+    [Fact]
+    public async Task StructuredPromptAdmissionRequiresCurrentCompletedRuntimeAndTerminalIdentity()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var requestId = Guid.NewGuid();
+
+        Assert.False(coordinator.TryAdmitStructuredPromptReadiness(requestId, current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId!.Value, executionCompleted: false));
+        Assert.False(coordinator.TryAdmitStructuredPromptReadiness(requestId, Guid.NewGuid(), current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId.Value, executionCompleted: true));
+        Assert.False(coordinator.TryAdmitStructuredPromptReadiness(requestId, current.SessionId, current.Generation + 1,
+            terminal.CurrentSessionGeneration, terminal.ProcessId.Value, executionCompleted: true));
+        Assert.False(coordinator.TryAdmitStructuredPromptReadiness(requestId, current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration - 1, terminal.ProcessId.Value, executionCompleted: true));
+        Assert.False(coordinator.TryAdmitStructuredPromptReadiness(requestId, current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId.Value + 1, executionCompleted: true));
+        Assert.True(coordinator.TryAdmitStructuredPromptReadiness(requestId, current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId.Value, executionCompleted: true));
+    }
+
+    [Fact]
+    public async Task StructuredPromptObservedBeforeCompletionIsAdmittedAfterLeaseRelease()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var requestId = Guid.NewGuid();
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+
+        Assert.False(coordinator.TryAdmitStructuredPromptReadiness(requestId, current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId!.Value, executionCompleted: false));
+
+        await lease.DisposeAsync();
+        Assert.True(coordinator.TryAdmitStructuredPromptReadiness(requestId, current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId.Value, executionCompleted: true));
+    }
+
+    [Fact]
+    public async Task StructuredPromptObservedAfterCompletionIsAdmittedWithoutAnotherTerminalCommand()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var requestId = Guid.NewGuid();
+        var lease = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+        await lease.DisposeAsync();
+
+        Assert.True(coordinator.TryAdmitStructuredPromptReadiness(requestId, current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId!.Value, executionCompleted: true));
+    }
+
+    [Fact]
+    public async Task StructuredPromptAdmissionConsumesObservationOnlyOnce()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var requestId = Guid.NewGuid();
+
+        Assert.True(coordinator.TryAdmitStructuredPromptReadiness(requestId, current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId!.Value, executionCompleted: true));
+        Assert.False(coordinator.TryAdmitStructuredPromptReadiness(requestId, current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId.Value, executionCompleted: true));
+    }
+
+    [Fact]
+    public async Task StructuredPromptAdmissionRejectsRecoveryRequiredAndDebuggerOwnedSessions()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var current = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        var debugger = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: true);
+
+        Assert.False(coordinator.TryAdmitStructuredPromptReadiness(Guid.NewGuid(), current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId!.Value, executionCompleted: true));
+        await debugger.DisposeAsync();
+
+        var execution = await coordinator.AcquireExecutionAsync(current.SessionId, current.Generation, debugger: false);
+        execution.MarkRecoveryRequired("cleanup is unverified");
+        await execution.DisposeAsync();
+        Assert.Equal(PowerShellRuntimeSessionState.RecoveryRequired, coordinator.Snapshot.State);
+        Assert.False(coordinator.TryAdmitStructuredPromptReadiness(Guid.NewGuid(), current.SessionId, current.Generation,
+            terminal.CurrentSessionGeneration, terminal.ProcessId.Value, executionCompleted: true));
+    }
+
+    [Fact]
+    public async Task StaleTerminalStartedNotificationCannotPublishReadinessForReplacementGeneration()
+    {
+        var terminal = new CoordinatorTerminalFake();
+        await using var coordinator = new PowerShellRuntimeSessionCoordinator(terminal);
+        var original = await coordinator.AcquireAsync(CreateRuntime(), _ => { });
+        terminal.HoldNextStartAfterWritableState = true;
+
+        var restart = coordinator.RestartAsync(CreateRuntime(), _ => { });
+        await terminal.WritableStartNotificationObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(PowerShellRuntimeSessionState.Starting, coordinator.Snapshot.State);
+        Assert.Equal(original.Generation + 1, coordinator.Snapshot.Generation);
+
+        terminal.RaiseTerminalStarted(terminal.CurrentSessionGeneration - 1);
+
+        Assert.Equal(PowerShellRuntimeSessionState.Starting, coordinator.Snapshot.State);
+
+        terminal.CompleteHeldStart();
+        var replacement = await restart.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(PowerShellRuntimeSessionState.Ready, replacement.State);
+        Assert.True(replacement.InputWritable);
+        Assert.True(replacement.Generation > original.Generation);
+    }
+
     private static PowerShellRuntimeInfo CreateRuntime() => new(
         "Test PowerShell", "Core", "7.6.0", new Version(7, 6, 0), "x64",
         Environment.ProcessPath!, "test", true, false, true);
@@ -450,7 +587,9 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
         public TaskCompletionSource<bool> WriteObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool FailStart { get; init; }
         public bool HoldStartAfterEarlyNotification { get; init; }
+        public bool HoldNextStartAfterWritableState { get; set; }
         public TaskCompletionSource<bool> EarlyStartNotificationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> WritableStartNotificationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource<bool>? _heldStartCompletion;
         public event Action? ScriptExecutionCompleted { add { } remove { } }
         public event Action<int>? CommandExecutionCompleted { add { } remove { } }
@@ -478,10 +617,18 @@ public sealed class PowerShellRuntimeSessionCoordinatorTests
             ActiveRuntime = runtime;
             ProcessId = 4321;
             IsSessionRunning = true;
+            if (HoldNextStartAfterWritableState)
+            {
+                HoldNextStartAfterWritableState = false;
+                _heldStartCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                WritableStartNotificationObserved.TrySetResult(true);
+                await _heldStartCompletion.Task.ConfigureAwait(false);
+            }
             TerminalSessionStarted?.Invoke(StartCount);
         }
 
         public void CompleteHeldStart() => _heldStartCompletion?.TrySetResult(true);
+        public void RaiseTerminalStarted(int generation) => TerminalSessionStarted?.Invoke(generation);
         public void ReplaceProcessWithoutNotification(int processId) => ProcessId = processId;
 
         public Task<bool> ShutdownAsync(CancellationToken cancellationToken = default)

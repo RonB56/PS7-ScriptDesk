@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Collections.ObjectModel;
@@ -68,6 +68,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         private readonly IStructuredPromptReadinessSource? _structuredPromptReadinessSource;
         private readonly object _deferredStructuredPromptSync = new();
         private DeferredStructuredPromptObservation? _deferredStructuredPromptObservation;
+        private DeferredStructuredPromptObservation? _completedStructuredPromptAwaitingObservation;
         private int _structuredPromptReconciliationInvalidated;
 
         private readonly RelayCommand _runCommand;
@@ -193,7 +194,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         // Execution progress timer (4C).
         private System.Timers.Timer? _progressTimer;
-        private DateTime _executionStartTime;
+        private System.Diagnostics.Stopwatch? _executionStopwatch;
         private string _executionProgressText = string.Empty;
 
         // Editor zoom level (2B) — font size in points.
@@ -307,7 +308,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             WelcomeMessage = $"{ApplicationBranding.PublicName} shell is running.";
             _runtimeText = "Runtime: Detecting installed PowerShell runtimes...";
             _workspaceText = workspaceService.GetWorkspaceDisplayText();
-            _statusText = $"Ready - {_applicationVersionText}";
+            _statusText = "Ready";
             _terminalDisplayText =
                 $"{ApplicationBranding.PublicName} {_applicationVersionText} terminal pane initialized.{Environment.NewLine}" +
                 $"This phase now hosts a ConPTY-backed PowerShell terminal process inside the application.{Environment.NewLine}";
@@ -494,12 +495,46 @@ namespace PS7ScriptDesk.UI.ViewModels
             get => _statusText;
             set
             {
-                if (_statusText != value)
+                if (_statusText != value || _lastStatusWasGitNotification != _settingGitNotification)
                 {
+                    var previousApplicationStatus = ApplicationStatusText;
                     _statusText = value;
+                    _lastStatusWasGitNotification = _settingGitNotification;
                     OnPropertyChanged();
+                    if (previousApplicationStatus != ApplicationStatusText)
+                        OnPropertyChanged(nameof(ApplicationStatusText));
                 }
             }
+        }
+
+        // Git workspace messages remain available to its own views. The application
+        // status bar presents only application activity and actionable diagnostics.
+        private bool _settingGitNotification;
+        private bool _lastStatusWasGitNotification;
+        private string GitNotificationStatusText
+        {
+            set
+            {
+                _settingGitNotification = true;
+                try { StatusText = value; }
+                finally { _settingGitNotification = false; }
+            }
+        }
+
+        public void SetGitNotificationStatus(string message) => GitNotificationStatusText = message;
+
+        public string ApplicationStatusText => _lastStatusWasGitNotification || IsRoutineStatus(_statusText) ? "Ready" : _statusText;
+
+        private static bool IsRoutineStatus(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return true;
+            if (text.StartsWith("Diagnostics: OK", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("Diagnostics: Ready", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("PSScriptAnalyzer: Ready", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("PSScriptAnalyzer: No findings", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("PSScriptAnalyzer: waiting", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("PSScriptAnalyzer: Canceled", StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
         }
 
         public string GitStatusText => _gitStatusText;
@@ -510,7 +545,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         {
             if (_gitService is null || string.IsNullOrWhiteSpace(GitRepositoryRoot))
             {
-                StatusText = "Git diff is unavailable because no repository is open.";
+                GitNotificationStatusText = "Git diff is unavailable because no repository is open.";
                 return null;
             }
 
@@ -547,7 +582,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public async Task<GitHistoryTabViewModel?> OpenHistoryAsync(CancellationToken cancellationToken = default)
         {
-            if (_gitService is null || string.IsNullOrWhiteSpace(GitRepositoryRoot)) { StatusText = "Git history is unavailable because no repository is open."; return null; }
+            if (_gitService is null || string.IsNullOrWhiteSpace(GitRepositoryRoot)) { GitNotificationStatusText = "Git history is unavailable because no repository is open."; return null; }
             var tab = OpenTabs.OfType<GitHistoryTabViewModel>().FirstOrDefault(item => string.Equals(item.RepositoryRoot, GitRepositoryRoot, StringComparison.OrdinalIgnoreCase));
             if (tab is null) { tab = new GitHistoryTabViewModel(GitRepositoryRoot); OpenTabs.Add(tab); }
             SelectedTab = tab;
@@ -575,11 +610,11 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 IsGitMutationInProgress = true;
                 CurrentGitOperation = GitOperationKind.Clone;
-                StatusText = "Cloning repository...";
+                GitNotificationStatusText = "Cloning repository...";
                 var result = await _gitService.CloneAsync(request.Source, destination, cancellationToken).ConfigureAwait(false);
                 if (!result.Success)
                 {
-                    StatusText = SummarizeGitFailure("Clone", result);
+                    GitNotificationStatusText = SummarizeGitFailure("Clone", result);
                     DeveloperDiagnostics.LogOperationStop("Git", "Clone", "Repository clone returned a failure result.", (long)result.Duration.TotalMilliseconds, new Dictionary<string, object?>
                     {
                         ["source"] = SanitizeGitSource(request.Source),
@@ -622,7 +657,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             if (!Directory.Exists(selected))
             {
-                await PostToUiAsync(() => StatusText = "Initialize failed — selected folder is unavailable.").ConfigureAwait(false);
+                await PostToUiAsync(() => GitNotificationStatusText = "Initialize failed — selected folder is unavailable.").ConfigureAwait(false);
                 DeveloperDiagnostics.LogInfo("Git", "Repository initialization rejected because the selected folder is unavailable.", new Dictionary<string, object?> { ["folder"] = selected });
                 return;
             }
@@ -640,7 +675,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 CurrentGitOperation = GitOperationKind.Initialize;
                 IsGitMutationInProgress = true;
-                StatusText = "Initializing repository...";
+                GitNotificationStatusText = "Initializing repository...";
             }).ConfigureAwait(false);
             LogInitializeStage("busy-state-set", selected);
             DeveloperDiagnostics.LogInfo("Git", "Repository initialization entered the shared mutation lifecycle.", new Dictionary<string, object?> { ["folder"] = selected });
@@ -651,7 +686,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 var result = await _gitService.InitializeAsync(selected, cancellationToken).ConfigureAwait(false);
                 if (!result.Success)
                 {
-                    await PostToUiAsync(() => StatusText = SummarizeGitFailure("Initialize", result)).ConfigureAwait(false);
+                    await PostToUiAsync(() => GitNotificationStatusText = SummarizeGitFailure("Initialize", result)).ConfigureAwait(false);
                     DeveloperDiagnostics.LogOperationStop("Git", "Initialize", "Repository initialization returned a failure result.", (long)result.Duration.TotalMilliseconds, new Dictionary<string, object?>
                     {
                         ["folder"] = selected,
@@ -672,12 +707,12 @@ namespace PS7ScriptDesk.UI.ViewModels
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                await PostToUiAsync(() => StatusText = "Initialize canceled.").ConfigureAwait(false);
+                await PostToUiAsync(() => GitNotificationStatusText = "Initialize canceled.").ConfigureAwait(false);
                 DeveloperDiagnostics.LogInfo("Git", "Repository initialization canceled after entering the mutation lifecycle.", new Dictionary<string, object?> { ["folder"] = selected, ["durationMs"] = started.ElapsedMilliseconds });
             }
             catch (Exception ex)
             {
-                await PostToUiAsync(() => StatusText = "Initialize failed — unable to create repository.").ConfigureAwait(false);
+                await PostToUiAsync(() => GitNotificationStatusText = "Initialize failed — unable to create repository.").ConfigureAwait(false);
                 DeveloperDiagnostics.LogException("Git", ex, "Repository initialization failed unexpectedly.", new Dictionary<string, object?> { ["folder"] = selected, ["durationMs"] = started.ElapsedMilliseconds });
             }
             finally
@@ -850,7 +885,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             catch (Exception ex)
             {
                 DeveloperDiagnostics.LogException("Git", ex, $"{operationName} command failed unexpectedly.");
-                await PostToUiAsync(() => StatusText = $"{operationName} failed: The operation could not be completed.").ConfigureAwait(false);
+                await PostToUiAsync(() => GitNotificationStatusText = $"{operationName} failed: The operation could not be completed.").ConfigureAwait(false);
             }
         }
 
@@ -864,7 +899,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (!CanSwitchBranches)
             {
                 const string message = "One or more open documents have unsaved changes. Save or close them before pulling.";
-                StatusText = "Pull blocked";
+                GitNotificationStatusText = "Pull blocked";
                 _userPromptService.ShowWarningMessage("Cannot pull", message);
                 DeveloperDiagnostics.LogUserAction("Git", "PullRejectedDirtyDocument", "Pull was blocked to protect unsaved editor content.");
                 return;
@@ -881,7 +916,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         public async Task PublishBranchAsync(string remote)
         {
             var branch = _gitBranchState?.Branches.FirstOrDefault(item => item.IsCurrent && !item.IsRemote);
-            if (branch is null || string.IsNullOrWhiteSpace(GitRepositoryRoot)) { StatusText = "No local branch is active."; return; }
+            if (branch is null || string.IsNullOrWhiteSpace(GitRepositoryRoot)) { GitNotificationStatusText = "No local branch is active."; return; }
             await RunRemoteMutationAsync("PublishBranch", token => _gitService!.PublishBranchAsync(GitRepositoryRoot!, remote, branch.Name, token), markDiffsStale: false).ConfigureAwait(false);
         }
 
@@ -895,7 +930,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (!CanSwitchBranches)
             {
                 const string message = "One or more open documents have unsaved changes. Save or close them before syncing.";
-                StatusText = "Sync blocked";
+                GitNotificationStatusText = "Sync blocked";
                 _userPromptService.ShowWarningMessage("Cannot sync", message);
                 DeveloperDiagnostics.LogUserAction("Git", "SyncRejectedDirtyDocument", "Sync was blocked to protect unsaved editor content.");
                 return;
@@ -912,12 +947,12 @@ namespace PS7ScriptDesk.UI.ViewModels
                 if (branch.BehindCount > 0)
                 {
                     await PullAsync().ConfigureAwait(false);
-                    if (_gitRepositoryState?.Changes.Any(change => change.IsConflicted) == true) { StatusText = "Resolve conflicts before continuing Sync."; return; }
+                    if (_gitRepositoryState?.Changes.Any(change => change.IsConflicted) == true) { GitNotificationStatusText = "Resolve conflicts before continuing Sync."; return; }
                 }
                 await RefreshBranchesAsync().ConfigureAwait(false);
                 branch = _gitBranchState?.Branches.FirstOrDefault(item => item.IsCurrent && !item.IsRemote);
                 if (branch?.AheadCount > 0) await PushAsync().ConfigureAwait(false);
-                await PostToUiAsync(() => StatusText = _syncChildFailed
+                await PostToUiAsync(() => GitNotificationStatusText = _syncChildFailed
                     ? "Sync failed. Review the Git operation details."
                     : branch?.AheadCount > 0 || branch?.BehindCount > 0
                         ? "Sync completed."
@@ -932,7 +967,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task<bool> EnsureRemoteAvailableAsync(string operation, bool requireUpstream)
         {
-            if (!CanGitMutation()) { StatusText = "Git operation unavailable in the current repository state"; return false; }
+            if (!CanGitMutation()) { GitNotificationStatusText = "Git operation unavailable in the current repository state"; return false; }
             var remoteState = GitWorkspaceCoordinator?.CurrentRemoteState;
             if (remoteState is null)
             {
@@ -953,7 +988,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     var message = $"{operation} unavailable: branch '{currentBranch}' has no upstream. Configure an upstream branch before using {operation}.";
                     await PostToUiAsync(() =>
                     {
-                        StatusText = $"{operation} failed";
+                        GitNotificationStatusText = $"{operation} failed";
                         _userPromptService.ShowWarningMessage($"{operation} failed", message);
                     }).ConfigureAwait(false);
                     DeveloperDiagnostics.LogUserAction("Git", $"{operation}RejectedNoUpstream", "A remote operation was blocked because the current branch has no upstream.", new Dictionary<string, object?>
@@ -970,7 +1005,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task RunRemoteMutationAsync(string operation, Func<CancellationToken, Task<GitCommandResult>> action, bool markDiffsStale)
         {
-            if (_gitService is null || string.IsNullOrWhiteSpace(GitRepositoryRoot)) { StatusText = "Remote operation unavailable."; return; }
+            if (_gitService is null || string.IsNullOrWhiteSpace(GitRepositoryRoot)) { GitNotificationStatusText = "Remote operation unavailable."; return; }
             _isRemoteOperationInProgress = true; OnPropertyChanged(nameof(IsRemoteOperationInProgress)); RefreshGitCommands();
             try { await RunGitMutationAsync(operation, ".", action, $"{operation} completed", markDiffsStale).ConfigureAwait(false); }
             finally { PostToUi(() => { _isRemoteOperationInProgress = false; OnPropertyChanged(nameof(IsRemoteOperationInProgress)); RefreshGitCommands(); }); }
@@ -1022,7 +1057,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (blockingTabs.Length > 0)
             {
                 var message = "One or more open documents have unsaved changes. Save or close them before switching branches.";
-                StatusText = "Branch switch blocked";
+                GitNotificationStatusText = "Branch switch blocked";
                 _userPromptService.ShowWarningMessage("Cannot switch branch", message);
                 DeveloperDiagnostics.LogUserAction("Git", "BranchSwitchRejectedDirtyDocument", "Branch switching was blocked to protect unsaved editor content.", new Dictionary<string, object?>
                 {
@@ -1037,7 +1072,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             if (_gitService is null || string.IsNullOrWhiteSpace(GitRepositoryRoot))
             {
-                StatusText = "Branch switch unavailable";
+                GitNotificationStatusText = "Branch switch unavailable";
                 return null;
             }
             var result = await RunGitMutationAsync("SwitchBranch", branchName,
@@ -1064,7 +1099,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         {
             if (!CanGitMutation() || _gitService is null || string.IsNullOrWhiteSpace(GitRepositoryRoot))
             {
-                StatusText = "Branch operation is unavailable in the current repository state.";
+                GitNotificationStatusText = "Branch operation is unavailable in the current repository state.";
                 return null;
             }
             var success = await RunGitMutationAsync(operation, description, action, $"{operation} completed").ConfigureAwait(false);
@@ -5035,7 +5070,9 @@ namespace PS7ScriptDesk.UI.ViewModels
                     RequestId: request.RequestId, RequestCorrelation: "authoritative",
                     RuntimeSessionId: _runtimeSessionCoordinator?.Snapshot.SessionId,
                     RuntimeGeneration: _runtimeSessionCoordinator?.Snapshot.Generation,
-                    TerminalGeneration: request.SessionGeneration, ProcessId: _liveConsoleService.ProcessId));
+                    TerminalGeneration: request.SessionGeneration, ProcessId: _liveConsoleService.ProcessId,
+                    EventSource: "Editor", EventType: "RunRequest:" + request.Mode,
+                    CorrelationConfidence: "EditorRequestIdentity"));
             if (DeveloperDiagnostics.IsEnabled)
             {
                 DeveloperDiagnostics.LogUserAction("Execution", "RunFileRequestAdmitted", "Run File passed command admission and is entering coordinator routing.", new Dictionary<string, object?>
@@ -5173,11 +5210,18 @@ namespace PS7ScriptDesk.UI.ViewModels
                 var result = await _executionCoordinator.ExecuteAsync(
                     request,
                     structured ? _structuredExecutionCancellation!.Token : CancellationToken.None).ConfigureAwait(false);
+                if (request.Mode is (EditorExecutionMode.ScriptCall or EditorExecutionMode.RunSelection) &&
+                    result.Status is (EditorExecutionStatus.Completed or EditorExecutionStatus.Cancelled or EditorExecutionStatus.Failed) &&
+                    !result.RecoveryRequired)
+                    PostToUi(() => ShowCompletedExecutionDuration(result.Duration));
                 if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
                     ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("ExecutionOutcomeObserved",
                         RequestId: request.RequestId, TerminalGeneration: request.SessionGeneration,
-                        ProcessId: _liveConsoleService.ProcessId, Outcome: result.Status.ToString()));
-                structuredRequestCompleted = structured && result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed;
+                        ProcessId: _liveConsoleService.ProcessId, Outcome: result.Status.ToString(),
+                        Reason: result.RecoveryRequired ? "request-cleanup-recovery-required" : null));
+                structuredRequestCompleted = _structuredPromptReadinessSource is not null &&
+                    !result.RecoveryRequired &&
+                    result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed;
                 DeveloperDiagnostics.LogInfo("Execution", "Editor execution completion was detected by the coordinator.", new Dictionary<string, object?>
                 {
                     ["requestId"] = request.RequestId,
@@ -5205,7 +5249,21 @@ namespace PS7ScriptDesk.UI.ViewModels
                         ["contentOmitted"] = true
                     });
                 }
-                if (result.Status == EditorExecutionStatus.Unknown)
+                if (result.RecoveryRequired)
+                {
+                    runtimeExecutionLease?.MarkRecoveryRequired(
+                        result.ErrorMessage ?? "The editor execution backend reported that session recovery is required.");
+                    DeveloperDiagnostics.LogWarning("RuntimeBroker", "Runtime lease will remain in RecoveryRequired because the editor backend reported unsafe session state.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = request.RequestId,
+                        ["backendId"] = decision.SelectedBackend,
+                        ["status"] = result.Status.ToString(),
+                        ["runtimeGeneration"] = _runtimeSessionCoordinator?.Snapshot.Generation,
+                        ["backendSessionGeneration"] = request.SessionGeneration,
+                        ["contentOmitted"] = true
+                    });
+                }
+                else if (result.Status == EditorExecutionStatus.Unknown)
                 {
                     runtimeExecutionLease?.MarkReadinessUnverified(result.ErrorMessage ?? "Editor execution outcome or interactive readiness was not verified.");
                     DeveloperDiagnostics.LogWarning("RuntimeBroker", "Runtime lease will not publish Ready because the editor backend returned an unknown execution result.", new Dictionary<string, object?>
@@ -5214,6 +5272,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                         ["backendId"] = decision.SelectedBackend,
                         ["runtimeGeneration"] = _runtimeSessionCoordinator?.Snapshot.Generation,
                         ["backendSessionGeneration"] = request.SessionGeneration,
+                        ["recoveryRequired"] = result.RecoveryRequired,
                         ["contentOmitted"] = true
                     });
                 }
@@ -5281,6 +5340,10 @@ namespace PS7ScriptDesk.UI.ViewModels
                 await PostToUiAsync(() =>
                 {
                     if (_activeCoordinatorExecutionRequestId != request.RequestId) return;
+                    // Keep request identity live until the execution projection is
+                    // released. Prompt callbacks may race this worker-to-UI handoff.
+                    if (_executionCoordinator?.ActiveExecution is null)
+                        IsExecutionRunning = false;
                     if (structured)
                     {
                         _terminalOutputMultiplexer.EndEditorExecution(request.RequestId);
@@ -5289,8 +5352,6 @@ namespace PS7ScriptDesk.UI.ViewModels
                         _structuredExecutionCancellation = null;
                     }
                     _activeCoordinatorExecutionRequestId = null;
-                    if (_executionCoordinator?.ActiveExecution is null)
-                        IsExecutionRunning = false;
                     DeveloperDiagnostics.LogInfo("Execution", "Editor execution ownership was released.", new Dictionary<string, object?>
                     {
                         ["requestId"] = request.RequestId,
@@ -5303,7 +5364,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                         ["terminalState"] = _interactiveTerminalCoordinator.State.ToString(),
                         ["contentOmitted"] = true
                     });
-                    if (structured)
+                    if (_structuredPromptReadinessSource is not null)
                         ReconcileDeferredStructuredPromptObservation(request.RequestId, structuredRequestCompleted);
                     if (DeveloperDiagnostics.IsEnabled)
                     {
@@ -5536,7 +5597,12 @@ namespace PS7ScriptDesk.UI.ViewModels
                     });
 
                 var result = await _editorExecutionAdapter.ExecuteAsync(request, _structuredExecutionCancellation.Token).ConfigureAwait(false);
-                structuredRequestCompleted = result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed;
+                if (request.Mode is (EditorExecutionMode.ScriptCall or EditorExecutionMode.RunSelection) &&
+                    result.Status is (EditorExecutionStatus.Completed or EditorExecutionStatus.Cancelled or EditorExecutionStatus.Failed) &&
+                    !result.RecoveryRequired)
+                    PostToUi(() => ShowCompletedExecutionDuration(result.Duration));
+                structuredRequestCompleted = !result.RecoveryRequired &&
+                    result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed;
                 DeveloperDiagnostics.LogInfo("Execution", "Editor execution completion was detected by the structured adapter.", new Dictionary<string, object?>
                 {
                     ["requestId"] = requestId,
@@ -5581,7 +5647,6 @@ namespace PS7ScriptDesk.UI.ViewModels
             finally
             {
                 _terminalOutputMultiplexer.EndEditorExecution(requestId);
-                _activeStructuredExecutionRequestId = null;
                 _structuredExecutionCancellation?.Dispose();
                 _structuredExecutionCancellation = null;
                 DeveloperDiagnostics.LogInfo("Execution", "Editor execution ownership was released.", new Dictionary<string, object?>
@@ -5598,6 +5663,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 PostToUi(() =>
                 {
                     IsExecutionRunning = false;
+                    _activeStructuredExecutionRequestId = null;
                     ReconcileDeferredStructuredPromptObservation(requestId, structuredRequestCompleted);
                     RefreshCommandStates();
                 });
@@ -5778,6 +5844,20 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private async Task OnStopAsync()
         {
+            if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+            {
+                var runtime = _runtimeSessionCoordinator?.Snapshot;
+                var activeRequestId = _activeStructuredExecutionRequestId ?? _activeCoordinatorExecutionRequestId;
+                var structuredCancellation = _activeStructuredExecutionRequestId.HasValue && _structuredExecutionCancellation is not null;
+                ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent(
+                    structuredCancellation ? "CancellationRequested" : "InterruptRequested",
+                    RequestId: activeRequestId, RuntimeSessionId: runtime?.SessionId,
+                    RuntimeGeneration: runtime?.Generation,
+                    TerminalGeneration: _interactiveTerminalCoordinator.Snapshot.Generation,
+                    ProcessId: _liveConsoleService.ProcessId, EventSource: "Editor/Terminal",
+                    EventType: structuredCancellation ? "EditorCancellationRequested" : "TerminalInterruptRequested",
+                    EventOutcome: "Requested", CorrelationConfidence: activeRequestId.HasValue ? "RequestContext" : "GlobalObservation"));
+            }
             if (DeveloperDiagnostics.IsEnabled)
             {
                 var runtime = _runtimeSessionCoordinator?.Snapshot;
@@ -6911,7 +6991,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         {
             if (!HasWorkspaceLoaded)
             {
-                StatusText = "No workspace folder open";
+                GitNotificationStatusText = "No workspace folder open";
                 return;
             }
 
@@ -6988,7 +7068,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (_gitRepositoryState?.HasUnresolvedConflicts == true)
             {
                 const string conflictMessage = "Commit is blocked because unresolved conflicts remain. Resolve the conflicts and mark them resolved before committing.";
-                StatusText = "Commit blocked";
+                GitNotificationStatusText = "Commit blocked";
                 _userPromptService.ShowWarningMessage("Commit blocked", conflictMessage);
                 DeveloperDiagnostics.LogUserAction("Git", "CommitRejectedUnresolvedConflicts", "Commit was blocked because unresolved conflicts remain.");
                 return;
@@ -6996,7 +7076,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             if (!CanCommit())
             {
-                StatusText = CommitDisabledReason;
+                GitNotificationStatusText = CommitDisabledReason;
                 return;
             }
 
@@ -7018,7 +7098,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             status ??= GetSelectedGitStatus();
             if (!CanStageFile(status))
             {
-                StatusText = "Stage is unavailable for the selected item";
+                GitNotificationStatusText = "Stage is unavailable for the selected item";
                 return;
             }
 
@@ -7029,7 +7109,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (dirtyTab is not null)
             {
                 const string message = "This file has unsaved editor changes. Save the file before staging it.";
-                StatusText = "Stage blocked";
+                GitNotificationStatusText = "Stage blocked";
                 _userPromptService.ShowWarningMessage("Cannot stage", message);
                 DeveloperDiagnostics.LogUserAction("Git", "StageRejectedDirtyDocument", "Stage was blocked to prevent staging stale on-disk content.", new Dictionary<string, object?>
                 {
@@ -7053,7 +7133,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             status ??= GetSelectedGitStatus();
             if (!CanUnstageFile(status))
             {
-                StatusText = "Unstage is unavailable for the selected item";
+                GitNotificationStatusText = "Unstage is unavailable for the selected item";
                 return;
             }
 
@@ -7073,21 +7153,21 @@ namespace PS7ScriptDesk.UI.ViewModels
                 var message = status?.IsUntracked == true
                     ? "Untracked files are not deleted by Discard."
                     : "Discard is unavailable for the selected item.";
-                StatusText = message;
+                GitNotificationStatusText = message;
                 _userPromptService.ShowWarningMessage("Discard unavailable", message);
                 return;
             }
 
             if (!status.HasUnstagedChanges)
             {
-                StatusText = "Discard is unavailable because the item has no unstaged working-tree change.";
+                GitNotificationStatusText = "Discard is unavailable because the item has no unstaged working-tree change.";
                 return;
             }
 
             var targetPath = NormalizeStoredPath(status.FullPath);
             if (targetPath is null)
             {
-                StatusText = "Discard failed: the file path is invalid";
+                GitNotificationStatusText = "Discard failed: the file path is invalid";
                 return;
             }
 
@@ -7096,7 +7176,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (openTab?.IsDirty == true)
             {
                 const string message = "Discard is blocked because this file is open with unsaved editor changes. Save or close the dirty document before discarding the working-tree change.";
-                StatusText = "Discard blocked";
+                GitNotificationStatusText = "Discard blocked";
                 _userPromptService.ShowWarningMessage("Discard blocked", message);
                 DeveloperDiagnostics.LogDecision("Git", "DiscardDirtyDocument", "Discard was blocked to protect unsaved editor content.", "Blocked", new Dictionary<string, object?>
                 {
@@ -7112,7 +7192,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     "Cancel",
                     destructive: true))
             {
-                StatusText = "Discard canceled";
+                GitNotificationStatusText = "Discard canceled";
                 return;
             }
 
@@ -7129,7 +7209,7 @@ namespace PS7ScriptDesk.UI.ViewModels
         {
             if (!CanGitMutation())
             {
-                StatusText = "Git operation unavailable in the current repository state";
+                GitNotificationStatusText = "Git operation unavailable in the current repository state";
                 return false;
             }
 
@@ -7151,7 +7231,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     var displayOperation = GetGitOperationDisplayName(operationName);
                     PostToUi(() =>
                     {
-                        if (!_syncStatusOwner) StatusText = $"{displayOperation} failed";
+                        if (!_syncStatusOwner) GitNotificationStatusText = $"{displayOperation} failed";
                         if (displayOperation == operationName)
                             _userPromptService.ShowWarningMessage($"{operationName} failed", DescribeGitFailure(operationName, pathDescription, result));
                         else
@@ -7171,7 +7251,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
                 await RefreshGitRepositoryAsync(logOperation: false).ConfigureAwait(false);
                 if (markDiffsStale) PostToUi(() => MarkDiffsStale(pathDescription == "." ? null : pathDescription));
-                if (!_syncStatusOwner) PostToUi(() => StatusText = successText);
+                if (!_syncStatusOwner) PostToUi(() => GitNotificationStatusText = successText);
                 DeveloperDiagnostics.LogOperationStop("Git", operationName, "Git mutation completed.", (long)result.Duration.TotalMilliseconds, new Dictionary<string, object?>
                 {
                     ["operationId"] = operationId,
@@ -7186,7 +7266,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 var displayOperation = GetGitOperationDisplayName(operationName);
                 await PostToUiAsync(() =>
                 {
-                    if (!_syncStatusOwner) StatusText = $"{displayOperation} failed";
+                    if (!_syncStatusOwner) GitNotificationStatusText = $"{displayOperation} failed";
                     _userPromptService.ShowWarningMessage($"{displayOperation} failed", "The Git operation could not be completed.");
                 });
                 return false;
@@ -7319,7 +7399,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 StartupLifecycleTrace.Write("MainWindowViewModel.ReloadTabAfterGitDiscard", "FAULT", $"exception={ex.GetType().Name}: {ex.Message}");
                 DeveloperDiagnostics.LogException("Git", ex, "Open document could not be reloaded after discard.", new Dictionary<string, object?> { ["filePath"] = filePath });
-                StatusText = "Discard completed, but the open document could not be reloaded";
+                GitNotificationStatusText = "Discard completed, but the open document could not be reloaded";
             }
         }
 
@@ -7402,7 +7482,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                     RefreshGitCommands();
                     if (logOperation)
                     {
-                        StatusText = state.Repository.IsRepository
+                        GitNotificationStatusText = state.Repository.IsRepository
                             ? "Git repository detected"
                             : state.Environment.IsAvailable
                                 ? "No Git repository detected"
@@ -7447,7 +7527,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                         ["required"] = false,
                         ["component"] = "remotes"
                     });
-                    await PostToUiAsync(() => StatusText = "Git remotes could not be refreshed; repository status is available.").ConfigureAwait(false);
+                    await PostToUiAsync(() => GitNotificationStatusText = "Git remotes could not be refreshed; repository status is available.").ConfigureAwait(false);
                 }
                 DeveloperDiagnostics.LogInfo("Git", "Git repository state was published to the UI.", new Dictionary<string, object?>
                 {
@@ -7469,7 +7549,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                         ["required"] = false,
                         ["component"] = "branches"
                     });
-                    await PostToUiAsync(() => StatusText = "Git branches could not be refreshed; repository status is available.").ConfigureAwait(false);
+                    await PostToUiAsync(() => GitNotificationStatusText = "Git branches could not be refreshed; repository status is available.").ConfigureAwait(false);
                 }
                 foreach (var historyTab in OpenTabs.OfType<GitHistoryTabViewModel>().Where(tab => string.Equals(tab.RepositoryRoot, state.Repository.RepositoryRoot, StringComparison.OrdinalIgnoreCase)))
                     _ = RefreshHistoryAsync(historyTab, true, cancellationSource.Token);
@@ -7496,7 +7576,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                         {
                             _gitStatusText = "Git: unavailable";
                             OnPropertyChanged(nameof(GitStatusText));
-                            StatusText = "Git repository refresh failed";
+                            GitNotificationStatusText = "Git repository refresh failed";
                         }).ConfigureAwait(false);
                 }
             }
@@ -7527,7 +7607,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             var folderPath = _userPromptService.ShowOpenFolderDialog();
             if (string.IsNullOrWhiteSpace(folderPath))
             {
-                StatusText = "Git repository folder selection canceled";
+                GitNotificationStatusText = "Git repository folder selection canceled";
                 DeveloperDiagnostics.LogEventHandlerExit("Git", "OpenRepositoryFolder", "Git repository folder selection canceled.");
                 return;
             }
@@ -7548,7 +7628,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             if (existing is not null)
             {
                 SelectedTab = existing;
-                StatusText = "Git Diagnostics opened";
+                GitNotificationStatusText = "Git Diagnostics opened";
                 DeveloperDiagnostics.LogUserAction("Git", "GitDiagnosticsOpened", "The existing Git diagnostics document was activated.", new Dictionary<string, object?>
                 {
                     ["reusedExistingDocument"] = true,
@@ -7567,7 +7647,7 @@ namespace PS7ScriptDesk.UI.ViewModels
             SelectedTab = tab;
             OnPropertyChanged(nameof(OpenTabCountText));
             OnPropertyChanged(nameof(ActiveDocumentText));
-            StatusText = "Git Diagnostics opened";
+            GitNotificationStatusText = "Git Diagnostics opened";
             DeveloperDiagnostics.LogUserAction("Git", "GitDiagnosticsOpened", "A Git diagnostics document was opened in the normal general-text editor path.", new Dictionary<string, object?>
             {
                 ["reusedExistingDocument"] = false,
@@ -8427,6 +8507,14 @@ namespace PS7ScriptDesk.UI.ViewModels
         private void OnStructuredPromptReadyObserved(StructuredPromptReadyObservation observation)
         {
             var runtime = _runtimeSessionCoordinator?.Snapshot;
+            var matchingActiveRequest = _activeStructuredExecutionRequestId == observation.RequestId ||
+                (_activeStructuredExecutionRequestId is null && _activeCoordinatorExecutionRequestId == observation.RequestId);
+            var noExecutionOwner = _activeStructuredExecutionRequestId is null &&
+                _activeCoordinatorExecutionRequestId is null &&
+                _executionCoordinator?.ActiveExecution is null &&
+                !IsExecutionRunning &&
+                !_liveConsoleService.IsCommandInProgress &&
+                runtime?.State is not (PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging);
             var sessionCurrent = observation.RequestId != Guid.Empty &&
                 observation.TerminalGeneration > 0 &&
                 observation.TerminalGeneration == _liveConsoleService.CurrentSessionGeneration &&
@@ -8435,7 +8523,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 observation.ProcessId == _liveConsoleService.ProcessId &&
                 _liveConsoleService.IsSessionRunning &&
                 _liveConsoleService.IsInputWritable &&
-                _activeStructuredExecutionRequestId == observation.RequestId &&
+                (matchingActiveRequest || noExecutionOwner) &&
                 Volatile.Read(ref _structuredPromptReconciliationInvalidated) == 0 &&
                 Volatile.Read(ref _resetConsoleInProgress) == 0 &&
                 !IsStopInProgress &&
@@ -8499,18 +8587,28 @@ namespace PS7ScriptDesk.UI.ViewModels
                 observation.ProcessId);
             lock (_deferredStructuredPromptSync)
             {
-                // A structured observation is tied to exactly one current owner.
+                // Keep request identity until completion reconciliation. The event can
+                // arrive just after the execution owner has released its reservation.
                 _deferredStructuredPromptObservation = deferred;
+            }
+            var completionAlreadyReconciled = false;
+            if (!matchingActiveRequest)
+            {
+                lock (_deferredStructuredPromptSync)
+                    completionAlreadyReconciled = _completedStructuredPromptAwaitingObservation?.RequestId == observation.RequestId;
             }
             if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
                 ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("UiPromptDeferred",
                     RequestId: observation.RequestId, RuntimeSessionId: runtime?.SessionId,
                     RuntimeGeneration: runtime?.Generation, TerminalGeneration: observation.TerminalGeneration,
-                    ProcessId: observation.ProcessId, IdentityValid: true, LeaseState: "held",
+                    ProcessId: observation.ProcessId, IdentityValid: true,
+                    LeaseState: matchingActiveRequest ? "held" : "released",
                     InteractiveState: _interactiveTerminalCoordinator.State.ToString(), RuntimeState: runtime?.State.ToString()));
             DeveloperDiagnostics.LogInfo(
                 "Terminal",
-                "Request-verified structured prompt retained until its matching editor execution releases ownership.",
+                matchingActiveRequest
+                    ? "Request-verified structured prompt retained until its matching editor execution releases ownership."
+                    : "Request-verified structured prompt retained for completion reconciliation after execution ownership release.",
                 new Dictionary<string, object?>
                 {
                     ["requestId"] = observation.RequestId,
@@ -8521,13 +8619,27 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ["pathLength"] = observation.Path?.Length ?? 0,
                     ["contentOmitted"] = true
                 });
+            if (completionAlreadyReconciled)
+                PostToUi(() => ReconcileDeferredStructuredPromptObservation(observation.RequestId, requestCompleted: true));
         }
 
         private void ReconcileDeferredStructuredPromptObservation(Guid completedRequestId, bool requestCompleted)
         {
             DeferredStructuredPromptObservation? deferred;
+            var runtimeAtCompletion = _runtimeSessionCoordinator?.Snapshot;
+            DeferredStructuredPromptObservation? completionIdentity;
             lock (_deferredStructuredPromptSync)
             {
+                _completedStructuredPromptAwaitingObservation = requestCompleted
+                    ? new DeferredStructuredPromptObservation(
+                        completedRequestId,
+                        _liveConsoleService.CurrentSessionGeneration,
+                        string.Empty,
+                        runtimeAtCompletion?.SessionId ?? Guid.Empty,
+                        runtimeAtCompletion?.Generation,
+                        _liveConsoleService.ProcessId ?? 0)
+                    : null;
+                completionIdentity = _completedStructuredPromptAwaitingObservation;
                 deferred = _deferredStructuredPromptObservation;
                 if (deferred?.RequestId == completedRequestId)
                     _deferredStructuredPromptObservation = null;
@@ -8547,6 +8659,12 @@ namespace PS7ScriptDesk.UI.ViewModels
 
             var runtime = _runtimeSessionCoordinator?.Snapshot;
             var identityMatches = requestCompleted &&
+                completionIdentity is not null &&
+                completionIdentity.RequestId == deferred.RequestId &&
+                completionIdentity.TerminalGeneration == deferred.TerminalGeneration &&
+                completionIdentity.ProcessId == deferred.ProcessId &&
+                completionIdentity.RuntimeSessionId == deferred.RuntimeSessionId &&
+                completionIdentity.RuntimeGeneration == deferred.RuntimeGeneration &&
                 _activeStructuredExecutionRequestId is null &&
                 _activeCoordinatorExecutionRequestId is null &&
                 _executionCoordinator?.ActiveExecution is null &&
@@ -8560,11 +8678,14 @@ namespace PS7ScriptDesk.UI.ViewModels
                 _liveConsoleService.IsSessionRunning &&
                 _liveConsoleService.IsInputWritable &&
                 (runtime is null
-                    ? deferred.RuntimeSessionId == Guid.Empty
-                    : runtime.SessionId == deferred.RuntimeSessionId &&
-                      runtime.Generation == deferred.RuntimeGeneration &&
-                      runtime.ProcessId == deferred.ProcessId &&
-                      _runtimeSessionCoordinator!.IsCurrent(runtime.SessionId, runtime.Generation));
+                    ? _runtimeSessionCoordinator is null && deferred.RuntimeSessionId == Guid.Empty
+                    : _runtimeSessionCoordinator!.TryAdmitStructuredPromptReadiness(
+                        deferred.RequestId,
+                        deferred.RuntimeSessionId,
+                        deferred.RuntimeGeneration ?? 0,
+                        deferred.TerminalGeneration,
+                        deferred.ProcessId,
+                        requestCompleted));
 
             if (!identityMatches)
             {
@@ -8583,9 +8704,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                     if (deferred.ProcessId != _liveConsoleService.ProcessId) failed.Add("process-identity-mismatch");
                     if (!_liveConsoleService.IsSessionRunning) failed.Add("session-not-running");
                     if (!_liveConsoleService.IsInputWritable) failed.Add("transport-not-writable");
-                    if (runtime is null ? deferred.RuntimeSessionId != Guid.Empty :
-                        runtime.SessionId != deferred.RuntimeSessionId || runtime.Generation != deferred.RuntimeGeneration ||
-                        runtime.ProcessId != deferred.ProcessId || !_runtimeSessionCoordinator!.IsCurrent(runtime.SessionId, runtime.Generation))
+                    if (runtime is null ? _runtimeSessionCoordinator is not null || deferred.RuntimeSessionId != Guid.Empty :
+                        runtime.SessionId != deferred.RuntimeSessionId || runtime.Generation != deferred.RuntimeGeneration)
                         failed.Add("runtime-session-mismatch");
                     ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("UiPromptReconciliationRejected",
                         RequestId: completedRequestId, RuntimeSessionId: runtime?.SessionId,
@@ -8625,12 +8745,20 @@ namespace PS7ScriptDesk.UI.ViewModels
                     ActualReady: accepted, Reason: accepted ? "accepted" : "prompt-admission-rejected-see-ui-prompt-admission-rejected",
                     LeaseState: "released", InteractiveState: _interactiveTerminalCoordinator.State.ToString(),
                     RuntimeState: runtime?.State.ToString()));
+            if (accepted)
+            {
+                lock (_deferredStructuredPromptSync)
+                {
+                    if (_completedStructuredPromptAwaitingObservation?.RequestId == completedRequestId)
+                        _completedStructuredPromptAwaitingObservation = null;
+                }
+            }
             DeveloperDiagnostics.LogDecision(
                 "Terminal",
                 "StructuredPromptReadinessReconciliation",
                 accepted
-                    ? "Matching request prompt passed existing prompt-admission checks after execution ownership release."
-                    : "Matching request prompt did not pass the existing prompt-admission checks after ownership release.",
+                    ? "Matching request prompt passed runtime-coordinator and UI prompt-admission checks after execution ownership release."
+                    : "Matching request prompt did not pass runtime-coordinator or UI prompt-admission checks after ownership release.",
                 accepted ? "Accepted" : "PromptAdmissionRejected",
                 new Dictionary<string, object?>
                 {
@@ -8652,6 +8780,7 @@ namespace PS7ScriptDesk.UI.ViewModels
                 cleared = _deferredStructuredPromptObservation is not null;
                 clearedRequestId = _deferredStructuredPromptObservation?.RequestId;
                 _deferredStructuredPromptObservation = null;
+                _completedStructuredPromptAwaitingObservation = null;
             }
             if (cleared)
             {
@@ -9441,7 +9570,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void StartProgressTimer()
         {
-            _executionStartTime = DateTime.Now;
+            _executionStopwatch = System.Diagnostics.Stopwatch.StartNew();
             ExecutionProgressText = "Running 0s";
 
             _progressTimer?.Stop();
@@ -9449,8 +9578,12 @@ namespace PS7ScriptDesk.UI.ViewModels
             var timer = new System.Timers.Timer(1000) { AutoReset = true };
             timer.Elapsed += (_, _) =>
             {
-                var elapsed = DateTime.Now - _executionStartTime;
-                PostToUi(() => ExecutionProgressText = $"Running {(int)elapsed.TotalSeconds}s");
+                var elapsed = _executionStopwatch?.Elapsed ?? TimeSpan.Zero;
+                PostToUi(() =>
+                {
+                    if (IsExecutionRunning && _executionStopwatch is not null)
+                        ExecutionProgressText = $"Running {(int)elapsed.TotalSeconds}s";
+                });
             };
             timer.Start();
             _progressTimer = timer;
@@ -9458,10 +9591,19 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void StopProgressTimer()
         {
+            _executionStopwatch?.Stop();
             _progressTimer?.Stop();
             _progressTimer?.Dispose();
             _progressTimer = null;
-            ExecutionProgressText = string.Empty;
+            _executionStopwatch = null;
+        }
+
+        private void ShowCompletedExecutionDuration(TimeSpan duration)
+        {
+            if (duration < TimeSpan.Zero) return;
+            ExecutionProgressText = duration.TotalMinutes >= 1
+                ? $"Execution: {(int)duration.TotalMinutes}m {duration.Seconds:D2}s"
+                : $"Execution: {duration.TotalSeconds:0.00}s";
         }
 
         // -------------------------------------------------------------------------

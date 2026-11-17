@@ -14,8 +14,73 @@ namespace PS7ScriptDesk.PowerShell.Services;
 /// </summary>
 internal static class PsesDapEvaluationClient
 {
+    public static async Task<bool> RemoveStagedScriptAsync(
+        string pipePath, Guid requestId, int sessionGeneration, string variableName)
+    {
+        // A canceled staging evaluation can finish just before its cancel response.
+        // Remove its request-unique launcher through the same PSES runspace before
+        // allowing another editor request to proceed.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            var pipeName = pipePath.Replace("\\\\.\\pipe\\", string.Empty, StringComparison.OrdinalIgnoreCase);
+            await using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            await pipe.ConnectAsync(timeout.Token).ConfigureAwait(false);
+            var initialized = await SendAsync(pipe, 1, "initialize", new
+            {
+                adapterID = "PS7ScriptDesk", clientID = "PS7ScriptDesk",
+                clientName = "PS7 ScriptDesk staged execution cleanup",
+                linesStartAt1 = true, columnsStartAt1 = true, pathFormat = "path",
+                supportsVariablePaging = false, supportsRunInTerminalRequest = false
+            }, timeout.Token).ConfigureAwait(false);
+            if (!initialized) return false;
+            var ack = "PS7SD_CLEANUP_ACK_" + requestId.ToString("N");
+            var expression = $"Remove-Variable -Name '{variableName}' -Scope Global -ErrorAction SilentlyContinue; " +
+                $"if (Get-Variable -Name '{variableName}' -Scope Global -ErrorAction SilentlyContinue) {{ 'PS7SD_CLEANUP_PRESENT_{requestId:N}' }} else {{ '{ack}' }}";
+            var response = await SendForResponseAsync(pipe, 2, "evaluate", new { expression, context = "repl" }, timeout.Token).ConfigureAwait(false);
+            var removed = IsSuccessful(response) && response.TryGetProperty("body", out var body) &&
+                body.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.String &&
+                string.Equals(result.GetString()?.Trim(), ack, StringComparison.Ordinal);
+            if (removed)
+            {
+                try
+                {
+                    await SendAsync(pipe, 3, "disconnect", new { terminateDebuggee = false, restart = false }, timeout.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is IOException or OperationCanceledException or InvalidDataException)
+                {
+                    // The request-correlated evaluate response already proved the
+                    // launcher absent. A best-effort client disconnect must not
+                    // invalidate that cleanup acknowledgment.
+                    DeveloperDiagnostics.LogWarning("PSES", "Staged launcher cleanup was acknowledged; DAP disconnect did not complete before the bounded deadline.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["sessionGeneration"] = sessionGeneration,
+                        ["exceptionType"] = ex.GetType().Name
+                    });
+                }
+            }
+            DeveloperDiagnostics.LogInfo("PSES", "Canceled staged launcher cleanup completed.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId, ["sessionGeneration"] = sessionGeneration,
+                ["cleanupAcknowledged"] = removed, ["contentOmitted"] = true
+            });
+            return removed;
+        }
+        catch (Exception ex)
+        {
+            DeveloperDiagnostics.LogWarning("PSES", "Canceled staged launcher cleanup could not be confirmed.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId, ["sessionGeneration"] = sessionGeneration,
+                ["exceptionType"] = ex.GetType().Name, ["contentOmitted"] = true
+            });
+            return false;
+        }
+    }
+
     public static async Task<PsesStructuredEvaluationResult> EvaluateAsync(
-        string pipePath, Guid requestId, int sessionGeneration, string expression, CancellationToken cancellationToken)
+        string pipePath, Guid requestId, int sessionGeneration, string expression, CancellationToken cancellationToken,
+        Action? onEvaluationSubmitted = null, Action<bool>? onEvaluationSettled = null)
     {
         DeveloperDiagnostics.LogInfo("PSES", "Private DAP evaluation connecting to authoritative debug endpoint.", new Dictionary<string, object?>
         {
@@ -55,17 +120,24 @@ internal static class PsesDapEvaluationClient
         bool evaluated;
         try
         {
+            onEvaluationSubmitted?.Invoke();
             evaluated = await SendAsync(pipe, 2, "evaluate", new { expression, context = "repl" }, cancellationToken).ConfigureAwait(false);
+            onEvaluationSettled?.Invoke(evaluated);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // DAP cancellation must reach PSES before the pipe is disposed.
             // Closing the client alone leaves the foreground pipeline running.
             using var settleTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var responseReceived = false;
+            var settled = false;
             try
             {
                 await WriteRequestAsync(pipe, 3, "cancel", new { requestId = 2 }, settleTimeout.Token).ConfigureAwait(false);
-                var settled = await WaitForResponseAsync(pipe, 2, settleTimeout.Token).ConfigureAwait(false);
+                var response = await WaitForResponseMessageAsync(pipe, 2, settleTimeout.Token).ConfigureAwait(false);
+                responseReceived = true;
+                settled = IsSuccessful(response);
+                onEvaluationSettled?.Invoke(settled);
                 DeveloperDiagnostics.LogInfo("PSES", "Private DAP evaluation cancellation settled.", new Dictionary<string, object?>
                 {
                     ["requestId"] = requestId,
@@ -81,9 +153,17 @@ internal static class PsesDapEvaluationClient
                     ["sessionGeneration"] = sessionGeneration,
                     ["exceptionType"] = ex.GetType().Name
                 });
-                // The service still escalates cancellation through ConPTY.
             }
-            throw;
+            if (!responseReceived)
+            {
+                // No terminal response means staging may still complete later. The
+                // caller must retain conservative readiness and must not race cleanup
+                // against this outstanding operation.
+                throw new OperationCanceledException(cancellationToken);
+            }
+            return settled
+                ? new(EditorExecutionStatus.Completed, true, true, null, null)
+                : new(EditorExecutionStatus.Unknown, true, true, "DAP evaluate failed", "PSES rejected the private execution request.");
         }
         try
         {
@@ -127,6 +207,18 @@ internal static class PsesDapEvaluationClient
     }
 
     private static async Task<bool> WaitForResponseAsync(Stream stream, int sequence, CancellationToken cancellationToken)
+        => IsSuccessful(await WaitForResponseMessageAsync(stream, sequence, cancellationToken).ConfigureAwait(false));
+
+    private static async Task<JsonElement> SendForResponseAsync(Stream stream, int sequence, string command, object arguments, CancellationToken cancellationToken)
+    {
+        await WriteRequestAsync(stream, sequence, command, arguments, cancellationToken).ConfigureAwait(false);
+        return await WaitForResponseMessageAsync(stream, sequence, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool IsSuccessful(JsonElement response)
+        => response.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True;
+
+    private static async Task<JsonElement> WaitForResponseMessageAsync(Stream stream, int sequence, CancellationToken cancellationToken)
     {
         while (true)
         {
@@ -134,7 +226,7 @@ internal static class PsesDapEvaluationClient
             if (!response.TryGetProperty("type", out var type) || type.GetString() != "response" ||
                 !response.TryGetProperty("request_seq", out var requestSequence) || requestSequence.GetInt32() != sequence)
                 continue;
-            return response.TryGetProperty("success", out var success) && success.GetBoolean();
+            return response;
         }
     }
 

@@ -212,7 +212,10 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         }
     }
 
-    public async Task<PsesStructuredEvaluationResult> EvaluateAsync(Guid requestId, string expression, CancellationToken cancellationToken = default)
+    public Task<PsesStructuredEvaluationResult> EvaluateAsync(Guid requestId, string expression, CancellationToken cancellationToken = default)
+        => EvaluateAsync(requestId, expression, cancellationToken, null);
+
+    public async Task<PsesStructuredEvaluationResult> EvaluateAsync(Guid requestId, string expression, CancellationToken cancellationToken, Action? onRequestSubmitted)
     {
         ArgumentNullException.ThrowIfNull(expression); ThrowIfDisposed();
         if (!IsInitialized) throw new InvalidOperationException("The PSES language-service client is not initialized.");
@@ -231,7 +234,19 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
             // Its owner supplies cancellation, and a lost pipe faults the pending response.
             var response = await SendRequestAsync("evaluate", new { expression }, cancellationToken, requestId,
                 waitForForegroundCompletion: true,
-                protocolIdAssigned: id => protocolRequestId = id,
+                protocolIdAssigned: id =>
+                {
+                    onRequestSubmitted?.Invoke();
+                    protocolRequestId = id;
+                    if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+                        ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("PsesEvaluationSubmitted",
+                            RequestId: requestId, ProtocolRequestId: id,
+                            RuntimeSessionId: RuntimeIdentityVerified ? RuntimeSessionIdentity : null,
+                            RuntimeGeneration: RuntimeGeneration, TerminalGeneration: SessionGeneration,
+                            ProcessId: _processId, ProcessStartUtcTicks: _processStartUtcTicks,
+                            PsesVersion: PsesLifecycleVersion, EventSource: "PSES/LSP",
+                            EventType: "EvaluateRequestSubmitted", CorrelationConfidence: "RequestIdentity"));
+                },
                 responseObserved: (_, sequence, idleCount) => { responseSequence = sequence; idleCountAtResponse = idleCount; }).ConfigureAwait(false);
             var hasResult = response.TryGetProperty("result", out var resultElement);
             WritePipeForensics(new
@@ -564,6 +579,14 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
                                 _psesIdleNotificationCount++;
                             }
                         }
+                        if (DeveloperDiagnostics.IsEnabled && !_requestIds.IsEmpty)
+                            DeveloperDiagnostics.LogInfo("PSES", "PSES busy status observed while a correlated request was pending.", Metadata(new()
+                            {
+                                ["busy"] = busy,
+                                ["wireNotificationSequence"] = wireNotificationSequence,
+                                ["pendingForegroundRequestCount"] = _requestIds.Count,
+                                ["contentOmitted"] = true
+                            }));
                     }
                     _ = DispatchNotificationSafelyAsync(methodName, parameters, cancellationToken, wireNotificationSequence);
                 }

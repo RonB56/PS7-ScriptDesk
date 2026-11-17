@@ -124,7 +124,7 @@ public sealed class BottomToolWindowLayoutRepairTests
     public void MainWindow_UsesLiveTerminalControlGeometryAndMarksOuterRowModeScoped()
     {
         var mainCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
-        var resizeDiagnostics = ExtractBetween(mainCode, "private Dictionary<string, object?> BuildResizeLayoutDiagnostics", "private void GitStatusTextBlock_TargetUpdated");
+        var resizeDiagnostics = ExtractBetween(mainCode, "private Dictionary<string, object?> BuildResizeLayoutDiagnostics", "private void ConsoleSessionStatusTextBlock_TargetUpdated");
         var bottomDiagnostics = ExtractBetween(mainCode, "private Dictionary<string, object?> BuildBottomToolWindowDiagnostics", "private void EditorTextEditor_PreviewDragOver");
 
         Assert.Contains("terminalRectangleSource\"] = \"TerminalConsole.ActualWidth/ActualHeight\"", resizeDiagnostics, StringComparison.Ordinal);

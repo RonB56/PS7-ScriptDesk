@@ -31,9 +31,9 @@ public sealed class StartupLifecycleTraceTests
         Assert.Contains("StartupLifecycleTrace.Write(\"TerminalControl.Xterm\", \"READY\"", terminalControl, StringComparison.Ordinal);
         Assert.Contains("StartupLifecycleTrace.Write(\"AppBootstrapper.CreateMainWindow\", \"ENTER\"", bootstrapper, StringComparison.Ordinal);
         Assert.Contains("var args = new PropertyChangedEventArgs(propertyName)", viewModel, StringComparison.Ordinal);
-        Assert.Contains("TargetUpdated=\"GitStatusTextBlock_TargetUpdated\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("TargetUpdated=\"GitStatusTextBlock_TargetUpdated\"", xaml, StringComparison.Ordinal);
         Assert.Contains("TargetUpdated=\"ConsoleSessionStatusTextBlock_TargetUpdated\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("StartupLifecycleTrace.Write(\"MainWindow.GitStatusTextBlock\", \"TARGET_UPDATED\"", mainWindow, StringComparison.Ordinal);
+        Assert.DoesNotContain("StartupLifecycleTrace.Write(\"MainWindow.GitStatusTextBlock\", \"TARGET_UPDATED\"", mainWindow, StringComparison.Ordinal);
         Assert.Contains("StartupLifecycleTrace.Write(\"MainWindow.ConsoleSessionStatusTextBlock\", \"TARGET_UPDATED\"", mainWindow, StringComparison.Ordinal);
     }
 

@@ -16,12 +16,22 @@ public sealed class TerminalAtRootCauseContractTests
     {
         var source = ReadRepositoryFile("PS7ScriptDesk.UI", "ViewModels", "MainWindowViewModel.cs");
 
-        var clearMethod = source[source.IndexOf("private async Task OnClearConsoleAsync()", StringComparison.Ordinal)..];
+        var clearMethod = ExtractSection(
+            source,
+            "private async Task OnClearConsoleAsync()",
+            "private async Task OnRefreshRuntimesAsync()");
         Assert.DoesNotContain("_clearTerminalSink", clearMethod, StringComparison.Ordinal);
         Assert.Contains("TryBeginInternalTerminalCommand(clearRequestId", clearMethod, StringComparison.Ordinal);
         Assert.Contains("ExecuteConsoleCommandAsync(\"cls\", AppendExecutionOutput, clearRequestId)", clearMethod, StringComparison.Ordinal);
         Assert.DoesNotContain("WriteRawInputAsync(\"cls\\r\")", clearMethod, StringComparison.Ordinal);
         Assert.Contains("PowerShell session unavailable. Use Reset Console", clearMethod, StringComparison.Ordinal);
+
+        var lifecycleOutput = ExtractSection(
+            source,
+            "private void AppendExecutionOutput(ExecutionOutputRecord record)",
+            "private void OnStructuredEditorExecutionEvent(");
+        Assert.Contains("_clearTerminalSink", lifecycleOutput, StringComparison.Ordinal);
+        Assert.Contains("TerminalDisplayText = string.Empty", lifecycleOutput, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -33,7 +43,6 @@ public sealed class TerminalAtRootCauseContractTests
         Assert.Contains("reconcile_authoritative_clear", terminalSource, StringComparison.Ordinal);
         Assert.Contains("term.scrollToBottom()", terminalSource, StringComparison.Ordinal);
         Assert.Contains("preservesSession", terminalSource, StringComparison.Ordinal);
-        Assert.Contains("_reconcileAuthoritativeClearSink?.Invoke()", viewModelSource, StringComparison.Ordinal);
         Assert.Contains("_reconcileAuthoritativeClearSink?.Invoke()", viewModelSource, StringComparison.Ordinal);
     }
 
@@ -79,16 +88,32 @@ public sealed class TerminalAtRootCauseContractTests
     {
         var service = ReadRepositoryFile("PS7ScriptDesk.PowerShell", "Services", "PsesOwnedInteractiveSessionService.cs");
         var viewModel = ReadRepositoryFile("PS7ScriptDesk.UI", "ViewModels", "MainWindowViewModel.cs");
-        var stop = service[service.IndexOf("private async Task<LiveConsoleInterruptOutcome> StopConsoleForGenerationAsync", StringComparison.Ordinal)..];
+        var stop = ExtractSection(
+            service,
+            "private async Task<InterruptRecoveryResult> StopConsoleForGenerationAsync(int expectedGeneration)",
+            "private sealed record InterruptRecoveryResult");
 
         Assert.Contains("LiveConsoleInterruptOutcome.RecoveredAtPrompt", stop, StringComparison.Ordinal);
         Assert.Contains("LiveConsoleInterruptOutcome.TimedOutUnverified", stop, StringComparison.Ordinal);
+        Assert.Contains("await promptRecoveryWaiter.Task.WaitAsync(PromptRecoveryTimeout)", stop, StringComparison.Ordinal);
         Assert.Contains("_interactiveReadinessUnverified = true", stop, StringComparison.Ordinal);
-        Assert.DoesNotContain("return !requirePromptRecovery", stop, StringComparison.Ordinal);
+
+        var interruptDelivery = ExtractSection(
+            service,
+            "public async Task<LiveConsoleInterruptResult> InterruptOrRestartAsync(",
+            "public void Dispose()");
+        Assert.Contains("var recovery = await StopConsoleForGenerationAsync(CurrentSessionGeneration)", interruptDelivery, StringComparison.Ordinal);
+        Assert.Contains("outcome == LiveConsoleInterruptOutcome.RecoveredAtPrompt", interruptDelivery, StringComparison.Ordinal);
+        Assert.Contains("recovery.SignalDelivered", interruptDelivery, StringComparison.Ordinal);
+
         var interruptStart = viewModel.IndexOf("private async Task OnStopAsync()", StringComparison.Ordinal);
         var interruptEnd = viewModel.IndexOf("private async Task OnRestartConsoleAsync()", interruptStart, StringComparison.Ordinal);
+        Assert.True(interruptStart >= 0 && interruptEnd > interruptStart, "Could not locate the OnStopAsync source section.");
         var interrupt = viewModel[interruptStart..interruptEnd];
-        Assert.DoesNotContain("!_liveConsoleService.IsCommandInProgress", interrupt, StringComparison.Ordinal);
+        Assert.Contains("_executionCoordinator?.ActiveExecution is null", interrupt, StringComparison.Ordinal);
+        Assert.Contains("interruptResult.CompletedGracefully ||", interrupt, StringComparison.Ordinal);
+        Assert.Contains("interruptResult.SessionRestarted ||", interrupt, StringComparison.Ordinal);
+        Assert.Contains("IsExecutionRunning = !executionResolved", interrupt, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -112,4 +137,14 @@ public sealed class TerminalAtRootCauseContractTests
 
     private static string ReadRepositoryFile(params string[] segments)
         => TestRepositoryPaths.ReadFile(segments);
+
+    private static string ExtractSection(string source, string startMarker, string endMarker)
+    {
+        var start = source.IndexOf(startMarker, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"Could not find source marker: {startMarker}");
+
+        var end = source.IndexOf(endMarker, start + startMarker.Length, StringComparison.Ordinal);
+        Assert.True(end > start, $"Could not find source marker after '{startMarker}': {endMarker}");
+        return source[start..end];
+    }
 }

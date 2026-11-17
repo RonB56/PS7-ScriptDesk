@@ -32,6 +32,24 @@ public sealed class HostForegroundTaskEndedCandidateTests
     }
 
     [Fact]
+    public void IdleSequenceWithoutAnObservedIdleIsIncomplete()
+    {
+        Assert.Equal("incomplete", HostForegroundTaskEndedCandidate.Classify(ValidFacts() with { IdleObservationCount = 0 }).Classification);
+    }
+
+    [Fact]
+    public void MissingEvaluationResponseIsIncomplete()
+    {
+        Assert.Equal("incomplete", HostForegroundTaskEndedCandidate.Classify(ValidFacts() with { ResponseSequence = null }).Classification);
+    }
+
+    [Fact]
+    public void SupersededSequentialRequestIsStale()
+    {
+        Assert.Equal("stale", HostForegroundTaskEndedCandidate.Classify(ValidFacts() with { Superseded = true }).Classification);
+    }
+
+    [Fact]
     public void DuplicateIdleIsAmbiguous()
     {
         Assert.Equal("ambiguous", HostForegroundTaskEndedCandidate.Classify(ValidFacts() with { IdleObservationCount = 2 }).Classification);

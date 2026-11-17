@@ -536,20 +536,15 @@ public sealed class MainWindowStructuralPolishTests
         Assert.Contains("<Setter Property=\"Padding\" Value=\"6,2\" />", appXaml, StringComparison.Ordinal);
         Assert.Contains("<Setter Property=\"Height\" Value=\"14\" />", appXaml, StringComparison.Ordinal);
 
-        Assert.True(CountOccurrences(statusBarXaml, "Style=\"{StaticResource IdeStatusBarSeparatorStyle}\"") >= 12);
-        Assert.Contains("Text=\"{Binding VersionText}\"", statusBarXaml, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding StatusText}\"", statusBarXaml, StringComparison.Ordinal);
+        Assert.Contains("Height=\"28\"", statusBarXaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding ApplicationStatusText}\"", statusBarXaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding SessionRestoreNoticeText}\"", statusBarXaml, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding SelectedTab.CaretDisplayText, TargetNullValue='Ln 1, Col 1'}\"", statusBarXaml, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding SelectedTab.EditorMetricsText, TargetNullValue=Lines: 1}\"", statusBarXaml, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding SelectedTab.SelectionDisplayText, TargetNullValue=Selection: None}\"", statusBarXaml, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding SelectedTab.BreakpointDisplayText, TargetNullValue=Breakpoints: None}\"", statusBarXaml, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding RuntimeText}\"", statusBarXaml, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding WorkspaceText}\"", statusBarXaml, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding ZoomLevelText}\"", statusBarXaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding ExecutionProgressText}\"", statusBarXaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"Editor metadata loading...\"", statusBarXaml, StringComparison.Ordinal);
         Assert.Contains("StatusBarHelpToggleButtonStyle", statusBarXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Text=\"{Binding VersionText}\"", statusBarXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("SelectedTab.CaretDisplayText", statusBarXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("GitStatusText", statusBarXaml, StringComparison.Ordinal);
 
         Assert.DoesNotContain("Background=\"#", statusBarXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Foreground=\"#", statusBarXaml, StringComparison.Ordinal);

@@ -219,11 +219,15 @@ public sealed record EditorExecutionResult(
     DateTimeOffset StartedAt,
     DateTimeOffset EndedAt,
     string BackendId = "unknown",
-    string? RejectionReason = null)
+    string? RejectionReason = null,
+    bool RecoveryRequired = false)
 {
     public bool Succeeded => Status == EditorExecutionStatus.Completed;
 
-    public TimeSpan Duration => EndedAt - StartedAt;
+    /// <summary>Monotonic elapsed time measured by the execution lifecycle owner.</summary>
+    public TimeSpan? MonotonicDuration { get; init; }
+
+    public TimeSpan Duration => MonotonicDuration ?? EndedAt - StartedAt;
 }
 
 public sealed record TerminalOutputEnvelope(

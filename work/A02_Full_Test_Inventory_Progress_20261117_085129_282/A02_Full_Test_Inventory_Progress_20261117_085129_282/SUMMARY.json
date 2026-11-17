@@ -1,0 +1,50 @@
+{
+  "GeneratedAt": "2026-11-17T09:36:38.3060764-05:00",
+  "Project": "C:\\Users\\rbarn\\source\\repos\\PowerShellStudio\\PS7ScriptDesk.Tests\\PS7ScriptDesk.Tests.csproj",
+  "Build": {
+    "Step": "build",
+    "Arguments": [
+      "build",
+      "C:\\Users\\rbarn\\source\\repos\\PowerShellStudio\\PS7ScriptDesk.Tests\\PS7ScriptDesk.Tests.csproj",
+      "--no-restore",
+      "-m:1",
+      "/nodeReuse:false",
+      "--nologo",
+      "-verbosity:minimal"
+    ],
+    "Started": "2026-11-17T08:51:29.3170630-05:00",
+    "DurationSeconds": 7.4,
+    "ExitCode": 0,
+    "TimedOut": false,
+    "Stdout": "C:\\Users\\rbarn\\source\\repos\\PowerShellStudio\\docs\\LocalOnly_NotForGitHub\\Codex_Work\\A02_Full_Test_Inventory_Progress_20261117_085129_282\\build.stdout.log",
+    "Stderr": "C:\\Users\\rbarn\\source\\repos\\PowerShellStudio\\docs\\LocalOnly_NotForGitHub\\Codex_Work\\A02_Full_Test_Inventory_Progress_20261117_085129_282\\build.stderr.log"
+  },
+  "Test": {
+    "Step": "full-test",
+    "Arguments": [
+      "test",
+      "C:\\Users\\rbarn\\source\\repos\\PowerShellStudio\\PS7ScriptDesk.Tests\\PS7ScriptDesk.Tests.csproj",
+      "--no-build",
+      "--no-restore",
+      "-m:1",
+      "/nodeReuse:false",
+      "--logger:trx;LogFileName=FullRegression.trx",
+      "--results-directory",
+      "C:\\Users\\rbarn\\source\\repos\\PowerShellStudio\\docs\\LocalOnly_NotForGitHub\\Codex_Work\\A02_Full_Test_Inventory_Progress_20261117_085129_282",
+      "--logger:console;verbosity=normal"
+    ],
+    "Started": "2026-11-17T08:51:36.7074615-05:00",
+    "DurationSeconds": 2701.6,
+    "ExitCode": null,
+    "TimedOut": true,
+    "Stdout": "C:\\Users\\rbarn\\source\\repos\\PowerShellStudio\\docs\\LocalOnly_NotForGitHub\\Codex_Work\\A02_Full_Test_Inventory_Progress_20261117_085129_282\\full-test.stdout.log",
+    "Stderr": "C:\\Users\\rbarn\\source\\repos\\PowerShellStudio\\docs\\LocalOnly_NotForGitHub\\Codex_Work\\A02_Full_Test_Inventory_Progress_20261117_085129_282\\full-test.stderr.log"
+  },
+  "TRXPath": null,
+  "Total": null,
+  "Passed": null,
+  "Failed": null,
+  "NotExecuted": null,
+  "TRXParsed": false,
+  "CompletedSuccessfully": false
+}

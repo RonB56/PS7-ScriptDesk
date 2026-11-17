@@ -131,11 +131,128 @@ public sealed class ExecutionCorrelationTelemetryTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void PerRequestRetentionAndRequestWindowStayBounded()
+    {
+        var recorder = new ExecutionCorrelationTelemetry(true);
+        var request = Guid.NewGuid();
+        for (var i = 0; i < ExecutionCorrelationTelemetry.MaximumEventsPerRequest + 17; i++)
+            recorder.Record(new ExecutionCorrelationEvent("PromptCandidate", RequestId: request, Reason: i.ToString()));
+        Assert.Equal(ExecutionCorrelationTelemetry.MaximumEventsPerRequest,
+            recorder.Snapshot().Count(item => item.RequestId == request));
+
+        for (var i = 0; i <= ExecutionCorrelationTelemetry.MaximumRecentRequests; i++)
+            recorder.Record(new ExecutionCorrelationEvent("RequestCreated", RequestId: Guid.NewGuid()));
+        Assert.InRange(recorder.Snapshot().Where(item => item.RequestId.HasValue).Select(item => item.RequestId).Distinct().Count(),
+            1, ExecutionCorrelationTelemetry.MaximumRecentRequests);
+        Assert.InRange(recorder.Snapshot().Sum(item => System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(item).Length),
+            0, ExecutionCorrelationTelemetry.MaximumRetainedBytes);
+        Assert.True(recorder.EvictedCount > 0);
+    }
+
+    [Fact]
+    public void GlobalIdleRemainsUncorrelatedAndRequestIncompleteUntilEvaluationResponse()
+    {
+        var recorder = new ExecutionCorrelationTelemetry(true);
+        var request = Guid.NewGuid();
+        recorder.Record(new ExecutionCorrelationEvent("RequestCreated", RequestId: request));
+        recorder.RecordPsesBusy(true, 22);
+        recorder.RecordPsesBusy(false, 23);
+        var idle = Assert.Single(recorder.Snapshot(), item => item.Code == "PsesIdle");
+        Assert.Null(idle.RequestId);
+        Assert.Equal("GlobalObservation", idle.CorrelationConfidence);
+        Assert.Equal("Incomplete", recorder.Classify(request));
+
+        recorder.Record(new ExecutionCorrelationEvent("LspEvaluationResponse", RequestId: request,
+            ProtocolRequestId: 17, ResponseSequence: 44, RuntimeSessionId: Guid.NewGuid(),
+            RuntimeGeneration: 3, ProcessId: 123, EventOutcome: "Completed",
+            CorrelationConfidence: "Correlated"));
+        Assert.Equal("Correlated", recorder.Classify(request));
+    }
+
+    [Fact]
+    public void LateOrDuplicateResponseEvidenceIsAmbiguousAndDisposalIsSafe()
+    {
+        var recorder = new ExecutionCorrelationTelemetry(true);
+        var request = Guid.NewGuid();
+        var response = new ExecutionCorrelationEvent("LspEvaluationResponse", RequestId: request,
+            ProtocolRequestId: 2, ResponseSequence: 8, RuntimeSessionId: Guid.NewGuid(),
+            RuntimeGeneration: 1, ProcessId: 456, CorrelationConfidence: "Correlated");
+        recorder.Record(response);
+        recorder.Record(response with { ResponseSequence = 9 });
+        Assert.Equal("Ambiguous", recorder.Classify(request));
+        recorder.Dispose();
+        recorder.Record(new ExecutionCorrelationEvent("AfterDispose", RequestId: request));
+        Assert.False(recorder.IsEnabled);
+        Assert.Empty(recorder.Snapshot());
+    }
+
+    [Theory]
+    [InlineData("runtime")]
+    [InlineData("terminal")]
+    [InlineData("process")]
+    public void IdentityMismatchIsClassifiedStale(string mismatch)
+    {
+        var recorder = new ExecutionCorrelationTelemetry(true);
+        var request = Guid.NewGuid();
+        var runtime = Guid.NewGuid();
+        recorder.Record(new ExecutionCorrelationEvent("RequestCreated", RequestId: request,
+            RuntimeSessionId: runtime, RuntimeGeneration: 5, TerminalGeneration: 8, ProcessId: 300));
+        var response = new ExecutionCorrelationEvent("LspEvaluationResponse", RequestId: request,
+            ProtocolRequestId: 15, ResponseSequence: 23, RuntimeSessionId: runtime,
+            RuntimeGeneration: 5, TerminalGeneration: 8, ProcessId: 300,
+            CorrelationConfidence: "Correlated");
+        response = mismatch switch
+        {
+            "runtime" => response with { RuntimeGeneration = 6 },
+            "terminal" => response with { TerminalGeneration = 9 },
+            "process" => response with { ProcessId = 301 },
+            _ => response
+        };
+        recorder.Record(response);
+        Assert.Equal("Stale", recorder.Classify(request));
+    }
+
+    [Fact]
+    public void DebuggerOwnershipAndCancellationRemainDiagnosticClassifications()
+    {
+        var request = Guid.NewGuid();
+        var recorder = new ExecutionCorrelationTelemetry(true);
+        recorder.Record(new ExecutionCorrelationEvent("RequestCreated", RequestId: request));
+        recorder.Record(new ExecutionCorrelationEvent("LspEvaluationResponse", RequestId: request,
+            ProtocolRequestId: 4, ResponseSequence: 7, RuntimeSessionId: Guid.NewGuid(),
+            RuntimeGeneration: 2, ProcessId: 123, DebuggerMayOwnSession: true));
+        Assert.Equal("Ambiguous", recorder.Classify(request));
+
+        recorder.Record(new ExecutionCorrelationEvent("CancellationRequested", RequestId: request,
+            EventOutcome: "Requested"));
+        Assert.Equal("Canceled", recorder.Classify(request));
+    }
+
+    [Fact]
+    public void LateResponseStaysWithItsOriginalRequestAndDoesNotCompleteNewRequest()
+    {
+        var recorder = new ExecutionCorrelationTelemetry(true);
+        var earlier = Guid.NewGuid();
+        var current = Guid.NewGuid();
+        var runtime = Guid.NewGuid();
+        recorder.Record(new ExecutionCorrelationEvent("RequestCreated", RequestId: earlier,
+            RuntimeSessionId: runtime, RuntimeGeneration: 3, TerminalGeneration: 5, ProcessId: 77));
+        recorder.Record(new ExecutionCorrelationEvent("RequestCreated", RequestId: current,
+            RuntimeSessionId: runtime, RuntimeGeneration: 3, TerminalGeneration: 5, ProcessId: 77));
+        recorder.Record(new ExecutionCorrelationEvent("LspEvaluationResponse", RequestId: earlier,
+            ProtocolRequestId: 10, ResponseSequence: 14, RuntimeSessionId: runtime,
+            RuntimeGeneration: 3, TerminalGeneration: 5, ProcessId: 77,
+            CorrelationConfidence: "Correlated"));
+        Assert.Equal("Correlated", recorder.Classify(earlier));
+        Assert.Equal("Incomplete", recorder.Classify(current));
+    }
+
+    [Fact]
     public void EventSchemaExcludesUserContentFields()
     {
         var fields = typeof(ExecutionCorrelationEvent).GetProperties().Select(p => p.Name).ToArray();
         Assert.DoesNotContain(fields, name => name.Contains("script", StringComparison.OrdinalIgnoreCase) ||
-            name.Contains("output", StringComparison.OrdinalIgnoreCase) ||
+            (name.Contains("output", StringComparison.OrdinalIgnoreCase) && name != nameof(ExecutionCorrelationEvent.OutputFramesSinceRegistration)) ||
             name.Contains("argument", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("environment", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("path", StringComparison.OrdinalIgnoreCase));

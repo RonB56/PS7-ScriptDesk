@@ -177,7 +177,7 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
                     ["result"] = result.Status.ToString(),
                     ["durationMs"] = started.ElapsedMilliseconds
                 });
-            return result with { BackendId = backend.BackendId };
+            return result with { BackendId = backend.BackendId, MonotonicDuration = started.Elapsed };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -187,7 +187,10 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
         catch (Exception ex)
         {
             DeveloperDiagnostics.LogException("Execution", ex, "Authoritative execution backend dispatch failed.", new Dictionary<string, object?> { ["requestId"] = request.RequestId, ["selectedBackend"] = backend.BackendId, ["durationMs"] = started.ElapsedMilliseconds });
-            return new EditorExecutionResult(request.RequestId, request.SessionGeneration, EditorExecutionStatus.Failed, Array.Empty<EditorOutputRecord>(), request.WorkingDirectory, null, ex.Message, DateTimeOffset.UtcNow - started.Elapsed, DateTimeOffset.UtcNow, backend.BackendId);
+            return new EditorExecutionResult(request.RequestId, request.SessionGeneration, EditorExecutionStatus.Failed, Array.Empty<EditorOutputRecord>(), request.WorkingDirectory, null, ex.Message, DateTimeOffset.UtcNow - started.Elapsed, DateTimeOffset.UtcNow, backend.BackendId)
+            {
+                MonotonicDuration = started.Elapsed
+            };
         }
         finally
         {

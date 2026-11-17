@@ -194,6 +194,7 @@ internal sealed class PsesDapDebugSession : IDebugSession
     {
         if (_stopped) return true;
         _stopped = true;
+        _endpoint.ReportDebuggerLifecycle(_sessionId, DebuggerLifecycleObservation.Stopping);
         try
         {
             if (_pipe is { IsConnected: true })
@@ -218,6 +219,8 @@ internal sealed class PsesDapDebugSession : IDebugSession
     {
         if (_disposed) return;
         _disposed = true;
+        if (TerminationInfo is null)
+            _endpoint.ReportDebuggerLifecycle(_sessionId, DebuggerLifecycleObservation.Unknown);
         _lifetime.Cancel();
         _pipe?.Dispose();
         FailPending(new ObjectDisposedException(nameof(PsesDapDebugSession)));
@@ -283,8 +286,17 @@ internal sealed class PsesDapDebugSession : IDebugSession
     private async Task SendControlAsync(string command, object arguments)
     {
         var pauseGenerationBeforeRequest = PauseGeneration;
-        var response = await SendRequestAsync(command, arguments, CancellationToken.None).ConfigureAwait(false);
-        EnsureSuccess(response, command);
+        _endpoint.ReportDebuggerLifecycle(_sessionId, DebuggerLifecycleObservation.Resuming);
+        try
+        {
+            var response = await SendRequestAsync(command, arguments, CancellationToken.None).ConfigureAwait(false);
+            EnsureSuccess(response, command);
+        }
+        catch
+        {
+            _endpoint.ReportDebuggerLifecycle(_sessionId, DebuggerLifecycleObservation.Unknown);
+            throw;
+        }
         // PSES may publish the stopped event before or after the control response.
         // Only suppress the response-side Running transition when a newer pause
         // was already observed; otherwise the successful response must advance the
@@ -437,8 +449,11 @@ internal sealed class PsesDapDebugSession : IDebugSession
     {
         if (TerminationInfo is not null) return;
         _initialized.TrySetException(new InvalidOperationException(message));
-        SetState(DebugSessionState.Stopped);
+        _endpoint.ReportDebuggerLifecycle(_sessionId, reason is DebugTerminationReason.NormalCompletion or DebugTerminationReason.UserStop
+            ? DebuggerLifecycleObservation.Terminated
+            : DebuggerLifecycleObservation.Unknown);
         TerminationInfo = new DebugTerminationInfo(_sessionId, DateTimeOffset.UtcNow, reason, message, exitCode: null, processId: _endpoint.ProcessId, wasUserRequested: wasUserRequested, wasExpected: reason == DebugTerminationReason.NormalCompletion, details: details);
+        SetState(DebugSessionState.Stopped);
         SafeInvoke(Terminated, TerminationInfo);
         SafeInvoke(SessionEnded);
     }
@@ -446,6 +461,15 @@ internal sealed class PsesDapDebugSession : IDebugSession
     private void SetState(DebugSessionState state)
     {
         CurrentState = state;
+        _endpoint.ReportDebuggerLifecycle(_sessionId, state switch
+        {
+            DebugSessionState.Starting => DebuggerLifecycleObservation.Starting,
+            DebugSessionState.Running => DebuggerLifecycleObservation.Running,
+            DebugSessionState.Paused => DebuggerLifecycleObservation.Suspended,
+            DebugSessionState.Stopped when TerminationInfo?.Reason is DebugTerminationReason.NormalCompletion or DebugTerminationReason.UserStop
+                => DebuggerLifecycleObservation.Terminated,
+            _ => DebuggerLifecycleObservation.Unknown
+        });
         SafeInvoke(StateChanged, state);
     }
 

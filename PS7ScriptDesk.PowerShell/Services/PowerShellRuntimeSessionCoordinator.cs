@@ -17,6 +17,8 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly SemaphoreSlim _executionGate = new(1, 1);
     private readonly object _syncRoot = new();
+    private readonly HashSet<Guid> _admittedStructuredPromptRequests = new();
+    private readonly Queue<Guid> _admittedStructuredPromptRequestOrder = new();
     private PowerShellRuntimeSessionSnapshot _snapshot = new(
         Guid.Empty, 0, null, PowerShellRuntimeSessionState.NotStarted, false, false, false, null, null);
     private bool _disposed;
@@ -232,6 +234,56 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
                _terminal.ProcessId == current.ProcessId;
     }
 
+    public bool TryAdmitStructuredPromptReadiness(
+        Guid requestId,
+        Guid sessionId,
+        long runtimeGeneration,
+        int terminalGeneration,
+        int processId,
+        bool executionCompleted)
+    {
+        lock (_syncRoot)
+        {
+            var current = _snapshot;
+            if (!executionCompleted || requestId == Guid.Empty || sessionId == Guid.Empty ||
+                runtimeGeneration <= 0 || terminalGeneration <= 0 || processId <= 0 ||
+                current.SessionId != sessionId || current.Generation != runtimeGeneration ||
+                current.State != PowerShellRuntimeSessionState.Ready ||
+                current.LifecyclePhase != PowerShellRuntimeLifecyclePhase.Stable ||
+                current.ProcessId != processId || !current.TerminalTransportAttached || !current.InputWritable ||
+                terminalGeneration != _terminal.CurrentSessionGeneration ||
+                !_terminal.IsSessionRunning || !_terminal.IsInputWritable || _terminal.ProcessId != processId ||
+                _admittedStructuredPromptRequests.Contains(requestId))
+            {
+                DeveloperDiagnostics.LogDecision("RuntimeBroker", "StructuredPromptReadinessRejected",
+                    "Structured prompt readiness was rejected because completion, runtime ownership, terminal generation, or writable transport was not current.",
+                    "StructuredPromptAdmissionGuard", Metadata(new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["requestedSessionId"] = sessionId,
+                        ["requestedRuntimeGeneration"] = runtimeGeneration,
+                        ["requestedTerminalGeneration"] = terminalGeneration,
+                        ["requestedProcessId"] = processId,
+                        ["executionCompleted"] = executionCompleted
+                    }));
+                return false;
+            }
+
+            _admittedStructuredPromptRequests.Add(requestId);
+            _admittedStructuredPromptRequestOrder.Enqueue(requestId);
+            while (_admittedStructuredPromptRequestOrder.Count > 256)
+                _admittedStructuredPromptRequests.Remove(_admittedStructuredPromptRequestOrder.Dequeue());
+            DeveloperDiagnostics.LogInfo("RuntimeBroker", "Structured prompt readiness admitted by the current runtime and terminal owner.",
+                Metadata(new Dictionary<string, object?>
+                {
+                    ["requestId"] = requestId,
+                    ["terminalGeneration"] = terminalGeneration,
+                    ["processId"] = processId
+                }));
+            return true;
+        }
+    }
+
     public async Task WriteRawInputAsync(Guid sessionId, long generation, string data, CancellationToken cancellationToken = default)
     {
         if (!IsCurrent(sessionId, generation))
@@ -337,11 +389,14 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
     private void OnTerminalStarted(int terminalGeneration)
     {
         var current = Snapshot;
-        if (current.State != PowerShellRuntimeSessionState.Starting || !_terminal.IsSessionRunning || !_terminal.IsInputWritable || !_terminal.ProcessId.HasValue)
+        if (current.State != PowerShellRuntimeSessionState.Starting ||
+            terminalGeneration != _terminal.CurrentSessionGeneration ||
+            !_terminal.IsSessionRunning || !_terminal.IsInputWritable || !_terminal.ProcessId.HasValue)
         {
-            DeveloperDiagnostics.LogWarning("RuntimeBroker", "Ignored terminal-start notification until the terminal is writable.", Metadata(new Dictionary<string, object?>
+            DeveloperDiagnostics.LogWarning("RuntimeBroker", "Ignored stale or non-ready terminal-start notification.", Metadata(new Dictionary<string, object?>
             {
                 ["terminalGeneration"] = terminalGeneration,
+                ["currentTerminalGeneration"] = _terminal.CurrentSessionGeneration,
                 ["terminalRunning"] = _terminal.IsSessionRunning,
                 ["inputWritable"] = _terminal.IsInputWritable,
                 ["terminalProcessId"] = _terminal.ProcessId
@@ -349,7 +404,31 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
             return;
         }
 
-        Publish(PowerShellRuntimeSessionState.Ready, current.SessionId, current.Generation, current.Runtime, null);
+        TryPublishTerminalReady(current.SessionId, current.Generation, terminalGeneration);
+    }
+
+    private bool TryPublishTerminalReady(Guid sessionId, long generation, int terminalGeneration)
+    {
+        PowerShellRuntimeSessionSnapshot next;
+        PowerShellRuntimeSessionState previousState;
+        lock (_syncRoot)
+        {
+            var current = _snapshot;
+            if (current.SessionId != sessionId || current.Generation != generation ||
+                current.State != PowerShellRuntimeSessionState.Starting ||
+                terminalGeneration != _terminal.CurrentSessionGeneration ||
+                !_terminal.IsSessionRunning || !_terminal.IsInputWritable || !_terminal.ProcessId.HasValue)
+                return false;
+
+            previousState = current.State;
+            next = new(current.SessionId, current.Generation, _terminal.ProcessId, PowerShellRuntimeSessionState.Ready,
+                _terminal.IsHostAttached, _terminal.IsInputWritable, current.DebuggerTransportAttached,
+                current.Runtime, null, current.LifecyclePhase);
+            _snapshot = next;
+        }
+
+        NotifyStateChanged(next, previousState, PowerShellRuntimeSessionState.Ready);
+        return true;
     }
 
     private void SetTerminalRuntimeIdentity(Guid sessionId, long generation)
@@ -448,27 +527,61 @@ public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSess
         private readonly long _generation;
         private int _released;
         private string? _readinessUnverifiedReason;
+        private string? _recoveryRequiredReason;
         public ExecutionLease(PowerShellRuntimeSessionCoordinator owner, Guid sessionId, long generation) { _owner = owner; _sessionId = sessionId; _generation = generation; }
         public void MarkReadinessUnverified(string reason)
             => Interlocked.CompareExchange(ref _readinessUnverifiedReason, string.IsNullOrWhiteSpace(reason) ? "Execution readiness was not verified." : reason, null);
+        public void MarkRecoveryRequired(string reason)
+            => Interlocked.CompareExchange(ref _recoveryRequiredReason, string.IsNullOrWhiteSpace(reason) ? "Request cleanup requires controlled recovery." : reason, null);
         public ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref _released, 1) == 0)
             {
-                var current = _owner.Snapshot;
-                if (current.SessionId == _sessionId && current.Generation == _generation &&
-                    current.State is PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging)
-                {
-                    var unverifiedReason = Volatile.Read(ref _readinessUnverifiedReason);
-                    if (unverifiedReason is null && _owner.IsCurrent(_sessionId, _generation))
-                        _owner.Publish(PowerShellRuntimeSessionState.Ready, _sessionId, _generation, current.Runtime, null);
-                    else
-                        _owner.Publish(PowerShellRuntimeSessionState.Faulted, _sessionId, _generation, current.Runtime,
-                            unverifiedReason ?? "The PowerShell input transport is no longer writable after execution.");
-                }
+                _owner.ReleaseExecutionLease(_sessionId, _generation,
+                    Volatile.Read(ref _readinessUnverifiedReason), Volatile.Read(ref _recoveryRequiredReason));
                 _owner._executionGate.Release();
             }
             return ValueTask.CompletedTask;
         }
+    }
+
+    private void ReleaseExecutionLease(Guid sessionId, long generation, string? unverifiedReason, string? recoveryRequiredReason)
+    {
+        PowerShellRuntimeSessionSnapshot next;
+        PowerShellRuntimeSessionState previousState = default;
+        PowerShellRuntimeSessionState state = default;
+        lock (_syncRoot)
+        {
+            var current = _snapshot;
+            if (current.SessionId != sessionId || current.Generation != generation ||
+                current.State is not (PowerShellRuntimeSessionState.Executing or PowerShellRuntimeSessionState.Debugging))
+                return;
+
+            var transportCurrent = _terminal.IsSessionRunning && _terminal.IsInputWritable &&
+                                  _terminal.ProcessId.HasValue && _terminal.ProcessId == current.ProcessId;
+            state = recoveryRequiredReason is not null && unverifiedReason is null && _terminal.IsSessionRunning
+                ? PowerShellRuntimeSessionState.RecoveryRequired
+                : unverifiedReason is null && recoveryRequiredReason is null && transportCurrent
+                    ? PowerShellRuntimeSessionState.Ready
+                    : PowerShellRuntimeSessionState.Faulted;
+            var fault = state switch
+            {
+                PowerShellRuntimeSessionState.RecoveryRequired => recoveryRequiredReason,
+                PowerShellRuntimeSessionState.Faulted => unverifiedReason ??
+                    "The PowerShell input transport is no longer writable after execution.",
+                _ => null
+            };
+            previousState = current.State;
+            next = new(current.SessionId, current.Generation, _terminal.ProcessId, state,
+                _terminal.IsHostAttached, _terminal.IsInputWritable, current.DebuggerTransportAttached,
+                current.Runtime, fault, current.LifecyclePhase);
+            _snapshot = next;
+        }
+
+        NotifyStateChanged(next, previousState, state);
+        if (state == PowerShellRuntimeSessionState.RecoveryRequired)
+            DeveloperDiagnostics.LogDecision("RuntimeBroker", "ExecutionCleanupRecoveryRequired",
+                "Execution admission remains closed because staged-launcher cleanup was not verified.",
+                "ControlledRecoveryRequired", Metadata());
     }
 }

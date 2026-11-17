@@ -296,6 +296,7 @@ namespace PS7ScriptDesk.Shell
         private PSScriptAnalyzerDiagnosticsCoordinator? _psScriptAnalyzerCoordinator;
         private CancellationTokenSource? _manualAnalyzerCancellation;
         private PSScriptAnalyzerLiveAnalysisScheduler? _liveAnalyzerScheduler;
+        private string? _lastSyntaxApplicationStatus;
         private readonly DispatcherTimer _editorHoverTimer;
         private readonly DispatcherTimer _editorMetadataWarmupTimer;
         private readonly DispatcherTimer _metadataToastShowDelayTimer;
@@ -1323,11 +1324,6 @@ namespace PS7ScriptDesk.Shell
             }
 
             return properties;
-        }
-
-        private void GitStatusTextBlock_TargetUpdated(object? sender, DataTransferEventArgs e)
-        {
-            StartupLifecycleTrace.Write("MainWindow.GitStatusTextBlock", "TARGET_UPDATED", $"dataContextId={(GitStatusTextBlock.DataContext?.GetHashCode() ?? 0):X8}; targetText={GitStatusTextBlock.Text}");
         }
 
         private void ConsoleSessionStatusTextBlock_TargetUpdated(object? sender, DataTransferEventArgs e)
@@ -4598,7 +4594,7 @@ namespace PS7ScriptDesk.Shell
                 }
                 else
                 {
-                    ViewModel.StatusText = failureReason ?? "Unable to open the selected repository file.";
+                    ViewModel.SetGitNotificationStatus(failureReason ?? "Unable to open the selected repository file.");
                 }
             }
         }
@@ -4664,7 +4660,7 @@ namespace PS7ScriptDesk.Shell
             {
                 if (!ViewModel.TryOpenFileFromPath(status.FullPath, out var failureReason))
                 {
-                    ViewModel.StatusText = failureReason ?? "Unable to open the selected repository file.";
+                    ViewModel.SetGitNotificationStatus(failureReason ?? "Unable to open the selected repository file.");
                 }
             }
         }
@@ -9586,6 +9582,19 @@ namespace PS7ScriptDesk.Shell
                     ? new PsesDapDebugSession(authoritativeDebugEndpoint)
                     : new PsesDebugSession();
                 _debugSession = debugSession;
+                if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+                {
+                    var ownerSnapshot = authoritativeDebugEndpoint?.GetDebuggerOwnershipSnapshot();
+                    ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("DebugRequestCreated",
+                        RuntimeSessionId: ownerSnapshot?.RuntimeSessionId,
+                        RuntimeGeneration: ownerSnapshot?.RuntimeGeneration,
+                        TerminalGeneration: authoritativeDebugEndpoint?.SessionGeneration,
+                        ProcessId: authoritativeDebugEndpoint?.ProcessId,
+                        DebuggerSessionId: debugSession.SessionId,
+                        EventSource: "Editor/Debugger", EventType: "DebugRequestCreated",
+                        CorrelationConfidence: "DebuggerSessionIdentity",
+                        Reason: "editor-request-guid-unavailable"));
+                }
                 ViewModel.BeginDebuggerPromptReadinessReconciliation(debugSession.SessionId);
                 if (authoritativeDebugEndpoint is PsesOwnedInteractiveSessionService echoFilterService &&
                     !string.IsNullOrWhiteSpace(_activeDebugSnapshotPath))
@@ -11265,7 +11274,8 @@ namespace PS7ScriptDesk.Shell
             _manualAnalyzerCancellation?.Cancel();
             _manualAnalyzerCancellation?.Dispose();
             _manualAnalyzerCancellation = new CancellationTokenSource();
-            var cancellationToken = _manualAnalyzerCancellation.Token;
+            var analyzerCancellation = _manualAnalyzerCancellation;
+            var cancellationToken = analyzerCancellation.Token;
             var snapshot = tab.DiagnosticDocument.Capture();
             viewModel.StatusText = "PSScriptAnalyzer: Analyzing...";
             try
@@ -11276,15 +11286,20 @@ namespace PS7ScriptDesk.Shell
                 if (published && tab.DiagnosticDocument.Revision == snapshot.DocumentRevision)
                 {
                     var count = _scriptDiagnosticStore.GetDiagnostics(snapshot.DocumentId, ScriptDiagnosticSource.PSScriptAnalyzer).Count;
-                    viewModel.StatusText = count > 0 ? $"PSScriptAnalyzer: Completed with {count} findings" : "PSScriptAnalyzer: No findings";
+                    if (ReferenceEquals(_manualAnalyzerCancellation, analyzerCancellation) && viewModel.StatusText == "PSScriptAnalyzer: Analyzing...")
+                        viewModel.StatusText = count > 0 ? $"PSScriptAnalyzer: Completed with {count} findings" : "Ready";
                 }
-                else if (!cancellationToken.IsCancellationRequested) viewModel.StatusText = "PSScriptAnalyzer: analysis failed";
+                else if (!cancellationToken.IsCancellationRequested && ReferenceEquals(_manualAnalyzerCancellation, analyzerCancellation) && viewModel.StatusText == "PSScriptAnalyzer: Analyzing...")
+                    viewModel.StatusText = "PSScriptAnalyzer: analysis failed";
             }
-            catch (OperationCanceledException) { viewModel.StatusText = "PSScriptAnalyzer: Canceled"; }
+            catch (OperationCanceledException)
+            {
+                if (ReferenceEquals(_manualAnalyzerCancellation, analyzerCancellation) && viewModel.StatusText == "PSScriptAnalyzer: Analyzing...") viewModel.StatusText = "Ready";
+            }
             catch (Exception ex)
             {
                 DeveloperDiagnostics.LogOperationFailure("PSScriptAnalyzer", "ManualAnalyzeCurrentDocument", "Manual analyzer command failed.", ex);
-                viewModel.StatusText = "PSScriptAnalyzer: unavailable";
+                if (ReferenceEquals(_manualAnalyzerCancellation, analyzerCancellation) && viewModel.StatusText == "PSScriptAnalyzer: Analyzing...") viewModel.StatusText = "PSScriptAnalyzer: unavailable";
             }
         }
 
@@ -11310,25 +11325,8 @@ namespace PS7ScriptDesk.Shell
             _psScriptAnalyzerCoordinator ??= CreatePSScriptAnalyzerCoordinator(runtimePath);
             _liveAnalyzerScheduler ??= new PSScriptAnalyzerLiveAnalysisScheduler(
                 (request, cancellationToken) => _psScriptAnalyzerCoordinator?.AnalyzeAndPublishAsync(request, cancellationToken) ?? Task.FromResult(false));
-            _liveAnalyzerScheduler.ActivityChanged -= LiveAnalyzerScheduler_ActivityChanged;
-            _liveAnalyzerScheduler.ActivityChanged += LiveAnalyzerScheduler_ActivityChanged;
             _liveAnalyzerEligibleRevisions.Remove((snapshot.DocumentId, snapshot.DocumentRevision));
             _liveAnalyzerScheduler.Schedule(snapshot.DocumentId, snapshot.DocumentRevision, tab.FilePath, scriptSnapshot, _loadedSettings.PSScriptAnalyzerSeverityFilter);
-            if (ViewModel is not null && ReferenceEquals(ViewModel.SelectedTab, tab)) ViewModel.StatusText = "PSScriptAnalyzer: waiting for edit pause";
-        }
-
-        private void LiveAnalyzerScheduler_ActivityChanged(object? sender, PSScriptAnalyzerActivity activity)
-        {
-            _ = Dispatcher.BeginInvoke(new Action(() =>
-            {
-                if (ViewModel?.SelectedTab is not EditorTabViewModel tab || tab.DiagnosticDocument.DocumentId != activity.DocumentId || tab.DiagnosticDocument.Revision != activity.Revision) return;
-                ViewModel.StatusText = activity.State switch
-                {
-                    "Analyzing" => "PSScriptAnalyzer: Analyzing...",
-                    "Canceled" => "PSScriptAnalyzer: Canceled",
-                    _ => "PSScriptAnalyzer: waiting for edit pause"
-                };
-            }), DispatcherPriority.Background);
         }
 
         private void ResetPSScriptAnalyzerRuntime()
@@ -11420,7 +11418,6 @@ namespace PS7ScriptDesk.Shell
                 _manualAnalyzerCancellation?.Cancel();
                 _manualAnalyzerCancellation?.Dispose();
                 _psScriptAnalyzerService?.Dispose();
-                if (_liveAnalyzerScheduler is not null) _liveAnalyzerScheduler.ActivityChanged -= LiveAnalyzerScheduler_ActivityChanged;
                 _liveAnalyzerScheduler?.Dispose();
                 _intelliSenseService.Dispose();
                 _activeCompletionCts?.Cancel();
@@ -12123,7 +12120,7 @@ namespace PS7ScriptDesk.Shell
                     EditorMetadataStatusBadge.ToolTip = tooltipText;
                     if (ViewModel is not null)
                     {
-                        ViewModel.StatusText = status.Message;
+                        ViewModel.StatusText = "Ready";
                     }
 
                     break;
@@ -12230,7 +12227,7 @@ namespace PS7ScriptDesk.Shell
 
                     if (ViewModel is not null)
                     {
-                        ViewModel.StatusText = status.ReadinessCaption;
+                        ViewModel.StatusText = "Ready";
                     }
 
                     break;
@@ -14881,15 +14878,19 @@ namespace PS7ScriptDesk.Shell
 
             if (diagnostics.Count == 1)
             {
-                ViewModel.StatusText = $"{diagnostics[0].Severity}: {diagnostics[0].DisplayText}";
+                _lastSyntaxApplicationStatus = $"{diagnostics[0].Severity}: {diagnostics[0].DisplayText}";
+                ViewModel.StatusText = _lastSyntaxApplicationStatus;
             }
             else if (diagnostics.Count > 1)
             {
-                ViewModel.StatusText = $"{tab.SyntaxErrorSummaryText} detected";
+                _lastSyntaxApplicationStatus = $"{tab.SyntaxErrorSummaryText} detected";
+                ViewModel.StatusText = _lastSyntaxApplicationStatus;
             }
             else
             {
-                ViewModel.StatusText = okStatusText;
+                if (_lastSyntaxApplicationStatus is not null && ViewModel.StatusText == _lastSyntaxApplicationStatus)
+                    ViewModel.StatusText = "Ready";
+                _lastSyntaxApplicationStatus = null;
             }
 
             return diagnosticsChanged;

@@ -6,6 +6,22 @@ namespace PS7ScriptDesk.Tests;
 public sealed class TerminalOutputIsolationTests
 {
     [Fact]
+    public void ApplicationStatusProjectsRoutineDiagnosticsAsReady()
+    {
+        using var viewModel = CreateViewModel();
+        Assert.Equal("Ready", viewModel.ApplicationStatusText);
+        viewModel.StatusText = "Diagnostics: OK";
+        Assert.Equal("Ready", viewModel.ApplicationStatusText);
+        viewModel.StatusText = "PSScriptAnalyzer: analysis failed";
+        Assert.Equal("PSScriptAnalyzer: analysis failed", viewModel.ApplicationStatusText);
+        viewModel.SetGitNotificationStatus("Git action failed");
+        Assert.Equal("Git action failed", viewModel.StatusText);
+        Assert.Equal("Ready", viewModel.ApplicationStatusText);
+        viewModel.StatusText = "Git action failed";
+        Assert.Equal("Git action failed", viewModel.ApplicationStatusText);
+    }
+
+    [Fact]
     public async Task DebuggerOutput_UsesDedicatedBuffer_NotApplicationActivityOrTerminalDisplay()
     {
         var viewModel = CreateViewModel();

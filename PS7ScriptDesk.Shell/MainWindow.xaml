@@ -880,139 +880,104 @@
                         AutomationProperties.Name="PowerShell update banner" />
 
         <StatusBar DockPanel.Dock="Bottom"
+                   Height="28"
+                   ClipToBounds="True"
                    Style="{StaticResource IdeModernStatusBarStyle}"
                    help:ContextHelp.Key="Status.General">
             <StatusBar.Resources>
                 <Style TargetType="TextBlock" BasedOn="{StaticResource IdeStatusBarTextStyle}" />
             </StatusBar.Resources>
-            <StatusBarItem help:ContextHelp.Key="Status.Version">
-                <TextBlock Text="{Binding VersionText}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.General">
-                <TextBlock Text="{Binding StatusText}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}"
-                       Visibility="{Binding IsConsoleInputActive, Converter={StaticResource BooleanToVisibilityConverter}}" />
-            <StatusBarItem Visibility="{Binding IsConsoleInputActive, Converter={StaticResource BooleanToVisibilityConverter}}"
-                           help:ContextHelp.Key="Status.General">
-                <TextBlock Text="{Binding ConsoleInputStatusText}"
-                           ToolTip="Press Ctrl+C in the Console to cancel the unfinished input line." />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}"
-                       Visibility="{Binding HasSessionRestoreNotice, Converter={StaticResource BooleanToVisibilityConverter}}" />
-            <StatusBarItem Visibility="{Binding HasSessionRestoreNotice, Converter={StaticResource BooleanToVisibilityConverter}}">
-                <TextBlock Text="{Binding SessionRestoreNoticeText}"
-                           ToolTip="{Binding SessionRestoreNoticeToolTip}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem Style="{StaticResource IdeStatusBarGroupStartItemStyle}"
-                           help:ContextHelp.Key="Status.Caret">
-                <TextBlock Text="{Binding SelectedTab.CaretDisplayText, TargetNullValue='Ln 1, Col 1'}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.Lines">
-                <TextBlock Text="{Binding SelectedTab.EditorMetricsText, TargetNullValue=Lines: 1}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.Selection">
-                <TextBlock Text="{Binding SelectedTab.SelectionDisplayText, TargetNullValue=Selection: None}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.Breakpoints">
-                <TextBlock Text="{Binding SelectedTab.BreakpointDisplayText, TargetNullValue=Breakpoints: None}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem Style="{StaticResource IdeStatusBarGroupStartItemStyle}"
-                           help:ContextHelp.Key="Status.Runtime">
-                <TextBlock Text="{Binding RuntimeText}"
-                           Style="{StaticResource IdeStatusBarLongTextStyle}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.Workspace">
-                <TextBlock Text="{Binding WorkspaceText}"
-                           Style="{StaticResource IdeStatusBarLongTextStyle}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.Git">
-                <TextBlock x:Name="GitStatusTextBlock"
-                           Style="{StaticResource IdeStatusBarLongTextStyle}"
-                           Text="{Binding GitStatusText, NotifyOnTargetUpdated=True}"
-                           TargetUpdated="GitStatusTextBlock_TargetUpdated"
-                           ToolTip="{Binding GitRepositoryRootText}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem Style="{StaticResource IdeStatusBarGroupStartItemStyle}"
-                           help:ContextHelp.Key="Status.Zoom">
-                <TextBlock Text="{Binding ZoomLevelText}" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.UiScale">
-                <TextBlock Text="{Binding UiScaleText}"
-                           ToolTip="Application interface scale. Editor Zoom and terminal font size are separate settings." />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem help:ContextHelp.Key="Status.Execution">
-                <TextBlock Text="{Binding ExecutionProgressText}"
-                           Foreground="{DynamicResource Theme.Status.Warning.Foreground}"
-                           FontWeight="SemiBold" />
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem x:Name="EditorMetadataStatusItem"
-                           help:ContextHelp.Key="Editor.Metadata"
-                           Visibility="Collapsed">
-                <Border x:Name="EditorMetadataStatusBadge"
-                        Background="Transparent"
-                        BorderBrush="Transparent"
-                        BorderThickness="0"
-                        Padding="4,0"
-                        ToolTip="PowerShell editor metadata is still loading in the background.">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock x:Name="EditorMetadataStatusGlyph"
-                                   Text="⏳"
-                                   Margin="0,0,5,0"
-                                   FontSize="12"
-                                   FontWeight="SemiBold"
-                                   VerticalAlignment="Center"
-                                   Foreground="{DynamicResource Theme.Icon.Warning}" />
-                        <TextBlock x:Name="EditorMetadataStatusTextBlock"
-                                   Text="Editor metadata loading..."
-                                   FontWeight="SemiBold"
-                                   FontSize="{StaticResource Theme.FontSize.Caption}"
-                                   VerticalAlignment="Center"
-                                   TextWrapping="NoWrap"
-                                   Foreground="{DynamicResource Theme.Text.Secondary}" />
-                    </StackPanel>
-                </Border>
-            </StatusBarItem>
-            <Separator Style="{StaticResource IdeStatusBarSeparatorStyle}" />
-            <StatusBarItem Style="{StaticResource IdeStatusBarGroupStartItemStyle}"
-                           help:ContextHelp.Key="Help.Context">
-                <ToggleButton Style="{StaticResource StatusBarHelpToggleButtonStyle}"
-                              ToolTip="Turn advanced context help on or off"
-                              IsChecked="{Binding IsContextHelpEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="?"
-                                   Margin="0,0,5,0"
-                                   FontWeight="SemiBold"
-                                   VerticalAlignment="Center"
-                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}" />
-                        <TextBlock FontWeight="SemiBold"
-                                   VerticalAlignment="Center"
-                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Text" Value="Help off" />
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsChecked, RelativeSource={RelativeSource AncestorType=ToggleButton}}" Value="True">
-                                            <Setter Property="Text" Value="Help on" />
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
-                    </StackPanel>
-                </ToggleButton>
+            <StatusBarItem HorizontalContentAlignment="Stretch" Padding="0">
+                <Grid ClipToBounds="True">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" MinWidth="0" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               Text="{Binding ApplicationStatusText}"
+                               TextWrapping="NoWrap"
+                               TextTrimming="CharacterEllipsis"
+                               VerticalAlignment="Center"
+                               ToolTip="{Binding ApplicationStatusText}" />
+                    <TextBlock Grid.Column="1"
+                               Margin="8,0,0,0"
+                               MaxWidth="180"
+                               Visibility="{Binding IsConsoleInputActive, Converter={StaticResource BooleanToVisibilityConverter}}"
+                               Text="{Binding ConsoleInputStatusText}"
+                               ToolTip="Press Ctrl+C in the Console to cancel the unfinished input line." />
+                    <TextBlock Grid.Column="2"
+                               Margin="8,0,0,0"
+                               MaxWidth="180"
+                               Visibility="{Binding HasSessionRestoreNotice, Converter={StaticResource BooleanToVisibilityConverter}}"
+                               Text="{Binding SessionRestoreNoticeText}"
+                               ToolTip="{Binding SessionRestoreNoticeToolTip}" />
+                    <TextBlock Grid.Column="3"
+                               Margin="8,0,0,0"
+                               Width="150"
+                               MaxWidth="160"
+                               Text="{Binding ExecutionProgressText}"
+                               Foreground="{DynamicResource Theme.Status.Warning.Foreground}"
+                               FontWeight="SemiBold" />
+                <StatusBarItem Grid.Column="4" x:Name="EditorMetadataStatusItem" MaxWidth="220"
+                               help:ContextHelp.Key="Editor.Metadata"
+                               Visibility="Collapsed">
+                    <Border x:Name="EditorMetadataStatusBadge"
+                            Background="Transparent"
+                            BorderBrush="Transparent"
+                            BorderThickness="0"
+                            Padding="4,0"
+                            ToolTip="PowerShell editor metadata is still loading in the background.">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock x:Name="EditorMetadataStatusGlyph"
+                                       Text="⏳"
+                                       Margin="0,0,5,0"
+                                       FontSize="12"
+                                       FontWeight="SemiBold"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Theme.Icon.Warning}" />
+                            <TextBlock x:Name="EditorMetadataStatusTextBlock"
+                                       Text="Editor metadata loading..."
+                                       FontWeight="SemiBold"
+                                       FontSize="{StaticResource Theme.FontSize.Caption}"
+                                       VerticalAlignment="Center"
+                                       TextWrapping="NoWrap"
+                                       Foreground="{DynamicResource Theme.Text.Secondary}" />
+                        </StackPanel>
+                    </Border>
+                </StatusBarItem>
+                <StatusBarItem Grid.Column="5" Style="{StaticResource IdeStatusBarGroupStartItemStyle}"
+                               help:ContextHelp.Key="Help.Context">
+                    <ToggleButton Style="{StaticResource StatusBarHelpToggleButtonStyle}"
+                                  ToolTip="Turn advanced context help on or off"
+                                  IsChecked="{Binding IsContextHelpEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="?"
+                                       Margin="0,0,5,0"
+                                       FontWeight="SemiBold"
+                                       VerticalAlignment="Center"
+                                       Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}" />
+                            <TextBlock FontWeight="SemiBold"
+                                       VerticalAlignment="Center"
+                                       Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Text" Value="Help off" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsChecked, RelativeSource={RelativeSource AncestorType=ToggleButton}}" Value="True">
+                                                <Setter Property="Text" Value="Help on" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </StackPanel>
+                    </ToggleButton>
+                </StatusBarItem>
+                </Grid>
             </StatusBarItem>
         </StatusBar>
 

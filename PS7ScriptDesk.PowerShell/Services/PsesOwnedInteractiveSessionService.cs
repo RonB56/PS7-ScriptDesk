@@ -15,7 +15,7 @@ namespace PS7ScriptDesk.PowerShell.Services;
 /// console-repl stdio is the terminal transport. This type intentionally does
 /// not create a second PowerShell process for debugging.
 /// </summary>
-public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IRuntimeSessionIdentityAware, IStructuredPromptReadinessSource, IAuthoritativeSessionStructuredExecution, IAuthoritativePsesDebugEndpoint, IAuthoritativeLiveCompletionProvider
+public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, ICorrelatedLiveConsoleScriptExecution, IRuntimeSessionIdentityAware, IStructuredPromptReadinessSource, IAuthoritativeSessionStructuredExecution, IAuthoritativePsesDebugEndpoint, IAuthoritativeLiveCompletionProvider
 {
     private const string FallbackPsesHostVersion = "2025.4.0";
     private const int StartupOutputCaptureLimit = 32 * 1024;
@@ -54,6 +54,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
     private Guid? _activeStructuredRequestId;
     private Guid _runtimeSessionIdentity;
     private long? _runtimeGeneration;
+    private DebuggerOwnershipSnapshot _debuggerOwnership = new(
+        Guid.Empty, null, 0, null, null, DebuggerLifecycleObservation.Unknown, false);
     private StructuredExecutionState? _activeStructuredExecutionState;
     private long _promptReadyObservation;
     private readonly PromptRecoveryFrameDiagnostics _promptFrameDiagnostics = new();
@@ -97,8 +99,20 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
         lock (_syncRoot)
         {
+            var identityChanged = _runtimeSessionIdentity != sessionId || _runtimeGeneration != generation;
             _runtimeSessionIdentity = sessionId;
             _runtimeGeneration = generation;
+            if (identityChanged)
+            {
+                _debuggerOwnership = new(sessionId, generation, _generation, ProcessId, null,
+                    DebuggerLifecycleObservation.Unknown, false);
+            }
+            else if (_debuggerOwnership.TerminalGeneration != _generation &&
+                     _debuggerOwnership.State is DebuggerLifecycleObservation.Unknown or DebuggerLifecycleObservation.Stale or DebuggerLifecycleObservation.None or DebuggerLifecycleObservation.Terminated)
+            {
+                _debuggerOwnership = new(sessionId, generation, _generation, ProcessId, null,
+                    DebuggerLifecycleObservation.None, true);
+            }
             _languageServiceClient?.SetRuntimeSessionIdentity(sessionId, generation);
         }
     }
@@ -176,6 +190,59 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
     }
     public string? LanguageServicePipeName => _languageServicePipeName;
     public string? DebugServicePipeName => _debugServicePipeName;
+    public DebuggerOwnershipSnapshot GetDebuggerOwnershipSnapshot()
+    {
+        lock (_syncRoot)
+        {
+            var snapshot = _debuggerOwnership;
+            var matchesCurrent = snapshot.TerminalGeneration == _generation &&
+                snapshot.RuntimeSessionId == _runtimeSessionIdentity && snapshot.RuntimeGeneration == _runtimeGeneration &&
+                snapshot.ProcessId == ProcessId;
+            return matchesCurrent ? snapshot : snapshot with { State = DebuggerLifecycleObservation.Stale, IsValid = false };
+        }
+    }
+
+    public bool ReportDebuggerLifecycle(Guid debuggerSessionId, DebuggerLifecycleObservation state)
+    {
+        if (debuggerSessionId == Guid.Empty) return false;
+        lock (_syncRoot)
+        {
+            var current = _debuggerOwnership;
+            if (!IsSessionRunning || _runtimeGeneration is not > 0 ||
+                !DebuggerOwnershipTransitionPolicy.TryApplyObservation(current, _runtimeSessionIdentity,
+                    _runtimeGeneration.Value, _generation, ProcessId, debuggerSessionId, state, out var next))
+            {
+                DeveloperDiagnostics.LogDecision("Debugger", "DebuggerOwnershipObservation",
+                    "Lifecycle observation was rejected because its identity was stale or another debugger still owned the current session.", "Rejected",
+                    new Dictionary<string, object?>
+                    {
+                        ["incomingDebuggerSessionId"] = debuggerSessionId,
+                        ["incomingState"] = state.ToString(),
+                        ["currentDebuggerSessionId"] = current.DebuggerSessionId,
+                        ["currentState"] = current.State.ToString(),
+                        ["currentSnapshotValid"] = current.IsValid,
+                        ["terminalGeneration"] = _generation,
+                        ["runtimeGeneration"] = _runtimeGeneration,
+                        ["processId"] = ProcessId
+                    });
+                return false;
+            }
+            _debuggerOwnership = next;
+        }
+
+        if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+        {
+            var snapshot = GetDebuggerOwnershipSnapshot();
+            ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("DebuggerOwnershipObserved",
+                DebuggerSessionId: debuggerSessionId, RuntimeSessionId: snapshot.RuntimeSessionId,
+                RuntimeGeneration: snapshot.RuntimeGeneration, TerminalGeneration: snapshot.TerminalGeneration,
+                ProcessId: snapshot.ProcessId, Outcome: snapshot.State.ToString(), DebuggerState: snapshot.State.ToString(),
+                DebuggerMayOwnSession: snapshot.MayOwnSession, IdentityValid: snapshot.IsValid,
+                EventSource: "DAP", EventType: "DebuggerLifecycleObservation",
+                CorrelationConfidence: snapshot.IsValid ? "GenerationBound" : "Stale"));
+        }
+        return true;
+    }
     public bool IsLiveCompletionAvailable => _languageServiceClient is { IsInitialized: true } && IsSessionRunning;
 
     public Task<AuthoritativeCompletionResult?> GetLiveCompletionsAsync(
@@ -329,6 +396,11 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
             _commandInProgress = false;
             _shutdownRequested = false;
             _sessionFaulted = false;
+            _debuggerOwnership = _runtimeSessionIdentity != Guid.Empty && _runtimeGeneration is > 0
+                ? new(_runtimeSessionIdentity, _runtimeGeneration, _generation, process.Id, null,
+                    DebuggerLifecycleObservation.None, true)
+                : new(_runtimeSessionIdentity, _runtimeGeneration, _generation, process.Id, null,
+                    DebuggerLifecycleObservation.Unknown, false);
             _promptReadyObservation = 0;
             _promptRecoveryGeneration = _generation;
             _promptRecoveryWaiter = null;
@@ -359,7 +431,15 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
                 throw new InvalidOperationException("PSES did not publish a language-service pipe for the console session.");
 
             languageServiceClient = new PsesLanguageServiceClient();
-            var languageServiceFaultHandler = new Action<Exception>(exception => OnLanguageServiceFaulted(languageServiceClient!, generation, exception));
+            var languageServiceFaultHandler = new Action<Exception>(exception =>
+            {
+                if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+                    ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("PsesSessionFaulted",
+                        TerminalGeneration: generation, ProcessId: process.Id, EventSource: "PSES/LSP",
+                        EventType: "SessionFault", EventOutcome: "Faulted", CorrelationConfidence: "GlobalObservation",
+                        Reason: exception.GetType().Name));
+                OnLanguageServiceFaulted(languageServiceClient!, generation, exception);
+            });
             languageServiceClient.SessionFaulted += languageServiceFaultHandler;
             await languageServiceClient.InitializeAsync(languageServicePipeName, process.Id, generation,
                 (data, token) => SendSyntheticTerminalInputAsync(generation, data, token), cancellationToken).ConfigureAwait(false);
@@ -439,6 +519,16 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
             ["consoleRepl"] = true,
             ["transport"] = "ConPTY + PSES host console REPL + named LSP/DAP session details"
         });
+        if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+        {
+            Guid runtimeSessionIdentity; long? runtimeGeneration;
+            lock (_syncRoot) { runtimeSessionIdentity = _runtimeSessionIdentity; runtimeGeneration = _runtimeGeneration; }
+            ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("TerminalGenerationCreated",
+                RuntimeSessionId: runtimeSessionIdentity == Guid.Empty ? null : runtimeSessionIdentity,
+                RuntimeGeneration: runtimeGeneration, TerminalGeneration: generation, ProcessId: process.Id,
+                ProcessStartUtcTicks: ProcessStartTimeUtc?.UtcTicks, EventSource: "ConPTY/PSES",
+                EventType: "TerminalGenerationCreated", CorrelationConfidence: "GenerationBound"));
+        }
         TerminalSessionStarted?.Invoke(generation);
         // The ConPTY reader starts before the LSP handshake. The first prompt can
         // therefore be observed before the session-start lifecycle event reaches
@@ -526,8 +616,12 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         return ExecuteTextAsync(commandText, onOutput, requestId, cancellationToken);
     }
 
-    public async Task<LiveConsoleCommandResult> ExecuteScriptAsync(string documentDisplayName, string scriptContent, Action<ExecutionOutputRecord> onOutput, bool executeInCurrentScope = false, CancellationToken cancellationToken = default)
+    public Task<LiveConsoleCommandResult> ExecuteScriptAsync(string documentDisplayName, string scriptContent, Action<ExecutionOutputRecord> onOutput, bool executeInCurrentScope = false, CancellationToken cancellationToken = default)
+        => ExecuteScriptForRequestAsync(Guid.NewGuid(), documentDisplayName, scriptContent, onOutput, executeInCurrentScope, cancellationToken);
+
+    public async Task<LiveConsoleCommandResult> ExecuteScriptForRequestAsync(Guid requestId, string documentDisplayName, string scriptContent, Action<ExecutionOutputRecord> onOutput, bool executeInCurrentScope, CancellationToken cancellationToken)
     {
+        if (requestId == Guid.Empty) throw new ArgumentException("A nonempty execution request ID is required.", nameof(requestId));
         ArgumentNullException.ThrowIfNull(scriptContent);
         ArgumentNullException.ThrowIfNull(onOutput);
         if (!IsSessionRunning || _languageServiceClient is null)
@@ -546,7 +640,6 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
             _activeCommandCancellation = commandCancellation;
         }
 
-        var requestId = Guid.NewGuid();
         var sessionGeneration = SessionGeneration;
         var startedAt = DateTimeOffset.UtcNow;
         DeveloperDiagnostics.LogInfo(
@@ -652,6 +745,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         var foregroundCompletionVerified = false;
         var foregroundHandoffStarted = false;
         var foregroundTerminationVerified = false;
+        var foregroundEvaluationSubmitted = false;
+        var stagedLauncherMayExist = false;
+        var stagingOperationSettled = false;
+        var phase = new StructuredExecutionPhaseTracker();
         var executionGateAcquired = false;
         string? snapshotPath = null;
         var snapshotCreated = false;
@@ -669,6 +766,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
             {
                 await _structuredExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 executionGateAcquired = true;
+                phase.AdvanceTo(StructuredExecutionPhase.DapStaging);
                 if (correlation.IsEnabled)
                     correlation.Record(new ExecutionCorrelationEvent("ServiceGateAcquired", RequestId: requestId,
                         TerminalGeneration: sessionGeneration, ProcessId: ProcessId));
@@ -733,6 +831,15 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
                 ["executeInCurrentScope"] = executeInCurrentScope,
                 ["contentOmitted"] = true
             });
+            DeveloperDiagnostics.LogInfo("PSES", "Request-scoped editor history exclusion was included in the private DAP stage before foreground submission.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = sessionGeneration,
+                ["historyOwner"] = "PSReadLine",
+                ["historyHandlerChained"] = true,
+                ["matchScope"] = "exact-generated-editor-invocation",
+                ["contentOmitted"] = true
+            });
             // DAP REPL evaluation runs inside PSES's PSReadLine idle handler. It
             // must only stage the script: output there advances the console cursor
             // without moving PSReadLine's retained input anchor. The foreground
@@ -742,7 +849,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
             // foreground command short so prompt matching and R34 echo filtering
             // continue to recognize the same request-specific invocation.
             var innerInvocation = (executeInCurrentScope ? ". " : "& ") + quotedSnapshotPath;
-            var stagedExpression = "$global:" + stagedScriptVariable + " = {\n" +
+            var stagedExpression = PsesInteractiveHistoryExclusion.BuildRegistrationScript() +
+                "$global:" + stagedScriptVariable + " = {\n" +
                 $"${statusVariable} = $true\ntry {{\n" +
                 $"if (-not [System.IO.File]::Exists({quotedSnapshotPath})) {{ throw 'The staged editor snapshot is missing.' }}\n" +
                 innerInvocation + "\n" +
@@ -765,7 +873,14 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
                     sourceInfo,
                     stagedExpression);
             }
-            protocolResult = await PsesDapEvaluationClient.EvaluateAsync(debugPipe, requestId, sessionGeneration, stagedExpression, cancellationToken).ConfigureAwait(false);
+            protocolResult = await PsesDapEvaluationClient.EvaluateAsync(debugPipe, requestId, sessionGeneration, stagedExpression, cancellationToken,
+                () => stagedLauncherMayExist = true,
+                evaluated =>
+                {
+                    stagingOperationSettled = true;
+                    phase.AdvanceTo(StructuredExecutionPhase.DapStageSettled);
+                    if (evaluated) phase.AdvanceTo(StructuredExecutionPhase.DapStaged);
+                }).ConfigureAwait(false);
             if (correlation.IsEnabled)
                 correlation.Record(new ExecutionCorrelationEvent("DapStageResponse", RequestId: requestId,
                     TerminalGeneration: sessionGeneration, ProcessId: ProcessId,
@@ -779,6 +894,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
                 ["stagedExpressionLength"] = stagedExpression.Length,
                 ["contentOmitted"] = true
             });
+            // A canceled stage may return its terminal response after the user
+            // cancellation. Record that settled outcome, then route through cleanup
+            // before foreground admission.
+            cancellationToken.ThrowIfCancellationRequested();
             var status = protocolResult.Status;
             var errorMessage = protocolResult.ErrorMessage ?? protocolResult.ProtocolError;
             if (protocolResult.ResponseReceived)
@@ -796,6 +915,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
                 // the staged script and cannot be an admission prerequisite.
                 if (status == EditorExecutionStatus.Completed && protocolResult.ResponseReceived)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var invocation = (executeInCurrentScope ? ". " : "& ") + "$global:" + stagedScriptVariable;
                     DeveloperDiagnostics.LogInfo("PSES", "Foreground PSES editor invocation requested after DAP staging.", new Dictionary<string, object?>
                     {
@@ -840,10 +960,16 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
                     var foregroundCompleted = false;
                     if (requestEchoFilter is not null)
                     {
-                        foregroundHandoffStarted = true;
-                        foregroundCompleted = await RestoreInteractivePromptAsync(requestId, sessionGeneration, invocation, statusPath, cancellationToken).ConfigureAwait(false);
+                        foregroundCompleted = await RestoreInteractivePromptAsync(requestId, sessionGeneration, invocation, statusPath, cancellationToken,
+                            () =>
+                            {
+                                foregroundHandoffStarted = true;
+                                foregroundEvaluationSubmitted = true;
+                                phase.AdvanceTo(StructuredExecutionPhase.ForegroundSubmitted);
+                            }, () => phase.AdvanceTo(StructuredExecutionPhase.EvaluationResponded)).ConfigureAwait(false);
                     }
                     foregroundCompletionVerified = foregroundCompleted;
+                    if (foregroundCompleted) phase.AdvanceTo(StructuredExecutionPhase.PromptReconciled);
                     if (!foregroundCompleted)
                     {
                         DeveloperDiagnostics.LogWarning("PSES", "Foreground editor execution did not satisfy request-specific prompt restoration predicates.", new Dictionary<string, object?>
@@ -941,37 +1067,93 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            phase.RequestCancellation();
             if (correlation.IsEnabled)
                 correlation.Record(new ExecutionCorrelationEvent("CancellationRequested", RequestId: requestId,
                     TerminalGeneration: sessionGeneration, ProcessId: ProcessId));
-            var promptRecovered = (await StopConsoleForGenerationAsync(sessionGeneration).ConfigureAwait(false)).Outcome == LiveConsoleInterruptOutcome.RecoveredAtPrompt;
-            var requestStatusObserved = File.Exists(statusPath) && sessionGeneration == SessionGeneration;
+            var promptRecovered = false;
+            var requestStatusObserved = false;
             var sessionTerminated = false;
-            if (!promptRecovered || !requestStatusObserved)
+            var preSubmissionCleanupConfirmed = true;
+            if (foregroundCompletionVerified)
             {
-                // Neither Ctrl+C nor a prompt candidate proves that this request's
-                // foreground pipeline stopped. The private status boundary or
-                // owned-process termination must settle it before release.
-                await ShutdownAsync().ConfigureAwait(false);
-                sessionTerminated = !IsSessionRunning;
+                // Cancellation can race with post-prompt outcome parsing. The
+                // request-specific status and prompt predicates already proved
+                // that this invocation settled, so no second Ctrl+C is needed.
+                promptRecovered = true;
+                requestStatusObserved = File.Exists(statusPath) && sessionGeneration == SessionGeneration;
+                foregroundTerminationVerified = requestStatusObserved;
             }
-            foregroundTerminationVerified = (promptRecovered && requestStatusObserved) || sessionTerminated;
+            else if (phase.RequiresForegroundInterruption)
+            {
+                promptRecovered = (await StopConsoleForGenerationAsync(sessionGeneration).ConfigureAwait(false)).Outcome == LiveConsoleInterruptOutcome.RecoveredAtPrompt;
+                requestStatusObserved = File.Exists(statusPath) && sessionGeneration == SessionGeneration;
+                if (!promptRecovered || !requestStatusObserved)
+                {
+                    // Ctrl+C and a visible prompt alone do not prove this request's
+                    // pipeline stopped. Preserve the existing controlled failure
+                    // path when the request status and prompt cannot both be verified.
+                    await ShutdownAsync().ConfigureAwait(false);
+                    sessionTerminated = !IsSessionRunning;
+                }
+                foregroundTerminationVerified = (promptRecovered && requestStatusObserved) || sessionTerminated;
+            }
+            else if (stagedLauncherMayExist)
+            {
+                if (stagingOperationSettled)
+                {
+                    var cleanupOwned = phase.TryBeginStagedLauncherCleanup();
+                    var debugPipe = _debugServicePipeName;
+                    preSubmissionCleanupConfirmed = cleanupOwned && debugPipe is not null && await PsesDapEvaluationClient.RemoveStagedScriptAsync(
+                        debugPipe, requestId, sessionGeneration, stagedScriptVariable).ConfigureAwait(false);
+                    if (preSubmissionCleanupConfirmed)
+                        phase.ConfirmStagedLauncherCleanup();
+                    if (correlation.IsEnabled)
+                        correlation.Record(new ExecutionCorrelationEvent("StagedLauncherCleanupSettled", RequestId: requestId,
+                            TerminalGeneration: sessionGeneration, ProcessId: ProcessId,
+                            Outcome: preSubmissionCleanupConfirmed ? "Acknowledged" : "Unknown",
+                            Reason: preSubmissionCleanupConfirmed ? "request-correlated-launcher-absence" : "cleanup-acknowledgment-missing"));
+                }
+                else
+                {
+                    preSubmissionCleanupConfirmed = false;
+                    DeveloperDiagnostics.LogWarning("PSES", "Staged launcher cleanup was withheld because the DAP stage has no terminal response; cleanup could race a late stage completion.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["sessionGeneration"] = sessionGeneration,
+                        ["cleanupDispatched"] = false,
+                        ["stagingSettled"] = false
+                    });
+                }
+                if (!preSubmissionCleanupConfirmed)
+                {
+                    lock (_syncRoot) _interactiveReadinessUnverified = true;
+                }
+            }
             if (correlation.IsEnabled)
                 correlation.Record(new ExecutionCorrelationEvent("CancellationRecoverySettled", RequestId: requestId,
                     TerminalGeneration: sessionGeneration, ProcessId: ProcessId,
-                    Outcome: foregroundTerminationVerified ? "CANCELLED" : "UNKNOWN",
-                    Reason: foregroundTerminationVerified ? null : "recovery-unverified"));
+                    Outcome: (foregroundEvaluationSubmitted ? foregroundTerminationVerified : preSubmissionCleanupConfirmed) ? "CANCELLED" : "UNKNOWN",
+                    Reason: foregroundEvaluationSubmitted ? foregroundTerminationVerified ? null : "recovery-unverified"
+                        : preSubmissionCleanupConfirmed ? "pre-foreground-canceled" : stagingOperationSettled ? "staged-launcher-cleanup-unverified" : "dap-stage-settlement-unverified"));
             DeveloperDiagnostics.LogInfo("PSES", "Structured cancellation recovery settled before execution ownership was released.", new Dictionary<string, object?>
             {
                 ["requestId"] = requestId,
                 ["sessionGeneration"] = sessionGeneration,
+                ["phase"] = phase.Current.ToString(),
+                ["foregroundEvaluationSubmitted"] = foregroundEvaluationSubmitted,
                 ["promptRecovered"] = promptRecovered,
                 ["requestStatusObserved"] = requestStatusObserved,
                 ["sessionTerminated"] = sessionTerminated,
-                ["pipelineInterruptionProven"] = foregroundTerminationVerified
+                ["pipelineInterruptionProven"] = foregroundTerminationVerified,
+                ["stagingOperationSettled"] = stagingOperationSettled,
+                ["preSubmissionCleanupConfirmed"] = preSubmissionCleanupConfirmed
             });
-            return new AuthoritativeStructuredExecutionResult(foregroundTerminationVerified ? EditorExecutionStatus.Cancelled : EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
-                promptRecovered && requestStatusObserved ? "Execution canceled; request completion and interactive prompt were observed." : sessionTerminated ? "Execution canceled; the owned session was terminated because request completion or prompt recovery was unverified." : "Execution cancellation could not be verified.", false);
+            var cancellationVerified = foregroundEvaluationSubmitted ? foregroundTerminationVerified : preSubmissionCleanupConfirmed;
+            return new AuthoritativeStructuredExecutionResult(cancellationVerified ? EditorExecutionStatus.Cancelled : EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
+                !foregroundEvaluationSubmitted ? preSubmissionCleanupConfirmed ? "Execution canceled before foreground submission; the staged launcher was removed." : "Execution cancellation was not verified because the staged launcher cleanup could not be confirmed."
+                    : promptRecovered && requestStatusObserved ? "Execution canceled; request completion and interactive prompt were observed." : sessionTerminated ? "Execution canceled; the owned session was terminated because request completion or prompt recovery was unverified." : "Execution cancellation could not be verified.",
+                false, RecoveryRequired: !foregroundEvaluationSubmitted && !preSubmissionCleanupConfirmed);
         }
         catch (Exception ex)
         {
@@ -1002,6 +1184,13 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         }
         finally
         {
+            var settledPhase = phase.Current;
+            phase.AdvanceTo(StructuredExecutionPhase.Terminal);
+            if (correlation.IsEnabled)
+                correlation.Record(new ExecutionCorrelationEvent("RequestTerminalCleanup", RequestId: requestId,
+                    TerminalGeneration: sessionGeneration, ProcessId: ProcessId,
+                    Outcome: phase.CancellationRequested ? "canceled" : protocolResult?.Status.ToString(),
+                    Reason: $"phase={settledPhase};foregroundSubmitted={foregroundEvaluationSubmitted}"));
             var foregroundSettled = !foregroundHandoffStarted || foregroundCompletionVerified || foregroundTerminationVerified;
             if (foregroundSettled)
                 TryDeleteFile(statusPath);
@@ -1072,6 +1261,31 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
             if (!string.IsNullOrEmpty(filteredEchoRemainder))
             {
                 PublishVisibleOutput(ExecutionOutputStreamKind.StandardOutput, sessionGeneration, filteredEchoRemainder);
+            }
+            if (requestEchoFilter is not null)
+            {
+                if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+                    ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("EchoFilterSettled",
+                        RequestId: requestId, TerminalGeneration: sessionGeneration, ProcessId: ProcessId,
+                        Outcome: cancellationToken.IsCancellationRequested ? "Canceled" : protocolResult?.Status.ToString(),
+                        Reason: $"candidate={requestEchoFilter.CandidateEchoObserved};matches={requestEchoFilter.MatchedEchoCount};remainderLength={filteredEchoRemainder.Length}",
+                        EventSource: "TerminalEchoFilter", EventType: "EchoFilterSettlement",
+                        CorrelationConfidence: "RequestIdentity"));
+                DeveloperDiagnostics.LogInfo("PSES", "Request-generated invocation echo coordination settled.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = requestId,
+                    ["sessionGeneration"] = sessionGeneration,
+                    ["terminalGeneration"] = sessionGeneration,
+                    ["candidateEchoObserved"] = requestEchoFilter.CandidateEchoObserved,
+                    ["matchedEchoCount"] = requestEchoFilter.MatchedEchoCount,
+                    ["candidateWithoutMatch"] = requestEchoFilter.CandidateEchoObserved && requestEchoFilter.MatchedEchoCount == 0,
+                    ["filteredRemainderLength"] = filteredEchoRemainder.Length,
+                    ["foregroundCompletionVerified"] = foregroundCompletionVerified,
+                    ["promptRestorationVerified"] = foregroundCompletionVerified,
+                    ["foregroundTerminationVerified"] = foregroundTerminationVerified,
+                    ["cancellationRequested"] = cancellationToken.IsCancellationRequested,
+                    ["contentOmitted"] = true
+                });
             }
             if (executionGateAcquired) _structuredExecutionGate.Release();
             if (correlation.IsEnabled)
@@ -1195,7 +1409,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
 
     private sealed record InterruptRecoveryResult(LiveConsoleInterruptOutcome Outcome, bool SignalDelivered);
 
-    private async Task<bool> RestoreInteractivePromptAsync(Guid requestId, int expectedGeneration, string invocation, string statusPath, CancellationToken cancellationToken)
+    private async Task<bool> RestoreInteractivePromptAsync(Guid requestId, int expectedGeneration, string invocation, string statusPath, CancellationToken cancellationToken, Action onForegroundEvaluationSubmitted, Action onEvaluationResponse)
     {
         PsesLanguageServiceClient? client;
         int? expectedProcessId = null;
@@ -1205,6 +1419,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         var promptSignal = new PromptRestorationSignal(expectedGeneration);
         ExecutionShadowReadiness? shadow = null;
         var statusMarkerRecorded = 0;
+        var pendingStatusLogged = 0;
+        var foregroundResponseReceived = 0;
         var eventOrder = 0L;
         var frameSequenceAtRegistration = 0L;
         Action<int, string> rawHandler = (generation, text) =>
@@ -1322,6 +1538,19 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         Action<int, bool> cursorHandler = (generation, visible) =>
         {
             var eventNumber = Interlocked.Increment(ref eventOrder);
+            if (DeveloperDiagnostics.IsEnabled && Volatile.Read(ref foregroundResponseReceived) == 0 &&
+                generation == expectedGeneration && visible &&
+                Volatile.Read(ref pendingStatusLogged) == 0 && File.Exists(statusPath) &&
+                Interlocked.Exchange(ref pendingStatusLogged, 1) == 0)
+                DeveloperDiagnostics.LogInfo("PSES", "Request status marker observed while foreground evaluate response was pending.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = requestId,
+                    ["sessionGeneration"] = expectedGeneration,
+                    ["processId"] = ProcessId,
+                    ["eventOrder"] = eventNumber,
+                    ["invocationObservedBeforeFiltering"] = invocationObserved,
+                    ["contentOmitted"] = true
+                });
             PromptRestorationSnapshot before;
             PromptRestorationSnapshot after;
             lock (_syncRoot)
@@ -1371,8 +1600,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         }
 
         if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+        {
             shadow = new ExecutionShadowReadiness(ExecutionCorrelationTelemetry.Shared, requestId,
                 expectedGeneration, expectedProcessId, ProcessStartTimeUtc?.UtcTicks);
+        }
 
         PromptReadyObserved += promptHandler;
         OutputObservedBeforeDisplayFiltering += rawHandler;
@@ -1394,7 +1625,9 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         {
             // PSES owns the foreground transition and writes the invocation before
             // user output. Its REPL then writes the next prompt at the new cursor.
-            var handoff = await client.EvaluateAsync(requestId, invocation, cancellationToken).ConfigureAwait(false);
+            var handoff = await client.EvaluateAsync(requestId, invocation, cancellationToken, onForegroundEvaluationSubmitted).ConfigureAwait(false);
+            Volatile.Write(ref foregroundResponseReceived, 1);
+            onEvaluationResponse();
             var processStartTicks = ProcessStartTimeUtc?.UtcTicks;
             var runtimeGeneration = client.RuntimeGeneration;
             bool requestOwnsForeground;
@@ -1412,20 +1645,33 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
             var candidate = HostForegroundTaskEndedCandidate.Classify(new HostForegroundTaskEndedCandidateFacts(
                 requestId, handoff.ProtocolRequestId, handoff.ResponseSequence, handoff.IdleSequence,
                 client.RuntimeIdentityVerified ? client.RuntimeSessionIdentity : null, runtimeGeneration, expectedGeneration, expectedProcessId,
-                processStartTicks, handoff.ProtocolError is null, requestOwnsForeground, identityStillCurrent, DebuggerOwnsSession: false,
+                processStartTicks, handoff.ProtocolError is null, requestOwnsForeground, identityStillCurrent,
+                DebuggerOwnsSession: GetDebuggerOwnershipSnapshot().MayOwnSession,
                 Canceled: cancellationToken.IsCancellationRequested, Faulted: !client.IsInitialized,
                 Superseded: expectedGeneration != SessionGeneration,
                 PsesVersionVerified: client.PsesLifecycleContractVerified,
                 RuntimeGenerationMatches: runtimeGeneration is > 0 && _runtimeGeneration == runtimeGeneration,
                 IdleObservationCount: handoff.IdleObservationCount ?? 0));
             if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+            {
+                var debuggerOwnership = GetDebuggerOwnershipSnapshot();
+                var responseConfidence = !handoff.ResponseReceived ? "Incomplete" :
+                    !identityStillCurrent ? "Stale" : debuggerOwnership.MayOwnSession ? "Rejected" :
+                    handoff.ProtocolRequestId.HasValue && handoff.ResponseSequence.HasValue ? "Correlated" : "Partial";
                 ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("LspEvaluationResponse",
                     RequestId: requestId, ProtocolRequestId: handoff.ProtocolRequestId,
                     RuntimeSessionId: client.RuntimeIdentityVerified ? client.RuntimeSessionIdentity : null,
                     RuntimeGeneration: runtimeGeneration, TerminalGeneration: expectedGeneration, ProcessId: expectedProcessId,
                     ProcessStartUtcTicks: processStartTicks, PsesVersion: client.PsesLifecycleVersion,
                     ResponseSequence: handoff.ResponseSequence, IdleSequence: handoff.IdleSequence,
-                    Outcome: handoff.Status.ToString(), Reason: handoff.ResponseReceived ? null : "no-response"));
+                    Outcome: handoff.Status.ToString(), Reason: handoff.ResponseReceived ? null : "no-response",
+                    EventSource: "PSES/LSP", EventType: "EvaluateResponse",
+                    EventOutcome: handoff.ResponseReceived ? handoff.Status.ToString() : "Incomplete",
+                    CorrelationConfidence: responseConfidence,
+                    RejectionReason: responseConfidence is "Stale" or "Rejected" ? responseConfidence : null,
+                    DebuggerSessionId: debuggerOwnership.DebuggerSessionId,
+                    DebuggerState: debuggerOwnership.State.ToString(), DebuggerMayOwnSession: debuggerOwnership.MayOwnSession));
+            }
             if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
                 ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("HostForegroundTaskEndedCandidate",
                     RequestId: requestId, ProtocolRequestId: handoff.ProtocolRequestId,
@@ -1718,6 +1964,16 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
             ["sessionGeneration"] = generation,
             ["shutdownRequested"] = true
         });
+        if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+        {
+            Guid runtimeSessionIdentity; long? runtimeGeneration;
+            lock (_syncRoot) { runtimeSessionIdentity = _runtimeSessionIdentity; runtimeGeneration = _runtimeGeneration; }
+            ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("TerminalGenerationStopping",
+                RuntimeSessionId: runtimeSessionIdentity == Guid.Empty ? null : runtimeSessionIdentity,
+                RuntimeGeneration: runtimeGeneration, TerminalGeneration: generation, ProcessId: processId,
+                EventSource: "ConPTY/PSES", EventType: "TerminalGenerationStopping",
+                CorrelationConfidence: "GenerationBound"));
+        }
         TerminalSessionStopping?.Invoke(generation);
         try
         {
@@ -2559,6 +2815,11 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
             return;
         }
 
+        if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+            ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("PsesSessionTerminated",
+                TerminalGeneration: generation, ProcessId: owner.ProcessId, EventSource: "PSES/ConPTY",
+                EventType: "PowerShellProcessTerminated", EventOutcome: "Terminated",
+                CorrelationConfidence: "GlobalObservation"));
         try { SessionTerminated?.Invoke(); } catch { }
     }
 
@@ -2589,6 +2850,11 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         });
         if (publish)
         {
+            if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+                ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("PsesSessionTerminated",
+                    TerminalGeneration: generation, ProcessId: ProcessId, EventSource: "PSES/LSP",
+                    EventType: "LanguageServiceSessionTerminated", EventOutcome: "Faulted",
+                    CorrelationConfidence: "GlobalObservation"));
             try { SessionTerminated?.Invoke(); } catch { }
             _ = RecoverFromLanguageServiceFaultAsync();
         }
@@ -2764,10 +3030,16 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
 
     private void NotifyPromptReadyObserved(int generation, string text)
     {
-        var handlers = PromptReadyObserved;
-        if (handlers is null) return;
         Guid? activeRequestId;
         lock (_syncRoot) activeRequestId = _activeStructuredEchoFilter?.RequestId;
+        if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
+            ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("TerminalPromptObserved",
+                RequestId: activeRequestId, TerminalGeneration: generation, ProcessId: ProcessId,
+                EventSource: "ConPTY/TerminalPresentation", EventType: "PromptPresentationObserved",
+                CorrelationConfidence: activeRequestId.HasValue ? "RequestContextAtObservation" : "PresentationOnly",
+                Reason: "prompt-text-omitted"));
+        var handlers = PromptReadyObserved;
+        if (handlers is null) return;
         foreach (Action<int, string> handler in handlers.GetInvocationList())
         {
             try { handler(generation, text); }
@@ -3182,6 +3454,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         private int _matchedEchoCount;
         private bool _candidateEchoObserved;
         private bool _isDebuggerLaunchEcho;
+        private bool _consumeEchoLineTerminator;
+        private int _echoLineTerminatorIndex;
 
         public Guid RequestId => _requestId;
         public int MatchedEchoCount => _matchedEchoCount;
@@ -3227,7 +3501,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
                 _candidateEchoObserved = true;
             }
             SuppressCompleteEchoes();
-            if (IsAwaitingPromptPrefixedNormalizedEcho(_pending.ToString()))
+            ConsumeEchoLineTerminator();
+            if (_consumeEchoLineTerminator || IsAwaitingPromptPrefixedNormalizedEcho(_pending.ToString()))
             {
                 return string.Empty;
             }
@@ -3253,8 +3528,11 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
         public string Flush()
         {
             SuppressCompleteEchoes();
+            ConsumeEchoLineTerminator(final: true);
             var visible = _pending.ToString();
             _pending.Clear();
+            _consumeEchoLineTerminator = false;
+            _echoLineTerminatorIndex = 0;
             if (_suppressedCharacters > 0)
             {
                 DeveloperDiagnostics.LogInfo("PSES", "Structured editor echo was suppressed from the terminal renderer.", new Dictionary<string, object?>
@@ -3294,7 +3572,31 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IR
                 _suppressedCharacters += promptPrefixedMatch.Length;
                 _promptPrefixedSuppressedCharacters += promptPrefixedMatch.Length;
                 _matchedEchoCount++;
+                _consumeEchoLineTerminator = true;
+                _echoLineTerminatorIndex = promptPrefixedMatch.Index + preservedControls.Length;
+                ConsumeEchoLineTerminator();
             }
+        }
+
+        private void ConsumeEchoLineTerminator(bool final = false)
+        {
+            if (!_consumeEchoLineTerminator || _pending.Length <= _echoLineTerminatorIndex) return;
+            if (_pending[_echoLineTerminatorIndex] == '\r')
+            {
+                if (_pending.Length == _echoLineTerminatorIndex + 1 && !final) return;
+                var consumed = _pending.Length > _echoLineTerminatorIndex + 1 && _pending[_echoLineTerminatorIndex + 1] == '\n' ? 2 : 1;
+                _pending.Remove(_echoLineTerminatorIndex, consumed);
+                _suppressedCharacters += consumed;
+                _consumeEchoLineTerminator = false;
+                return;
+            }
+
+            if (_pending[_echoLineTerminatorIndex] == '\n')
+            {
+                _pending.Remove(_echoLineTerminatorIndex, 1);
+                _suppressedCharacters++;
+            }
+            _consumeEchoLineTerminator = false;
         }
 
         private bool HasPromptAnchoredCandidate(string pending)

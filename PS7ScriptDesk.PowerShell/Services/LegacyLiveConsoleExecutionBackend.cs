@@ -60,12 +60,17 @@ public sealed class LegacyLiveConsoleExecutionBackend : IEditorExecutionBackend
         {
             Publish(new EditorExecutionEvent(EditorExecutionEventKind.Accepted, request.RequestId, request.SessionGeneration, 0, Timestamp: startedAt, BackendId: BackendId));
             Publish(new EditorExecutionEvent(EditorExecutionEventKind.Started, request.RequestId, request.SessionGeneration, 0, Timestamp: startedAt, BackendId: BackendId));
-            var command = await _liveConsoleService.ExecuteScriptAsync(
-                request.DocumentDisplayName,
-                request.ScriptText,
-                OnOutput,
-                request.ExecuteInCurrentScope,
-                cancellationToken).ConfigureAwait(false);
+            DeveloperDiagnostics.LogInfo("Execution", "Legacy backend request correlation selected.", new Dictionary<string, object?>
+            {
+                ["requestId"] = request.RequestId,
+                ["correlatedProvider"] = _liveConsoleService is ICorrelatedLiveConsoleScriptExecution,
+                ["contentOmitted"] = true
+            });
+            var command = _liveConsoleService is ICorrelatedLiveConsoleScriptExecution correlated
+                ? await correlated.ExecuteScriptForRequestAsync(request.RequestId, request.DocumentDisplayName,
+                    request.ScriptText, OnOutput, request.ExecuteInCurrentScope, cancellationToken).ConfigureAwait(false)
+                : await _liveConsoleService.ExecuteScriptAsync(request.DocumentDisplayName,
+                    request.ScriptText, OnOutput, request.ExecuteInCurrentScope, cancellationToken).ConfigureAwait(false);
             await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             var endedAt = DateTimeOffset.UtcNow;
             var result = new EditorExecutionResult(

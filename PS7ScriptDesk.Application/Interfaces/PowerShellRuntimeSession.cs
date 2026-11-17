@@ -11,6 +11,7 @@ public enum PowerShellRuntimeSessionState
     Debugging,
     Stopping,
     Faulted,
+    RecoveryRequired,
     Stopped
 }
 
@@ -40,6 +41,8 @@ public sealed record PowerShellRuntimeSessionSnapshot(
 public interface IPowerShellRuntimeExecutionLease : IAsyncDisposable
 {
     void MarkReadinessUnverified(string reason);
+
+    void MarkRecoveryRequired(string reason);
 }
 
 public interface IPowerShellRuntimeSessionCoordinator : IAsyncDisposable
@@ -69,6 +72,15 @@ public interface IPowerShellRuntimeSessionCoordinator : IAsyncDisposable
         CancellationToken cancellationToken = default);
 
     bool IsCurrent(Guid sessionId, long generation);
+
+    /// <summary>Admits one completed structured prompt observation for the current writable runtime/terminal identity.</summary>
+    bool TryAdmitStructuredPromptReadiness(
+        Guid requestId,
+        Guid sessionId,
+        long runtimeGeneration,
+        int terminalGeneration,
+        int processId,
+        bool executionCompleted);
 
     Task<IPowerShellRuntimeExecutionLease> AcquireExecutionAsync(
         Guid sessionId,

@@ -30,7 +30,7 @@ public sealed class TerminalInputCoordinatorTests
     [InlineData("\u001b[I", "FocusIn")]
     [InlineData("\u001b[O", "FocusOut")]
     [InlineData("\u001b", "Escape")]
-    [InlineData("\u001b[M!!", "MouseProtocol")]
+    [InlineData("\u001b[M!!!", "MouseProtocol")]
     [InlineData("\u001b[<0;10;4M", "MouseProtocol")]
     [InlineData("\u001b[<0;10;4m", "MouseProtocol")]
     [InlineData("Get-Date", "PrintableText")]

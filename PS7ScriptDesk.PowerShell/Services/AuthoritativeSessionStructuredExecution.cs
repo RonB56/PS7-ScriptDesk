@@ -58,6 +58,7 @@ public sealed class AuthoritativeSessionStructuredExecutionAdapter : IEditorExec
             return Rejected(request, "The authoritative PSES session is unavailable or stale.");
         }
 
+        var monotonicClock = System.Diagnostics.Stopwatch.StartNew();
         var startedAt = DateTimeOffset.UtcNow;
         var sequence = 0L;
         var outputs = new List<EditorOutputRecord>();
@@ -123,7 +124,11 @@ public sealed class AuthoritativeSessionStructuredExecutionAdapter : IEditorExec
                 result.ErrorMessage,
                 startedAt,
                 endedAt,
-                AuthoritativeSessionStructuredExecutionBackend.BackendName);
+                AuthoritativeSessionStructuredExecutionBackend.BackendName,
+                RecoveryRequired: result.RecoveryRequired)
+            {
+                MonotonicDuration = monotonicClock.Elapsed
+            };
         }
         catch (Exception ex)
         {
@@ -135,7 +140,10 @@ public sealed class AuthoritativeSessionStructuredExecutionAdapter : IEditorExec
                 ["sessionGeneration"] = request.SessionGeneration
             });
             EventPublished?.Invoke(new EditorExecutionEvent(EditorExecutionEventKind.Failed, request.RequestId, request.SessionGeneration, sequence, ErrorMessage: ex.Message, Timestamp: endedAt, BackendId: AuthoritativeSessionStructuredExecutionBackend.BackendName));
-            return new EditorExecutionResult(request.RequestId, request.SessionGeneration, EditorExecutionStatus.Failed, outputs.ToArray(), _session.CurrentWorkingDirectory, null, ex.Message, startedAt, endedAt, AuthoritativeSessionStructuredExecutionBackend.BackendName);
+            return new EditorExecutionResult(request.RequestId, request.SessionGeneration, EditorExecutionStatus.Failed, outputs.ToArray(), _session.CurrentWorkingDirectory, null, ex.Message, startedAt, endedAt, AuthoritativeSessionStructuredExecutionBackend.BackendName)
+            {
+                MonotonicDuration = monotonicClock.Elapsed
+            };
         }
     }
 

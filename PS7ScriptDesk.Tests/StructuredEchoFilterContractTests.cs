@@ -1,5 +1,6 @@
 using System.Text;
 using System.Reflection;
+using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.PowerShell.Services;
 
 namespace PS7ScriptDesk.Tests;
@@ -65,6 +66,33 @@ public sealed class StructuredEchoFilterContractTests
     }
 
     [Fact]
+    public void PromptPrefixedWrappedEcho_SplitCarriageReturnNewlineBoundaryIsRemoved()
+    {
+        const string script = "Write-Output 'DONE'";
+        var filter = new PsesOwnedInteractiveSessionService.StructuredEchoFilter(Guid.NewGuid(), script);
+        var invocation = "PS C:\\Work> " + script + "\r";
+
+        Assert.Empty(filter.Filter(invocation));
+        var visible = filter.Filter("\nDONE\r\n") + filter.Flush();
+
+        Assert.Equal("DONE\r\n", visible);
+    }
+
+    [Fact]
+    public void GeneratedInvocationEcho_PreservesPromptAndConsumesSplitCrLfBoundary()
+    {
+        var requestId = Guid.NewGuid();
+        var invocation = "& $global:__ps7sd_editor_" + requestId.ToString("N");
+        var filter = new PsesOwnedInteractiveSessionService.StructuredEchoFilter(
+            requestId, preservePromptPrefix: true, invocation);
+
+        Assert.Empty(filter.Filter("PS> " + invocation + "\r"));
+        var visible = filter.Filter("\nUSER_OUTPUT\r\n") + filter.Flush();
+
+        Assert.Equal("PS> USER_OUTPUT\r\n", visible);
+    }
+
+    [Fact]
     public void SourceIdenticalLegitimateOutput_RemainsVisibleWithoutPromptPrefix()
     {
         const string script = "Write-Output 'source-identical'";
@@ -96,6 +124,7 @@ public sealed class StructuredEchoFilterContractTests
         Assert.Contains("\u001b[32m", visible.ToString(), StringComparison.Ordinal);
         Assert.Contains("\u001b[0m", visible.ToString(), StringComparison.Ordinal);
         Assert.Contains("PS C:\\Work> ", visible.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("\r\n\u001b[32mUSER_OUTPUT", visible.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -303,14 +332,48 @@ public sealed class StructuredEchoFilterContractTests
     [Fact]
     public void ProductionPromptObserverReceivesOutputBeforeDisplayFilter()
     {
-        var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.PowerShell", "Services", "PsesOwnedInteractiveSessionService.cs");
+        using var service = new PsesOwnedInteractiveSessionService();
+        var requestId = Guid.NewGuid();
+        var invocation = "& $global:__ps7sd_editor_" + requestId.ToString("N");
+        var filter = new PsesOwnedInteractiveSessionService.StructuredEchoFilter(
+            requestId, preservePromptPrefix: true, invocation);
+        typeof(PsesOwnedInteractiveSessionService)
+            .GetField("_activeStructuredEchoFilter", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, filter);
 
-        Assert.Contains("OutputObservedBeforeDisplayFiltering += rawHandler", source, StringComparison.Ordinal);
-        var preFilterIndex = source.IndexOf("handler(generation, text)", StringComparison.Ordinal);
-        var structuredFilterIndex = source.IndexOf("echoFilter.Filter(string.Concat(executionState.Process(text)))", StringComparison.Ordinal);
-        var directFilterIndex = source.IndexOf("_activeStructuredEchoFilter?.Filter(text)", StringComparison.Ordinal);
-        Assert.True(preFilterIndex >= 0 && structuredFilterIndex > preFilterIndex && directFilterIndex > preFilterIndex,
-            "The request invocation observer must receive ConPTY text before the display echo filter runs.");
+        var callbackOrder = new List<string>();
+        var observedRaw = string.Empty;
+        var displayed = string.Empty;
+        service.OutputObservedBeforeDisplayFiltering += (_, text) =>
+        {
+            callbackOrder.Add("raw-observer");
+            observedRaw = text;
+        };
+        service.OutputObservedBeforeDisplayFiltering += (_, _) =>
+            throw new InvalidOperationException("diagnostic observer failure");
+        service.OutputObservedBeforeDisplayFiltering += (_, _) => callbackOrder.Add("later-raw-observer");
+        typeof(PsesOwnedInteractiveSessionService)
+            .GetField("_onOutput", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, new Action<ExecutionOutputRecord>(record =>
+            {
+                callbackOrder.Add("display");
+                displayed = record.Text;
+            }));
+
+        var publish = typeof(PsesOwnedInteractiveSessionService).GetMethod(
+            "PublishOutput", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(publish);
+        publish.Invoke(service,
+        [
+            ExecutionOutputStreamKind.StandardOutput,
+            0,
+            "PS C:\\Work> " + invocation + "\r\nUSER_OUTPUT\r\n"
+        ]);
+
+        Assert.Contains(invocation, observedRaw, StringComparison.Ordinal);
+        Assert.DoesNotContain(invocation, displayed, StringComparison.Ordinal);
+        Assert.Equal("PS C:\\Work> USER_OUTPUT\r\n", displayed);
+        Assert.Equal(new[] { "raw-observer", "later-raw-observer", "display" }, callbackOrder);
     }
 
     [Fact]

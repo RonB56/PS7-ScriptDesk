@@ -31,4 +31,5 @@ public sealed record AuthoritativeStructuredExecutionResult(
     EditorExecutionStatus Status,
     string? CurrentWorkingDirectory,
     string? ErrorMessage,
-    bool CompletionObserved);
+    bool CompletionObserved,
+    bool RecoveryRequired = false);

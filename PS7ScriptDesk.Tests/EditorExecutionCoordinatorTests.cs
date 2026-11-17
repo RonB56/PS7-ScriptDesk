@@ -192,6 +192,20 @@ public sealed class EditorExecutionCoordinatorTests
     }
 
     [Fact]
+    public async Task CompletedExecutionCarriesMonotonicDurationFromCoordinator()
+    {
+        var legacy = new FakeBackend(EditorExecutionCoordinator.LegacyBackendId, LegacyCapabilities, TimeSpan.FromMilliseconds(80));
+        using var coordinator = CreateCoordinator(legacy, null, new EditorExecutionFeatureGate(false), shadowMode: false);
+
+        var result = await coordinator.ExecuteAsync(CreateRequest());
+
+        Assert.Equal(EditorExecutionStatus.Completed, result.Status);
+        Assert.NotNull(result.MonotonicDuration);
+        Assert.True(result.Duration >= TimeSpan.FromMilliseconds(70));
+        Assert.Equal(result.MonotonicDuration, result.Duration);
+    }
+
+    [Fact]
     public async Task StructuredActiveExecutionSnapshotAdvertisesCancellationCapability()
     {
         var legacy = new FakeBackend(EditorExecutionCoordinator.LegacyBackendId, LegacyCapabilities);

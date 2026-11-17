@@ -51,6 +51,7 @@ public sealed class GitDirtyDocumentRuntimeSafetyTests
         Assert.True(tab.IsDirty);
         Assert.Equal("master\nUNSAVED SCRIPT DESK TEST\n", tab.Content);
         Assert.Equal("Branch switch blocked", host.StatusText);
+        Assert.Equal("Ready", host.ApplicationStatusText);
         Assert.Equal("Cannot switch branch", prompt.LastTitle);
         Assert.Contains("unsaved changes", prompt.LastMessage, StringComparison.OrdinalIgnoreCase);
         Assert.True(workspace.Branches.CanSwitchSelected);
