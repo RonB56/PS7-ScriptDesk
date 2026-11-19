@@ -4,6 +4,7 @@
     <Platform Name="x64" />
   </Configurations>
   <Project Path="PS7ScriptDesk.Application/PS7ScriptDesk.Application.csproj" />
+  <Project Path="PS7ScriptDesk.AcceptanceRunner/PS7ScriptDesk.AcceptanceRunner.csproj" />
   <Project Path="PS7ScriptDesk.Domain/PS7ScriptDesk.Domain.csproj" />
   <Project Path="PS7ScriptDesk.Editor/PS7ScriptDesk.Editor.csproj" />
   <Project Path="PS7ScriptDesk.Infrastructure/PS7ScriptDesk.Infrastructure.csproj" />

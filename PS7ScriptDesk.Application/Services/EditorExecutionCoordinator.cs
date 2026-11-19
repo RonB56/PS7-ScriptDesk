@@ -21,6 +21,7 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
     private readonly EditorExecutionFeatureGate _featureGate;
     private readonly ExecutionBackendAvailability _structuredAvailability;
     private readonly IEditorExecutionRequestClassifier _classifier;
+    private readonly ExperimentalRunSelectionBridgeFeatureGate _directSelectionGate;
     private readonly ConcurrentDictionary<Guid, byte> _activeRequests = new();
     private readonly ConcurrentDictionary<Guid, ExecutionRoutingDecision> _preparedDecisions = new();
     private ActiveEditorExecutionSnapshot? _activeExecution;
@@ -31,7 +32,8 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
         EditorExecutionFeatureGate featureGate,
         bool shadowMode = true,
         ExecutionBackendAvailability structuredAvailability = ExecutionBackendAvailability.Available,
-        IEditorExecutionRequestClassifier? classifier = null)
+        IEditorExecutionRequestClassifier? classifier = null,
+        ExperimentalRunSelectionBridgeFeatureGate? directSelectionGate = null)
     {
         ArgumentNullException.ThrowIfNull(backends);
         _featureGate = featureGate ?? throw new ArgumentNullException(nameof(featureGate));
@@ -40,6 +42,7 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
         IsRollbackEnabled = IsDevelopmentRollbackEnabled();
         _structuredAvailability = structuredAvailability;
         _classifier = classifier ?? new UnknownExecutionRequestClassifier();
+        _directSelectionGate = directSelectionGate ?? ExperimentalRunSelectionBridgeFeatureGate.FromEnvironment();
         foreach (var backend in _backends.Values)
         {
             backend.EventPublished += OnBackendEventPublished;
@@ -164,7 +167,11 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
                     ["selectionReason"] = decision.SelectionReason,
                     ["sessionGeneration"] = request.SessionGeneration
                 });
-            var result = await backend.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+            var directSelectionApproved = request.IsRunSelection && request.ExecuteInCurrentScope &&
+                decision.Classification == ExecutionRequestClassification.KnownNonInteractive &&
+                decision.BackendId == StructuredBackendId && _directSelectionGate.IsEnabled;
+            var dispatchRequest = request with { DirectRunSelectionApproved = directSelectionApproved };
+            var result = await backend.ExecuteAsync(dispatchRequest, cancellationToken).ConfigureAwait(false);
             DeveloperDiagnostics.LogOperationStop(
                 "Execution",
                 "CanonicalExecution",
@@ -283,6 +290,17 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "InteractiveCapabilityRequired", classification.Reason);
         }
 
+        if (classification.Classification == ExecutionRequestClassification.Unknown && request.IsRunSelection)
+        {
+            return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "SelectionNotProvenNonInteractive", classification.Reason);
+        }
+
+        if (classification.Classification == ExecutionRequestClassification.KnownNonInteractive &&
+            request.IsRunSelection && !_directSelectionGate.IsEnabled)
+        {
+            return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "DirectSelectionOptOut", "Direct PSES Run Selection was disabled for this process.");
+        }
+
         if (classification.Classification == ExecutionRequestClassification.Unknown)
         {
             // Unknown means the classifier could not prove the script is in the
@@ -397,6 +415,7 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
                 ["requiredCapabilities"] = decision.RequiredCapabilities,
                 ["selectedBackend"] = decision.SelectedBackend,
                 ["selectionReason"] = decision.SelectionReason,
+                ["directRunSelectionApproved"] = request.IsRunSelection && decision.Classification == ExecutionRequestClassification.KnownNonInteractive && decision.BackendId == StructuredBackendId && _directSelectionGate.IsEnabled,
                 ["fallbackOrDowngradeReason"] = decision.FallbackOrDowngradeReason,
                 ["structuredUnknownDefault"] = string.Equals(decision.SelectionReason, "StructuredEligibleUnknown", StringComparison.Ordinal),
                 ["sessionGeneration"] = request.SessionGeneration,

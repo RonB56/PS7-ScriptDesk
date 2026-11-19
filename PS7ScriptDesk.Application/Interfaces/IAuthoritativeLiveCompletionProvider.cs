@@ -10,6 +10,9 @@ public interface IAuthoritativeLiveCompletionProvider
         string documentText,
         int cursorOffset,
         CancellationToken cancellationToken = default);
+
+    Task CloseDocumentAsync(string documentUri, CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
 }
 
 public sealed record AuthoritativeCompletionResult(

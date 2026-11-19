@@ -2473,6 +2473,18 @@ namespace PS7ScriptDesk.UI.ViewModels
                         InteractiveState: _interactiveTerminalCoordinator.State.ToString(),
                         RuntimeState: runtimeAfterInput?.State.ToString(), Reason: "transport-write-accepted"));
                 }
+                if (ExecutionCorrelationTelemetry.Shared.IsEnabled &&
+                    inputClass is ("FunctionKeyF8" or "CtrlC"))
+                {
+                    var runtimeAfterControl = _runtimeSessionCoordinator?.Snapshot;
+                    ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("TerminalControlAccepted",
+                        RequestCorrelation: "terminal-session", RuntimeSessionId: runtimeAfterControl?.SessionId,
+                        RuntimeGeneration: runtimeAfterControl?.Generation,
+                        TerminalGeneration: _liveConsoleService.CurrentSessionGeneration,
+                        ProcessId: _liveConsoleService.ProcessId,
+                        InteractiveState: _interactiveTerminalCoordinator.State.ToString(),
+                        RuntimeState: runtimeAfterControl?.State.ToString(), Reason: inputClass));
+                }
             }
             catch (Exception ex)
             {
@@ -2484,6 +2496,19 @@ namespace PS7ScriptDesk.UI.ViewModels
                         RuntimeGeneration: runtimeAfterRejection?.Generation,
                         TerminalGeneration: _liveConsoleService.CurrentSessionGeneration,
                         ProcessId: _liveConsoleService.ProcessId, Reason: ex.GetType().Name,
+                        InteractiveState: _interactiveTerminalCoordinator.State.ToString(),
+                        RuntimeState: runtimeAfterRejection?.State.ToString()));
+                }
+                var rejectedInputClass = TerminalInputClassifier.Classify(data);
+                if (ExecutionCorrelationTelemetry.Shared.IsEnabled &&
+                    rejectedInputClass is ("FunctionKeyF8" or "CtrlC"))
+                {
+                    var runtimeAfterRejection = _runtimeSessionCoordinator?.Snapshot;
+                    ExecutionCorrelationTelemetry.Shared.Record(new ExecutionCorrelationEvent("TerminalControlRejected",
+                        RequestCorrelation: "terminal-session", RuntimeSessionId: runtimeAfterRejection?.SessionId,
+                        RuntimeGeneration: runtimeAfterRejection?.Generation,
+                        TerminalGeneration: _liveConsoleService.CurrentSessionGeneration,
+                        ProcessId: _liveConsoleService.ProcessId, Reason: rejectedInputClass + ":" + ex.GetType().Name,
                         InteractiveState: _interactiveTerminalCoordinator.State.ToString(),
                         RuntimeState: runtimeAfterRejection?.State.ToString()));
                 }
@@ -5075,9 +5100,16 @@ namespace PS7ScriptDesk.UI.ViewModels
                     CorrelationConfidence: "EditorRequestIdentity"));
             if (DeveloperDiagnostics.IsEnabled)
             {
-                DeveloperDiagnostics.LogUserAction("Execution", "RunFileRequestAdmitted", "Run File passed command admission and is entering coordinator routing.", new Dictionary<string, object?>
+                DeveloperDiagnostics.LogUserAction("Execution", "EditorExecutionRequestAdmitted", "Editor execution passed command admission and is entering coordinator routing.", new Dictionary<string, object?>
                 {
                     ["requestId"] = request.RequestId,
+                    ["mode"] = request.Mode.ToString(),
+                    ["executeInCurrentScope"] = request.ExecuteInCurrentScope,
+                    ["sourceInfoPresent"] = request.SourceInfo is not null,
+                    ["sourceDocumentId"] = request.SourceInfo?.DocumentId,
+                    ["sourceDocumentRevision"] = request.SourceInfo?.DocumentRevision,
+                    ["selectionStart"] = request.SourceInfo?.SelectionStart,
+                    ["selectionLength"] = request.SourceInfo?.SelectionLength,
                     ["terminalGeneration"] = _liveConsoleService.CurrentSessionGeneration,
                     ["terminalState"] = _interactiveTerminalCoordinator.State.ToString(),
                     ["editorExecutionRunning"] = IsExecutionRunning,
@@ -5173,6 +5205,12 @@ namespace PS7ScriptDesk.UI.ViewModels
             {
                 ["requestId"] = request.RequestId,
                 ["mode"] = mode.ToString(),
+                ["executeInCurrentScope"] = request.ExecuteInCurrentScope,
+                ["sourceInfoPresent"] = request.SourceInfo is not null,
+                ["sourceDocumentId"] = request.SourceInfo?.DocumentId,
+                ["sourceDocumentRevision"] = request.SourceInfo?.DocumentRevision,
+                ["selectionStart"] = request.SourceInfo?.SelectionStart,
+                ["selectionLength"] = request.SourceInfo?.SelectionLength,
                 ["sessionGeneration"] = request.SessionGeneration,
                 ["terminalGeneration"] = _interactiveTerminalCoordinator.Snapshot.Generation,
                 ["backendId"] = decision.SelectedBackend,

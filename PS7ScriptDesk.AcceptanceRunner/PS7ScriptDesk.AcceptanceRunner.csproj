@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>PS7ScriptDesk.AcceptanceRunner</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PS7ScriptDesk.Application\PS7ScriptDesk.Application.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.Domain\PS7ScriptDesk.Domain.csproj" />
+    <ProjectReference Include="..\PS7ScriptDesk.PowerShell\PS7ScriptDesk.PowerShell.csproj" />
+  </ItemGroup>
+</Project>

@@ -264,6 +264,7 @@ namespace PS7ScriptDesk.Shell
         private EditorInputTraceContext? _activeEditorTextInputTrace;
         private readonly Dictionary<TextEditor, BreakpointLineBackgroundRenderer> _breakpointRenderers = new();
         private readonly Dictionary<TextEditor, BreakpointGlyphMargin> _breakpointGlyphMargins = new();
+        private readonly BreakpointMutationCoordinator _breakpointMutations = new();
         private readonly Dictionary<EditorTabViewModel, EditorBreakpointTracker> _breakpointTrackers = new();
         private readonly Dictionary<TextEditor, ErrorMarkerRenderer> _errorRenderers = new();
         private readonly Dictionary<TextEditor, DiagnosticGlyphMargin> _diagnosticGlyphMargins = new();
@@ -2537,18 +2538,19 @@ namespace PS7ScriptDesk.Shell
             if (isCtrl && !isShift && e.Key == Key.F5)
             {
                 e.Handled = true;
-                await RunScriptNormallyAsync().ConfigureAwait(true);
+                await RunScriptNormallyAsync("RunFileKeyboardShortcut").ConfigureAwait(true);
                 return;
             }
 
             if (!isCtrl && !isShift && e.Key == Key.F8)
             {
                 if (FindActiveEditor() is TextEditor editorTextEditor &&
+                    editorTextEditor.IsKeyboardFocusWithin &&
                     editorTextEditor.SelectionLength > 0 &&
                     !string.IsNullOrWhiteSpace(editorTextEditor.SelectedText))
                 {
                     e.Handled = true;
-                    await RunSelectionFromEditorAsync(editorTextEditor).ConfigureAwait(true);
+                    await RunSelectionFromEditorAsync(editorTextEditor, "RunSelectionF8").ConfigureAwait(true);
                     return;
                 }
             }
@@ -3786,14 +3788,14 @@ namespace PS7ScriptDesk.Shell
             if (e.Key == Key.F9)
             {
                 e.Handled = true;
-                ToggleBreakpointForEditor(editorTextEditor);
+                await ToggleBreakpointForEditorAsync(editorTextEditor);
                 return;
             }
 
             if (e.Key == Key.F8)
             {
                 e.Handled = true;
-                await RunSelectionFromEditorAsync(editorTextEditor);
+                await RunSelectionFromEditorAsync(editorTextEditor, "RunSelectionF8");
             }
         }
 
@@ -3814,12 +3816,14 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            await RunSelectionFromEditorAsync(editorTextEditor);
+            await RunSelectionFromEditorAsync(
+                editorTextEditor,
+                (sender as FrameworkElement)?.Tag as string ?? "RunSelectionUnknownSurface");
         }
 
         private async void RunScript_Click(object sender, RoutedEventArgs e)
         {
-            await RunScriptNormallyAsync().ConfigureAwait(true);
+            await RunScriptNormallyAsync((sender as FrameworkElement)?.Tag as string ?? "RunFileUnknownSurface").ConfigureAwait(true);
         }
 
         private void NewTabPlus_Click(object sender, RoutedEventArgs e)
@@ -6272,14 +6276,14 @@ namespace PS7ScriptDesk.Shell
             await ViewModel.LoadWorkspaceChildrenAsync(item).ConfigureAwait(true);
         }
 
-        private void ToggleBreakpoint_Click(object sender, RoutedEventArgs e)
+        private async void ToggleBreakpoint_Click(object sender, RoutedEventArgs e)
         {
             if (FindActiveEditor() is not TextEditor editorTextEditor)
             {
                 return;
             }
 
-            ToggleBreakpointForEditor(editorTextEditor);
+            await ToggleBreakpointForEditorAsync(editorTextEditor);
         }
 
         private void RemoveAllBreakpointsCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
@@ -6300,7 +6304,7 @@ namespace PS7ScriptDesk.Shell
         private void RemoveCurrentFileBreakpointsCommand_Executed(object sender, ExecutedRoutedEventArgs e)
             => ClearBreakpointsForOpenDocuments(currentDocumentOnly: true);
 
-        private void ClearBreakpointsForOpenDocuments(bool currentDocumentOnly)
+        private async void ClearBreakpointsForOpenDocuments(bool currentDocumentOnly)
         {
             if (ViewModel is null || _debugSession is not null)
             {
@@ -6317,28 +6321,11 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            var documentId = currentDocumentOnly ? ViewModel.SelectedTab?.DiagnosticDocument.DocumentId : (Guid?)null;
-            var removedCount = currentDocumentOnly
-                ? documentId.HasValue ? BreakpointBulkOperations.ClearDocument(ViewModel.OpenTabs, documentId.Value) : 0
-                : BreakpointBulkOperations.ClearAll(ViewModel.OpenTabs);
-
-            RefreshBreakpointsList();
-            CommandManager.InvalidateRequerySuggested();
-            ViewModel.StatusText = currentDocumentOnly
-                ? $"Removed {removedCount} breakpoint{(removedCount == 1 ? string.Empty : "s")} from the current file"
-                : $"Removed {removedCount} breakpoint{(removedCount == 1 ? string.Empty : "s")}";
-            DeveloperDiagnostics.LogUserAction(
-                "Debugger",
-                currentDocumentOnly ? "RemoveCurrentFileBreakpoints" : "RemoveAllBreakpoints",
-                "Bulk breakpoint removal completed for open document models.",
-                new Dictionary<string, object?>
-                {
-                    ["removedBreakpointCount"] = removedCount,
-                    ["documentCount"] = currentDocumentOnly ? (documentId.HasValue ? 1 : 0) : ViewModel.OpenTabs.Count,
-                    ["documentId"] = documentId,
-                    ["debuggerSessionActive"] = false,
-                    ["persistenceScope"] = "OpenDocumentsOnly"
-                });
+            await ApplyBreakpointMutationAsync(
+                currentDocumentOnly ? ViewModel.SelectedTab : null,
+                0,
+                currentDocumentOnly ? BreakpointMutationKind.ClearDocument : BreakpointMutationKind.ClearAll,
+                currentDocumentOnly ? "RemoveCurrentFileBreakpoints" : "RemoveAllBreakpoints");
         }
 
         public void ExecuteFindNext(string findText, bool matchCase, bool wholeWord = false, bool useRegex = false)
@@ -6968,7 +6955,13 @@ namespace PS7ScriptDesk.Shell
             if (!_breakpointGlyphMargins.TryGetValue(editorTextEditor, out var margin))
             {
                 margin = new BreakpointGlyphMargin(tab);
-                margin.BreakpointLineClicked += lineNumber => OnBreakpointGlyphLineClicked(editorTextEditor, lineNumber);
+                margin.BreakpointLineClicked += async lineNumber => await ToggleBreakpointForEditorLineAsync(editorTextEditor, lineNumber);
+                margin.RemoveBreakpointRequested += async (targetTab, lineNumber) =>
+                    await RemoveGutterBreakpointAsync(targetTab, lineNumber);
+                margin.RemoveAllBreakpointsRequested += async () =>
+                    await RemoveAllGutterBreakpointsAsync();
+                margin.CanRemoveBreakpoints = CanRemoveBreakpointsFromGutter;
+                margin.CanRemoveBreakpoint = CanRemoveBreakpointFromGutter;
                 _breakpointGlyphMargins[editorTextEditor] = margin;
             }
             else
@@ -7079,6 +7072,7 @@ namespace PS7ScriptDesk.Shell
 
         private void UnregisterEditor(TextEditor editorTextEditor)
         {
+            _intelliSenseService.NotifyEditorUnregistered(editorTextEditor);
             IncrementEditorRegistrationVersion(editorTextEditor);
             CancelPendingDiagnostics(editorTextEditor);
             DisposeLiveSyntaxPump(editorTextEditor);
@@ -8372,7 +8366,7 @@ namespace PS7ScriptDesk.Shell
             });
         }
 
-        private async System.Threading.Tasks.Task RunSelectionFromEditorAsync(TextEditor editorTextEditor)
+        private async System.Threading.Tasks.Task RunSelectionFromEditorAsync(TextEditor editorTextEditor, string commandSource)
         {
             if (ViewModel?.IsRunAvailable != true)
             {
@@ -8411,14 +8405,18 @@ namespace PS7ScriptDesk.Shell
                 "Run Selection requested from the editor.",
                 new Dictionary<string, object?>(DeveloperDiagnostics.CreatePrivateTextMetadata(selectedText))
                 {
+                    ["commandSource"] = commandSource,
                     ["filePath"] = (editorTextEditor.DataContext as EditorTabViewModel)?.FilePath,
-                    ["caretOffset"] = editorTextEditor.CaretOffset
+                    ["caretOffset"] = editorTextEditor.CaretOffset,
+                    ["selectionStart"] = selectionStart,
+                    ["selectionLength"] = selectionLength,
+                    ["sourceInfoPresent"] = sourceInfo is not null
                 });
             await ViewModel.RunSelectionAsync(selectedText, sourceInfo).ConfigureAwait(true);
             DeveloperDiagnostics.LogInfo("Execution", "Run Selection dispatched to ViewModel.");
         }
 
-        private async Task RunScriptNormallyAsync()
+        private async Task RunScriptNormallyAsync(string commandSource)
         {
             if (ViewModel?.SelectedTab is null)
             {
@@ -8433,6 +8431,7 @@ namespace PS7ScriptDesk.Shell
                 "Run Script requested for normal shared-session execution.",
                 new Dictionary<string, object?>
                 {
+                    ["commandSource"] = commandSource,
                     ["filePath"] = ViewModel.SelectedTab.FilePath,
                     ["isDirty"] = ViewModel.SelectedTab.IsDirty
                 });
@@ -8451,7 +8450,7 @@ namespace PS7ScriptDesk.Shell
             await Task.CompletedTask;
         }
 
-        private void ToggleBreakpointForEditor(TextEditor editorTextEditor)
+        private async Task ToggleBreakpointForEditorAsync(TextEditor editorTextEditor)
         {
             if (editorTextEditor.Document is null)
             {
@@ -8460,15 +8459,54 @@ namespace PS7ScriptDesk.Shell
 
             var caretOffset = Math.Clamp(editorTextEditor.CaretOffset, 0, editorTextEditor.Document.TextLength);
             var lineNumber = editorTextEditor.Document.GetLineByOffset(caretOffset).LineNumber;
-            ToggleBreakpointForEditorLine(editorTextEditor, lineNumber);
+            await ToggleBreakpointForEditorLineAsync(editorTextEditor, lineNumber);
         }
 
-        private void OnBreakpointGlyphLineClicked(TextEditor editorTextEditor, int lineNumber)
+        private bool CanRemoveBreakpointsFromGutter() =>
+            ViewModel is not null &&
+            (_debugSession is null ||
+             _debugSession is PsesDapDebugSession { CurrentState: DebugSessionState.Running or DebugSessionState.Paused });
+
+        private bool CanRemoveBreakpointFromGutter(EditorTabViewModel tab) =>
+            !ReferenceEquals(tab, _activeDebugTab) || _debugSession is null ||
+            CurrentBreakpointDebugContext().CanChangeActiveSource;
+
+        private async Task RemoveGutterBreakpointAsync(EditorTabViewModel tab, int lineNumber)
+            => await ApplyBreakpointMutationAsync(tab, lineNumber, BreakpointMutationKind.Remove, "GutterRemoveBreakpoint");
+
+        private async Task RemoveAllGutterBreakpointsAsync()
+            => await ApplyBreakpointMutationAsync(null, 0, BreakpointMutationKind.ClearAll, "GutterRemoveAllBreakpoints");
+
+        private void RefreshBreakpointPresentation()
         {
-            ToggleBreakpointForEditorLine(editorTextEditor, lineNumber);
+            foreach (var editor in _editorByTab.Values)
+            {
+                editor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+                RefreshBreakpointGlyphMargin(editor);
+            }
+            RefreshBreakpointsList();
+            RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
+            CommandManager.InvalidateRequerySuggested();
         }
 
-        private void ToggleBreakpointForEditorLine(TextEditor editorTextEditor, int lineNumber)
+        private void ReportBreakpointMutationFailure(string action, Exception ex)
+        {
+            if (ViewModel is not null)
+                ViewModel.StatusText = _debugSession is not null
+                        ? "Breakpoint update was not confirmed; stop and restart debugging before relying on breakpoints"
+                        : "Breakpoint change failed; editor breakpoints were left unchanged";
+            DeveloperDiagnostics.LogError("Debugger",
+                "Breakpoint mutation failed; editor markers were left unchanged.",
+                new Dictionary<string, object?>
+                {
+                    ["action"] = action,
+                    ["exceptionType"] = ex.GetType().Name,
+                    ["modelChanged"] = false,
+                    ["debugSessionId"] = _debugSession?.SessionId
+                });
+        }
+
+        private async Task ToggleBreakpointForEditorLineAsync(TextEditor editorTextEditor, int lineNumber)
         {
             if (editorTextEditor.DataContext is not EditorTabViewModel tab || editorTextEditor.Document is null)
             {
@@ -8483,28 +8521,63 @@ namespace PS7ScriptDesk.Shell
             var documentLine = editorTextEditor.Document.GetLineByNumber(lineNumber);
             editorTextEditor.CaretOffset = documentLine.Offset;
 
-            var breakpointAdded = tab.ToggleBreakpoint(lineNumber);
-            DeveloperDiagnostics.LogUserAction(
-                "Debugger",
-                "BreakpointChanged",
-                breakpointAdded ? "Breakpoint added." : "Breakpoint removed.",
-                new Dictionary<string, object?>
-                {
-                    ["filePath"] = tab.FilePath,
-                    ["lineNumber"] = lineNumber,
-                    ["enabled"] = breakpointAdded,
-                    ["totalBreakpoints"] = tab.EnabledBreakpointCount
-                });
-            editorTextEditor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
-            RefreshBreakpointGlyphMargin(editorTextEditor);
-            RefreshBreakpointsList();
-            RefreshDebugCommandAvailability(_debugSession?.CurrentState == DebugSessionState.Paused);
+            await ApplyBreakpointMutationAsync(tab, lineNumber, BreakpointMutationKind.Toggle, "BreakpointChanged");
+        }
 
-            if (ViewModel is not null)
+        private BreakpointDebugContext CurrentBreakpointDebugContext()
+        {
+            var session = _debugSession;
+            var activeTab = _activeDebugTab;
+            var dap = session as PsesDapDebugSession;
+            var sourceCurrent = activeTab is not null &&
+                ViewModel?.OpenTabs.Contains(activeTab) == true &&
+                _activeDebugSourceMap is { IsValid: true } sourceMap &&
+                sourceMap.SessionId == session?.SessionId &&
+                !sourceMap.IsDocumentRevisionMismatch(
+                    activeTab.DiagnosticDocument.DocumentId, GetCurrentDebugDocumentRevision);
+            return new BreakpointDebugContext(
+                session?.SessionId,
+                activeTab,
+                sourceCurrent && dap?.CurrentState is DebugSessionState.Running or DebugSessionState.Paused,
+                dap is null ? null : dap.UpdateLaunchBreakpointsAsync);
+        }
+
+        private async Task<BreakpointMutationResult> ApplyBreakpointMutationAsync(
+            EditorTabViewModel? tab, int lineNumber, BreakpointMutationKind kind, string action)
+        {
+            if (ViewModel is null)
+                return BreakpointMutationResult.Rejected;
+
+            try
             {
-                ViewModel.StatusText = breakpointAdded
-                    ? $"Breakpoint added on line {lineNumber}"
-                    : $"Breakpoint removed from line {lineNumber}";
+                var result = await _breakpointMutations.MutateAsync(
+                    ViewModel.OpenTabs.ToArray(), tab, lineNumber, kind, CurrentBreakpointDebugContext);
+                if (!result.Accepted)
+                {
+                    ViewModel.StatusText = "Breakpoint change was not confirmed for the current debugger source";
+                    DeveloperDiagnostics.LogDecision("Debugger", action,
+                        "Breakpoint mutation was rejected; editor markers were left unchanged.", "Rejected",
+                        new Dictionary<string, object?> { ["debugSessionId"] = _debugSession?.SessionId,
+                            ["documentId"] = tab?.DiagnosticDocument.DocumentId, ["lineNumber"] = lineNumber });
+                    return result;
+                }
+
+                if (result.ChangedCount > 0)
+                    RefreshBreakpointPresentation();
+                ViewModel.StatusText = kind is BreakpointMutationKind.ClearAll or BreakpointMutationKind.ClearDocument
+                    ? $"Removed {result.ChangedCount} breakpoint{(result.ChangedCount == 1 ? string.Empty : "s")}" 
+                    : result.Added ? $"Breakpoint added on line {lineNumber}" : $"Breakpoint removed from line {lineNumber}";
+                DeveloperDiagnostics.LogUserAction("Debugger", action,
+                    "Breakpoint mutation committed after required debugger synchronization.",
+                    new Dictionary<string, object?> { ["debugSessionId"] = _debugSession?.SessionId,
+                        ["documentId"] = tab?.DiagnosticDocument.DocumentId, ["lineNumber"] = lineNumber,
+                        ["changedCount"] = result.ChangedCount, ["added"] = result.Added });
+                return result;
+            }
+            catch (Exception ex)
+            {
+                ReportBreakpointMutationFailure(action, ex);
+                return BreakpointMutationResult.Rejected;
             }
         }
 
@@ -17674,6 +17747,9 @@ namespace PS7ScriptDesk.Shell
             ITextSource TextSource,
             int TextLength,
             int CaretOffset,
+            int SelectionStart,
+            int SelectionLength,
+            string? FileName,
             int RegistrationVersion)
         {
             public static CompletionRequestSnapshot Capture(MainWindow owner, TextEditor editor)
@@ -17688,6 +17764,9 @@ namespace PS7ScriptDesk.Shell
                     textSource,
                     textSource.TextLength,
                     editor.CaretOffset,
+                    editor.SelectionStart,
+                    editor.SelectionLength,
+                    document.FileName,
                     registrationVersion);
             }
 
@@ -17697,6 +17776,9 @@ namespace PS7ScriptDesk.Shell
                        ReferenceEquals(Document, other.Document) &&
                        ReferenceEquals(DocumentVersion, other.DocumentVersion) &&
                        CaretOffset == other.CaretOffset &&
+                       SelectionStart == other.SelectionStart &&
+                       SelectionLength == other.SelectionLength &&
+                       string.Equals(FileName, other.FileName, StringComparison.OrdinalIgnoreCase) &&
                        RegistrationVersion == other.RegistrationVersion;
             }
 
@@ -17705,7 +17787,10 @@ namespace PS7ScriptDesk.Shell
                 if (!ReferenceEquals(owner.FindActiveEditor(), Editor) ||
                     !ReferenceEquals(Editor.Document, Document) ||
                     !ReferenceEquals(Document.Version, DocumentVersion) ||
-                    Editor.CaretOffset != CaretOffset)
+                    Editor.CaretOffset != CaretOffset ||
+                    Editor.SelectionStart != SelectionStart ||
+                    Editor.SelectionLength != SelectionLength ||
+                    !string.Equals(Document.FileName, FileName, StringComparison.OrdinalIgnoreCase))
                 {
                     return false;
                 }

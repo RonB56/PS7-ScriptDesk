@@ -1,0 +1,12 @@
+Command: C:\Program Files\PowerShell\7\pwsh.exe -NoLogo -NoProfile -File .\work\A02_P2B_3A_R2_Interactive_Execution_20261117_1508_8f3012f1\evidence\verify-one-line-invocation.ps1
+Exit code: 0
+Runtime: PowerShell 7.6.10
+SuccessWrapperOneLine: True
+SuccessWrapperParseErrors: 0
+SuccessStatus: OK
+SharedGlobalScope: SHARED_SCOPE_OK
+ErrorWrapperParseErrors: 0
+ErrorRethrown: R2_EXPECTED_TERMINATING_ERROR
+ErrorStatus: ERROR
+
+The harness reflected the internal builder from the compiled production assembly and exercised success and terminating-error paths with apostrophes in the snapshot/status paths.

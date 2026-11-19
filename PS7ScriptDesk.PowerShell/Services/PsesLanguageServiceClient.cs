@@ -22,7 +22,7 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
     private readonly SemaphoreSlim _evaluationGate = new(1, 1);
     private readonly SemaphoreSlim _completionGate = new(1, 1);
     private readonly object _stateGate = new();
-    private readonly Dictionary<string, int> _openDocumentVersions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, SyncedDocument> _openDocuments = new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource? _lifetime;
     private Stream? _pipe;
     private Task? _readerTask;
@@ -313,19 +313,19 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         var requestId = Guid.NewGuid();
         try
         {
-            var version = _openDocumentVersions.TryGetValue(documentUri, out var priorVersion)
-                ? priorVersion + 1
-                : 1;
+            var alreadyOpen = _openDocuments.TryGetValue(documentUri, out var priorDocument);
+            var changed = !alreadyOpen || !string.Equals(priorDocument!.Text, documentText, StringComparison.Ordinal);
+            var version = alreadyOpen ? priorDocument!.Version + (changed ? 1 : 0) : 1;
             var normalizedCursor = Math.Clamp(cursorOffset, 0, documentText.Length);
             var position = ToDocumentPosition(documentText, normalizedCursor);
-            if (priorVersion == 0)
+            if (!alreadyOpen)
             {
                 await SendNotificationAsync(
                     "textDocument/didOpen",
                     new { textDocument = new { uri = documentUri, languageId = "powershell", version, text = documentText } },
                     cancellationToken).ConfigureAwait(false);
             }
-            else
+            else if (changed)
             {
                 await SendNotificationAsync(
                     "textDocument/didChange",
@@ -333,12 +333,13 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
                     cancellationToken).ConfigureAwait(false);
             }
 
-            _openDocumentVersions[documentUri] = version;
+            if (changed) _openDocuments[documentUri] = new SyncedDocument(version, documentText);
             DeveloperDiagnostics.LogInfo("PSES", "Authoritative live completion request sent.", Metadata(new()
             {
                 ["requestId"] = requestId,
                 ["documentUri"] = DeveloperDiagnostics.SanitizePath(documentUri),
                 ["documentVersion"] = version,
+                ["documentChanged"] = changed,
                 ["documentLength"] = documentText.Length,
                 ["cursorOffset"] = normalizedCursor,
                 ["line"] = position.Line,
@@ -384,6 +385,26 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
         {
             _completionGate.Release();
         }
+    }
+
+    public async Task CloseDocumentAsync(string documentUri, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(documentUri);
+        ThrowIfDisposed();
+        await _completionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!_openDocuments.ContainsKey(documentUri)) return;
+            if (IsInitialized)
+                await SendNotificationAsync("textDocument/didClose", new { textDocument = new { uri = documentUri } }, cancellationToken).ConfigureAwait(false);
+            _openDocuments.Remove(documentUri);
+            DeveloperDiagnostics.LogInfo("PSES", "Authoritative completion document closed.", Metadata(new()
+            {
+                ["documentUri"] = DeveloperDiagnostics.SanitizePath(documentUri),
+                ["sessionGeneration"] = SessionGeneration
+            }));
+        }
+        finally { _completionGate.Release(); }
     }
 
     public async Task CancelRequestAsync(Guid requestId, CancellationToken cancellationToken = default)
@@ -796,4 +817,5 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
     private Dictionary<string, object?> Metadata(Dictionary<string, object?>? extra = null) { var result = new Dictionary<string, object?> { ["sessionGeneration"] = SessionGeneration, ["initialized"] = IsInitialized, ["busy"] = IsBusy, ["pendingCount"] = _pending.Count }; if (extra is not null) foreach (var pair in extra) result[pair.Key] = pair.Value; return result; }
     private void ThrowIfDisposed() { if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(PsesLanguageServiceClient)); }
     private sealed class PendingRequest { public TaskCompletionSource<JsonElement> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously); public long? ResponseSequence { get; set; } public long? ResponseIdleCount { get; set; } }
+    private sealed record SyncedDocument(int Version, string Text);
 }

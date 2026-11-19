@@ -33,6 +33,7 @@ public sealed class RunDebugExecutionModeSeparationTests
         var shell = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
         var xaml = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml");
         var shortcutHandler = ExtractMethod(shell, "private async void EditorTextEditor_PreviewKeyDown");
+        var windowShortcutHandler = ExtractMethod(shell, "private async void Window_PreviewKeyDown");
         var runSelection = ExtractMethod(shell, "private async System.Threading.Tasks.Task RunSelectionFromEditorAsync");
         var runSelectionClick = ExtractMethod(shell, "private async void RunSelection_Click");
 
@@ -41,6 +42,7 @@ public sealed class RunDebugExecutionModeSeparationTests
         Assert.Contains("InputGestureText=\"F8\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Click=\"RunSelection_Click\"", xaml, StringComparison.Ordinal);
         Assert.Contains("e.Key == Key.F8", shortcutHandler, StringComparison.Ordinal);
+        Assert.Contains("editorTextEditor.IsKeyboardFocusWithin &&", windowShortcutHandler, StringComparison.Ordinal);
         Assert.Contains("RunSelectionFromEditorAsync(editorTextEditor)", shortcutHandler, StringComparison.Ordinal);
         Assert.Contains("RunSelectionFromEditorAsync(editorTextEditor)", runSelectionClick, StringComparison.Ordinal);
         Assert.Contains("ViewModel.RunSelectionAsync(selectedText, sourceInfo)", runSelection, StringComparison.Ordinal);
@@ -67,7 +69,7 @@ public sealed class RunDebugExecutionModeSeparationTests
         Assert.Contains("TryExecuteDebuggerShortcut(ContinueDebugCommand", windowShortcutHandler, StringComparison.Ordinal);
         Assert.Contains("TryExecuteDebuggerShortcut(StartDebugCommand", windowShortcutHandler, StringComparison.Ordinal);
         Assert.Contains("e.Key == Key.F9", editorShortcutHandler, StringComparison.Ordinal);
-        Assert.Contains("ToggleBreakpointForEditor(editorTextEditor)", editorShortcutHandler, StringComparison.Ordinal);
+        Assert.Contains("await ToggleBreakpointForEditorAsync(editorTextEditor)", editorShortcutHandler, StringComparison.Ordinal);
         Assert.Contains("F9", xaml, StringComparison.Ordinal);
     }
 

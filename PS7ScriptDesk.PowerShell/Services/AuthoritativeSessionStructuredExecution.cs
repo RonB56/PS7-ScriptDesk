@@ -104,7 +104,10 @@ public sealed class AuthoritativeSessionStructuredExecutionAdapter : IEditorExec
                 request.ExecuteInCurrentScope,
                 OnOutput,
                 cancellationToken,
-                request.SourceInfo).ConfigureAwait(false);
+                request.SourceInfo,
+                request.Mode,
+                request.DirectRunSelectionApproved,
+                request.IsSavedClean ? request.SavedScriptPath : null).ConfigureAwait(false);
             var endedAt = DateTimeOffset.UtcNow;
             var executionEvent = result.Status switch
             {

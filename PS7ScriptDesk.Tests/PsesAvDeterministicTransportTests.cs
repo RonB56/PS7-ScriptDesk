@@ -165,7 +165,57 @@ public sealed class PsesAvDeterministicTransportTests
         Assert.Contains(result.Items, item => item.CompletionText == "-ErrorAction" && item.Tooltip == "Controls error handling.");
     }
 
-    private sealed class ConnectedFixture : IAsyncDisposable
+    [Fact]
+    public async Task LiveCompletionOnlyChangesEditedDocumentsAndClosesBeforeReopen()
+    {
+        await using var fixture = await ConnectedFixture.CreateAsync();
+        const string uri = "untitled:ps7scriptdesk/revision-probe.ps1";
+
+        var first = fixture.Client.GetLiveCompletionsAsync(uri, "$one", 4);
+        using (var opened = await fixture.ServerReadTask.WaitAsync(TimeSpan.FromSeconds(5)))
+        {
+            Assert.Equal("textDocument/didOpen", opened.RootElement.GetProperty("method").GetString());
+            Assert.Equal(1, opened.RootElement.GetProperty("params").GetProperty("textDocument").GetProperty("version").GetInt32());
+        }
+        using (var request = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5)))
+            await fixture.WriteCompletionResponseAsync(request.RootElement.GetProperty("id").GetInt32());
+        await first.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var unchanged = fixture.Client.GetLiveCompletionsAsync(uri, "$one", 4);
+        using (var request = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5)))
+        {
+            Assert.Equal("textDocument/completion", request.RootElement.GetProperty("method").GetString());
+            await fixture.WriteCompletionResponseAsync(request.RootElement.GetProperty("id").GetInt32());
+        }
+        await unchanged.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var edited = fixture.Client.GetLiveCompletionsAsync(uri, "$ones", 5);
+        using (var change = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5)))
+        {
+            Assert.Equal("textDocument/didChange", change.RootElement.GetProperty("method").GetString());
+            Assert.Equal(2, change.RootElement.GetProperty("params").GetProperty("textDocument").GetProperty("version").GetInt32());
+            Assert.Equal("$ones", change.RootElement.GetProperty("params").GetProperty("contentChanges")[0].GetProperty("text").GetString());
+        }
+        using (var request = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5)))
+            await fixture.WriteCompletionResponseAsync(request.RootElement.GetProperty("id").GetInt32());
+        await edited.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await fixture.Client.CloseDocumentAsync(uri);
+        using (var closed = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5)))
+            Assert.Equal("textDocument/didClose", closed.RootElement.GetProperty("method").GetString());
+
+        var reopened = fixture.Client.GetLiveCompletionsAsync(uri, "$new", 4);
+        using (var opened = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5)))
+        {
+            Assert.Equal("textDocument/didOpen", opened.RootElement.GetProperty("method").GetString());
+            Assert.Equal(1, opened.RootElement.GetProperty("params").GetProperty("textDocument").GetProperty("version").GetInt32());
+        }
+        using (var request = await fixture.ReadNextServerMessageAsync().WaitAsync(TimeSpan.FromSeconds(5)))
+            await fixture.WriteCompletionResponseAsync(request.RootElement.GetProperty("id").GetInt32());
+        await reopened.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    internal sealed class ConnectedFixture : IAsyncDisposable
     {
         private readonly NamedPipeServerStream _server;
         private readonly NamedPipeClientStream _clientStream;

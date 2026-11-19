@@ -28,9 +28,11 @@ namespace PS7ScriptDesk.Shell.Composition
             var gitWorkspaceCoordinator = new GitWorkspaceCoordinator(gitService);
             var userPromptService = new UserPromptService();
             var psesOwnedSessionFeatureGate = PsesOwnedInteractiveSessionFeatureGate.FromEnvironment();
+            var experimentalRunFileBridgeFeatureGate = ExperimentalRunFileBridgeFeatureGate.FromEnvironment();
+            var experimentalRunSelectionBridgeFeatureGate = ExperimentalRunSelectionBridgeFeatureGate.FromEnvironment();
             var psesOwnedSessionGateValue = Environment.GetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName);
             ILiveConsoleService liveConsoleService = psesOwnedSessionFeatureGate.IsEnabled
-                ? new PsesOwnedInteractiveSessionService()
+                ? new PsesOwnedInteractiveSessionService(experimentalRunFileBridgeFeatureGate, experimentalRunSelectionBridgeFeatureGate)
                 : new LiveConsoleService();
             DeveloperDiagnostics.LogInfo(
                 "Startup",
@@ -41,6 +43,10 @@ namespace PS7ScriptDesk.Shell.Composition
                     ["featureGate"] = PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName,
                     ["featureGateSource"] = "process-environment",
                     ["featureGateValuePresent"] = !string.IsNullOrWhiteSpace(psesOwnedSessionGateValue),
+                    ["experimentalDirectRunFileBridge"] = psesOwnedSessionFeatureGate.IsEnabled && experimentalRunFileBridgeFeatureGate.IsEnabled,
+                    ["experimentalRunFileFeatureGate"] = ExperimentalRunFileBridgeFeatureGate.EnvironmentVariableName,
+                    ["directRunSelectionEnabled"] = psesOwnedSessionFeatureGate.IsEnabled && experimentalRunSelectionBridgeFeatureGate.IsEnabled,
+                    ["experimentalRunSelectionFeatureGate"] = ExperimentalRunSelectionBridgeFeatureGate.EnvironmentVariableName,
                     ["provider"] = liveConsoleService.GetType().Name,
                     ["expectedDebuggerBackend"] = psesOwnedSessionFeatureGate.IsEnabled ? "PsesDapDebugSession" : "PsesDebugSession",
                     ["fallbackPolicy"] = psesOwnedSessionFeatureGate.IsEnabled ? "NoSilentLegacyFallback" : "LegacyByExplicitSelection"
@@ -126,7 +132,8 @@ namespace PS7ScriptDesk.Shell.Composition
                 structuredExecutionFeatureGate,
                 shadowMode: false,
                 structuredAvailability,
-                new PowerShellExecutionRequestClassifier());
+                new PowerShellExecutionRequestClassifier(),
+                experimentalRunSelectionBridgeFeatureGate);
             DeveloperDiagnostics.LogInfo(
                 "Startup",
                     "Canonical execution coordinator composed with production dispatch enabled.",
@@ -135,6 +142,7 @@ namespace PS7ScriptDesk.Shell.Composition
                     ["structuredExecutionEnabled"] = structuredExecutionFeatureGate.IsStructuredExecutionEnabled,
                     ["structuredExecutionEffective"] = effectiveExecutionFeatureGate.IsStructuredExecutionEnabled,
                     ["structuredExecutionAvailable"] = editorExecutionAdapter is not null,
+                    ["directRunSelectionDefault"] = experimentalRunSelectionBridgeFeatureGate.IsEnabled,
                     ["backendCount"] = executionBackends.Count,
                     ["shadowMode"] = false
                 });

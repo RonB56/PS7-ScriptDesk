@@ -5,7 +5,7 @@ namespace PS7ScriptDesk.PowerShell.Services;
 /// boundary. A prompt-looking output fragment before that boundary is never
 /// evidence that the foreground invocation has returned to the REPL.
 /// </summary>
-internal sealed class PromptRestorationSignal(int expectedGeneration)
+internal sealed class PromptRestorationSignal(int expectedGeneration, bool requireInvocationEcho = true)
 {
     private readonly object _syncRoot = new();
     private readonly TaskCompletionSource<bool> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -40,7 +40,7 @@ internal sealed class PromptRestorationSignal(int expectedGeneration)
 
     public bool ObservePrompt(int generation, bool statusFileExists, bool invocationEchoRemoved, bool cursorVisible)
     {
-        if (generation != expectedGeneration || !invocationEchoRemoved) return false;
+        if (generation != expectedGeneration || (requireInvocationEcho && !invocationEchoRemoved)) return false;
 
         lock (_syncRoot)
         {

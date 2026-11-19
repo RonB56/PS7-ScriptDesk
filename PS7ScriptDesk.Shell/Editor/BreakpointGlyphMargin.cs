@@ -20,6 +20,9 @@ using WpfRect = System.Windows.Rect;
 using WpfSolidColorBrush = System.Windows.Media.SolidColorBrush;
 using WpfStreamGeometry = System.Windows.Media.StreamGeometry;
 using WpfSize = System.Windows.Size;
+using WpfContextMenu = System.Windows.Controls.ContextMenu;
+using WpfMenuItem = System.Windows.Controls.MenuItem;
+using WpfPlacementMode = System.Windows.Controls.Primitives.PlacementMode;
 
 namespace PS7ScriptDesk.Shell.Editor
 {
@@ -66,6 +69,10 @@ namespace PS7ScriptDesk.Shell.Editor
         }
 
         public event Action<int>? BreakpointLineClicked;
+        public event Action<EditorTabViewModel, int>? RemoveBreakpointRequested;
+        public event Action? RemoveAllBreakpointsRequested;
+        public Func<bool>? CanRemoveBreakpoints { get; set; }
+        public Func<EditorTabViewModel, bool>? CanRemoveBreakpoint { get; set; }
 
         public void SetTab(EditorTabViewModel tab)
         {
@@ -201,6 +208,46 @@ namespace PS7ScriptDesk.Shell.Editor
                 BreakpointLineClicked?.Invoke(releasedLineNumber);
                 e.Handled = true;
             }
+        }
+
+        protected override void OnMouseRightButtonUp(WpfMouseButtonEventArgs e)
+        {
+            base.OnMouseRightButtonUp(e);
+            CancelPendingClick();
+
+            var tab = _tab;
+            var line = TryGetVisualLineNumberFromPoint(e.GetPosition(this), out var clickedLine)
+                ? clickedLine
+                : (int?)null;
+            var canRemove = CanRemoveBreakpoints?.Invoke() == true;
+            var menu = new WpfContextMenu { PlacementTarget = this, Placement = WpfPlacementMode.MousePoint };
+            var remove = new WpfMenuItem
+            {
+                Header = "Remove Breakpoint",
+                IsEnabled = canRemove && line.HasValue && tab.HasBreakpoint(line.Value) &&
+                    CanRemoveBreakpoint?.Invoke(tab) == true
+            };
+            if (!remove.IsEnabled)
+                remove.ToolTip = !canRemove ? "Breakpoint changes are unavailable in this debugger state."
+                    : line.HasValue && tab.HasBreakpoint(line.Value)
+                        ? "Restart debugging after editing this file to change its active breakpoint."
+                        : "No breakpoint on this line.";
+            remove.Click += (_, _) =>
+            {
+                if (line.HasValue)
+                    RemoveBreakpointRequested?.Invoke(tab, line.Value);
+            };
+            var removeAll = new WpfMenuItem
+            {
+                Header = "Remove All Breakpoints",
+                IsEnabled = canRemove,
+                ToolTip = canRemove ? null : "Breakpoint changes are unavailable in this debugger state."
+            };
+            removeAll.Click += (_, _) => RemoveAllBreakpointsRequested?.Invoke();
+            menu.Items.Add(remove);
+            menu.Items.Add(removeAll);
+            menu.IsOpen = true;
+            e.Handled = true;
         }
 
         private bool TryGetVisualLineNumberFromPoint(WpfPoint point, out int lineNumber)

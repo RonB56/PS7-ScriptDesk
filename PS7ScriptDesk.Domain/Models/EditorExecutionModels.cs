@@ -178,6 +178,7 @@ public sealed record EditorExecutionRequest(
     EditorExecutionSourceInfo? SourceInfo = null)
 {
     public bool IsRunSelection => Mode == EditorExecutionMode.RunSelection;
+    public bool DirectRunSelectionApproved { get; init; }
 }
 
 public sealed record EditorOutputRecord(

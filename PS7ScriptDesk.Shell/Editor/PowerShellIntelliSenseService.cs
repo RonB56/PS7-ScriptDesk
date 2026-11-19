@@ -28,8 +28,12 @@ namespace PS7ScriptDesk.Shell.Editor
     public sealed class PowerShellIntelliSenseService : IDisposable
     {
         private readonly PowerShellCompletionService _completionService = new();
+        private readonly IntelliSenseProviderCoordinator _providerCoordinator = new();
         private readonly IAuthoritativeLiveCompletionProvider? _authoritativeCompletionProvider;
         private readonly PowerShellSnippetProvider _snippetProvider = new();
+        private readonly Dictionary<TextEditor, string> _authoritativeDocumentUris = new();
+        private readonly Dictionary<TextEditor, Guid> _untitledDocumentIds = new();
+        private readonly Dictionary<string, Task> _pendingDocumentCloses = new(StringComparer.OrdinalIgnoreCase);
         private int _firstCompletionRequestLogged;
         private int _firstUsableCompletionLogged;
 
@@ -402,58 +406,28 @@ namespace PS7ScriptDesk.Shell.Editor
                         ["engineWaitMilliseconds"] = effectiveEngineWaitMilliseconds
                     });
 
-                try
-                {
-                    if (shouldQueryAuthoritative)
+                var providerResult = await _providerCoordinator.QueryAsync(
+                    shouldQueryAuthoritative,
+                    shouldQueryEngine,
+                    source.TextLength,
+                    async token =>
                     {
                         var engineDocumentText = GetFullDocumentText("authoritative live completion request");
-                        var authoritativeResult = await GetAuthoritativeCompletionsAsync(
-                                editor,
-                                engineDocumentText,
-                                caretOffset,
-                                effectiveEngineWaitMilliseconds,
-                                cancellationToken)
+                        return await GetAuthoritativeCompletionsAsync(
+                            editor, engineDocumentText, caretOffset, effectiveEngineWaitMilliseconds, token)
                             .ConfigureAwait(true);
-                        if (authoritativeResult is { HasItems: true })
-                        {
-                            engineResult = authoritativeResult;
-                            completionSource = "authoritative-live";
-                        }
-                    }
-
-                    if (engineResult is null && shouldQueryEngine)
+                    },
+                    async token =>
                     {
                         var engineDocumentText = GetFullDocumentText("PowerShell completion engine request");
-                        engineResult = await _completionService.GetCompletionsAsync(
-                                engineDocumentText,
-                                caretOffset,
-                                pwshExecutablePath!,
-                                cancellationToken,
-                                TimeSpan.FromMilliseconds(effectiveEngineWaitMilliseconds))
-                            .ConfigureAwait(true);
-                    }
-
-                    if (engineResult is { HasItems: true } && completionSource == "none")
-                    {
-                        completionSource = "engine";
-                    }
-                }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    // The engine did not answer quickly enough. Return local completions now
-                    // instead of making Ctrl+Space / typing feel blocked.
-                    engineTimedOut = true;
-                    engineResult = null;
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch
-                {
-                    // Local candidates still keep IntelliSense useful if the engine is busy.
-                    engineResult = null;
-                }
+                        return await _completionService.GetCompletionsAsync(
+                            engineDocumentText, caretOffset, pwshExecutablePath!, token,
+                            TimeSpan.FromMilliseconds(effectiveEngineWaitMilliseconds)).ConfigureAwait(true);
+                    },
+                    cancellationToken).ConfigureAwait(true);
+                engineResult = providerResult.Result;
+                completionSource = providerResult.Source;
+                engineTimedOut = providerResult.TimedOut;
             }
 
             if (cancellationToken.IsCancellationRequested) throw new OperationCanceledException(cancellationToken);
@@ -532,6 +506,12 @@ namespace PS7ScriptDesk.Shell.Editor
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(100, timeoutMilliseconds)));
             var documentUri = BuildAuthoritativeDocumentUri(editor);
+            if (_authoritativeDocumentUris.TryGetValue(editor, out var priorUri) &&
+                !string.Equals(priorUri, documentUri, StringComparison.OrdinalIgnoreCase))
+                await CloseAuthoritativeDocumentAsync(priorUri, timeout.Token).ConfigureAwait(true);
+            _authoritativeDocumentUris[editor] = documentUri;
+            if (_pendingDocumentCloses.TryGetValue(documentUri, out var pendingClose))
+                await pendingClose.WaitAsync(timeout.Token).ConfigureAwait(true);
             AuthoritativeCompletionResult? result;
             try
             {
@@ -561,7 +541,33 @@ namespace PS7ScriptDesk.Shell.Editor
                     item.Tooltip)).ToList());
         }
 
-        private static string BuildAuthoritativeDocumentUri(TextEditor editor)
+        public void NotifyEditorUnregistered(TextEditor editor)
+        {
+            if (_authoritativeDocumentUris.Remove(editor, out var uri))
+                _ = CloseAuthoritativeDocumentAsync(uri);
+            _untitledDocumentIds.Remove(editor);
+        }
+
+        private async Task CloseAuthoritativeDocumentAsync(string uri, CancellationToken cancellationToken = default)
+        {
+            if (_authoritativeCompletionProvider is null) return;
+            if (_pendingDocumentCloses.TryGetValue(uri, out var existing))
+            {
+                await existing.WaitAsync(cancellationToken).ConfigureAwait(true);
+                return;
+            }
+            var close = _authoritativeCompletionProvider.CloseDocumentAsync(uri, cancellationToken);
+            _pendingDocumentCloses[uri] = close;
+            try { await close.ConfigureAwait(true); }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogWarning("EditorCompletion", "PSES document close failed; the next completion will resynchronize after session recovery.",
+                    new Dictionary<string, object?> { ["exceptionType"] = ex.GetType().Name, ["documentUri"] = DeveloperDiagnostics.SanitizePath(uri) });
+            }
+            finally { _pendingDocumentCloses.Remove(uri); }
+        }
+
+        private string BuildAuthoritativeDocumentUri(TextEditor editor)
         {
             var fileName = editor.Document?.FileName;
             if (!string.IsNullOrWhiteSpace(fileName))
@@ -569,7 +575,9 @@ namespace PS7ScriptDesk.Shell.Editor
                 return new Uri(Path.GetFullPath(fileName)).AbsoluteUri;
             }
 
-            return $"untitled:ps7scriptdesk/{editor.GetHashCode():X8}.ps1";
+            if (!_untitledDocumentIds.TryGetValue(editor, out var id))
+                _untitledDocumentIds[editor] = id = Guid.NewGuid();
+            return $"untitled:ps7scriptdesk/{id:N}.ps1";
         }
 
         private static CompletionItemKind MapCompletionKind(int lspKind)

@@ -16,6 +16,9 @@ public static class TerminalInputClassifier
             "\u001b[B" or "\u001bOB" => "ArrowDown",
             "\u001b[C" or "\u001bOC" => "ArrowRight",
             "\u001b[D" or "\u001bOD" => "ArrowLeft",
+            // xterm.js emits ESC [ 19 ~ for unmodified F8. This label is
+            // diagnostic only; the key retains conservative edit ownership.
+            "\u001b[19~" => "FunctionKeyF8",
             "\u001b[H" or "\u001b[1~" => "Home",
             "\u001b[F" or "\u001b[4~" => "End",
             "\u001b[I" => "FocusIn",

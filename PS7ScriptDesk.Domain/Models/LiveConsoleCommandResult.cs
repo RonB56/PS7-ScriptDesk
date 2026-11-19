@@ -9,6 +9,7 @@ namespace PS7ScriptDesk.Domain.Models
         PromptObserved,
         RecoveryUnverified,
         Interrupted,
+        ExecutionFailed,
         WriteFailed,
         SessionReplaced,
         SessionTerminated

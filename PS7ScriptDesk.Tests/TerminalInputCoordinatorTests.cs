@@ -42,6 +42,7 @@ public sealed class TerminalInputCoordinatorTests
     [InlineData("\u001bOC", "ArrowRight")]
     [InlineData("\u001b[D", "ArrowLeft")]
     [InlineData("\u001bOD", "ArrowLeft")]
+    [InlineData("\u001b[19~", "FunctionKeyF8")]
     [InlineData("\u001b[3~", "OtherControlSequence")]
     [InlineData("\u001b[H", "Home")]
     [InlineData("\u001b[1~", "Home")]
@@ -67,6 +68,7 @@ public sealed class TerminalInputCoordinatorTests
     [InlineData("Backspace")]
     [InlineData("ArrowUp")]
     [InlineData("OtherControlSequence")]
+    [InlineData("FunctionKeyF8")]
     public void ExistingCommandLineInputClasses_KeepEditOwnership(string inputClass)
     {
         Assert.True(TerminalInputClassifier.EstablishesUserEditOwnership(inputClass));

@@ -457,8 +457,8 @@
             </MenuItem>
 
             <MenuItem Header="_Run" help:ContextHelp.Key="Command.RunScript">
-                <MenuItem Header="_Run Script" InputGestureText="Ctrl+F5" Click="RunScript_Click" IsEnabled="{Binding IsRunAvailable}" help:ContextHelp.Key="Command.RunScript" />
-                <MenuItem Header="Run _Selection" InputGestureText="F8" Click="RunSelection_Click" IsEnabled="{Binding IsRunAvailable}" help:ContextHelp.Key="Command.RunSelection" />
+                <MenuItem Header="_Run Script" Tag="RunFileMenu" InputGestureText="Ctrl+F5" Click="RunScript_Click" IsEnabled="{Binding IsRunAvailable}" help:ContextHelp.Key="Command.RunScript" />
+                <MenuItem Header="Run _Selection" Tag="RunSelectionMenu" InputGestureText="F8" Click="RunSelection_Click" IsEnabled="{Binding IsRunAvailable}" help:ContextHelp.Key="Command.RunSelection" />
                 <MenuItem Header="_Interrupt" Command="{Binding StopCommand}" help:ContextHelp.Key="Command.Interrupt" />
                 <Separator />
                 <MenuItem x:Name="RefreshEditorMetadataMenuItem"
@@ -686,7 +686,7 @@
                       Style="{StaticResource IdeToolbarTooltipHostStyle}"
                       help:ContextHelp.PreserveToolTip="True"
                       ToolTip="{Binding RunSelectionDisabledReason, TargetNullValue='Run Selection (F8). Runs the current selection in the shared PowerShell session, or the current line when nothing is selected.'}">
-                <Button x:Name="RunSelectionButton" Click="RunSelection_Click"
+                <Button x:Name="RunSelectionButton" Tag="RunSelectionToolbar" Click="RunSelection_Click"
                         help:ContextHelp.Key="Command.RunSelection"
                         help:ContextHelp.PreserveToolTip="True"
                         IsEnabled="{Binding IsRunAvailable}"
@@ -1511,6 +1511,7 @@
                                                                   Click="EditorPaste_Click" />
                                                         <Separator />
                                                         <MenuItem Header="Run Selection"
+                                                                  Tag="RunSelectionContextMenu"
                                                                   help:ContextHelp.Key="Command.RunSelection"
                                                                   InputGestureText="F8"
                                                                   IsEnabled="{Binding DataContext.IsRunAvailable, Source={x:Reference RootWindow}}"

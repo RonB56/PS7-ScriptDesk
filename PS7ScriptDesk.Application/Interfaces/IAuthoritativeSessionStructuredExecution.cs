@@ -24,7 +24,10 @@ public interface IAuthoritativeSessionStructuredExecution
         bool executeInCurrentScope,
         Action<ExecutionOutputRecord> onOutput,
         CancellationToken cancellationToken = default,
-        EditorExecutionSourceInfo? sourceInfo = null);
+        EditorExecutionSourceInfo? sourceInfo = null,
+        EditorExecutionMode mode = EditorExecutionMode.ScriptCall,
+        bool directRunSelectionApproved = false,
+        string? savedScriptPath = null);
 }
 
 public sealed record AuthoritativeStructuredExecutionResult(

@@ -5,8 +5,9 @@ using PS7ScriptDesk.Domain.Models;
 namespace PS7ScriptDesk.PowerShell.Services;
 
 /// <summary>
-/// Conservative, syntax-based editor execution classifier. Anything that cannot be
-/// proven noninteractive remains unknown and therefore stays on the legacy console.
+/// Syntax-based editor execution classifier. Only the conservative allow-list
+/// proves a selection eligible for direct PSES execution. Unknown is not a
+/// guarantee of noninteractive behavior.
 /// </summary>
 public sealed class PowerShellExecutionRequestClassifier : IEditorExecutionRequestClassifier
 {
@@ -60,6 +61,12 @@ public sealed class PowerShellExecutionRequestClassifier : IEditorExecutionReque
                                 searchNestedScriptBlocks: true).Count() > 0)
         {
             return Interactive("The request references the PowerShell host object.", secure: false);
+        }
+
+        if (ast.FindAll(node => node is LoopStatementAst or InvokeMemberExpressionAst,
+                searchNestedScriptBlocks: true).Count() > 0)
+        {
+            return Unknown("The request contains a loop or member invocation with potentially blocking behavior.");
         }
 
         var functionNames = ast.FindAll(node => node is FunctionDefinitionAst, true)

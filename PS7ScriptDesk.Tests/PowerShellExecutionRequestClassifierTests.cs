@@ -30,6 +30,18 @@ public sealed class PowerShellExecutionRequestClassifierTests
         Assert.True(result.RequiredCapabilities.RequiresSecureInput);
     }
 
+    [Fact]
+    public void LiteralAndIndirectInteractiveInvocationsKeepDistinctRoutingEvidence()
+    {
+        var literal = _classifier.Classify(Request("& 'Read-Host' 'Name'"));
+        var indirect = _classifier.Classify(Request("Invoke-Expression 'Read-Host -Prompt Name'"));
+
+        Assert.Equal(ExecutionRequestClassification.KnownInteractive, literal.Classification);
+        Assert.True(literal.RequiredCapabilities.RequiresInteractiveInput);
+        Assert.Equal(ExecutionRequestClassification.Unknown, indirect.Classification);
+        Assert.False(indirect.RequiredCapabilities.RequiresInteractiveInput);
+    }
+
     [Theory]
     [InlineData("Write-Output 'hello'")]
     [InlineData("Write-Host 'hello'")]

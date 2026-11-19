@@ -29,6 +29,7 @@ internal sealed class PsesDapDebugSession : IDebugSession
     private long _pauseGeneration;
     private bool _disposed;
     private bool _stopped;
+    private string? _launchScriptPath;
     private IReadOnlyList<DebugCallStackFrame> _frames = Array.Empty<DebugCallStackFrame>();
 
     public PsesDapDebugSession(IAuthoritativePsesDebugEndpoint endpoint)
@@ -76,6 +77,14 @@ internal sealed class PsesDapDebugSession : IDebugSession
         }, connectTimeout.Token).ConfigureAwait(false);
         EnsureSuccess(initialize, "initialize");
 
+        Log("Submitting PSES debugger launch without a working-directory override.", new Dictionary<string, object?>
+        {
+            ["sessionId"] = _sessionId,
+            ["generation"] = _sessionGeneration,
+            ["programPath"] = DeveloperDiagnostics.SanitizePath(launchScriptPath),
+            ["workingDirectoryMode"] = "Unspecified",
+            ["contentOmitted"] = true
+        });
         var launch = await SendRequestAsync("launch", new
         {
             type = "PowerShell",
@@ -83,8 +92,6 @@ internal sealed class PsesDapDebugSession : IDebugSession
             name = "PS7 ScriptDesk authoritative session",
             program = launchScriptPath,
             script = launchScriptPath,
-            cwd = Path.GetDirectoryName(launchScriptPath),
-            workingDirectory = Path.GetDirectoryName(launchScriptPath),
             args = Array.Empty<string>(),
             stopOnEntry = false,
             terminateDebuggee = false,
@@ -94,6 +101,7 @@ internal sealed class PsesDapDebugSession : IDebugSession
         await _initialized.Task.WaitAsync(connectTimeout.Token).ConfigureAwait(false);
 
         var grouped = breakpoints.Where(item => string.Equals(Path.GetFullPath(item.ScriptPath), Path.GetFullPath(launchScriptPath), StringComparison.OrdinalIgnoreCase)).ToArray();
+        _launchScriptPath = launchScriptPath;
         var setBreakpoints = await SendRequestAsync("setBreakpoints", new
         {
             source = new { name = Path.GetFileName(launchScriptPath), path = launchScriptPath },
@@ -129,6 +137,32 @@ internal sealed class PsesDapDebugSession : IDebugSession
             Finish(DebugTerminationReason.StartupFailure, "Authoritative PSES DAP startup failed.", details: ex.GetType().Name);
             throw;
         }
+    }
+
+    public async Task UpdateLaunchBreakpointsAsync(IReadOnlyList<int> lines, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        if (_stopped || CurrentState is not (DebugSessionState.Running or DebugSessionState.Paused) ||
+            string.IsNullOrWhiteSpace(_launchScriptPath))
+            throw new InvalidOperationException("The debugger cannot update breakpoints in its current state.");
+
+        var path = _launchScriptPath;
+        var normalizedLines = lines.Distinct().Order().ToArray();
+        var response = await SendRequestAsync("setBreakpoints", new
+        {
+            source = new { name = Path.GetFileName(path), path },
+            breakpoints = normalizedLines.Select(line => new { line }).ToArray(),
+            lines = normalizedLines,
+            sourceModified = false
+        }, cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(response, "setBreakpoints");
+        Log("Authoritative PSES DAP breakpoints updated.", new Dictionary<string, object?>
+        {
+            ["sessionId"] = _sessionId,
+            ["generation"] = _sessionGeneration,
+            ["sourcePath"] = DeveloperDiagnostics.SanitizePath(path),
+            ["breakpointCount"] = normalizedLines.Length
+        });
     }
 
     public Task ContinueAsync() => SendControlAsync("continue", new { threadId = _threadId });

@@ -70,6 +70,22 @@ public sealed class BreakpointBulkOperationsTests
     }
 
     [Fact]
+    public void RemoveSpecificBreakpointPreservesOtherLinesAndDocuments()
+    {
+        var first = CreateDocument("a.ps1");
+        var second = CreateDocument("b.ps1");
+        first.ToggleBreakpoint(2);
+        first.ToggleBreakpoint(5);
+        first.SetBreakpointEnabled(5, false);
+        second.ToggleBreakpoint(2);
+
+        Assert.True(first.RemoveBreakpoint(5));
+        Assert.False(first.RemoveBreakpoint(5));
+        Assert.Equal(new[] { 2 }, first.BreakpointLineNumbers);
+        Assert.Equal(new[] { 2 }, second.BreakpointLineNumbers);
+    }
+
+    [Fact]
     public void BulkRemovalIncludesOpenModelsWithoutLoadedEditorControls()
     {
         var visible = CreateDocument("visible.ps1");

@@ -8,6 +8,53 @@ namespace PS7ScriptDesk.Tests;
 public sealed class StructuredEchoFilterContractTests
 {
     [Fact]
+    public void NativeRunSelectionInvocation_IsPromptAnchoredAndPreservesUserOutput()
+    {
+        var requestId = Guid.NewGuid();
+        const string snapshot = "C:\\Users\\tester\\AppData\\Local\\Temp\\PS7ScriptDesk\\EditorExecution\\selection-0123456789abcdef0123456789abcdef.ps1";
+        const string marker = "C:\\Users\\tester\\AppData\\Local\\Temp\\PS7ScriptDesk\\EditorExecution\\selection-0123456789abcdef0123456789abcdef.completed";
+        var invocation = PsesOwnedInteractiveSessionService.BuildNativeSelectionInvocation(snapshot, marker, requestId);
+        var filter = new PsesOwnedInteractiveSessionService.StructuredEchoFilter(requestId, preservePromptPrefix: true,
+            PsesOwnedInteractiveSessionService.BuildInvocationEchoForms(invocation, executeInCurrentScope: true));
+        var output = "PS C:\\Work> " + invocation + "\r\nT06_RECEIVED: [NativeInput123!ABC]\r\nPS C:\\Work> ";
+
+        var visible = filter.Filter(output) + filter.Flush();
+
+        Assert.DoesNotContain(invocation, visible, StringComparison.Ordinal);
+        Assert.Contains("PS C:\\Work> ", visible, StringComparison.Ordinal);
+        Assert.Contains("T06_RECEIVED: [NativeInput123!ABC]", visible, StringComparison.Ordinal);
+        Assert.Contains("WriteAllText", invocation, StringComparison.Ordinal);
+        Assert.Contains("'OK'", invocation, StringComparison.Ordinal);
+        Assert.Contains("'ERROR'", invocation, StringComparison.Ordinal);
+        Assert.Contains("File]::Move", invocation, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NativeRunSelectionCompletionEvidence_AcceptsEitherArrivalOrder(bool markerFirst)
+    {
+        var submitted = true;
+        var markerObserved = false;
+        var promptObserved = false;
+        if (markerFirst) markerObserved = true;
+        else promptObserved = true;
+        Assert.False(PsesOwnedInteractiveSessionService.IsNativeSelectionCompletionReady(submitted, promptObserved, markerObserved));
+
+        if (markerFirst) promptObserved = true;
+        else markerObserved = true;
+        Assert.True(PsesOwnedInteractiveSessionService.IsNativeSelectionCompletionReady(submitted, promptObserved, markerObserved));
+    }
+
+    [Fact]
+    public void NativeRunSelectionCompletionEvidence_RejectsMarkerOnlyOldPromptAndUnsubmittedRequest()
+    {
+        Assert.False(PsesOwnedInteractiveSessionService.IsNativeSelectionCompletionReady(true, false, true));
+        Assert.False(PsesOwnedInteractiveSessionService.IsNativeSelectionCompletionReady(true, true, false));
+        Assert.False(PsesOwnedInteractiveSessionService.IsNativeSelectionCompletionReady(false, true, true));
+    }
+
+    [Fact]
     public void PromptPrefixedMultilineEcho_IsSuppressedWithoutSuppressingOutput()
     {
         const string script = "Write-Output \"CLEAN_START_20\"\n# clean filler 1\n# clean filler 2\nWrite-Output \"CLEAN_DONE_20\"";
@@ -145,6 +192,67 @@ public sealed class StructuredEchoFilterContractTests
     }
 
     [Fact]
+    public void RunFileGeneratedCommand_RedrawnEchoWaitsForLineBoundaryAndUsesRequestMarker()
+    {
+        var requestId = Guid.NewGuid();
+        var invocation = "& { $__ps7sd_status_" + requestId.ToString("N") + " = $true; try { if (-not [System.IO.File]::Exists('snapshot.ps1')) { throw 'missing' }; & 'snapshot.ps1' } finally { Remove-Variable -Name '__ps7sd_status_" + requestId.ToString("N") + "' -ErrorAction SilentlyContinue } }";
+        var filter = new PsesOwnedInteractiveSessionService.StructuredEchoFilter(
+            requestId, preservePromptPrefix: true, invocation);
+        // Simulate a PSReadLine redraw that duplicates printable text around a
+        // cursor reposition. The request marker still identifies this command,
+        // but the complete echo no longer matches the submitted bytes exactly.
+        var redrawnEcho = invocation.Replace("try {", "try {\u001b[1;1Htry {", StringComparison.Ordinal);
+
+        Assert.Empty(filter.Filter("PS C:\\Work> " + redrawnEcho));
+        var visible = filter.Filter("\r\nRUNFILE_OUTPUT\r\nPS C:\\Work> ") + filter.Flush();
+
+        Assert.DoesNotContain("__ps7sd_status_", visible, StringComparison.Ordinal);
+        Assert.DoesNotContain("snapshot.ps1", visible, StringComparison.Ordinal);
+        Assert.Contains("PS C:\\Work> ", visible, StringComparison.Ordinal);
+        Assert.Contains("RUNFILE_OUTPUT\r\n", visible, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunFileGeneratedCommand_RedrawnCleanupTailUsesRequestLineBoundaryWithoutLosingOutput()
+    {
+        var requestId = Guid.NewGuid();
+        var marker = "__ps7sd_status_" + requestId.ToString("N");
+        var invocation = PsesOwnedInteractiveSessionService.BuildExperimentalDirectRunFileInvocation(
+            "'snapshot.ps1'", "'status.txt'", marker);
+        var filter = new PsesOwnedInteractiveSessionService.StructuredEchoFilter(
+            requestId, preservePromptPrefix: true, invocation);
+        var redraw = invocation.Replace("-ErrorAction SilentlyContinue",
+            "-ErrorAction \u001b[1C-ErrorAction SilentlyContinue", StringComparison.Ordinal);
+        var raw = "PS C:\\Work> " + redraw + "\r\n" +
+            "USER_OUTPUT\r\n\u001b[32mNATIVE_OUTPUT\u001b[0m\r\nPS C:\\Work> ";
+        var visible = new StringBuilder();
+
+        foreach (var chunk in raw.Chunk(11)) visible.Append(filter.Filter(new string(chunk)));
+        visible.Append(filter.Flush());
+
+        Assert.DoesNotContain(marker, visible.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("snapshot.ps1", visible.ToString(), StringComparison.Ordinal);
+        Assert.Contains("PS C:\\Work> ", visible.ToString(), StringComparison.Ordinal);
+        Assert.Contains("USER_OUTPUT\r\n", visible.ToString(), StringComparison.Ordinal);
+        Assert.Contains("\u001b[32mNATIVE_OUTPUT\u001b[0m", visible.ToString(), StringComparison.Ordinal);
+        Assert.EndsWith("PS C:\\Work> ", visible.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunFileGeneratedCommand_RequestMarkerInOrdinaryOutputIsPreserved()
+    {
+        var requestId = Guid.NewGuid();
+        var marker = "__ps7sd_status_" + requestId.ToString("N");
+        var invocation = PsesOwnedInteractiveSessionService.BuildExperimentalDirectRunFileInvocation(
+            "'snapshot.ps1'", "'status.txt'", marker);
+        var filter = new PsesOwnedInteractiveSessionService.StructuredEchoFilter(
+            requestId, preservePromptPrefix: true, invocation);
+        var userOutput = "USER_PRINTED_TOKEN=" + marker + "\r\n";
+
+        Assert.Equal(userOutput, filter.Filter(userOutput) + filter.Flush());
+    }
+
+    [Fact]
     public void RunSelectionOperandEcho_IsSuppressedAndSelectedOutputRemainsVisible()
     {
         var requestId = Guid.NewGuid();
@@ -160,6 +268,20 @@ public sealed class StructuredEchoFilterContractTests
         Assert.DoesNotContain(operand, visible, StringComparison.Ordinal);
         Assert.Contains("SELECTED_EXPRESSION_OUTPUT", visible, StringComparison.Ordinal);
         Assert.Contains("PS C:\\Work> ", visible, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExperimentalDirectRunSelection_DotSourcesSnapshotWithoutCreatingChildScriptScope()
+    {
+        var invocation = PsesOwnedInteractiveSessionService.BuildExperimentalDirectRunSelectionInvocation(
+            "'selection-snapshot.ps1'", "'selection-status.txt'", "__ps7sd_status_test");
+
+        Assert.Contains(". 'selection-snapshot.ps1'", invocation, StringComparison.Ordinal);
+        Assert.DoesNotContain("& 'selection-snapshot.ps1'", invocation, StringComparison.Ordinal);
+        Assert.DoesNotContain("& {", invocation, StringComparison.Ordinal);
+        Assert.Contains("WriteAllText('selection-status.txt', 'OK')", invocation, StringComparison.Ordinal);
+        Assert.Contains("throw", invocation, StringComparison.Ordinal);
+        Assert.Contains("Remove-Variable", invocation, StringComparison.Ordinal);
     }
 
     [Fact]
