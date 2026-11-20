@@ -421,6 +421,8 @@ namespace PS7ScriptDesk.Shell
         private bool _terminalHostAttached;
         private Task? _consoleWarmStartTask;
         private readonly object _consoleWarmStartLock = new();
+        private Task? _startupRecoveryTask;
+        private CancellationTokenSource? _startupRecoveryCancellation;
         private bool _terminalIsActive;
         private EditorMetadataWarmupPhase _lastEditorMetadataWarmupPhase = EditorMetadataWarmupPhase.Idle;
         private PowerShellRuntimeInfo? _pendingEditorMetadataWarmupRuntime;
@@ -1763,7 +1765,6 @@ namespace PS7ScriptDesk.Shell
                 ViewModel.ExeExportProgressChanged -= ViewModel_ExeExportProgressChanged;
                 ViewModel.ExeExportProgressChanged += ViewModel_ExeExportProgressChanged;
                 DeveloperDiagnostics.LogInfo("Startup", "ViewModel bound to synchronization context and PropertyChanged handler attached.");
-                ViewModel.ProcessStartupDocumentRecovery();
                 ContextHelp.ValidateWindowTopics(this);
                 ApplyExplorerVisibilityLayout();
                 RefreshDebugCommandAvailability(false);
@@ -1917,6 +1918,12 @@ namespace PS7ScriptDesk.Shell
                 DeveloperDiagnostics.LogAsyncBoundary("Startup", "InitializeAsync", "Deferred ViewModel initialization launched.", "AsyncStart");
                 StartupTimingLogger.Log("MainWindow", $"Deferred initialization launched at {startupStopwatch.ElapsedMilliseconds} ms");
 
+                // Recovery uses modal WPF dialogs, but it is deliberately queued
+                // only after terminal wiring, host attachment, console warm start,
+                // and deferred services have all been started. The nested dialog
+                // dispatcher can then continue those independent operations.
+                ScheduleStartupDocumentRecovery(ViewModel);
+
                 TerminalConsole.FocusTerminal();
                 StartupTimingLogger.Log("MainWindow", $"Window_Loaded completed in {startupStopwatch.ElapsedMilliseconds} ms");
                 StartupLifecycleTrace.Write("MainWindow.Window_Loaded", "EXIT", $"elapsedMs={startupStopwatch.ElapsedMilliseconds}");
@@ -1998,6 +2005,115 @@ namespace PS7ScriptDesk.Shell
             {
                 AppLogger.Error("Startup", "Deferred ViewModel initialization faulted outside its expected recovery boundary.", ex);
                 DeveloperDiagnostics.LogException("Startup", ex, "Deferred ViewModel initialization faulted outside its expected recovery boundary.");
+            }
+        }
+
+        private void ScheduleStartupDocumentRecovery(MainWindowViewModel viewModel)
+        {
+            if (_startupRecoveryTask is not null)
+            {
+                return;
+            }
+
+            var cancellation = new CancellationTokenSource();
+            _startupRecoveryCancellation = cancellation;
+            StartupLifecycleTrace.Write("MainWindow.StartupRecovery", "SCHEDULED");
+            DeveloperDiagnostics.LogAsyncBoundary(
+                "Startup",
+                "DocumentRecovery",
+                "Startup document recovery was queued after independent initialization started.",
+                "DispatcherSchedule");
+
+            _startupRecoveryTask = Dispatcher.InvokeAsync(
+                () => RunStartupDocumentRecovery(viewModel, cancellation),
+                DispatcherPriority.ContextIdle).Task;
+            _ = ObserveStartupDocumentRecoveryAsync(_startupRecoveryTask);
+        }
+
+        private void RunStartupDocumentRecovery(
+            MainWindowViewModel viewModel,
+            CancellationTokenSource cancellation)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            if (cancellation.IsCancellationRequested || _allowWindowClose)
+            {
+                StartupLifecycleTrace.Write("MainWindow.StartupRecovery", "SKIPPED", "reason=shutdown");
+                return;
+            }
+
+            StartupLifecycleTrace.Write("MainWindow.StartupRecovery", "ENTER");
+            try
+            {
+                viewModel.ProcessStartupDocumentRecovery(cancellation.Token);
+                StartupLifecycleTrace.Write(
+                    "MainWindow.StartupRecovery",
+                    "EXIT",
+                    $"elapsedMs={stopwatch.ElapsedMilliseconds}");
+                DeveloperDiagnostics.LogInfo(
+                    "Startup",
+                    "Startup document recovery completed after independent initialization was launched.",
+                    new Dictionary<string, object?>
+                    {
+                        ["elapsedMs"] = stopwatch.ElapsedMilliseconds,
+                        ["canceled"] = cancellation.IsCancellationRequested
+                    });
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                StartupLifecycleTrace.Write("MainWindow.StartupRecovery", "CANCELED");
+                DeveloperDiagnostics.LogInfo(
+                    "Startup",
+                    "Startup document recovery was canceled during application shutdown.",
+                    new Dictionary<string, object?> { ["elapsedMs"] = stopwatch.ElapsedMilliseconds });
+            }
+            catch (Exception ex)
+            {
+                StartupLifecycleTrace.Write(
+                    "MainWindow.StartupRecovery",
+                    "FAULT",
+                    $"exception={ex.GetType().Name}: {ex.Message}");
+                DeveloperDiagnostics.LogException(
+                    "Startup",
+                    ex,
+                    "Startup document recovery failed after independent initialization was launched.");
+                viewModel.StatusText = "Startup document recovery failed";
+            }
+            finally
+            {
+                if (ReferenceEquals(_startupRecoveryCancellation, cancellation))
+                {
+                    _startupRecoveryCancellation = null;
+                    cancellation.Dispose();
+                }
+            }
+        }
+
+        private static async Task ObserveStartupDocumentRecoveryAsync(Task recoveryTask)
+        {
+            try
+            {
+                await recoveryTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                DeveloperDiagnostics.LogInfo("Startup", "Queued startup document recovery dispatcher work was canceled.");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Startup", "Queued startup document recovery faulted outside its expected recovery boundary.", ex);
+                DeveloperDiagnostics.LogException("Startup", ex, "Queued startup document recovery faulted outside its expected recovery boundary.");
+            }
+        }
+
+        private void CancelStartupDocumentRecovery()
+        {
+            try
+            {
+                _startupRecoveryCancellation?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // The dispatcher callback already completed its tracked owner.
             }
         }
 
@@ -8412,6 +8528,17 @@ namespace PS7ScriptDesk.Shell
                     ["selectionLength"] = selectionLength,
                     ["sourceInfoPresent"] = sourceInfo is not null
                 });
+            var classification = new PowerShellExecutionRequestClassifier().Classify(
+                new EditorExecutionRequest(Guid.NewGuid(), 0, EditorExecutionMode.RunSelection,
+                    "Run Selection focus check", selectedText, ExecuteInCurrentScope: true));
+            if (classification.Classification == ExecutionRequestClassification.KnownInteractive)
+            {
+                // Toolbar and context-menu invocation leave keyboard focus outside xterm.
+                // Read-Host receives input only after xterm owns that focus again.
+                Dispatcher.BeginInvoke(new Action(() => TerminalConsole.FocusTerminal()));
+                DeveloperDiagnostics.LogInfo("Execution", "Interactive Run Selection requested terminal keyboard focus.",
+                    new Dictionary<string, object?> { ["commandSource"] = commandSource, ["contentOmitted"] = true });
+            }
             await ViewModel.RunSelectionAsync(selectedText, sourceInfo).ConfigureAwait(true);
             DeveloperDiagnostics.LogInfo("Execution", "Run Selection dispatched to ViewModel.");
         }
@@ -11434,6 +11561,7 @@ namespace PS7ScriptDesk.Shell
         private async void Window_Closing(object? sender, CancelEventArgs e)
         {
             DeveloperDiagnostics.LogEventHandlerEntry("UI", "Window_Closing", "Window_Closing entered.");
+            CancelStartupDocumentRecovery();
             if (_allowWindowClose)
             {
                 CancelPendingMetadataToast();
@@ -11832,6 +11960,9 @@ namespace PS7ScriptDesk.Shell
 
         private void Window_Closed(object? sender, EventArgs e)
         {
+            CancelStartupDocumentRecovery();
+            _startupRecoveryCancellation?.Dispose();
+            _startupRecoveryCancellation = null;
             CancelPendingMetadataToast();
             _metadataToastDismissal.Dispose();
             _metadataInitializationWindow?.Close();

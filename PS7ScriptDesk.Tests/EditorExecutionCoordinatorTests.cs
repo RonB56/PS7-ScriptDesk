@@ -65,6 +65,68 @@ public sealed class EditorExecutionCoordinatorTests
     }
 
     [Fact]
+    public async Task RunSelection_UsesPsesSchedulerRegardlessOfClassifierResult()
+    {
+        var legacy = new FakeBackend(EditorExecutionCoordinator.LegacyBackendId, LegacyCapabilities);
+        var structured = new FakeBackend(EditorExecutionCoordinator.StructuredBackendId, InteractiveStructuredCapabilities);
+        using var coordinator = new EditorExecutionCoordinator(
+            new IEditorExecutionBackend[] { legacy, structured }, new EditorExecutionFeatureGate(true),
+            shadowMode: false,
+            classifier: new FakeClassifier(ExecutionRequestClassification.KnownInteractive,
+                new ExecutionCapabilityRequirements(RequiresInteractiveInput: true, RequiresCurrentScope: true,
+                    RequiresTerminalInterrupt: true), "DirectRunSelectionReadHost"),
+            directSelectionGate: new ExperimentalRunSelectionBridgeFeatureGate(true));
+
+        var decision = await coordinator.ObserveAsync(CreateRequest() with { Mode = EditorExecutionMode.RunSelection, ExecuteInCurrentScope = true });
+
+        Assert.True(decision.Accepted);
+        Assert.Equal(EditorExecutionCoordinator.StructuredBackendId, decision.SelectedBackend);
+        Assert.Equal("PsesSchedulerAdmission", decision.SelectionReason);
+    }
+
+    [Fact]
+    public async Task RunSelection_OptOutCannotRestoreLegacyRoute()
+    {
+        var legacy = new FakeBackend(EditorExecutionCoordinator.LegacyBackendId, LegacyCapabilities);
+        var structured = new FakeBackend(EditorExecutionCoordinator.StructuredBackendId, InteractiveStructuredCapabilities);
+        using var coordinator = new EditorExecutionCoordinator(
+            new IEditorExecutionBackend[] { legacy, structured }, new EditorExecutionFeatureGate(true),
+            shadowMode: false,
+            classifier: new FakeClassifier(ExecutionRequestClassification.KnownInteractive,
+                new ExecutionCapabilityRequirements(RequiresInteractiveInput: true, RequiresCurrentScope: true,
+                    RequiresTerminalInterrupt: true), "DirectRunSelectionReadHost"),
+            directSelectionGate: new ExperimentalRunSelectionBridgeFeatureGate(false));
+
+        var decision = await coordinator.ObserveAsync(CreateRequest() with { Mode = EditorExecutionMode.RunSelection, ExecuteInCurrentScope = true });
+
+        Assert.True(decision.Accepted);
+        Assert.Equal(EditorExecutionCoordinator.StructuredBackendId, decision.SelectedBackend);
+        Assert.Equal("PsesSchedulerAdmission", decision.SelectionReason);
+    }
+
+    [Fact]
+    public async Task DirectReadHostApproval_IsNarrowlyPropagatedToAuthoritativeAdapter()
+    {
+        var legacy = new FakeBackend(EditorExecutionCoordinator.LegacyBackendId, LegacyCapabilities);
+        var structured = new FakeBackend(EditorExecutionCoordinator.StructuredBackendId, InteractiveStructuredCapabilities);
+        using var coordinator = new EditorExecutionCoordinator(
+            new IEditorExecutionBackend[] { legacy, structured }, new EditorExecutionFeatureGate(true),
+            shadowMode: false,
+            classifier: new FakeClassifier(ExecutionRequestClassification.KnownInteractive,
+                new ExecutionCapabilityRequirements(RequiresInteractiveInput: true, RequiresCurrentScope: true,
+                    RequiresTerminalInterrupt: true), "DirectRunSelectionReadHost"),
+            directSelectionGate: new ExperimentalRunSelectionBridgeFeatureGate(true));
+        var request = CreateRequest() with { Mode = EditorExecutionMode.RunSelection, ExecuteInCurrentScope = true };
+
+        await coordinator.ExecuteAsync(request);
+
+        Assert.True(structured.LastRequest?.DirectRunSelectionApproved);
+        Assert.False(structured.LastRequest?.DirectReadHostSelectionApproved);
+        Assert.Equal(1, structured.ExecutionCount);
+        Assert.Equal(0, legacy.ExecutionCount);
+    }
+
+    [Fact]
     public async Task GateOn_UnknownUsesStructuredBackendWhenNoInteractiveCapabilityIsRequired()
     {
         var legacy = new FakeBackend(EditorExecutionCoordinator.LegacyBackendId, LegacyCapabilities);
@@ -232,26 +294,6 @@ public sealed class EditorExecutionCoordinatorTests
         Assert.Null(coordinator.ActiveExecution);
     }
 
-    [Fact]
-    public void DevelopmentRollbackSwitchIsExplicitAndDisabledByDefault()
-    {
-        var previous = Environment.GetEnvironmentVariable(EditorExecutionCoordinator.RollbackEnvironmentVariableName);
-        try
-        {
-            Environment.SetEnvironmentVariable(EditorExecutionCoordinator.RollbackEnvironmentVariableName, "1");
-            using var coordinator = CreateCoordinator(
-                new FakeBackend(EditorExecutionCoordinator.LegacyBackendId, LegacyCapabilities),
-                null,
-                new EditorExecutionFeatureGate(false));
-
-            Assert.True(coordinator.IsRollbackEnabled);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(EditorExecutionCoordinator.RollbackEnvironmentVariableName, previous);
-        }
-    }
-
     private static EditorExecutionCoordinator CreateCoordinator(
         FakeBackend legacy,
         FakeBackend? structured,
@@ -265,10 +307,11 @@ public sealed class EditorExecutionCoordinatorTests
     }
 
     private static EditorExecutionRequest CreateRequest(ExecutionCapabilityRequirements? requirements = null)
-        => new(Guid.NewGuid(), 1, EditorExecutionMode.ScriptCall, "Test.ps1", "Write-Output test", CapabilityRequirements: requirements);
+        => new(Guid.NewGuid(), 1, EditorExecutionMode.CurrentScope, "Test.ps1", "Write-Output test", CapabilityRequirements: requirements);
 
     private static readonly ExecutionBackendCapabilities LegacyCapabilities = new(true, true, true, false, true, false, true, true, true, true);
     private static readonly ExecutionBackendCapabilities StructuredCapabilities = new(false, false, true, true, false, true, true, true, true, true, true);
+    private static readonly ExecutionBackendCapabilities InteractiveStructuredCapabilities = new(true, true, true, true, true, false, true, true, true, true, true);
 
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
@@ -284,11 +327,19 @@ public sealed class EditorExecutionCoordinatorTests
     private sealed class FakeClassifier : IEditorExecutionRequestClassifier
     {
         private readonly ExecutionRequestClassification _classification;
+        private readonly ExecutionCapabilityRequirements _requirements;
+        private readonly string? _reason;
 
-        public FakeClassifier(ExecutionRequestClassification classification) => _classification = classification;
+        public FakeClassifier(ExecutionRequestClassification classification,
+            ExecutionCapabilityRequirements? requirements = null, string? reason = null)
+        {
+            _classification = classification;
+            _requirements = requirements ?? new ExecutionCapabilityRequirements();
+            _reason = reason;
+        }
 
         public ExecutionRequestClassificationResult Classify(EditorExecutionRequest request)
-            => new(_classification, new ExecutionCapabilityRequirements(), "Test classification");
+            => new(_classification, _requirements, _reason ?? "Test classification");
     }
 
     private sealed class FakeBackend : IEditorExecutionBackend
@@ -307,6 +358,7 @@ public sealed class EditorExecutionCoordinatorTests
         public ExecutionBackendAvailability Availability => ExecutionBackendAvailability.Available;
         public string? AvailabilityReason => null;
         public int ExecutionCount { get; private set; }
+        public EditorExecutionRequest? LastRequest { get; private set; }
         public TaskCompletionSource<bool>? Release { get; set; }
         public event Action<EditorExecutionEvent>? EventPublished;
 
@@ -316,6 +368,7 @@ public sealed class EditorExecutionCoordinatorTests
         public async Task<EditorExecutionResult> ExecuteAsync(EditorExecutionRequest request, CancellationToken cancellationToken)
         {
             ExecutionCount++;
+            LastRequest = request;
             if (Release is not null) await Release.Task.WaitAsync(cancellationToken);
             if (_delay > TimeSpan.Zero) await Task.Delay(_delay, cancellationToken);
             var now = DateTimeOffset.UtcNow;

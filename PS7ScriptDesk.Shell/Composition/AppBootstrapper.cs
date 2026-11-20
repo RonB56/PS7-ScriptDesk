@@ -67,29 +67,20 @@ namespace PS7ScriptDesk.Shell.Composition
             if (structuredExecutionFeatureGate.IsStructuredExecutionEnabled)
             {
                 StructuredExecutionStartupResult structuredStartup;
-                if (psesOwnedSessionFeatureGate.IsEnabled)
+                structuredStartup = TryInitializeStructuredExecution(() =>
                 {
-                    structuredStartup = TryInitializeStructuredExecution(() =>
+                    if (!psesOwnedSessionFeatureGate.IsEnabled)
                     {
-                        if (liveConsoleService is not IAuthoritativeSessionStructuredExecution authoritativeSession)
-                        {
-                            throw new InvalidOperationException("The PSES-owned interactive service does not expose the authoritative structured execution contract.");
-                        }
+                        throw new InvalidOperationException("Editor execution requires the PSES-owned interactive session; an independent editor runspace is not created.");
+                    }
 
-                        return new AuthoritativeSessionStructuredExecutionAdapter(authoritativeSession, structuredExecutionFeatureGate);
-                    });
-                }
-                else
-                {
-                    structuredStartup = TryInitializeStructuredExecution(() =>
+                    if (liveConsoleService is not IAuthoritativeSessionStructuredExecution authoritativeSession)
                     {
-                        var broker = PersistentPowerShellSessionBroker
-                            .CreateAsync("Structured editor PowerShell broker", startupRuntimeInfo)
-                            .GetAwaiter()
-                            .GetResult();
-                        return new StructuredEditorExecutionAdapter(broker, structuredExecutionFeatureGate);
-                    });
-                }
+                        throw new InvalidOperationException("The PSES-owned interactive service does not expose the authoritative structured execution contract.");
+                    }
+
+                    return new AuthoritativeSessionStructuredExecutionAdapter(authoritativeSession, structuredExecutionFeatureGate);
+                });
                 editorExecutionAdapter = structuredStartup.Adapter;
                 if (structuredStartup.IsAvailable)
                 {
@@ -108,21 +99,18 @@ namespace PS7ScriptDesk.Shell.Composition
                     DeveloperDiagnostics.LogException(
                         "Startup",
                         failure,
-                        "Structured execution was requested but initialization failed; continuing with the legacy execution backend. Structured execution is unavailable for this application session.",
+                        "Editor execution was requested but the PSES-owned bridge backend is unavailable. No independent runspace or console-injection fallback was created.",
                         new Dictionary<string, object?>
                         {
                             ["structuredExecutionRequested"] = true,
                             ["structuredExecutionAvailable"] = false,
-                            ["effectiveBackend"] = "legacy",
-                            ["legacyBackendAvailable"] = true,
-                            ["fallbackScope"] = "startup-composition-only"
+                            ["effectiveBackend"] = "none",
+                            ["legacyBackendAvailable"] = false,
+                            ["fallbackScope"] = "none"
                         });
                 }
             }
-            var executionBackends = new List<IEditorExecutionBackend>
-            {
-                new LegacyLiveConsoleExecutionBackend(liveConsoleService)
-            };
+            var executionBackends = new List<IEditorExecutionBackend>();
             if (structuredBackend is not null)
             {
                 executionBackends.Add(structuredBackend);

@@ -13,7 +13,6 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
 {
     public const string LegacyBackendId = "legacy-live-console";
     public const string StructuredBackendId = "authoritative-pses-session";
-    public const string RollbackEnvironmentVariableName = "PS7SCRIPTDESK_C2_ROUTING_ROLLBACK";
 
     private static readonly ExecutionBackendCapabilities EmptyCapabilities = new(
         false, false, false, false, false, false, false, false, false, false);
@@ -39,7 +38,6 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
         _featureGate = featureGate ?? throw new ArgumentNullException(nameof(featureGate));
         _backends = backends.ToDictionary(backend => backend.BackendId, StringComparer.OrdinalIgnoreCase);
         IsShadowMode = shadowMode;
-        IsRollbackEnabled = IsDevelopmentRollbackEnabled();
         _structuredAvailability = structuredAvailability;
         _classifier = classifier ?? new UnknownExecutionRequestClassifier();
         _directSelectionGate = directSelectionGate ?? ExperimentalRunSelectionBridgeFeatureGate.FromEnvironment();
@@ -50,8 +48,6 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
     }
 
     public bool IsShadowMode { get; }
-
-    public bool IsRollbackEnabled { get; }
 
     public ActiveEditorExecutionSnapshot? ActiveExecution => Volatile.Read(ref _activeExecution);
 
@@ -167,10 +163,16 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
                     ["selectionReason"] = decision.SelectionReason,
                     ["sessionGeneration"] = request.SessionGeneration
                 });
-            var directSelectionApproved = request.IsRunSelection && request.ExecuteInCurrentScope &&
-                decision.Classification == ExecutionRequestClassification.KnownNonInteractive &&
+            var directSelectionApproved = request.IsRunSelection &&
+                decision.BackendId == StructuredBackendId;
+            var directReadHostApproved = request.IsRunSelection && request.ExecuteInCurrentScope &&
+                string.Equals(decision.SelectionReason, "DirectReadHostSelectionEligible", StringComparison.Ordinal) &&
                 decision.BackendId == StructuredBackendId && _directSelectionGate.IsEnabled;
-            var dispatchRequest = request with { DirectRunSelectionApproved = directSelectionApproved };
+            var dispatchRequest = request with
+            {
+                DirectRunSelectionApproved = directSelectionApproved,
+                DirectReadHostSelectionApproved = directReadHostApproved
+            };
             var result = await backend.ExecuteAsync(dispatchRequest, cancellationToken).ConfigureAwait(false);
             DeveloperDiagnostics.LogOperationStop(
                 "Execution",
@@ -255,7 +257,20 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
 
     private ExecutionRoutingDecision SelectBackend(EditorExecutionRequest request)
     {
-        var classification = _classifier.Classify(request);
+        var isRunFile = request.Mode == EditorExecutionMode.ScriptCall && !request.ExecuteInCurrentScope;
+        var isBridgeEditorRequest = request.IsRunSelection || isRunFile;
+        var classification = isBridgeEditorRequest
+            ? new ExecutionRequestClassificationResult(
+                ExecutionRequestClassification.KnownInteractive,
+                new ExecutionCapabilityRequirements(
+                    RequiresInteractiveInput: true,
+                    RequiresSecureInput: true,
+                    RequiresCurrentScope: request.IsRunSelection,
+                    RequiresScriptCallIsolation: isRunFile,
+                    RequiresTerminalInterrupt: true,
+                    RequiresWorkingDirectoryContinuity: true),
+                "Run Selection is admitted by PSES scheduler capabilities.")
+            : _classifier.Classify(request);
         var requiredCapabilities = MergeRequirements(request.CapabilityRequirements, classification.RequiredCapabilities);
         var structuredCompatibility = _structuredAvailability switch
         {
@@ -267,25 +282,68 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
 
         if (!_featureGate.IsStructuredExecutionEnabled)
         {
+            if (isBridgeEditorRequest)
+                return new ExecutionRoutingDecision(request.RequestId, StructuredBackendId, EmptyCapabilities, false, IsShadowMode,
+                    "Run Selection and Run File require the authenticated PSES execution bridge.", false,
+                    _structuredAvailability, structuredCompatibility, classification.Classification, requiredCapabilities,
+                    "BridgeUnavailable", "Structured execution is disabled.", DateTimeOffset.UtcNow);
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "GateOff", null);
         }
 
         if (_structuredAvailability == ExecutionBackendAvailability.RuntimeIncompatible)
         {
+            if (isBridgeEditorRequest)
+                return new ExecutionRoutingDecision(request.RequestId, StructuredBackendId, EmptyCapabilities, false, IsShadowMode,
+                    "Run Selection and Run File require the authenticated PSES execution bridge.", true,
+                    _structuredAvailability, structuredCompatibility, classification.Classification, requiredCapabilities,
+                    "BridgeUnavailable", "The private bridge runtime is incompatible.", DateTimeOffset.UtcNow);
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "StructuredUnavailableRuntimeIncompatible", "The structured runtime is incompatible with the loaded in-process SMA assembly.");
         }
 
         if (_structuredAvailability == ExecutionBackendAvailability.InitializationFailed)
         {
+            if (isBridgeEditorRequest)
+                return new ExecutionRoutingDecision(request.RequestId, StructuredBackendId, EmptyCapabilities, false, IsShadowMode,
+                    "Run Selection and Run File require the authenticated PSES execution bridge.", true,
+                    _structuredAvailability, structuredCompatibility, classification.Classification, requiredCapabilities,
+                    "BridgeUnavailable", "The private bridge runtime failed initialization.", DateTimeOffset.UtcNow);
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "StructuredInitializationFailed", "Structured backend initialization failed during startup.");
         }
 
         if (!_backends.TryGetValue(StructuredBackendId, out var structured) || structured.Availability != ExecutionBackendAvailability.Available)
         {
+            if (isBridgeEditorRequest)
+                return new ExecutionRoutingDecision(request.RequestId, StructuredBackendId, EmptyCapabilities, false, IsShadowMode,
+                    "Run Selection requires the authenticated PSES execution bridge.", _featureGate.IsStructuredExecutionEnabled,
+                    _structuredAvailability, structuredCompatibility, classification.Classification, requiredCapabilities,
+                    "BridgeUnavailable", structured?.AvailabilityReason, DateTimeOffset.UtcNow);
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "StructuredUnavailable", structured?.AvailabilityReason ?? "The structured backend is not composed or available.");
         }
 
-        if (classification.Classification == ExecutionRequestClassification.KnownInteractive)
+        if (isBridgeEditorRequest)
+        {
+            if (!_featureGate.IsStructuredExecutionEnabled || _structuredAvailability != ExecutionBackendAvailability.Available)
+                return new ExecutionRoutingDecision(request.RequestId, StructuredBackendId, structured.Capabilities, false, IsShadowMode,
+                    "Run Selection requires the authenticated PSES execution bridge.", _featureGate.IsStructuredExecutionEnabled,
+                    structured.Availability, structuredCompatibility, classification.Classification, requiredCapabilities,
+                    "BridgeUnavailable", "Structured bridge execution is disabled or unavailable.", DateTimeOffset.UtcNow);
+
+            var selectionCapabilityFailure = GetCapabilityFailure(requiredCapabilities, structured.Capabilities);
+            if (selectionCapabilityFailure is not null)
+                return new ExecutionRoutingDecision(request.RequestId, StructuredBackendId, structured.Capabilities, false, IsShadowMode,
+                    selectionCapabilityFailure, true, structured.Availability, structuredCompatibility,
+                    classification.Classification, requiredCapabilities, "CapabilityNotSupported", selectionCapabilityFailure,
+                    DateTimeOffset.UtcNow);
+
+            return new ExecutionRoutingDecision(request.RequestId, StructuredBackendId, structured.Capabilities, true, IsShadowMode,
+                null, true, structured.Availability, structuredCompatibility, classification.Classification,
+                requiredCapabilities, "PsesSchedulerAdmission", null, DateTimeOffset.UtcNow);
+        }
+
+        const bool directReadHostSelection = false;
+
+        if (classification.Classification == ExecutionRequestClassification.KnownInteractive &&
+            !(directReadHostSelection && _directSelectionGate.IsEnabled))
         {
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "InteractiveCapabilityRequired", classification.Reason);
         }
@@ -295,7 +353,7 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "SelectionNotProvenNonInteractive", classification.Reason);
         }
 
-        if (classification.Classification == ExecutionRequestClassification.KnownNonInteractive &&
+        if ((classification.Classification == ExecutionRequestClassification.KnownNonInteractive || directReadHostSelection) &&
             request.IsRunSelection && !_directSelectionGate.IsEnabled)
         {
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "DirectSelectionOptOut", "Direct PSES Run Selection was disabled for this process.");
@@ -333,7 +391,7 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "CapabilityNotSupported", unknownCapabilityFailure);
         }
 
-        if (classification.Classification != ExecutionRequestClassification.KnownNonInteractive)
+        if (classification.Classification != ExecutionRequestClassification.KnownNonInteractive && !directReadHostSelection)
         {
             return SelectLegacy(request, classification, requiredCapabilities, structuredCompatibility, "CapabilityNotProven", classification.Reason);
         }
@@ -356,7 +414,7 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
             structuredCompatibility,
             classification.Classification,
             requiredCapabilities,
-            "StructuredEligible",
+            directReadHostSelection ? "DirectReadHostSelectionEligible" : "StructuredEligible",
             null,
             DateTimeOffset.UtcNow);
     }
@@ -415,7 +473,8 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
                 ["requiredCapabilities"] = decision.RequiredCapabilities,
                 ["selectedBackend"] = decision.SelectedBackend,
                 ["selectionReason"] = decision.SelectionReason,
-                ["directRunSelectionApproved"] = request.IsRunSelection && decision.Classification == ExecutionRequestClassification.KnownNonInteractive && decision.BackendId == StructuredBackendId && _directSelectionGate.IsEnabled,
+                ["directRunSelectionApproved"] = request.IsRunSelection && decision.BackendId == StructuredBackendId && _directSelectionGate.IsEnabled &&
+                    (decision.Classification == ExecutionRequestClassification.KnownNonInteractive || string.Equals(decision.SelectionReason, "DirectReadHostSelectionEligible", StringComparison.Ordinal)),
                 ["fallbackOrDowngradeReason"] = decision.FallbackOrDowngradeReason,
                 ["structuredUnknownDefault"] = string.Equals(decision.SelectionReason, "StructuredEligibleUnknown", StringComparison.Ordinal),
                 ["sessionGeneration"] = request.SessionGeneration,
@@ -456,14 +515,6 @@ public sealed class EditorExecutionCoordinator : IEditorExecutionCoordinator
     }
 
     private void OnBackendEventPublished(EditorExecutionEvent executionEvent) => EventPublished?.Invoke(executionEvent);
-
-    private static bool IsDevelopmentRollbackEnabled()
-    {
-        var value = Environment.GetEnvironmentVariable(RollbackEnvironmentVariableName);
-        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
-    }
 
     private void ThrowIfDisposed()
     {

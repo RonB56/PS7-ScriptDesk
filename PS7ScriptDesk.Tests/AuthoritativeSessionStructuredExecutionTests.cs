@@ -97,7 +97,8 @@ public sealed class AuthoritativeSessionStructuredExecutionTests
             EditorExecutionSourceInfo? sourceInfo = null,
             EditorExecutionMode mode = EditorExecutionMode.ScriptCall,
             bool directRunSelectionApproved = false,
-            string? savedScriptPath = null)
+            string? savedScriptPath = null,
+            bool directReadHostSelectionApproved = false)
         {
             InvocationCount++;
             LastRequestId = requestId;

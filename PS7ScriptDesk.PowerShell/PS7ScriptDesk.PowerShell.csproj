@@ -26,6 +26,10 @@
     <Content Include="Dependencies\PSScriptAnalyzer\1.25.0\**\*"
              CopyToOutputDirectory="PreserveNewest"
              CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\PS7ScriptDesk-PSES-Bridge\runtime\**\*"
+             Link="PSES\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

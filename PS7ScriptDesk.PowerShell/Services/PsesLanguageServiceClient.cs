@@ -472,6 +472,12 @@ public sealed class PsesLanguageServiceClient : IPsesStructuredExecutionAdapter
             if (!string.IsNullOrWhiteSpace(configured))
             {
                 var path = Path.GetFullPath(configured);
+                var bridgeMarkerPath = Path.Combine(path, "ScriptDeskEditorBridge.protocol");
+                if (File.Exists(bridgeMarkerPath))
+                {
+                    var bridgeVerified = PsesEditorBridgeRuntimeContract.TryValidate(path, out var bridgeIdentity);
+                    return (bridgeVerified, bridgeIdentity);
+                }
                 extensionDirectory = new DirectoryInfo(path).Parent?.FullName;
             }
             else

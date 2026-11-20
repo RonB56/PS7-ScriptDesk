@@ -112,6 +112,131 @@ public sealed class TerminalLifecycleViewModelTests
         viewModel.Dispose();
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task NativeSelectionCompletionReconcilesPromptWithoutAnotherEnter(bool completionBeforeRelease)
+    {
+        var console = new RecordingLiveConsoleService();
+        var runtime = CreateRuntime();
+        await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
+        await runtimeCoordinator.AcquireAsync(runtime, _ => { });
+        var backend = new BlockingExecutionBackend();
+        var executionCoordinator = new EditorExecutionCoordinator(
+            [backend], new EditorExecutionFeatureGate(false), shadowMode: false,
+            ExecutionBackendAvailability.Unavailable, new PowerShellExecutionRequestClassifier());
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, runtime, terminal, executionCoordinator, runtimeCoordinator);
+        console.RaiseSessionStarted(console.CurrentSessionGeneration);
+        var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var executeTask = (Task)dispatch.Invoke(viewModel,
+            ["selection", "$answer = Read-Host 'Enter value'", EditorExecutionMode.RunSelection, true, null, null])!;
+        await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        terminal.SetState(InteractiveTerminalState.InteractiveCommandRunning, "native selection awaits input");
+        console.IsCommandInProgress = true;
+        console.RaisePromptReady(console.CurrentSessionGeneration, "C:\\");
+        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, terminal.State);
+        Assert.False(viewModel.IsRunAvailable);
+        Assert.True(viewModel.StopCommand.CanExecute(null));
+
+        if (completionBeforeRelease)
+            console.RaiseInteractiveCommandCompleted(backend.RequestId);
+        backend.Complete();
+        await executeTask.WaitAsync(TimeSpan.FromSeconds(2));
+        if (!completionBeforeRelease)
+            console.RaiseInteractiveCommandCompleted(backend.RequestId);
+
+        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, terminal.State);
+        Assert.True(viewModel.IsRunAvailable);
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+        Assert.Null(viewModel.RunSelectionDisabledReason);
+        Assert.False(viewModel.StopCommand.CanExecute(null));
+        viewModel.Dispose();
+    }
+
+    [Theory]
+    [InlineData("request")]
+    [InlineData("generation")]
+    [InlineData("process")]
+    [InlineData("prompt-sequence")]
+    [InlineData("interrupted")]
+    public async Task NativeSelectionRejectsMismatchedOrUnverifiedCompletion(string mismatch)
+    {
+        var console = new RecordingLiveConsoleService();
+        var runtime = CreateRuntime();
+        await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
+        await runtimeCoordinator.AcquireAsync(runtime, _ => { });
+        var backend = new BlockingExecutionBackend();
+        var executionCoordinator = new EditorExecutionCoordinator(
+            [backend], new EditorExecutionFeatureGate(false), shadowMode: false,
+            ExecutionBackendAvailability.Unavailable, new PowerShellExecutionRequestClassifier());
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, runtime, terminal, executionCoordinator, runtimeCoordinator);
+        console.RaiseSessionStarted(console.CurrentSessionGeneration);
+        var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var executeTask = (Task)dispatch.Invoke(viewModel,
+            ["selection", "$answer = Read-Host 'Enter value'", EditorExecutionMode.RunSelection, true, null, null])!;
+        await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        terminal.SetState(InteractiveTerminalState.InteractiveCommandRunning, "native selection awaits input");
+        console.IsCommandInProgress = true;
+        console.RaisePromptReady(console.CurrentSessionGeneration, "C:\\");
+        console.RaiseInteractiveCommandCompleted(
+            mismatch == "request" ? Guid.NewGuid() : backend.RequestId,
+            mismatch == "interrupted" ? LiveConsoleCommandOutcome.Interrupted : LiveConsoleCommandOutcome.PromptObserved,
+            mismatch == "generation" ? console.CurrentSessionGeneration - 1 : null,
+            mismatch == "process" ? console.ProcessId + 1 : null,
+            mismatch == "prompt-sequence" ? 0 : 1);
+        backend.Complete();
+        await executeTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, terminal.State);
+        Assert.False(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ResetOrReplacementInvalidatesPendingNativeSelectionPrompt(bool replaceSession)
+    {
+        var console = new RecordingLiveConsoleService();
+        var runtime = CreateRuntime();
+        await using var runtimeCoordinator = new PowerShellRuntimeSessionCoordinator(console);
+        await runtimeCoordinator.AcquireAsync(runtime, _ => { });
+        var backend = new BlockingExecutionBackend();
+        var executionCoordinator = new EditorExecutionCoordinator(
+            [backend], new EditorExecutionFeatureGate(false), shadowMode: false,
+            ExecutionBackendAvailability.Unavailable, new PowerShellExecutionRequestClassifier());
+        var terminal = new InteractiveTerminalCoordinator();
+        var viewModel = await CreateViewModelAsync(console, runtime, terminal, executionCoordinator, runtimeCoordinator);
+        console.RaiseSessionStarted(console.CurrentSessionGeneration);
+        var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var executeTask = (Task)dispatch.Invoke(viewModel,
+            ["selection", "$answer = Read-Host 'Enter value'", EditorExecutionMode.RunSelection, true, null, null])!;
+        await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        terminal.SetState(InteractiveTerminalState.InteractiveCommandRunning, "native selection awaits input");
+        console.IsCommandInProgress = true;
+        console.RaiseInteractiveCommandCompleted(backend.RequestId);
+        if (replaceSession)
+            console.PrimeSession(console.CurrentSessionGeneration + 1);
+        else
+        {
+            var clear = typeof(MainWindowViewModel).GetMethod("ClearDeferredStructuredPromptObservation",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            clear.Invoke(viewModel, ["ResetConsoleStarted"]);
+        }
+        backend.Complete();
+        await executeTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(replaceSession ? InteractiveTerminalState.Starting : InteractiveTerminalState.InteractiveCommandRunning,
+            terminal.State);
+        Assert.False(viewModel.IsRunAvailable);
+        viewModel.Dispose();
+    }
+
     [Fact]
     public async Task ProductionViewModelDispatchReleasesRuntimeLeaseWhenBackendThrows()
     {
@@ -1489,7 +1614,6 @@ public sealed class TerminalLifecycleViewModelTests
     private sealed class RecordingEditorExecutionCoordinator : IEditorExecutionCoordinator
     {
         public bool IsShadowMode => false;
-        public bool IsRollbackEnabled => false;
         public ActiveEditorExecutionSnapshot? ActiveExecution { get; private set; }
         public event Action<EditorExecutionEvent>? EventPublished { add { } remove { } }
         public event Action? ActiveExecutionChanged;
@@ -1518,10 +1642,12 @@ public sealed class TerminalLifecycleViewModelTests
         private readonly TaskCompletionSource<bool> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Exception? Failure { get; init; }
         public EditorExecutionStatus ResultStatus { get; init; } = EditorExecutionStatus.Completed;
+        public Guid RequestId { get; private set; }
 
         public void Complete() => _completion.TrySetResult(true);
         public async Task<EditorExecutionResult> ExecuteAsync(EditorExecutionRequest request, CancellationToken cancellationToken = default)
         {
+            RequestId = request.RequestId;
             Started.TrySetResult(true);
             await _completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             if (Failure is not null) throw Failure;
@@ -1708,11 +1834,13 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService, IStruct
     public void RaiseScriptCompleted() => ScriptExecutionCompleted?.Invoke();
     public void RaiseCommandCompleted() => RaiseCommandCompleted(CurrentSessionGeneration);
     public void RaiseCommandCompleted(int generation) => CommandExecutionCompleted?.Invoke(generation);
-    public void RaiseInteractiveCommandCompleted(Guid requestId, LiveConsoleCommandOutcome outcome = LiveConsoleCommandOutcome.PromptObserved)
+    public void RaiseInteractiveCommandCompleted(Guid requestId, LiveConsoleCommandOutcome outcome = LiveConsoleCommandOutcome.PromptObserved,
+        int? generation = null, int? processId = null, long promptSequence = 1)
     {
         IsCommandInProgress = false;
-        if (ProcessId is { } processId)
-            InteractiveCommandCompleted?.Invoke(new LiveConsoleCommandCompletion(requestId, CurrentSessionGeneration, processId, outcome, 1, DateTimeOffset.UtcNow));
+        if ((processId ?? ProcessId) is { } observedProcessId)
+            InteractiveCommandCompleted?.Invoke(new LiveConsoleCommandCompletion(requestId, generation ?? CurrentSessionGeneration,
+                observedProcessId, outcome, promptSequence, DateTimeOffset.UtcNow));
     }
     public void RaiseSessionTerminated() => SessionTerminated?.Invoke();
     public void RaiseSessionStarted(int generation)

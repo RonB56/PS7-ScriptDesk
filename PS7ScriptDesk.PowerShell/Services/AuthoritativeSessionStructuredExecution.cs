@@ -107,7 +107,8 @@ public sealed class AuthoritativeSessionStructuredExecutionAdapter : IEditorExec
                 request.SourceInfo,
                 request.Mode,
                 request.DirectRunSelectionApproved,
-                request.IsSavedClean ? request.SavedScriptPath : null).ConfigureAwait(false);
+                request.SavedScriptPath,
+                request.DirectReadHostSelectionApproved).ConfigureAwait(false);
             var endedAt = DateTimeOffset.UtcNow;
             var executionEvent = result.Status switch
             {
@@ -178,8 +179,8 @@ public sealed class AuthoritativeSessionStructuredExecutionBackend : IEditorExec
     public string BackendId => BackendName;
 
     public ExecutionBackendCapabilities Capabilities { get; } = new(
-        SupportsInteractiveInput: false,
-        SupportsSecureInput: false,
+        SupportsInteractiveInput: true,
+        SupportsSecureInput: true,
         SupportsCurrentScope: true,
         SupportsScriptCallIsolation: true,
         SupportsTerminalInterrupt: true,

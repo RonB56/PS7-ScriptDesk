@@ -76,6 +76,8 @@ public sealed class PowerShellExecutionRequestClassifier : IEditorExecutionReque
         var commandAsts = ast.FindAll(node => node is CommandAst, true)
             .OfType<CommandAst>()
             .ToArray();
+        var readHostCount = 0;
+        var secureReadHost = false;
         foreach (var command in commandAsts)
         {
             var commandName = command.GetCommandName();
@@ -89,11 +91,10 @@ public sealed class PowerShellExecutionRequestClassifier : IEditorExecutionReque
                 : commandName;
             if (leafName.Equals("Read-Host", StringComparison.OrdinalIgnoreCase))
             {
-                var secure = command.CommandElements.OfType<CommandParameterAst>()
+                readHostCount++;
+                secureReadHost |= command.CommandElements.OfType<CommandParameterAst>()
                     .Any(parameter => parameter.ParameterName.Equals("AsSecureString", StringComparison.OrdinalIgnoreCase));
-                return Interactive(
-                    secure ? "The request uses Read-Host secure input." : "The request uses Read-Host input.",
-                    secure);
+                continue;
             }
 
             if (leafName.Equals("Invoke-Expression", StringComparison.OrdinalIgnoreCase) ||
@@ -110,6 +111,16 @@ public sealed class PowerShellExecutionRequestClassifier : IEditorExecutionReque
             {
                 return Unknown($"The request contains an unclassified command: {leafName}.");
             }
+        }
+
+        if (readHostCount > 0)
+        {
+            var directSimpleInput = request.IsRunSelection && readHostCount == 1 && !secureReadHost;
+            return Interactive(
+                directSimpleInput ? "DirectRunSelectionReadHost" : secureReadHost
+                    ? "The request uses Read-Host secure input."
+                    : "The request uses Read-Host input.",
+                secureReadHost);
         }
 
         return NonInteractive("All parsed commands are in the conservative noninteractive allow-list.");

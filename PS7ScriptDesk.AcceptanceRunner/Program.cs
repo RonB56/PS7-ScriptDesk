@@ -25,9 +25,12 @@ internal static class Program
         Directory.CreateDirectory(evidence);
         var result = new RunResult(started, Environment.Version.ToString(), Environment.OSVersion.ToString());
         var productionMigrationMode = string.Equals(Environment.GetEnvironmentVariable("PS7SD_ACCEPTANCE_PROD01"), "1", StringComparison.Ordinal);
+        var bridgeR1Mode = string.Equals(Environment.GetEnvironmentVariable("PS7SD_ACCEPTANCE_BRIDGE_R1"), "1", StringComparison.Ordinal);
+        var bridgeProtocolMode = string.Equals(Environment.GetEnvironmentVariable("PS7SD_ACCEPTANCE_BRIDGE_PROTOCOL"), "1", StringComparison.Ordinal);
+        var bridgeT02OnlyMode = string.Equals(Environment.GetEnvironmentVariable("PS7SD_ACCEPTANCE_BRIDGE_T02_ONLY"), "1", StringComparison.Ordinal);
         result.DirectRunSelectionEnabled = string.Equals(
             Environment.GetEnvironmentVariable("PS7SD_ACCEPTANCE_DIRECT_RUNSELECTION"), "1", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(Environment.GetEnvironmentVariable("PS7SD_ACCEPTANCE_DIRECT_RUNSELECTION"), "true", StringComparison.OrdinalIgnoreCase);
+            string.Equals(Environment.GetEnvironmentVariable("PS7SD_ACCEPTANCE_DIRECT_RUNSELECTION"), "true", StringComparison.OrdinalIgnoreCase) || bridgeR1Mode || bridgeProtocolMode || bridgeT02OnlyMode;
         if (productionMigrationMode)
         {
             result.DirectRunSelectionEnabled = ExperimentalRunSelectionBridgeFeatureGate.FromEnvironment().IsEnabled;
@@ -57,7 +60,8 @@ internal static class Program
                 check.Detail, check.Passed ? "PASS" : "FAIL", check.Passed ? null : check.Detail, Math.Round(check.DurationSeconds, 3)));
         var service = new PsesOwnedInteractiveSessionService(
             new ExperimentalRunFileBridgeFeatureGate(false),
-            new ExperimentalRunSelectionBridgeFeatureGate(isEnabled: result.DirectRunSelectionEnabled));
+            new ExperimentalRunSelectionBridgeFeatureGate(isEnabled: result.DirectRunSelectionEnabled),
+            new PsesEditorBridgeFeatureGate(isEnabled: bridgeR1Mode || bridgeProtocolMode || bridgeT02OnlyMode || PsesEditorBridgeFeatureGate.FromEnvironment().IsEnabled));
         var sessionStarted = false;
         int? ownedSessionProcessId = null;
         DateTimeOffset? ownedSessionProcessStartUtc = null;
@@ -90,8 +94,33 @@ internal static class Program
                     result.Tests.Add(Timed(Pass("A01", "PSES-owned PowerShell session startup", "Production integration",
                         $"Session running; PID={service.ProcessId}; generation={service.SessionGeneration}."), startupTimer));
 
-                    if (productionMigrationMode)
-                        await RunProductionMigrationCasesAsync(result, service, outputLog, budget.Token);
+                    if (bridgeProtocolMode)
+                    {
+                        await RunBridgeCancellationBoundaryAsync(result, service, outputLog, budget.Token);
+                        await RunCoordinatorRunSelectionBoundaryAsync(result, service, outputLog, budget.Token);
+                        var idleShutdownTimer = Stopwatch.StartNew();
+                        try
+                        {
+                            var idleShutdown = await service.ShutdownAsync(budget.Token).WaitAsync(TimeSpan.FromSeconds(15), budget.Token);
+                            result.Tests.Add(Timed(new TestResult("T01", "Authenticated idle bridge shutdown", "Production integration",
+                                "An authenticated, silent bridge client does not block bounded PSES shutdown.",
+                                $"shutdown={idleShutdown}; processExited={!service.IsSessionRunning}",
+                                idleShutdown && !service.IsSessionRunning ? "PASS" : "FAIL",
+                                idleShutdown && !service.IsSessionRunning ? null : "Idle bridge shutdown did not settle cleanly."), idleShutdownTimer));
+                        }
+                        catch (Exception ex) { result.Tests.Add(Timed(Fail("T01", "Authenticated idle bridge shutdown", ex), idleShutdownTimer)); }
+                        await RunFocusedBridgeShutdownProbeAsync(result, runtime, outputLog, budget.Token);
+                    }
+                    else if (bridgeT02OnlyMode)
+                    {
+                        await RunBridgeCancellationBoundaryAsync(result, service, outputLog, budget.Token);
+                    }
+                    else if (bridgeR1Mode)
+                    {
+                        await RunBridgeR1CasesAsync(result, service, outputLog, budget.Token, redactions);
+                    }
+                    else if (productionMigrationMode)
+                        await RunProductionMigrationCasesAsync(result, service, outputLog, budget.Token, redactions);
                     else if (string.Equals(Environment.GetEnvironmentVariable("PS7SD_ACCEPTANCE_FAST01"), "1", StringComparison.Ordinal))
                         await RunFast01CasesAsync(result, service, outputLog, visibleOutputLog, budget.Token);
                     else
@@ -196,7 +225,7 @@ internal static class Program
     }
 
     private static async Task RunProductionMigrationCasesAsync(RunResult result, PsesOwnedInteractiveSessionService service,
-        SequencedOutputCapture output, CancellationToken budget)
+        SequencedOutputCapture output, CancellationToken budget, List<string> redactions)
     {
         var gate = new EditorExecutionFeatureGate(structuredExecutionEnabled: true);
         var backend = new AuthoritativeSessionStructuredExecutionBackend(
@@ -225,33 +254,429 @@ internal static class Program
         var reverted = rollback.Route(Selection("Write-Output 'rollback'"));
         void Check(string id, string name, bool passed, string actual) => result.Tests.Add(new TestResult(
             id, name, "Source/contract", name, actual, passed ? "PASS" : "FAIL", passed ? null : actual));
-        Check("R01-ROUTE", "Eligible selection routes to structured PSES", ordinary.Accepted &&
+        Check("R01-ROUTE", "All Run Selection syntax classes route to the PSES scheduler", ordinary.Accepted &&
             ordinary.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId &&
-            ordinary.Classification == ExecutionRequestClassification.KnownNonInteractive &&
-            selectionGate.ShouldUseDirectBridge(EditorExecutionMode.RunSelection, true, true),
-            $"backend={ordinary.SelectedBackend}; classification={ordinary.Classification}; gate={selectionGate.IsEnabled}");
-        Check("R03", "Read-Host selection uses native route", interactive.Accepted &&
-            interactive.SelectedBackend == EditorExecutionCoordinator.LegacyBackendId &&
-            interactive.Classification == ExecutionRequestClassification.KnownInteractive,
+            ordinary.Classification == ExecutionRequestClassification.KnownInteractive && ordinary.SelectionReason == "PsesSchedulerAdmission" &&
+            interactive.SelectedBackend == ordinary.SelectedBackend && unknown.SelectedBackend == ordinary.SelectedBackend &&
+            loop.SelectedBackend == ordinary.SelectedBackend && memberInput.SelectedBackend == ordinary.SelectedBackend,
+            $"ordinary={ordinary.SelectedBackend}/{ordinary.SelectionReason}; interactive={interactive.SelectedBackend}; dynamic={unknown.SelectedBackend}; loop={loop.SelectedBackend}; member={memberInput.SelectedBackend}");
+        Check("R03", "Interactive Run Selection uses PSES host input", interactive.Accepted &&
+            interactive.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId &&
+            interactive.SelectionReason == "PsesSchedulerAdmission",
             $"backend={interactive.SelectedBackend}; classification={interactive.Classification}");
-        Check("R04", "Unknown blocking selection uses native route", unknown.Accepted &&
-            unknown.SelectedBackend == EditorExecutionCoordinator.LegacyBackendId &&
-            unknown.Classification == ExecutionRequestClassification.Unknown &&
-            loop.SelectedBackend == EditorExecutionCoordinator.LegacyBackendId &&
-            loop.Classification == ExecutionRequestClassification.Unknown &&
-            memberInput.SelectedBackend == EditorExecutionCoordinator.LegacyBackendId &&
-            memberInput.Classification == ExecutionRequestClassification.Unknown,
-            $"command={unknown.SelectedBackend}/{unknown.Classification}; loop={loop.SelectedBackend}/{loop.Classification}; member={memberInput.SelectedBackend}/{memberInput.Classification}");
-        Check("R05", "Opt-out selects previous native route", reverted.Accepted &&
-            reverted.SelectedBackend == EditorExecutionCoordinator.LegacyBackendId &&
-            reverted.SelectionReason == "DirectSelectionOptOut",
+        Check("R04", "Classifier opt-out cannot reactivate the legacy selection launcher", reverted.Accepted &&
+            reverted.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId &&
+            reverted.SelectionReason == "PsesSchedulerAdmission",
             $"backend={reverted.SelectedBackend}; reason={reverted.SelectionReason}");
-        Check("R06", "Run File retains script-call routing", file.Accepted &&
-            file.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId,
-            $"backend={file.SelectedBackend}; mode=ScriptCall");
+        Check("R06", "Run File routes through the PSES bridge backend", file.Accepted &&
+            file.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId && file.SelectionReason == "PsesSchedulerAdmission",
+            $"backend={file.SelectedBackend}; mode=ScriptCall; reason={file.SelectionReason}");
         if (selectionGate.IsEnabled)
             await RunCoordinatorRunSelectionBoundaryAsync(result, service, output, budget);
+        await RunBridgeReadHostAndOutputOwnershipAsync(result, service, output, budget, redactions);
+        await RunBridgeNativeChildParityAsync(result, service, output, budget);
+        await RunBridgeCompetingConsoleAdmissionAsync(result, service, output, budget);
         await RunRunFileIdentityCasesAsync(result, service, output, budget);
+    }
+
+    private static async Task RunBridgeR1CasesAsync(RunResult result, PsesOwnedInteractiveSessionService service,
+        SequencedOutputCapture output, CancellationToken budget, List<string> redactions)
+    {
+        await RunBridgeLanguageServiceCoexistenceAsync(result, service, output, budget);
+        await RunBridgeReadHostAndOutputOwnershipAsync(result, service, output, budget, redactions);
+
+        var timer = Stopwatch.StartNew();
+        var processId = service.ProcessId;
+        var generation = service.SessionGeneration;
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(budget);
+        var gate = new EditorExecutionFeatureGate(structuredExecutionEnabled: true);
+        var adapter = new AuthoritativeSessionStructuredExecutionAdapter(service, gate);
+        var structured = new AuthoritativeSessionStructuredExecutionBackend(adapter);
+        var legacy = new LegacyLiveConsoleExecutionBackend(service);
+        using var coordinator = new EditorExecutionCoordinator(
+            new IEditorExecutionBackend[] { legacy, structured }, gate, false,
+            ExecutionBackendAvailability.Available, new PowerShellExecutionRequestClassifier(),
+            new ExperimentalRunSelectionBridgeFeatureGate(true));
+        var longScript = string.Join(";", Enumerable.Repeat("Get-Process | Measure-Object", 120));
+        var request = new EditorExecutionRequest(Guid.NewGuid(), generation, EditorExecutionMode.RunSelection,
+            "A02-ARCH-06B-R1 cancellation probe", longScript, ExecuteInCurrentScope: true,
+            CapabilityRequirements: new ExecutionCapabilityRequirements(RequiresCurrentScope: true));
+        try
+        {
+            var routing = coordinator.Route(request);
+            var execution = coordinator.ExecuteAsync(request, cancellation.Token);
+            await Task.Delay(TimeSpan.FromMilliseconds(500), budget);
+            cancellation.Cancel();
+            var resultOfExecution = await execution.WaitAsync(TimeSpan.FromSeconds(20), budget);
+            var verificationMarker = "BRIDGE_CANCEL_SESSION_REUSED";
+            var verificationBoundary = output.Boundary;
+            await RunConsoleAndWaitAsync(service, output,
+                "Write-Output ('BRIDGE_CANCEL_'+'SESSION_REUSED'); Write-Output ('BRIDGE_CANCEL_HISTORY=' + @((Get-History | Where-Object { $_.CommandLine -like '*Get-Process | Measure-Object*' }).Count))",
+                verificationMarker, generation, budget);
+            var verification = await WaitForCaptureAsync(output, verificationBoundary,
+                text => text.Contains("BRIDGE_CANCEL_HISTORY=0", StringComparison.Ordinal), InteractiveTimeout, budget);
+            var passed = routing.Accepted && routing.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId &&
+                resultOfExecution.Status == EditorExecutionStatus.Cancelled && !resultOfExecution.RecoveryRequired &&
+                service.IsSessionRunning && service.IsInputWritable && service.ProcessId == processId &&
+                service.SessionGeneration == generation && verification.Text.Contains("BRIDGE_CANCEL_HISTORY=0", StringComparison.Ordinal) &&
+                verification.Text.Contains(verificationMarker, StringComparison.Ordinal);
+            result.Tests.Add(Timed(new TestResult("R05", "Bridge cancellation settlement and session reuse", "Production integration",
+                "Coordinator cancellation is acknowledged and settled, the cancelled script is absent from history, and the same session accepts a console command.",
+                $"route={routing.SelectedBackend}; status={resultOfExecution.Status}; error={resultOfExecution.ErrorMessage}; recoveryRequired={resultOfExecution.RecoveryRequired}; process={processId}->{service.ProcessId}; generation={generation}->{service.SessionGeneration}; consoleReusable={verification.Text.Contains(verificationMarker, StringComparison.Ordinal)}; cancelHistoryClean={verification.Text.Contains("BRIDGE_CANCEL_HISTORY=0", StringComparison.Ordinal)}",
+                passed ? "PASS" : "FAIL", passed ? null : "Cancellation settlement or same-session/history verification failed.", Math.Round(timer.Elapsed.TotalSeconds, 3)), timer));
+        }
+        catch (Exception ex)
+        {
+            cancellation.Cancel();
+            result.Tests.Add(Timed(Fail("R05", "Bridge cancellation settlement and session reuse", ex), timer));
+        }
+
+        await RunBridgeShutdownWhileExecutingAsync(result, service, output, budget);
+        if (!service.IsSessionRunning) return;
+    }
+
+    private static async Task RunBridgeCancellationBoundaryAsync(RunResult result,
+        PsesOwnedInteractiveSessionService service, SequencedOutputCapture output, CancellationToken budget)
+    {
+        var timer = Stopwatch.StartNew();
+        var processId = service.ProcessId;
+        var generation = service.SessionGeneration;
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(budget);
+        var gate = new EditorExecutionFeatureGate(structuredExecutionEnabled: true);
+        var adapter = new AuthoritativeSessionStructuredExecutionAdapter(service, gate);
+        var structured = new AuthoritativeSessionStructuredExecutionBackend(adapter);
+        var legacy = new LegacyLiveConsoleExecutionBackend(service);
+        using var coordinator = new EditorExecutionCoordinator(
+            new IEditorExecutionBackend[] { legacy, structured }, gate, false,
+            ExecutionBackendAvailability.Available, new PowerShellExecutionRequestClassifier(),
+            new ExperimentalRunSelectionBridgeFeatureGate(true));
+        var requestId = Guid.NewGuid();
+        var raceScript = "Write-Output 'BRIDGE_BOUNDARY_START';" + string.Join(";", Enumerable.Repeat("Get-Process | Measure-Object", 120)) +
+            "; Write-Output 'BRIDGE_BOUNDARY_FINAL'";
+        var request = new EditorExecutionRequest(requestId, generation, EditorExecutionMode.RunSelection,
+            "A02-ARCH-06B-R1.1 completion-boundary cancellation",
+            raceScript,
+            ExecuteInCurrentScope: true, CapabilityRequirements: new ExecutionCapabilityRequirements(RequiresCurrentScope: true));
+        var outputBoundary = output.Boundary;
+        try
+        {
+            var route = coordinator.Route(request);
+            var executionTask = coordinator.ExecuteAsync(request, cancellation.Token);
+            var started = await WaitForCaptureAsync(output, outputBoundary,
+                text => text.Contains("BRIDGE_BOUNDARY_START", StringComparison.Ordinal), InteractiveTimeout, budget);
+            Require(started.Text.Contains("BRIDGE_BOUNDARY_START", StringComparison.Ordinal),
+                "The cancellation-race request did not reach its controlled start point.");
+            await Task.Delay(TimeSpan.FromMilliseconds(500), budget);
+            cancellation.Cancel();
+            var execution = await executionTask.WaitAsync(TimeSpan.FromSeconds(15), budget);
+            var followupId = Guid.NewGuid();
+            var followup = new EditorExecutionRequest(followupId, generation, EditorExecutionMode.RunSelection,
+                "A02-ARCH-06B-R1.1 same-pipe follow-up", "Write-Output 'BRIDGE_BOUNDARY_FOLLOWUP_OK'",
+                ExecuteInCurrentScope: true, CapabilityRequirements: new ExecutionCapabilityRequirements(RequiresCurrentScope: true));
+            var followupResult = await coordinator.ExecuteAsync(followup, budget).WaitAsync(TimeSpan.FromSeconds(15), budget);
+            var followupCapture = await WaitForCaptureAsync(output, outputBoundary,
+                text => text.Contains("BRIDGE_BOUNDARY_FOLLOWUP_OK", StringComparison.Ordinal), InteractiveTimeout, budget);
+            var followupObserved = followupCapture.Text.Contains("BRIDGE_BOUNDARY_FOLLOWUP_OK", StringComparison.Ordinal);
+            var passed = route.Accepted && route.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId &&
+                execution.RequestId == requestId && execution.SessionGeneration == generation &&
+                (execution.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Cancelled) &&
+                !execution.RecoveryRequired &&
+                followupResult.Status == EditorExecutionStatus.Completed && followupResult.RequestId == followupId &&
+                followupResult.SessionGeneration == generation && followupObserved && !followupResult.RecoveryRequired &&
+                service.IsSessionRunning && service.ProcessId == processId && service.SessionGeneration == generation;
+            result.Tests.Add(Timed(new TestResult("T02", "Cancellation/completion boundary and pipe reuse", "Production integration",
+                "Cancellation near normal completion leaves the protocol aligned for a second request in the same session.",
+                $"route={route.SelectedBackend}/{route.Classification}; cancellationIssuedAfterStart=True; first={execution.Status}; firstIdentity={execution.RequestId == requestId && execution.SessionGeneration == generation}; firstRecovery={execution.RecoveryRequired}; followup={followupResult.Status}; followupIdentity={followupResult.RequestId == followupId && followupResult.SessionGeneration == generation}; marker={followupObserved}; sameProcess={service.ProcessId == processId}; sameGeneration={service.SessionGeneration == generation}",
+                passed ? "PASS" : "FAIL", passed ? null : "The completion-boundary cancellation contaminated or faulted the next request."), timer));
+        }
+        catch (Exception ex) { result.Tests.Add(Timed(Fail("T02", "Cancellation/completion boundary and pipe reuse", ex), timer)); }
+    }
+
+    private static async Task RunFocusedBridgeShutdownProbeAsync(RunResult result, PowerShellRuntimeInfo runtime,
+        SequencedOutputCapture output, CancellationToken budget)
+    {
+        var service = new PsesOwnedInteractiveSessionService(
+            new ExperimentalRunFileBridgeFeatureGate(false),
+            new ExperimentalRunSelectionBridgeFeatureGate(true),
+            new PsesEditorBridgeFeatureGate(true));
+        int? processId = null;
+        string? sessionDetailsPath = null;
+        try
+        {
+            service.RawOutputReceived += (_, text) => output.Append(text);
+            await service.StartSessionAsync(runtime, _ => { }, Path.GetTempPath(), budget)
+                .WaitAsync(StartupTimeout, budget);
+            processId = service.ProcessId;
+            await RunBridgeShutdownWhileExecutingAsync(result, service, output, budget, "T03");
+        }
+        catch (Exception ex)
+        {
+            result.Tests.Add(Fail("T03", "Concurrent shutdown and request settlement", ex));
+        }
+        finally
+        {
+            sessionDetailsPath = service.SessionDetailsPath;
+            try { await service.ShutdownAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(15)); } catch { }
+            service.Dispose();
+            if (sessionDetailsPath is not null)
+            {
+                var sessionRoot = Path.GetDirectoryName(sessionDetailsPath);
+                if (sessionRoot is not null && Directory.Exists(sessionRoot))
+                {
+                    try { Directory.Delete(sessionRoot, recursive: true); } catch { }
+                }
+            }
+            if (processId is int pid && !await IsProcessExitedAsync(pid, null))
+                result.Tests.Add(new TestResult("T03-CLEANUP", "Concurrent shutdown probe process cleanup", "Harness infrastructure",
+                    "The bounded probe-owned process exits after shutdown.", $"process={pid} remains running", "FAIL", "Probe process did not exit."));
+        }
+    }
+
+    private static async Task RunBridgeLanguageServiceCoexistenceAsync(RunResult result,
+        PsesOwnedInteractiveSessionService service, SequencedOutputCapture output, CancellationToken budget)
+    {
+        var timer = Stopwatch.StartNew();
+        const string uri = "untitled:ps7scriptdesk/bridge-r1-lsp.ps1";
+        const string text = "Get-Pro";
+        try
+        {
+            var before = await service.GetLiveCompletionsAsync(uri, text, text.Length, budget)
+                .WaitAsync(TimeSpan.FromSeconds(15), budget);
+            await RunCoordinatorRunSelectionBoundaryAsync(result, service, output, budget);
+            var after = await service.GetLiveCompletionsAsync(uri, text, text.Length, budget)
+                .WaitAsync(TimeSpan.FromSeconds(15), budget);
+            var beforeMatch = before?.Items.Any(item => item.CompletionText.Contains("Get-Process", StringComparison.OrdinalIgnoreCase)) == true;
+            var afterMatch = after?.Items.Any(item => item.CompletionText.Contains("Get-Process", StringComparison.OrdinalIgnoreCase)) == true;
+            var passed = beforeMatch && afterMatch && service.IsSessionRunning;
+            result.Tests.Add(Timed(new TestResult("R10", "LSP completion before and after bridge execution", "Production integration",
+                "A focused live LSP completion request remains available around bridge-backed Run Selection without corrupting the shared PSES session.",
+                $"beforeCompletion={beforeMatch}; afterCompletion={afterMatch}; sameSessionRunning={service.IsSessionRunning}",
+                passed ? "PASS" : "FAIL", passed ? null : "LSP completion was not available on both sides of bridge execution.", Math.Round(timer.Elapsed.TotalSeconds, 3)), timer));
+        }
+        catch (Exception ex)
+        {
+            result.Tests.Add(Timed(Fail("R10", "LSP completion before and after bridge execution", ex), timer));
+        }
+    }
+
+    private static async Task RunBridgeCompetingConsoleAdmissionAsync(RunResult result,
+        PsesOwnedInteractiveSessionService service, SequencedOutputCapture output, CancellationToken budget)
+    {
+        var timer = Stopwatch.StartNew();
+        var generation = service.SessionGeneration;
+        var processId = service.ProcessId;
+        var boundary = output.Boundary;
+        try
+        {
+            var submitted = await service.ExecuteConsoleCommandAsync(
+                "Start-Sleep -Seconds 2; Write-Output ('A02_R1_'+'CONSOLE_BUSY_DONE')",
+                _ => { }, Guid.NewGuid(), budget).WaitAsync(TimeSpan.FromSeconds(10), budget);
+
+            var featureGate = new EditorExecutionFeatureGate(structuredExecutionEnabled: true);
+            var adapter = new AuthoritativeSessionStructuredExecutionAdapter(service, featureGate);
+            var structured = new AuthoritativeSessionStructuredExecutionBackend(adapter);
+            var legacy = new LegacyLiveConsoleExecutionBackend(service);
+            using var coordinator = new EditorExecutionCoordinator(
+                new IEditorExecutionBackend[] { legacy, structured }, featureGate, false,
+                ExecutionBackendAvailability.Available, new PowerShellExecutionRequestClassifier(),
+                new ExperimentalRunSelectionBridgeFeatureGate(true));
+            var request = new EditorExecutionRequest(Guid.NewGuid(), generation,
+                EditorExecutionMode.RunSelection, "A02-ARCH-06B-R1 console-busy probe",
+                "Write-Output ('A02_R1_'+'BRIDGE_AFTER_CONSOLE')", ExecuteInCurrentScope: true,
+                CapabilityRequirements: new ExecutionCapabilityRequirements(RequiresCurrentScope: true));
+            var route = coordinator.Route(request);
+            var competingTask = coordinator.ExecuteAsync(request, budget);
+            var consoleCapture = await WaitForCaptureAsync(output, boundary,
+                text => text.Contains("A02_R1_CONSOLE_BUSY_DONE", StringComparison.Ordinal), TimeSpan.FromSeconds(10), budget);
+            var competing = await competingTask.WaitAsync(TimeSpan.FromSeconds(10), budget);
+            var settled = competing.Status == EditorExecutionStatus.Completed
+                ? await WaitForCaptureAsync(output, boundary,
+                    text => text.Contains("A02_R1_BRIDGE_AFTER_CONSOLE", StringComparison.Ordinal), TimeSpan.FromSeconds(10), budget)
+                : consoleCapture;
+            var consoleDone = settled.Text.IndexOf("A02_R1_CONSOLE_BUSY_DONE", StringComparison.Ordinal);
+            var bridgeDone = settled.Text.IndexOf("A02_R1_BRIDGE_AFTER_CONSOLE", StringComparison.Ordinal);
+            var safelyRejected = competing.Status == EditorExecutionStatus.Rejected && bridgeDone < 0 && consoleDone >= 0;
+            var queuedAfterConsole = competing.Status == EditorExecutionStatus.Completed && consoleDone >= 0 && bridgeDone > consoleDone;
+            var passed = submitted.SessionGeneration == generation && route.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId &&
+                (safelyRejected || queuedAfterConsole) &&
+                service.IsInputWritable && service.ProcessId == processId && service.SessionGeneration == generation;
+            var promptDeadline = Stopwatch.StartNew();
+            while (service.IsCommandInProgress && promptDeadline.Elapsed < TimeSpan.FromSeconds(5))
+                await Task.Delay(TimeSpan.FromMilliseconds(50), budget);
+            passed &= !service.IsCommandInProgress;
+            result.Tests.Add(Timed(new TestResult("R07", "Bridge admission while native console is busy", "Production integration",
+                "An active foreground console command is not preempted; a competing bridge request is safely rejected or runs after console completion.",
+                $"consoleSubmitted={submitted.SessionGeneration == generation}; route={route.SelectedBackend}; bridgeStatus={competing.Status}; consoleMarkerIndex={consoleDone}; bridgeMarkerIndex={bridgeDone}; sameSession={service.ProcessId == processId && service.SessionGeneration == generation}",
+                passed ? "PASS" : "FAIL", passed ? null : "The bridge request preempted, overlapped, or failed the established console ownership contract.", Math.Round(timer.Elapsed.TotalSeconds, 3)), timer));
+        }
+        catch (Exception ex)
+        {
+            result.Tests.Add(Timed(Fail("R07", "Bridge admission while native console is busy", ex), timer));
+        }
+    }
+
+    private static async Task RunBridgeShutdownWhileExecutingAsync(RunResult result,
+        PsesOwnedInteractiveSessionService service, SequencedOutputCapture output, CancellationToken budget,
+        string testId = "R08")
+    {
+        var timer = Stopwatch.StartNew();
+        var generation = service.SessionGeneration;
+        var featureGate = new EditorExecutionFeatureGate(structuredExecutionEnabled: true);
+        var adapter = new AuthoritativeSessionStructuredExecutionAdapter(service, featureGate);
+        var structured = new AuthoritativeSessionStructuredExecutionBackend(adapter);
+        var legacy = new LegacyLiveConsoleExecutionBackend(service);
+        using var coordinator = new EditorExecutionCoordinator(
+            new IEditorExecutionBackend[] { legacy, structured }, featureGate, false,
+            ExecutionBackendAvailability.Available, new PowerShellExecutionRequestClassifier(),
+            new ExperimentalRunSelectionBridgeFeatureGate(true));
+        var boundary = output.Boundary;
+        var workload = "Write-Output ('BRIDGE_SHUTDOWN_'+'STARTED');" +
+            string.Join(";", Enumerable.Repeat("Get-Process | Measure-Object", 300));
+        var request = new EditorExecutionRequest(Guid.NewGuid(), generation,
+            EditorExecutionMode.RunSelection, "A02-ARCH-06B-R1 shutdown probe", workload,
+            ExecuteInCurrentScope: true,
+            CapabilityRequirements: new ExecutionCapabilityRequirements(RequiresCurrentScope: true));
+        try
+        {
+            var route = coordinator.Route(request);
+            if (!route.Accepted || route.SelectedBackend != EditorExecutionCoordinator.StructuredBackendId)
+                throw new InvalidOperationException($"Shutdown probe did not route through the authenticated bridge: {route.SelectedBackend}/{route.Classification}.");
+            var execution = coordinator.ExecuteAsync(request, CancellationToken.None);
+            var started = await WaitForCaptureAsync(output, boundary,
+                text => text.Contains("BRIDGE_SHUTDOWN_STARTED", StringComparison.Ordinal), InteractiveTimeout, budget);
+            if (!started.Text.Contains("BRIDGE_SHUTDOWN_STARTED", StringComparison.Ordinal))
+                throw new InvalidOperationException("The active bridge shutdown script did not produce its startup marker.");
+            using var shutdownTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+            var shutdown = await service.ShutdownAsync(shutdownTimeout.Token).WaitAsync(TimeSpan.FromSeconds(25), budget);
+            var settled = await execution.WaitAsync(TimeSpan.FromSeconds(5), budget);
+            var settlementStatusAccepted = settled.Status is EditorExecutionStatus.Cancelled or EditorExecutionStatus.Unknown or EditorExecutionStatus.Failed;
+            var passed = shutdown && settlementStatusAccepted &&
+                settled.Status != EditorExecutionStatus.Completed &&
+                (settled.Status != EditorExecutionStatus.Unknown || settled.RecoveryRequired) &&
+                !service.IsSessionRunning && service.SessionGeneration == generation;
+            result.Tests.Add(Timed(new TestResult(testId, "Shutdown with active bridge execution", "Production integration",
+                "Shutdown requests cancellation, settles or marks the request uncertain, releases resources safely, and never reports premature success.",
+                $"route={route.SelectedBackend}; shutdown={shutdown}; execution={settled.Status}; recoveryRequired={settled.RecoveryRequired}; generationStable={service.SessionGeneration == generation}; sessionStopped={!service.IsSessionRunning}",
+                passed ? "PASS" : "FAIL", passed ? null : "Shutdown or active-request settlement did not meet the bounded lifecycle contract.", Math.Round(timer.Elapsed.TotalSeconds, 3)), timer));
+        }
+        catch (Exception ex)
+        {
+            result.Tests.Add(Timed(Fail(testId, "Shutdown with active bridge execution", ex), timer));
+        }
+    }
+
+    private static async Task RunBridgeReadHostAndOutputOwnershipAsync(RunResult result,
+        PsesOwnedInteractiveSessionService service, SequencedOutputCapture output, CancellationToken budget,
+        List<string> redactions)
+    {
+        var timer = Stopwatch.StartNew();
+        var generation = service.SessionGeneration;
+        var processId = service.ProcessId;
+        var boundary = output.Boundary;
+        var rawCallbackCount = 0;
+        var prompt = "A02_R1_READHOST_PROMPT";
+        var prompt2 = "A02_R1_READHOST_PROMPT_2";
+        var script = "$value=Read-Host -Prompt 'A02_R1_READHOST_PROMPT'; $value2=Read-Host -Prompt 'A02_R1_READHOST_PROMPT_2'; Write-Host ('A02_R1_'+'VT_OUTPUT_ITEM'); Write-Output ('A02_R1_'+'READHOST_RESULT=' + $value + '|' + $value2)";
+        try
+        {
+            var pending = service.ExecuteStructuredScriptAsync(Guid.NewGuid(), generation,
+                "A02-ARCH-06B-R1 bridge Read-Host", script, true,
+                _ => Interlocked.Increment(ref rawCallbackCount), budget,
+                mode: EditorExecutionMode.RunSelection, directRunSelectionApproved: true);
+            var promptSeen = await WaitForCaptureAsync(output, boundary,
+                text => text.Contains(prompt, StringComparison.Ordinal), InteractiveTimeout, budget);
+            Require(!promptSeen.Truncated && promptSeen.Text.Contains(prompt, StringComparison.Ordinal),
+                "The authenticated bridge did not render the Read-Host prompt in the native terminal.");
+            await service.WriteRawInputAsync("BRIDGE_INPUT_OK\r", budget).WaitAsync(InteractiveTimeout, budget);
+            var secondPrompt = await WaitForCaptureAsync(output, boundary,
+                text => text.Contains(prompt2, StringComparison.Ordinal), InteractiveTimeout, budget);
+            Require(secondPrompt.Text.Contains(prompt2, StringComparison.Ordinal),
+                "The sequential Read-Host prompt was not rendered by the native console.");
+            await service.WriteRawInputAsync("BRIDGE_INPUT_SECOND\r", budget).WaitAsync(InteractiveTimeout, budget);
+            var execution = await pending.WaitAsync(CaseTimeout, budget);
+            var rendered = await WaitForCaptureAsync(output, boundary,
+                text => text.Contains("A02_R1_READHOST_RESULT=BRIDGE_INPUT_OK|BRIDGE_INPUT_SECOND", StringComparison.Ordinal), InteractiveTimeout, budget);
+            var capture = rendered;
+            var outputCount = capture.Text.Split("A02_R1_VT_OUTPUT_ITEM", StringSplitOptions.None).Length - 1;
+            var resultCount = capture.Text.Split("A02_R1_READHOST_RESULT=BRIDGE_INPUT_OK|BRIDGE_INPUT_SECOND", StringSplitOptions.None).Length - 1;
+            var passed = execution.Status == EditorExecutionStatus.Completed && execution.CompletionObserved &&
+                !execution.RecoveryRequired && outputCount == 1 && resultCount == 1 && rawCallbackCount == 0 &&
+                !capture.Text.Contains("$value=Read-Host", StringComparison.Ordinal) &&
+                !capture.Text.Contains("Write-Host ('A02_R1_", StringComparison.Ordinal) &&
+                service.ProcessId == processId && service.SessionGeneration == generation;
+            result.Tests.Add(Timed(new TestResult("R04/R06", "Bridge Read-Host, native input, and single-owner output", "Production integration",
+                "Read-Host runs through the bridge, ConPTY input completes it, terminal owns VT rendering once, and raw bytes are not reported as editor stdout.",
+                $"status={execution.Status}; promptVisible={capture.Text.Contains(prompt, StringComparison.Ordinal) && capture.Text.Contains(prompt2, StringComparison.Ordinal)}; vtItemCount={outputCount}; resultCount={resultCount}; editorStdoutCallbackCount={rawCallbackCount}; sameSession={service.ProcessId == processId && service.SessionGeneration == generation}",
+                passed ? "PASS" : "FAIL", passed ? null : "Interactive completion, output ownership, or session continuity check failed.", Math.Round(timer.Elapsed.TotalSeconds, 3)), timer));
+
+            const string secureValue = "A02_SECURE_INPUT_SYNTHETIC_SENTINEL";
+            redactions.Add(secureValue);
+            const string securePrompt = "A02_R1_SECURE_READHOST_PROMPT";
+            const string secureMarker = "A02_R1_SECURE_LENGTH=";
+            var secureBoundary = output.Boundary;
+            var secureScript = "$secret=Read-Host -AsSecureString -Prompt '" + securePrompt + "'; if ($secret -is [System.Security.SecureString]) { Write-Output ('" + secureMarker + "' + $secret.Length) }";
+            var secureTask = service.ExecuteStructuredScriptAsync(Guid.NewGuid(), generation,
+                "A02-ARCH-06C bridge secure Read-Host", secureScript, true, _ => { }, budget,
+                mode: EditorExecutionMode.RunSelection, directRunSelectionApproved: true);
+            var securePromptSeen = await WaitForCaptureAsync(output, secureBoundary,
+                text => text.Contains(securePrompt, StringComparison.Ordinal), InteractiveTimeout, budget);
+            Require(securePromptSeen.Text.Contains(securePrompt, StringComparison.Ordinal), "Secure Read-Host prompt was not rendered.");
+            await service.WriteRawInputAsync(secureValue + "\r", budget).WaitAsync(InteractiveTimeout, budget);
+            var secureExecution = await secureTask.WaitAsync(CaseTimeout, budget);
+            var secureCapture = await WaitForCaptureAsync(output, secureBoundary,
+                text => text.Contains(secureMarker + secureValue.Length, StringComparison.Ordinal), InteractiveTimeout, budget);
+            Require(secureExecution.Status == EditorExecutionStatus.Completed &&
+                    secureCapture.Text.Contains(secureMarker + secureValue.Length, StringComparison.Ordinal) &&
+                    !secureCapture.Text.Contains(secureValue, StringComparison.Ordinal),
+                "Secure Read-Host failed, exposed the submitted value, or did not preserve SecureString.");
+        }
+        catch (Exception ex)
+        {
+            result.Tests.Add(Timed(Fail("R04/R06", "Bridge Read-Host, native input, and single-owner output", ex), timer));
+        }
+    }
+
+    private static async Task RunBridgeNativeChildParityAsync(RunResult result,
+        PsesOwnedInteractiveSessionService service, SequencedOutputCapture output, CancellationToken budget)
+    {
+        var timer = Stopwatch.StartNew();
+        var generation = service.SessionGeneration;
+        var boundary = output.Boundary;
+        const string prompt = "A02_NATIVE_CHILD_STDIN_PROMPT:";
+        const string input = "NATIVE_CHILD_INPUT_OK";
+        const string stdoutMarker = "A02_NATIVE_CHILD_STDOUT=" + input;
+        const string stderrMarker = "A02_NATIVE_CHILD_STDERR";
+        const string exitMarker = "A02_NATIVE_CHILD_EXIT=7";
+        var source = "& $env:ComSpec /v:on /d /c \"set /p childInput=" + prompt +
+            " & echo A02_NATIVE_CHILD_STDOUT=!childInput! & echo A02_NATIVE_CHILD_STDERR 1>&2 & exit /b 7\"; " +
+            "Write-Output ('A02_NATIVE_CHILD_EXIT=' + $LASTEXITCODE)";
+        try
+        {
+            var execution = service.ExecuteStructuredScriptAsync(Guid.NewGuid(), generation,
+                "A02-ARCH-06C native child I/O", source, true, _ => { }, budget,
+                mode: EditorExecutionMode.RunSelection, directRunSelectionApproved: true);
+            var promptCapture = await WaitForCaptureAsync(output, boundary,
+                text => text.Contains(prompt, StringComparison.Ordinal), InteractiveTimeout, budget);
+            Require(promptCapture.Text.Contains(prompt, StringComparison.Ordinal),
+                "Native child stdin prompt did not arrive through the shared ConPTY.");
+            await service.WriteRawInputAsync(input + "\r", budget).WaitAsync(InteractiveTimeout, budget);
+            var completed = await execution.WaitAsync(CaseTimeout, budget);
+            var capture = await WaitForCaptureAsync(output, boundary,
+                text => text.Contains(exitMarker, StringComparison.Ordinal), InteractiveTimeout, budget);
+            var passed = completed.Status == EditorExecutionStatus.Completed &&
+                capture.Text.Contains(stdoutMarker, StringComparison.Ordinal) &&
+                capture.Text.Contains(stderrMarker, StringComparison.Ordinal) &&
+                capture.Text.Contains(exitMarker, StringComparison.Ordinal) &&
+                service.IsSessionRunning && service.SessionGeneration == generation;
+            result.Tests.Add(Timed(new TestResult("E01", "Bridge native child stdin/stdout/stderr and exit code", "Production integration",
+                "A native child receives ConPTY input, writes both output streams, and leaves its exit code observable to the PowerShell script.",
+                $"status={completed.Status}; prompt={capture.Text.Contains(prompt, StringComparison.Ordinal)}; stdout={capture.Text.Contains(stdoutMarker, StringComparison.Ordinal)}; stderr={capture.Text.Contains(stderrMarker, StringComparison.Ordinal)}; exitCode={capture.Text.Contains(exitMarker, StringComparison.Ordinal)}; sameGeneration={service.SessionGeneration == generation}",
+                passed ? "PASS" : "FAIL", passed ? null : "Native child I/O or exit-code ownership failed at the PSES/ConPTY boundary.", Math.Round(timer.Elapsed.TotalSeconds, 3)), timer));
+        }
+        catch (Exception ex)
+        {
+            result.Tests.Add(Timed(Fail("E01", "Bridge native child stdin/stdout/stderr and exit code", ex), timer));
+        }
     }
 
     private static async Task RunRunFileIdentityCasesAsync(RunResult result, PsesOwnedInteractiveSessionService service,
@@ -259,17 +684,21 @@ internal static class Program
     {
         var evidence = Environment.GetEnvironmentVariable("PS7SD_ACCEPTANCE_EVIDENCE")
             ?? throw new InvalidOperationException("Run File identity checks require the assigned evidence directory.");
-        var savedPath = Path.Combine(evidence, "A02-PROD-02A-saved-script.ps1");
-        var relativePath = Path.Combine(evidence, "A02-PROD-02A-neighbor.txt");
+        var runFileDirectory = Path.Combine(evidence, "Run File Paths With Spaces & Apostrophe's");
+        var savedPath = Path.Combine(runFileDirectory, "A02-PROD-02A-saved-script.ps1");
+        var relativePath = Path.Combine(runFileDirectory, "A02-PROD-02A-neighbor.txt");
+        var unsavedRelativePath = Path.Combine(evidence, "A02-PROD-02A-neighbor.txt");
         var pid = service.ProcessId;
         var generation = service.SessionGeneration;
         var overallTimer = Stopwatch.StartNew();
-        Directory.CreateDirectory(evidence);
+        Directory.CreateDirectory(runFileDirectory);
+        service.ResizeConsole(300, 50);
         await File.WriteAllTextAsync(relativePath, "RUNFILE_RELATIVE_OK", budget);
+        await File.WriteAllTextAsync(unsavedRelativePath, "RUNFILE_RELATIVE_OK", budget);
 
         try
         {
-            var source = "$A02RunFileLocal='LOCAL_ONLY'; function A02RunFileLocalFunction { 'LOCAL_FUNCTION_ONLY' }; " +
+            var source = "$A02RunFileLocal='LOCAL_ONLY'; $global:A02RunFileGlobal='GLOBAL_OK'; function A02RunFileLocalFunction { 'LOCAL_FUNCTION_ONLY' }; " +
                 "Write-Output ('R01_ROOT=' + $PSScriptRoot); Write-Output ('R01_PATH=' + $PSCommandPath); " +
                 "Write-Output ('R01_INVOCATION=' + $MyInvocation.MyCommand.Path); " +
                 "Write-Output ('R01_RELATIVE=' + (Get-Content -Raw (Join-Path $PSScriptRoot 'A02-PROD-02A-neighbor.txt')).Trim()); " +
@@ -296,47 +725,110 @@ internal static class Program
             var scopeTimer = Stopwatch.StartNew();
             var scopeBoundary = rawOutput.Boundary;
             await RunConsoleAndWaitAsync(service, rawOutput,
-                "if ($null -eq (Get-Variable A02RunFileLocal -ErrorAction SilentlyContinue)) { Write-Output ('R02_'+'VARIABLE_ISOLATED') }; if ($null -eq (Get-Command A02RunFileLocalFunction -ErrorAction SilentlyContinue)) { Write-Output ('R02_'+'FUNCTION_ISOLATED') }; Write-Output ('R02_VERIFY_'+'DONE')",
+                "if ($null -eq (Get-Variable A02RunFileLocal -ErrorAction SilentlyContinue)) { Write-Output ('R02_'+'VARIABLE_ISOLATED') }; if ($null -eq (Get-Command A02RunFileLocalFunction -ErrorAction SilentlyContinue)) { Write-Output ('R02_'+'FUNCTION_ISOLATED') }; Write-Output ('R02_GLOBAL=' + $global:A02RunFileGlobal); Write-Output ('R02_VERIFY_'+'DONE')",
                 "R02_VERIFY_DONE", generation, budget);
             var scopeOutput = rawOutput.SnapshotAfter(scopeBoundary).Text;
             Require(scopeOutput.Contains("R02_VARIABLE_ISOLATED", StringComparison.Ordinal) &&
-                    scopeOutput.Contains("R02_FUNCTION_ISOLATED", StringComparison.Ordinal),
+                    scopeOutput.Contains("R02_FUNCTION_ISOLATED", StringComparison.Ordinal) &&
+                    scopeOutput.Contains("R02_GLOBAL=GLOBAL_OK", StringComparison.Ordinal),
                 "An ordinary Run File variable or function became visible in the integrated console.");
             result.Tests.Add(Timed(Pass("R02", "Run File script-scope isolation", "Production integration",
-                "Ordinary variable and function definitions from the saved script were absent from the subsequent console scope."), scopeTimer));
+                "Ordinary variable and function definitions were isolated; an explicit $global: assignment remained visible."), scopeTimer));
 
             var dirtyTimer = Stopwatch.StartNew();
             const string staleDiskSource = "Write-Output 'R03_STALE_DISK_CONTENT'";
-            const string currentBufferSource = "Write-Output ('R03_BUFFER_CONTENT'); Write-Output ('R03_BUFFER_PATH=' + $PSCommandPath)";
+            const string currentBufferSource = "Write-Output ('R03_BUFFER_CONTENT'); Write-Output ('R03_BUFFER_ROOT=' + $PSScriptRoot); Write-Output ('R03_BUFFER_PATH=' + $PSCommandPath); Write-Output ('R03_BUFFER_INVOCATION=' + $MyInvocation.MyCommand.Path); Write-Output ('R03_RELATIVE=' + (Get-Content -Raw (Join-Path $PSScriptRoot 'A02-PROD-02A-neighbor.txt')).Trim())";
             await File.WriteAllTextAsync(savedPath, staleDiskSource, budget);
             var dirtyBoundary = rawOutput.Boundary;
             var dirty = await service.ExecuteStructuredScriptAsync(Guid.NewGuid(), generation,
                 "A02-PROD-02A modified saved buffer", currentBufferSource, false, _ => { }, budget,
                 mode: EditorExecutionMode.ScriptCall, savedScriptPath: savedPath).WaitAsync(CaseTimeout, budget);
             var dirtyOutput = await WaitForCaptureAsync(rawOutput, dirtyBoundary,
-                text => text.Contains("R03_BUFFER_CONTENT", StringComparison.Ordinal), TimeSpan.FromSeconds(5), budget);
+                text => text.Contains("R03_BUFFER_PATH=", StringComparison.Ordinal), TimeSpan.FromSeconds(5), budget);
+            var dirtyActualPath = dirtyOutput.Text.Split("R03_BUFFER_PATH=", StringSplitOptions.None).Last().Split('\r', '\n')[0].Trim();
             Require(dirty.Status == EditorExecutionStatus.Completed && dirty.CompletionObserved &&
                     dirtyOutput.Text.Contains("R03_BUFFER_CONTENT", StringComparison.Ordinal) &&
                     !dirtyOutput.Text.Contains("R03_STALE_DISK_CONTENT", StringComparison.Ordinal) &&
-                    dirtyOutput.Text.Contains(Path.Combine(Path.GetTempPath(), "PS7ScriptDesk", "EditorExecution"), StringComparison.OrdinalIgnoreCase),
+                    dirtyOutput.Text.Contains("R03_BUFFER_ROOT=" + Path.GetDirectoryName(expectedPath), StringComparison.OrdinalIgnoreCase) &&
+                    dirtyOutput.Text.Contains("R03_BUFFER_INVOCATION=" + dirtyActualPath, StringComparison.Ordinal) &&
+                    string.Equals(Path.GetDirectoryName(dirtyActualPath), Path.GetDirectoryName(expectedPath), StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(dirtyActualPath, expectedPath, StringComparison.OrdinalIgnoreCase) &&
+                    dirtyOutput.Text.Contains("R03_RELATIVE=RUNFILE_RELATIVE_OK", StringComparison.Ordinal),
                 $"Modified editor content did not execute from a temporary snapshot. status={dirty.Status}; output={dirtyOutput.Text}");
             result.Tests.Add(Timed(Pass("R03", "Modified buffer avoids stale disk script", "Production integration",
-                "A saved-path candidate whose contents differed from the request used the immutable editor snapshot."), dirtyTimer));
+                "A dirty saved buffer used an immutable sibling snapshot: current content executed, $PSScriptRoot and relative sibling lookup used the source directory, and PowerShell reported the snapshot's actual path."), dirtyTimer));
 
             var unsavedTimer = Stopwatch.StartNew();
-            const string unsavedSource = "Write-Output ('R04_UNSAVED_CONTENT'); Write-Output ('R04_UNSAVED_PATH=' + $PSCommandPath)";
+            const string unsavedSource = "Write-Output ('R04_UNSAVED_CONTENT'); Write-Output ('R04_UNSAVED_ROOT=' + $PSScriptRoot); Write-Output ('R04_UNSAVED_PATH=' + $PSCommandPath); Write-Output ('R04_UNSAVED_INVOCATION=' + $MyInvocation.MyCommand.Path); Write-Output ('R04_RELATIVE=' + (Get-Content -Raw (Join-Path $PSScriptRoot 'A02-PROD-02A-neighbor.txt')).Trim())";
             var unsavedBoundary = rawOutput.Boundary;
             var unsaved = await service.ExecuteStructuredScriptAsync(Guid.NewGuid(), generation,
                 "Untitled A02-PROD-02A buffer", unsavedSource, false, _ => { }, budget,
                 mode: EditorExecutionMode.ScriptCall).WaitAsync(CaseTimeout, budget);
             var unsavedOutput = await WaitForCaptureAsync(rawOutput, unsavedBoundary,
-                text => text.Contains("R04_UNSAVED_CONTENT", StringComparison.Ordinal), TimeSpan.FromSeconds(5), budget);
+                text => text.Contains("R04_UNSAVED_PATH=", StringComparison.Ordinal), TimeSpan.FromSeconds(5), budget);
+            var unsavedActualPath = unsavedOutput.Text.Split("R04_UNSAVED_PATH=", StringSplitOptions.None).Last().Split('\r', '\n')[0].Trim();
             Require(unsaved.Status == EditorExecutionStatus.Completed && unsaved.CompletionObserved &&
                     unsavedOutput.Text.Contains("R04_UNSAVED_CONTENT", StringComparison.Ordinal) &&
-                    unsavedOutput.Text.Contains(Path.Combine(Path.GetTempPath(), "PS7ScriptDesk", "EditorExecution"), StringComparison.OrdinalIgnoreCase),
+                    unsavedOutput.Text.Contains("R04_UNSAVED_ROOT=" + Path.GetFullPath(service.CurrentWorkingDirectory ?? string.Empty), StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(Path.GetDirectoryName(unsavedActualPath), Path.GetFullPath(service.CurrentWorkingDirectory ?? string.Empty), StringComparison.OrdinalIgnoreCase) &&
+                    unsavedOutput.Text.Contains("R04_UNSAVED_INVOCATION=" + unsavedActualPath, StringComparison.OrdinalIgnoreCase) &&
+                    unsavedOutput.Text.Contains("R04_RELATIVE=RUNFILE_RELATIVE_OK", StringComparison.Ordinal),
                 $"Unsaved editor buffer did not execute from the supported temporary snapshot. status={unsaved.Status}; output={unsavedOutput.Text}");
             result.Tests.Add(Timed(Pass("R04", "Unsaved Run File snapshot", "Production integration",
-                "Unsaved buffer content executed from the existing temporary snapshot mechanism."), unsavedTimer));
+                "Unsaved buffer content executed from an immutable snapshot under the intended console working directory; relative lookup followed that directory."), unsavedTimer));
+
+            var streamsTimer = Stopwatch.StartNew();
+            var streamBoundary = rawOutput.Boundary;
+            var callbackCount = 0;
+            var streams = await service.ExecuteStructuredScriptAsync(Guid.NewGuid(), generation,
+                "A02 Run File stream ownership", "Write-Output 'R05_SUCCESS'; Write-Warning 'R05_WARNING'; Write-Verbose 'R05_VERBOSE' -Verbose; Write-Information 'R05_INFORMATION' -InformationAction Continue; Write-Error 'R05_NONTERMINATING' -ErrorAction Continue", false,
+                _ => Interlocked.Increment(ref callbackCount), budget,
+                mode: EditorExecutionMode.ScriptCall).WaitAsync(CaseTimeout, budget);
+            var streamOutput = await WaitForCaptureAsync(rawOutput, streamBoundary,
+                text => text.Contains("R05_NONTERMINATING", StringComparison.Ordinal), TimeSpan.FromSeconds(5), budget);
+            Require(streams.Status == EditorExecutionStatus.Completed && streams.CompletionObserved && callbackCount == 0 &&
+                    streamOutput.Text.Contains("R05_SUCCESS", StringComparison.Ordinal) &&
+                    streamOutput.Text.Contains("R05_WARNING", StringComparison.Ordinal) &&
+                    streamOutput.Text.Contains("R05_VERBOSE", StringComparison.Ordinal) &&
+                    streamOutput.Text.Contains("R05_INFORMATION", StringComparison.Ordinal) &&
+                    streamOutput.Text.Contains("R05_NONTERMINATING", StringComparison.Ordinal),
+                $"Run File stream ownership or status was incorrect. status={streams.Status}; callbackCount={callbackCount}; output={streamOutput.Text}");
+            result.Tests.Add(Timed(Pass("R06", "Run File stream ownership", "Production integration",
+                "Success, warning, verbose, information, and nonterminating error records remained under native PSES/ConPTY presentation; no duplicate editor result callback was emitted."), streamsTimer));
+
+            var terminatingTimer = Stopwatch.StartNew();
+            var terminatingBoundary = rawOutput.Boundary;
+            var terminating = await service.ExecuteStructuredScriptAsync(Guid.NewGuid(), generation,
+                "A02 Run File terminating error", "Write-Output 'R07_BEFORE_TERMINATING'; Write-Output ('R07_PATH=' + $PSCommandPath); throw 'R07_TERMINATING_ERROR'", false, _ => { }, budget,
+                mode: EditorExecutionMode.ScriptCall).WaitAsync(CaseTimeout, budget);
+            var terminatingOutput = await WaitForCaptureAsync(rawOutput, terminatingBoundary,
+                text => text.Contains("R07_TERMINATING_ERROR", StringComparison.Ordinal), TimeSpan.FromSeconds(5), budget);
+            var terminatingPath = terminatingOutput.Text.Split("R07_PATH=", StringSplitOptions.None).Last().Split('\r', '\n')[0].Trim();
+            Require(terminating.Status == EditorExecutionStatus.Failed && terminating.CompletionObserved &&
+                    terminatingOutput.Text.Contains("R07_BEFORE_TERMINATING", StringComparison.Ordinal) &&
+                    terminatingOutput.Text.Contains("R07_TERMINATING_ERROR", StringComparison.Ordinal) &&
+                    terminatingOutput.Text.Contains(terminatingPath, StringComparison.OrdinalIgnoreCase) &&
+                    terminatingOutput.Text.Contains("At " + terminatingPath + ":", StringComparison.OrdinalIgnoreCase) &&
+                    terminatingPath.Contains(".ps7sd-editor-", StringComparison.OrdinalIgnoreCase),
+                $"Run File terminating error was not surfaced as a settled failure. status={terminating.Status}; completion={terminating.CompletionObserved}; output={terminatingOutput.Text}");
+            result.Tests.Add(Timed(Pass("R07", "Run File terminating error", "Production integration",
+                "A terminating script error appeared in the native terminal and settled as a failed bridge request."), terminatingTimer));
+
+            var cancelTimer = Stopwatch.StartNew();
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(budget);
+            cancellation.CancelAfter(TimeSpan.FromMilliseconds(500));
+            var canceled = await service.ExecuteStructuredScriptAsync(Guid.NewGuid(), generation,
+                "A02 Run File cancellation", "while ($true) { Start-Sleep -Milliseconds 100 }", false, _ => { }, cancellation.Token,
+                mode: EditorExecutionMode.ScriptCall).WaitAsync(CaseTimeout, budget);
+            var leftoverSnapshots = Directory.EnumerateFiles(
+                service.CurrentWorkingDirectory ?? evidence,
+                ".ps7sd-editor-*.ps1",
+                SearchOption.TopDirectoryOnly).ToArray();
+            Require(canceled.Status == EditorExecutionStatus.Cancelled && canceled.CompletionObserved && !canceled.RecoveryRequired &&
+                    service.IsSessionRunning && service.ProcessId == pid && service.SessionGeneration == generation && leftoverSnapshots.Length == 0,
+                $"Run File cancellation did not settle safely. status={canceled.Status}; completion={canceled.CompletionObserved}; recoveryRequired={canceled.RecoveryRequired};");
+            result.Tests.Add(Timed(Pass("R08", "Run File cancellation and cleanup", "Production integration",
+                "The bridge confirmed cancellation before release; the same session remained usable for follow-up work."), cancelTimer));
 
             Require(service.IsSessionRunning && service.ProcessId == pid && service.SessionGeneration == generation,
                 $"Run File replaced the PSES session: PID {pid}->{service.ProcessId}; generation {generation}->{service.SessionGeneration}.");
@@ -345,12 +837,14 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            result.Tests.Add(Timed(Fail("R01-R05", "Run File identity and snapshot integration", ex), overallTimer));
+            result.Tests.Add(Timed(Fail("R01-R08", "Run File identity and snapshot integration", ex), overallTimer));
         }
         finally
         {
             try { File.Delete(savedPath); } catch { }
             try { File.Delete(relativePath); } catch { }
+            try { File.Delete(unsavedRelativePath); } catch { }
+            try { Directory.Delete(runFileDirectory); } catch { }
         }
     }
 
@@ -367,17 +861,213 @@ internal static class Program
             new IEditorExecutionBackend[] { legacy, structured }, gate, shadowMode: false,
             ExecutionBackendAvailability.Available, new PowerShellExecutionRequestClassifier());
 
-        async Task<(EditorExecutionResult Result, string Backend)> SelectAsync(string source, bool interactive = false, TimeSpan? timeout = null)
+        async Task<AuthoritativeStructuredExecutionResult> ExecuteDirectSelectionAsync(string source,
+            CancellationToken cancellationToken = default) => await service.ExecuteStructuredScriptAsync(Guid.NewGuid(), generation,
+                "A02-ARCH-03 direct PSES qualification", source, true,
+                record => visibleOutput.Append(record.Text), cancellationToken,
+                mode: EditorExecutionMode.RunSelection, directRunSelectionApproved: true);
+
+        async Task<object> EvaluateDapExpressionAsync(Guid requestId, string expression, CancellationToken cancellationToken)
+        {
+            var type = typeof(PsesOwnedInteractiveSessionService).Assembly.GetType("PS7ScriptDesk.PowerShell.Services.PsesDapEvaluationClient", throwOnError: true)!;
+            var method = type.GetMethod("EvaluateAsync", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                ?? throw new MissingMethodException(type.FullName, "EvaluateAsync");
+            var task = method.Invoke(null, new object?[] { service.DebugServicePipeName!, requestId, generation, expression, cancellationToken, null, null }) as Task
+                ?? throw new InvalidOperationException("PSES DAP evaluation did not return a task.");
+            await task.WaitAsync(TimeSpan.FromSeconds(20), cancellationToken);
+            return task.GetType().GetProperty("Result")?.GetValue(task)
+                ?? throw new InvalidOperationException("PSES DAP evaluation did not return a result.");
+        }
+
+        async Task<(EditorExecutionResult Result, string Backend)> SelectAsync(string source, bool interactive = false,
+            TimeSpan? timeout = null, CancellationToken? cancellationToken = null)
         {
             var request = new EditorExecutionRequest(Guid.NewGuid(), generation, EditorExecutionMode.RunSelection,
-                "A02-FAST-01 targeted Run Selection", source, WorkingDirectory: service.CurrentWorkingDirectory,
+                "A02-ARCH-04 coordinator Run Selection", source, WorkingDirectory: service.CurrentWorkingDirectory,
                 ExecuteInCurrentScope: true,
                 CapabilityRequirements: new ExecutionCapabilityRequirements(RequiresInteractiveInput: interactive,
-                    RequiresCurrentScope: true, RequiresWorkingDirectoryContinuity: true),
+                    RequiresCurrentScope: true, RequiresWorkingDirectoryContinuity: true,
+                    RequiresTerminalInterrupt: interactive),
                 SourceInfo: new EditorExecutionSourceInfo(Guid.NewGuid(), 1, 0, source.Length));
             var route = coordinator.Route(request);
             Require(route.Accepted, "Targeted Run Selection request was rejected: " + route.SelectionReason);
-            return (await coordinator.ExecuteAsync(request, budget).WaitAsync(timeout ?? CaseTimeout, budget), route.SelectedBackend);
+            var effectiveCancellation = cancellationToken ?? budget;
+            return (await coordinator.ExecuteAsync(request, effectiveCancellation).WaitAsync(timeout ?? CaseTimeout, budget), route.SelectedBackend);
+        }
+
+        // Phase-A architecture qualification: deliberately bypass the coordinator's
+        // known-interactive fallback once to establish whether PSES LSP evaluation
+        // can accept real ConPTY Read-Host input in the shared production session.
+        // This probe does not change application routing.
+        var inputProbeTimer = Stopwatch.StartNew();
+        using (var inputProbeCancellation = CancellationTokenSource.CreateLinkedTokenSource(budget))
+        {
+            var prompt = "ARCH03_DIRECT_READHOST_PROMPT";
+            var marker = "ARCH03_DIRECT_READHOST_RESULT";
+            var source = $"$ARCH03Input=Read-Host '{prompt}'; Write-Output ('{marker}=' + $ARCH03Input)";
+            var boundary = rawOutput.Boundary;
+            try
+            {
+                var request = SelectAsync(source, interactive: true, timeout: CaseTimeout, cancellationToken: inputProbeCancellation.Token);
+                var promptCapture = await WaitForCaptureAsync(rawOutput, boundary,
+                    text => text.Contains(prompt, StringComparison.Ordinal), InteractiveTimeout, budget);
+                Require(!promptCapture.Truncated && promptCapture.Text.Contains(prompt, StringComparison.Ordinal),
+                    "Direct PSES evaluation did not expose the Read-Host prompt through the integrated terminal capture.");
+                await service.WriteRawInputAsync("ARCH03_INPUT_OK\r", budget).WaitAsync(InteractiveTimeout, budget);
+                var completed = await request;
+                var capture = rawOutput.SnapshotAfter(boundary);
+                Require(completed.Backend == EditorExecutionCoordinator.StructuredBackendId &&
+                    completed.Result.Status == EditorExecutionStatus.Completed &&
+                    capture.Text.Contains(marker + "=ARCH03_INPUT_OK", StringComparison.Ordinal) &&
+                    !completed.Result.RecoveryRequired &&
+                    !capture.Text.Contains("__ps7sd_status_", StringComparison.OrdinalIgnoreCase) &&
+                    !capture.Text.Contains("PS7ScriptDesk\\EditorExecution\\", StringComparison.OrdinalIgnoreCase) &&
+                    !capture.Text.Contains("WriteAllText", StringComparison.OrdinalIgnoreCase) &&
+                    pid == service.ProcessId && generation == service.SessionGeneration,
+                    $"Coordinator did not complete direct LSP Read-Host using shared ConPTY input. backend={completed.Backend}; status={completed.Result.Status}; output={capture.Text}");
+                await RunConsoleAndWaitAsync(service, rawOutput,
+                    "Write-Output ('ARCH04_HISTORY_LEGITIMATE=' + 'PRESENT')", "ARCH04_HISTORY_LEGITIMATE=PRESENT", generation, budget);
+                var historyBoundary = rawOutput.Boundary;
+                var historyQuery = "$h=@(Get-History -Count 128 | Where-Object { $_.CommandLine -match '^\\s*(?:\\.|&)\\s+\\$global:__ps7sd_editor_[0-9a-f]{32}\\s*$' }); $legit=@(Get-History -Count 128 | Where-Object { $_.CommandLine -match 'ARCH04_HISTORY_LEGITIMATE' }); Write-Output ('ARCH04_'+'HISTORY=' + $h.Count + ':' + $legit.Count)";
+                await RunConsoleAndWaitAsync(service, rawOutput, historyQuery, "ARCH04_HISTORY=", generation, budget);
+                var historyCapture = rawOutput.SnapshotAfter(historyBoundary);
+                Require(!historyCapture.Truncated && historyCapture.Text.Contains("ARCH04_HISTORY=0:1", StringComparison.Ordinal),
+                    "Coordinator-routed Read-Host added its internal foreground invocation to PSReadLine history or altered a legitimate entry.");
+                result.Tests.Add(Timed(Pass("ARCH03-A05", "Direct PSES Read-Host input handoff", "Production integration",
+                    $"The production coordinator selected {completed.Backend}, accepted real ConPTY input, preserved request-scoped output isolation and legitimate history, and completed in PID={pid}/generation={generation}."), inputProbeTimer));
+                result.Tests.Add(Timed(Pass("ARCH04-OUTPUT-HISTORY-01", "Migrated Read-Host output and history isolation", "Production integration",
+                    "The coordinator-routed Read-Host request contained no control wrapper in its own capture; its generated invocation added no PSReadLine history entry, and a legitimate console entry remained."), inputProbeTimer));
+            }
+            catch (Exception ex)
+            {
+                inputProbeCancellation.Cancel();
+                var settled = false;
+                try { await service.ShutdownAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(12)); settled = !service.IsSessionRunning; }
+                catch { }
+                result.Tests.Add(Timed(Fail("ARCH03-A05", "Direct PSES Read-Host input handoff",
+                    $"{ShortException(ex)}; owned-session shutdown confirmed={settled}"), inputProbeTimer));
+                result.Notes.Add("ARCH-03 direct interactive probe failed or timed out; the owned PSES session was not reused and subsequent Fast01 cases are BLOCKED.");
+                return;
+            }
+        }
+
+        var inputCancelTimer = Stopwatch.StartNew();
+        using (var inputCancel = CancellationTokenSource.CreateLinkedTokenSource(budget))
+        {
+            var prompt = "ARCH04_DIRECT_CANCEL_PROMPT";
+            var boundary = rawOutput.Boundary;
+            try
+            {
+                var pending = SelectAsync($"$null=Read-Host '{prompt}'; Write-Output 'ARCH04_CANCEL_UNEXPECTED_COMPLETION'",
+                    interactive: true, timeout: TimeSpan.FromSeconds(20), cancellationToken: inputCancel.Token);
+                var promptCapture = await WaitForCaptureAsync(rawOutput, boundary,
+                    text => text.Contains(prompt, StringComparison.Ordinal), InteractiveTimeout, budget);
+                Require(!promptCapture.Truncated && promptCapture.Text.Contains(prompt, StringComparison.Ordinal),
+                    "Coordinator-routed direct Read-Host cancellation prompt was not visible.");
+                inputCancel.Cancel();
+                var canceled = await pending.WaitAsync(TimeSpan.FromSeconds(15), budget);
+                var recovery = await ExecuteDirectSelectionAsync("Write-Output 'ARCH04_CANCEL_RECOVERY_OK'", budget);
+                var recoveryCapture = rawOutput.SnapshotAfter(boundary).Text;
+                Require(canceled.Backend == EditorExecutionCoordinator.StructuredBackendId &&
+                    canceled.Result.Status == EditorExecutionStatus.Cancelled && !canceled.Result.RecoveryRequired &&
+                    recovery.Status == EditorExecutionStatus.Completed && recoveryCapture.Contains("ARCH04_CANCEL_RECOVERY_OK", StringComparison.Ordinal) &&
+                    pid == service.ProcessId && generation == service.SessionGeneration,
+                    $"Direct Read-Host cancellation/reuse was not proven. backend={canceled.Backend}; status={canceled.Result.Status}; recovery={recovery.Status}; generation={generation}->{service.SessionGeneration}.");
+                result.Tests.Add(Timed(Pass("ARCH04-C01", "Direct input cancellation and reuse", "Production integration",
+                    $"Coordinator-routed Read-Host was interrupted, acknowledged, and followed by direct execution in PID={pid}/generation={generation}."), inputCancelTimer));
+            }
+            catch (Exception ex)
+            {
+                inputCancel.Cancel();
+                result.Tests.Add(Timed(Fail("ARCH04-C01", "Direct input cancellation and reuse", ex), inputCancelTimer));
+                if (!service.IsSessionRunning || !service.IsInputWritable)
+                {
+                    result.Notes.Add("Direct input cancellation left session readiness unverified; remaining cases BLOCKED and owned session is shut down.");
+                    foreach (var id in new[] { "C01", "C02", "R01", "R02", "R03", "ECHO-HISTORY-01", "C04", "C03" })
+                        result.Tests.Add(new TestResult(id, NameForFast01(id), "Production integration", "A02-ARCH-04 bounded qualification", "Not run after unverified cancellation", "BLOCKED", "The service reported unavailable or unverified interactive readiness after cancellation."));
+                    try { await service.ShutdownAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(12)); } catch { }
+                    return;
+                }
+            }
+        }
+
+        var cwdProbeTimer = Stopwatch.StartNew();
+        var cwdProbePath = Path.Combine(Path.GetTempPath(), "PS7SD-ARCH03-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(cwdProbePath);
+        var cwdProbeFile = Path.Combine(cwdProbePath, "relative-check.txt");
+        await File.WriteAllTextAsync(cwdProbeFile, "ARCH03_RELATIVE_OK", budget);
+        try
+        {
+            var encodedCwd = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(cwdProbePath));
+            var scopeBoundary = rawOutput.Boundary;
+            var change = await ExecuteDirectSelectionAsync($"Set-Location -LiteralPath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encodedCwd}'))); Write-Output ('ARCH03_SCOPE=' + $PSScriptRoot + '|' + $PSCommandPath)");
+            var scopeText = rawOutput.SnapshotAfter(scopeBoundary).Text;
+            var verifyBoundary = rawOutput.Boundary;
+            var verify = await ExecuteDirectSelectionAsync("Write-Output ('ARCH03_CWD=' + (Get-Location).Path); Get-Content -LiteralPath './relative-check.txt'");
+            var verifyText = rawOutput.SnapshotAfter(verifyBoundary).Text;
+            Require(change.Status == EditorExecutionStatus.Completed && verify.Status == EditorExecutionStatus.Completed &&
+                verify.CompletionObserved && verifyText.Contains(Path.GetFullPath(cwdProbePath), StringComparison.OrdinalIgnoreCase) &&
+                verifyText.Contains("ARCH03_RELATIVE_OK", StringComparison.Ordinal) &&
+                scopeText.Contains("ARCH03_SCOPE=", StringComparison.Ordinal) &&
+                scopeText.Contains(".ps1", StringComparison.Ordinal),
+                $"Direct PSES Run Selection did not preserve location/relative path. change={change.Status}; verify={verify.Status}; output={verifyText}");
+            result.Tests.Add(Timed(Pass("ARCH03-A03", "Direct selection scope and working directory", "Production integration",
+                "Dot-sourced selection state persisted across direct PSES requests; relative path resolved; snapshot exposed its real PSScriptRoot/PSCommandPath."), cwdProbeTimer));
+        }
+        catch (Exception ex) { result.Tests.Add(Timed(Fail("ARCH03-A03", "Direct selection scope and working directory", ex), cwdProbeTimer)); }
+        finally
+        {
+            var originalPath = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(Environment.GetEnvironmentVariable("PS7SD_ACCEPTANCE_STARTUP_CWD") ?? Path.GetTempPath()));
+            try { await ExecuteDirectSelectionAsync($"Set-Location -LiteralPath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{originalPath}')))" ); } catch { }
+            try { Directory.Delete(cwdProbePath, recursive: true); } catch { }
+        }
+
+        var secureProbeTimer = Stopwatch.StartNew();
+        {
+            const string typedValue = "ARCH04_DAP_SECURE_SENTINEL";
+            var prompt = "ARCH04_DAP_SECURE_PROMPT";
+            var marker = "ARCH04_DAP_SECURE_LENGTH";
+            var boundary = rawOutput.Boundary;
+            using var secureCancellation = CancellationTokenSource.CreateLinkedTokenSource(budget);
+            Task<object>? execution = null;
+            try
+            {
+                execution = EvaluateDapExpressionAsync(Guid.NewGuid(), $"$s=Read-Host -AsSecureString '{prompt}'; Write-Output ('{marker}=' + $s.Length)", secureCancellation.Token);
+                var seen = await WaitForCaptureAsync(rawOutput, boundary, text => text.Contains(prompt, StringComparison.Ordinal), InteractiveTimeout, budget);
+                Require(!seen.Truncated && seen.Text.Contains(prompt, StringComparison.Ordinal), "Direct secure Read-Host prompt was not visible.");
+                await service.WriteRawInputAsync(typedValue + "\r", budget).WaitAsync(InteractiveTimeout, budget);
+                var secureResult = await execution.WaitAsync(CaseTimeout, budget);
+                var secureCapture = rawOutput.SnapshotAfter(boundary).Text;
+                Require(secureResult.GetType().GetProperty("Status")?.GetValue(secureResult)?.ToString() == "Completed" &&
+                    secureCapture.Contains(marker + "=" + typedValue.Length, StringComparison.Ordinal) &&
+                    !secureCapture.Contains(typedValue, StringComparison.Ordinal),
+                    $"Direct SecureString input failed or was exposed. status={secureResult.GetType().GetProperty("Status")?.GetValue(secureResult)}; outputLength={secureCapture.Length}; secretExposed={secureCapture.Contains(typedValue, StringComparison.Ordinal)}");
+                result.Tests.Add(Timed(Pass("ARCH04-A06-DAP", "PSES DAP secure input experiment", "Production integration",
+                    "The existing same-process PSES DAP evaluate request completed secure input without echoing the value."), secureProbeTimer));
+            }
+            catch (Exception ex)
+            {
+                secureCancellation.Cancel();
+                string settlement = "execution-not-started";
+                if (execution is not null)
+                {
+                    try
+                    {
+                        var canceled = await execution.WaitAsync(TimeSpan.FromSeconds(12), budget);
+                        settlement = "cancellationResult=" + canceled.GetType().GetProperty("Status")?.GetValue(canceled)?.ToString();
+                    }
+                    catch (Exception settleException) { settlement = "cancellationSettlement=" + ShortException(settleException); }
+                }
+                result.Tests.Add(Timed(Fail("ARCH03-A06", "Direct PSES secure input", $"{ShortException(ex)}; {settlement}"), secureProbeTimer));
+                if (!service.IsSessionRunning || !service.IsInputWritable)
+                {
+                    result.Notes.Add("The secure-input evaluation did not settle into a writable prompt; remaining cases are BLOCKED and the owned service is shut down.");
+                    foreach (var id in new[] { "A06-FAST01", "C01", "C02", "R01", "R02", "R03", "ECHO-HISTORY-01", "C04", "C03" })
+                        result.Tests.Add(new TestResult(id, NameForFast01(id), "Production integration", "A02-ARCH-04 bounded qualification", "Not run after unverified secure-input settlement", "BLOCKED", "PSES readiness was not verified after the secure-input request."));
+                    try { await service.ShutdownAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(12)); } catch { }
+                    return;
+                }
+            }
         }
 
         var a06 = Stopwatch.StartNew();
@@ -431,14 +1121,14 @@ internal static class Program
                 var boundary = rawOutput.Boundary;
                 await RunConsoleAndWaitAsync(service, rawOutput, verify, "FAST01_RELATIVE_OK", generation, budget);
                 var text = rawOutput.SnapshotAfter(boundary).Text;
-                Require(selected.Backend == EditorExecutionCoordinator.StructuredBackendId &&
+                Require(selected.Backend == EditorExecutionCoordinator.LegacyBackendId &&
                     selected.Result.Status == EditorExecutionStatus.Completed &&
                     text.Contains(Path.GetFullPath(cwd), StringComparison.OrdinalIgnoreCase) &&
                     text.Contains("FAST01_RELATIVE_OK", StringComparison.Ordinal) &&
                     pid == service.ProcessId && generation == service.SessionGeneration,
-                    $"Run Selection CWD/relative path failed. route={selected.Backend}; status={selected.Result.Status}; output={text}");
-                result.Tests.Add(Timed(Pass("C01", "Run Selection working directory and relative path", "Production integration",
-                    $"Route={selected.Backend}; selected Set-Location persisted; relative file resolved; PID/generation stable."), timer));
+                    $"Run Selection CWD fallback attribution or relative path failed. route={selected.Backend}; status={selected.Result.Status}; output={text}");
+                result.Tests.Add(Timed(Pass("C01", "Unknown selection CWD fallback attribution", "Production integration",
+                    $"The dynamic Set-Location selection remained on {selected.Backend}; relative file resolution and same-session CWD were preserved. Direct PSES CWD semantics are separately covered by ARCH03-A03."), timer));
             }
             catch (Exception ex) { result.Tests.Add(Timed(Fail("C01", "Run Selection working directory and relative path", ex), timer)); }
 
@@ -477,7 +1167,6 @@ internal static class Program
             var smokeTimer = Stopwatch.StartNew();
             try
             {
-                var setupBoundary = rawOutput.Boundary;
                 await RunConsoleAndWaitAsync(service, rawOutput, "Write-Output ('FAST01_HISTORY_LEGITIMATE=' + 'PRESENT')", "FAST01_HISTORY_LEGITIMATE=PRESENT", generation, budget);
                 var functionBoundary = rawOutput.Boundary;
                 var functionSelection = await SelectAsync("function FAST01-SmokeFunction { 'FAST01_FUNCTION_OK' }; Write-Output 'FAST01_FUNCTION_DEFINED'");
@@ -503,14 +1192,13 @@ internal static class Program
                 var crossSelection = await SelectAsync("FAST01-SmokeFunction");
                 var crossSelectionOutput = rawOutput.SnapshotAfter(crossSelectionBoundary).Text;
                 var crossSelectionPassed = crossSelection.Result.Status == EditorExecutionStatus.Completed &&
-                    crossSelection.Backend == EditorExecutionCoordinator.StructuredBackendId &&
+                    crossSelection.Backend == EditorExecutionCoordinator.LegacyBackendId &&
                     crossSelectionOutput.Contains("FAST01_FUNCTION_OK", StringComparison.Ordinal);
                 result.Tests.Add(Timed(crossSelectionPassed
-                    ? Pass("R03", "Cross-selection function persistence", "Production integration", "A separate Run Selection request invoked the ordinary function defined by the prior selection.")
-                    : Fail("R03", "Cross-selection function persistence", $"route={crossSelection.Backend}; status={crossSelection.Result.Status}; output={crossSelectionOutput}"), smokeTimer));
+                    ? Pass("R03", "Unknown function-call fallback attribution", "Production integration", "The function defined by the prior direct selection remained callable in the same session; its bare custom command name is conservatively classified Unknown and stays on the legacy fallback.")
+                    : Fail("R03", "Unknown function-call fallback attribution", $"route={crossSelection.Backend}; status={crossSelection.Result.Status}; output={crossSelectionOutput}"), smokeTimer));
 
                 var selected = variableSelection;
-                var echo = rawOutput.SnapshotAfter(setupBoundary).Text;
                 var verifyBoundary = rawOutput.Boundary;
                 await RunConsoleAndWaitAsync(service, rawOutput, "Write-Output $FAST01SmokeVariable; FAST01-SmokeFunction", "FAST01_FUNCTION_OK", generation, budget);
                 var verify = rawOutput.SnapshotAfter(verifyBoundary).Text;
@@ -520,7 +1208,12 @@ internal static class Program
                 var historyText = rawOutput.SnapshotAfter(historyBoundary).Text;
                 var zeroWrappers = historyText.Contains("FAST01_HISTORY=0:", StringComparison.Ordinal);
                 var legitPreserved = historyText.Contains("FAST01_HISTORY=0:1", StringComparison.Ordinal);
-                var noWrapperEcho = !echo.Contains("$__ps7sd_selection_success_", StringComparison.Ordinal) && !echo.Contains("selection-", StringComparison.Ordinal);
+                static bool ContainsControlWrapper(string text) =>
+                    text.Contains("$__ps7sd_selection_success_", StringComparison.Ordinal) ||
+                    text.Contains("__ps7sd_status_", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("WriteAllText", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("PS7ScriptDesk\\EditorExecution\\", StringComparison.OrdinalIgnoreCase);
+                var noWrapperEcho = !ContainsControlWrapper(functionDefinitionOutput) && !ContainsControlWrapper(variableDefinitionOutput);
                 var smokePassed = functionDefinitionPassed && variableDefinitionPassed && crossSelectionPassed &&
                     selected.Result.Status == EditorExecutionStatus.Completed && selected.Backend == EditorExecutionCoordinator.StructuredBackendId &&
                     verify.Contains("FAST01_VARIABLE_OK", StringComparison.Ordinal) && verify.Contains("FAST01_FUNCTION_OK", StringComparison.Ordinal) &&
@@ -552,43 +1245,50 @@ internal static class Program
                 var baselineEncoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(baselineCommand));
                 var baselineSource = $"& $env:ComSpec /d /c ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{baselineEncoded}'))); $FAST01_BASELINE_EXIT=$LASTEXITCODE; Write-Output ('FAST01_CHILD_EXIT=' + $FAST01_BASELINE_EXIT)";
                 var baselineBoundary = rawOutput.Boundary;
-                var baselineTask = SelectAsync(baselineSource, interactive: true, timeout: TimeSpan.FromSeconds(12));
-                var baselineCapture = await WaitForCaptureAsync(rawOutput, baselineBoundary,
-                    text => text.Contains("FAST01_CHILD_EXIT=7", StringComparison.Ordinal), TimeSpan.FromSeconds(25), budget);
+                var baseline = await ExecuteDirectSelectionAsync(baselineSource, budget).WaitAsync(TimeSpan.FromSeconds(20), budget);
+                var baselineCapture = rawOutput.SnapshotAfter(baselineBoundary);
                 var baselineText = baselineCapture.Text;
                 childStdoutVerified = baselineText.Contains("FAST01_CHILD_STDOUT_OK", StringComparison.Ordinal);
                 childStderrVerified = baselineText.Contains("FAST01_CHILD_STDERR_OK", StringComparison.Ordinal);
                 childExitVerified = baselineText.Contains("FAST01_CHILD_EXIT=7", StringComparison.Ordinal);
-                var baseline = await baselineTask.WaitAsync(TimeSpan.FromSeconds(2), budget);
-                Require(baseline.Result.Status == EditorExecutionStatus.Completed && !baselineCapture.Truncated && childStdoutVerified && childStderrVerified && childExitVerified,
-                    $"Noninteractive native child baseline failed. stdout={childStdoutVerified}; stderr={childStderrVerified}; exit={childExitVerified}; route={baseline.Backend}; status={baseline.Result.Status}; output={baselineText}");
+                Require(baseline.Status == EditorExecutionStatus.Completed && baseline.CompletionObserved && !baselineCapture.Truncated && childStdoutVerified && childStderrVerified && childExitVerified,
+                    $"Direct PSES native child baseline failed. stdout={childStdoutVerified}; stderr={childStderrVerified}; exit={childExitVerified}; status={baseline.Status}; output={baselineText}");
 
-                var command = "set /p LINE= & echo FAST01_CHILD_STDOUT:%LINE% & echo FAST01_CHILD_STDERR 1>&2 & exit /b 7";
+                var command = "set /p LINE=FAST01_CHILD_INPUT: & echo FAST01_CHILD_STDOUT:!LINE! & echo FAST01_CHILD_STDERR 1>&2 & exit /b 7";
                 var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(command));
-                var source = $"& $env:ComSpec /d /c ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))); $FAST01_CHILD_EXIT=$LASTEXITCODE; Write-Output ('FAST01_CHILD_EXIT=' + $FAST01_CHILD_EXIT)";
-                var pending = SelectAsync(source, interactive: true, timeout: TimeSpan.FromSeconds(12));
-                await Task.Delay(350, budget);
+                var source = $"& $env:ComSpec /v:on /d /c ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))); $FAST01_CHILD_EXIT=$LASTEXITCODE; Write-Output ('FAST01_CHILD_EXIT=' + $FAST01_CHILD_EXIT)";
+                var boundary = rawOutput.Boundary;
+                var pending = ExecuteDirectSelectionAsync(source, budget);
+                var childPrompt = await WaitForCaptureAsync(rawOutput, boundary,
+                    text => text.Contains("FAST01_CHILD_INPUT:", StringComparison.Ordinal), InteractiveTimeout, budget);
+                Require(!childPrompt.Truncated && childPrompt.Text.Contains("FAST01_CHILD_INPUT:", StringComparison.Ordinal),
+                    "Direct native child stdin prompt was not visible.");
                 await service.WriteRawInputAsync("CHILD_INPUT_OK\r", budget).WaitAsync(InteractiveTimeout, budget);
-                var completed = await pending;
-                var text = rawOutput.SnapshotAfter(0).Text;
-                var route = coordinator.Route(new EditorExecutionRequest(Guid.NewGuid(), generation, EditorExecutionMode.RunSelection,
-                    "A02-FAST-01 child route observation", source, WorkingDirectory: service.CurrentWorkingDirectory,
-                    ExecuteInCurrentScope: true, CapabilityRequirements: new ExecutionCapabilityRequirements(RequiresInteractiveInput: true,
-                        RequiresCurrentScope: true, RequiresWorkingDirectoryContinuity: true),
-                    SourceInfo: new EditorExecutionSourceInfo(Guid.NewGuid(), 1, 0, source.Length)));
-                Require(completed.Result.Status == EditorExecutionStatus.Completed &&
-                    text.Contains("FAST01_CHILD_STDOUT:CHILD_INPUT_OK", StringComparison.Ordinal) &&
-                    text.Contains("FAST01_CHILD_STDERR", StringComparison.Ordinal) &&
-                    text.Contains("FAST01_CHILD_EXIT=7", StringComparison.Ordinal) &&
+                var completed = await pending.WaitAsync(TimeSpan.FromSeconds(20), budget);
+                var childText = rawOutput.SnapshotAfter(boundary).Text;
+                Require(completed.Status == EditorExecutionStatus.Completed && completed.CompletionObserved &&
+                    childText.Contains("FAST01_CHILD_STDOUT:CHILD_INPUT_OK", StringComparison.Ordinal) &&
+                    childText.Contains("FAST01_CHILD_STDERR", StringComparison.Ordinal) &&
+                    childText.Contains("FAST01_CHILD_EXIT=7", StringComparison.Ordinal) &&
                     pid == service.ProcessId && generation == service.SessionGeneration,
-                    $"Native child contract incomplete. stdout={text.Contains("FAST01_CHILD_STDOUT:CHILD_INPUT_OK", StringComparison.Ordinal)}; stderr={text.Contains("FAST01_CHILD_STDERR", StringComparison.Ordinal)}; exit={text.Contains("FAST01_CHILD_EXIT=7", StringComparison.Ordinal)}; route={route.SelectedBackend}; status={completed.Result.Status}.");
-                result.Tests.Add(Timed(Pass("C03", "Native child stdin, stdout, stderr, and exit status", "Production integration",
-                    $"Harmless cmd.exe round-trip passed; route={route.SelectedBackend}; exit=7; PID/generation stable."), childTimer));
+                    $"Direct native child contract incomplete. stdout={childText.Contains("FAST01_CHILD_STDOUT:CHILD_INPUT_OK", StringComparison.Ordinal)}; stderr={childText.Contains("FAST01_CHILD_STDERR", StringComparison.Ordinal)}; exit={childText.Contains("FAST01_CHILD_EXIT=7", StringComparison.Ordinal)}; status={completed.Status}.");
+
+                var esc = ((char)27).ToString();
+                var ansiCommand = "echo " + esc + "[31mFAST01_ANSI_OK" + esc + "[0m";
+                var ansiEncoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(ansiCommand));
+                var ansiBoundary = rawOutput.Boundary;
+                var ansiResult = await ExecuteDirectSelectionAsync($"& $env:ComSpec /d /c ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{ansiEncoded}')))", budget).WaitAsync(TimeSpan.FromSeconds(20), budget);
+                var ansiText = rawOutput.SnapshotAfter(ansiBoundary).Text;
+                var ansiVerified = ansiText.Contains(esc + "[31mFAST01_ANSI_OK" + esc + "[0m", StringComparison.Ordinal);
+                Require(ansiResult.Status == EditorExecutionStatus.Completed && ansiVerified,
+                    $"Direct native child VT output failed. completed={ansiResult.Status}; ansi={ansiVerified}; outputLength={ansiText.Length}.");
+                result.Tests.Add(Timed(Pass("C03", "Direct native child I/O and ANSI", "Production integration",
+                    $"Direct same-session cmd.exe stdout/stderr/exit/stdin and ANSI output passed; PID/generation stable."), childTimer));
             }
             catch (Exception ex)
             {
                 result.Tests.Add(Timed(Fail("C03", "Native child stdin, stdout, stderr, and exit status", ex), childTimer));
-                result.Notes.Add($"C03 observed: baseline stdout={childStdoutVerified}, stderr={childStderrVerified}, exitCode7={childExitVerified}; baseline structured completion timed out, so this run did not continue into the stdin probe. A prior bounded probe recorded child input at the parent PowerShell prompt and did not verify child completion/input response. The runner terminates this owned session and does not reuse it.");
+                result.Notes.Add($"Direct C03 observed: stdout={childStdoutVerified}, stderr={childStderrVerified}, exitCode7={childExitVerified}. The owner session is shut down after an unqualified child I/O outcome.");
                 try { await service.ShutdownAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(12)); } catch { }
                 return;
             }
@@ -1099,7 +1799,7 @@ internal static class Program
 
         try
         {
-            const string source = "$A02GuiBoundaryValue='T01_VARIABLE_PERSISTED'; Write-Host 'T01_SELECTION_EXECUTED'; function A02GuiBoundaryFunction { 'GUI_BOUNDARY_FUNCTION_OK' }";
+            const string source = "$A02GuiBoundaryValue='T01_VARIABLE_PERSISTED'; $dynamicCommand='Write-Host'; & $dynamicCommand 'T01_SELECTION_EXECUTED'; @('PIPELINE_OK') | ForEach-Object { Write-Output $_ }; for ($index=0; $index -lt 1; $index++) { Write-Output 'LOOP_OK' }; function A02GuiBoundaryFunction { 'GUI_BOUNDARY_FUNCTION_OK' }";
             var requestId = Guid.NewGuid();
             var request = new EditorExecutionRequest(
                 requestId,
@@ -1114,21 +1814,29 @@ internal static class Program
                     RequiresWorkingDirectoryContinuity: true),
                 SourceInfo: new EditorExecutionSourceInfo(Guid.NewGuid(), 1, 0, source.Length));
             var routing = coordinator.Route(request);
-            var execution = await coordinator.ExecuteAsync(request, budget).WaitAsync(CaseTimeout, budget);
+            var executionTask = coordinator.ExecuteAsync(request, budget);
+            var completionDuringBridgeTask = service.GetLiveCompletionsAsync(
+                "untitled:ps7scriptdesk/bridge-r1-during.ps1", "Get-Pro", "Get-Pro".Length, budget);
+            var execution = await executionTask.WaitAsync(CaseTimeout, budget);
+            var completionDuringBridge = await completionDuringBridgeTask.WaitAsync(TimeSpan.FromSeconds(15), budget);
+            if (execution.Status != EditorExecutionStatus.Completed)
+                throw new InvalidOperationException($"Bridge Run Selection failed before console verification: status={execution.Status}; error={execution.ErrorMessage}; backend={routing.SelectedBackend}; classification={routing.Classification}; reason={routing.SelectionReason}.");
             var verifySource = "Write-Output ('VARIABLE: [' + $A02GuiBoundaryValue + ']'); if (Get-Command A02GuiBoundaryFunction -ErrorAction SilentlyContinue) { A02GuiBoundaryFunction } else { 'GUI_BOUNDARY_FUNCTION_MISSING' }; & { $A02GuiBoundaryNegative='CHILD_SCOPE_ONLY'; function A02GuiBoundaryNegativeFunction { 'CHILD_SCOPE_ONLY' } }; if ($null -eq (Get-Variable A02GuiBoundaryNegative -ErrorAction SilentlyContinue) -and $null -eq (Get-Command A02GuiBoundaryNegativeFunction -ErrorAction SilentlyContinue)) { Write-Output 'GUI_BOUNDARY_NEGATIVE_CONTROL_OK' } else { Write-Output 'GUI_BOUNDARY_NEGATIVE_CONTROL_LEAK' }; Write-Output ('GUI_BOUNDARY_'+'VERIFY_DONE')";
             var boundary = rawOutput.Boundary;
             await RunConsoleAndWaitAsync(service, rawOutput, verifySource,
                 "VARIABLE: [T01_VARIABLE_PERSISTED]", generation, budget, "GUI_BOUNDARY_VERIFY_DONE");
             var verification = rawOutput.SnapshotAfter(boundary);
             Require(routing.Accepted && routing.SelectedBackend == EditorExecutionCoordinator.StructuredBackendId &&
-                    routing.Classification == ExecutionRequestClassification.KnownNonInteractive &&
+                    routing.SelectionReason == "PsesSchedulerAdmission" &&
                     execution.Status == EditorExecutionStatus.Completed && execution.SessionGeneration == generation &&
                     execution.RequestId == requestId && verification.Text.Contains("GUI_BOUNDARY_FUNCTION_OK", StringComparison.Ordinal) &&
                     verification.Text.Contains("GUI_BOUNDARY_NEGATIVE_CONTROL_OK", StringComparison.Ordinal) &&
+                    completionDuringBridge?.Items.Any(item => item.CompletionText.Contains("Get-Process", StringComparison.OrdinalIgnoreCase)) == true &&
+                    !rawOutput.SnapshotAfter(0).Text.Contains(source, StringComparison.Ordinal) &&
                     service.IsSessionRunning && service.ProcessId == pid && service.SessionGeneration == generation,
                 $"Coordinator Run Selection boundary failed. backend={routing.SelectedBackend}; classification={routing.Classification}; status={execution.Status}; variable/function output={verification.Text}; PID {pid}->{service.ProcessId}; generation {generation}->{service.SessionGeneration}.");
             result.Tests.Add(Timed(Pass("B16", "Coordinator-to-PSES Run Selection scope boundary", "Production integration",
-                $"Production request, classifier, coordinator, structured backend, adapter, PSES service, and native-console verification passed. Backend={routing.SelectedBackend}; classification={routing.Classification}; T01 variable/function persisted; controlled child-scope variable/function remained isolated; PID={pid}; generation={generation}."), timer));
+                $"Coordinator Run Selection used the authenticated bridge; request source stayed out of terminal input/output/history; shared variable/function persisted; child-scope control remained isolated; an LSP Get-Process completion returned during the bridge request; PID={pid}; generation={generation}."), timer));
         }
         catch (Exception ex)
         {

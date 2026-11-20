@@ -95,6 +95,18 @@ public sealed class PsesPromptReadinessContractTests
     }
 
     [Fact]
+    public void AcceptedPromptIsNotReplayedWhenLaterOutputArrives()
+    {
+        var observe = typeof(PsesOwnedInteractiveSessionService)
+            .GetMethod("ObservePromptBoundary", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(observe);
+        using var service = new PsesOwnedInteractiveSessionService();
+
+        Assert.True((bool)observe!.Invoke(service, ["PS C:\\>\r\n", 0])!);
+        Assert.False((bool)observe.Invoke(service, ["launcher redraw without a prompt", 0])!);
+    }
+
+    [Fact]
     public void AnsiDecoratedPromptSplitAcrossConPtyReads_IsRecognized()
     {
         var observe = typeof(PsesOwnedInteractiveSessionService)

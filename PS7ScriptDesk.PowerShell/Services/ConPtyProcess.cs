@@ -11,6 +11,7 @@ internal sealed class ConPtyProcess : IAsyncDisposable
 {
     private const int ProcThreadAttributePseudoConsole = 0x00020016;
     private const uint ExtendedStartupInfoPresent = 0x00080000;
+    private const uint CreateUnicodeEnvironment = 0x00000400;
     private const int StartfUseStdHandles = 0x00000100;
     private const uint HandleFlagInherit = 0x00000001;
     private SafeFileHandle? _inputWriter;
@@ -51,7 +52,7 @@ internal sealed class ConPtyProcess : IAsyncDisposable
         }
     }
 
-    public static ConPtyProcess Start(string executable, IReadOnlyList<string> arguments, string workingDirectory, int columns = 120, int rows = 40)
+    public static ConPtyProcess Start(string executable, IReadOnlyList<string> arguments, string workingDirectory, int columns = 120, int rows = 40, IReadOnlyDictionary<string, string>? environmentOverrides = null)
     {
         using var inputRead = CreatePipe(read: true, inherit: false, out var inputWrite);
         using var outputWrite = CreatePipe(read: false, inherit: false, out var outputRead);
@@ -100,9 +101,19 @@ internal sealed class ConPtyProcess : IAsyncDisposable
                 if (!UpdateProcThreadAttribute(startup.AttributeList, 0, ProcThreadAttributePseudoConsole, pseudoConsoleValue, IntPtr.Size, IntPtr.Zero, IntPtr.Zero))
                     throw new Win32Exception(Marshal.GetLastWin32Error());
 
-                using var processEnvironment = new SafeFileHandle(IntPtr.Zero, ownsHandle: false);
-                if (!CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, false, ExtendedStartupInfoPresent, IntPtr.Zero, workingDirectory, ref startup, out var processInfo))
-                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                var environmentBlock = BuildEnvironmentBlock(environmentOverrides);
+                PROCESS_INFORMATION processInfo;
+                try
+                {
+                    if (!CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, false,
+                        ExtendedStartupInfoPresent | (environmentBlock == IntPtr.Zero ? 0 : CreateUnicodeEnvironment),
+                        environmentBlock, workingDirectory, ref startup, out processInfo))
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                finally
+                {
+                    if (environmentBlock != IntPtr.Zero) Marshal.FreeHGlobal(environmentBlock);
+                }
 
                 // CreatePseudoConsole consumes these as the PTY-side endpoints. The
                 // parent must close its copies after child creation; retaining them
@@ -189,6 +200,18 @@ internal sealed class ConPtyProcess : IAsyncDisposable
             ClosePseudoConsole(pseudoConsole);
             throw;
         }
+    }
+
+    private static IntPtr BuildEnvironmentBlock(IReadOnlyDictionary<string, string>? overrides)
+    {
+        if (overrides is null || overrides.Count == 0) return IntPtr.Zero;
+        var values = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
+            .Where(entry => entry.Key is string && entry.Value is string)
+            .ToDictionary(entry => (string)entry.Key, entry => (string)entry.Value!, StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in overrides) values[pair.Key] = pair.Value;
+        var text = string.Join('\0', values.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(pair => pair.Key + "=" + pair.Value)) + "\0\0";
+        return Marshal.StringToHGlobalUni(text);
     }
 
     public void Resize(int columns, int rows)

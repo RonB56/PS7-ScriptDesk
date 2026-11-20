@@ -6,8 +6,6 @@ public interface IEditorExecutionCoordinator : IDisposable
 {
     bool IsShadowMode { get; }
 
-    bool IsRollbackEnabled { get; }
-
     ActiveEditorExecutionSnapshot? ActiveExecution { get; }
 
     event Action<EditorExecutionEvent>? EventPublished;

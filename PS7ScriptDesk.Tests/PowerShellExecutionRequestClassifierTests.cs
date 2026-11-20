@@ -31,6 +31,37 @@ public sealed class PowerShellExecutionRequestClassifierTests
     }
 
     [Fact]
+    public void OrdinaryRunSelectionReadHost_IsMarkedForGatedDirectRoute()
+    {
+        var result = _classifier.Classify(Request("$answer = Read-Host 'Enter value'; Write-Output ('RESULT: ' + $answer)", EditorExecutionMode.RunSelection));
+
+        Assert.Equal(ExecutionRequestClassification.KnownInteractive, result.Classification);
+        Assert.Equal("DirectRunSelectionReadHost", result.Reason);
+        Assert.True(result.RequiredCapabilities.RequiresInteractiveInput);
+        Assert.True(result.RequiredCapabilities.RequiresTerminalInterrupt);
+        Assert.False(result.RequiredCapabilities.RequiresSecureInput);
+    }
+
+    [Theory]
+    [InlineData("Read-Host -AsSecureString 'Password'")]
+    [InlineData("Read-Host 'Name'; Read-Host 'Second name'")]
+    public void UnqualifiedReadHostRequests_DoNotReceiveDirectRouteMarker(string script)
+    {
+        var result = _classifier.Classify(Request(script, EditorExecutionMode.RunSelection));
+
+        Assert.NotEqual("DirectRunSelectionReadHost", result.Reason);
+    }
+
+    [Fact]
+    public void ReadHostCombinedWithUnclassifiedCommand_RemainsUnknown()
+    {
+        var result = _classifier.Classify(Request("Read-Host 'Name'; Start-Process notepad", EditorExecutionMode.RunSelection));
+
+        Assert.Equal(ExecutionRequestClassification.Unknown, result.Classification);
+        Assert.NotEqual("DirectRunSelectionReadHost", result.Reason);
+    }
+
+    [Fact]
     public void LiteralAndIndirectInteractiveInvocationsKeepDistinctRoutingEvidence()
     {
         var literal = _classifier.Classify(Request("& 'Read-Host' 'Name'"));
@@ -78,6 +109,6 @@ public sealed class PowerShellExecutionRequestClassifierTests
         Assert.NotEqual(ExecutionRequestClassification.KnownInteractive, result.Classification);
     }
 
-    private static EditorExecutionRequest Request(string script)
-        => new(Guid.NewGuid(), 1, EditorExecutionMode.ScriptCall, "Classifier.ps1", script);
+    private static EditorExecutionRequest Request(string script, EditorExecutionMode mode = EditorExecutionMode.ScriptCall)
+        => new(Guid.NewGuid(), 1, mode, "Classifier.ps1", script);
 }

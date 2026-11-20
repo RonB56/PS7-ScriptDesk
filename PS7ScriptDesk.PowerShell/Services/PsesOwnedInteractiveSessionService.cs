@@ -23,12 +23,14 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     private static readonly TimeSpan PromptRecoveryTimeout = TimeSpan.FromSeconds(5);
     private static readonly Regex AnsiSequenceRegex = new("\\x1B\\[[0-?]*[ -/]*[@-~]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex CursorColumnOneRegex = new("\\x1B\\[[0-9]+;1[Hf]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex NativeLauncherCursorMoveRegex = new("\\x1B\\[[0-9]+;[0-9]+[Hf]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     // PSES can emit its startup banner and first prompt in one decoded read:
     // "...PowerShell Editor Services <=====PS C:\\...>". Treat the banner's
     // repeated '=' boundary as a valid prompt boundary, while requiring a
     // rooted filesystem/provider path so ordinary script output containing
     // "PS ..." is not promoted to readiness.
     private static readonly Regex PromptBoundaryRegex = new("(?:^|\\r?\\n|={2,})[ \\t]*PS[ \\t]+(?:\\r?\\n[ \\t]*)?(?:[A-Za-z]:[\\\\/]|/)[^\\r\\n>]{0,240}>[ \\t]*(?:\\r?\\n|$)|(?:^|\\r?\\n)[ \\t]*>>[ \\t]*(?:\\r?\\n|$)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex PromptCandidateRegex = new("PS[ \\t]+(?:[A-Za-z]:[\\\\/]|/)[^\\r\\n>]{0,240}>[ \\t]*$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly object _syncRoot = new();
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly SemaphoreSlim _structuredExecutionGate = new(1, 1);
@@ -37,6 +39,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     // bridge midway through execution if the process environment is changed.
     private readonly ExperimentalRunFileBridgeFeatureGate _experimentalRunFileBridge;
     private readonly ExperimentalRunSelectionBridgeFeatureGate _experimentalRunSelectionBridge;
+    private readonly PS7ScriptDesk.Application.Services.PsesEditorBridgeFeatureGate _editorBridgeFeatureGate;
+    private PsesEditorExecutionBridgeClient? _editorBridgeClient;
+    private string? _editorBridgeGeneration;
+    private string? _editorBridgeSecret;
     private ConPtyProcess? _conPty;
     private Task? _outputTask;
     private PsesLanguageServiceClient? _languageServiceClient;
@@ -53,7 +59,6 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     private bool _shutdownRequested;
     private bool _sessionFaulted;
     private bool _commandInProgress;
-    private CancellationTokenSource? _activeCommandCancellation;
     private InputOutputProbe? _pendingInputOutputProbe;
     private StructuredEchoFilter? _activeStructuredEchoFilter;
     private Guid? _activeStructuredRequestId;
@@ -84,14 +89,17 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
 
     public PsesOwnedInteractiveSessionService(
         ExperimentalRunFileBridgeFeatureGate? experimentalRunFileBridge = null,
-        ExperimentalRunSelectionBridgeFeatureGate? experimentalRunSelectionBridge = null)
+        ExperimentalRunSelectionBridgeFeatureGate? experimentalRunSelectionBridge = null,
+        PS7ScriptDesk.Application.Services.PsesEditorBridgeFeatureGate? editorBridgeFeatureGate = null)
     {
         _experimentalRunFileBridge = experimentalRunFileBridge ?? ExperimentalRunFileBridgeFeatureGate.FromEnvironment();
         _experimentalRunSelectionBridge = experimentalRunSelectionBridge ?? ExperimentalRunSelectionBridgeFeatureGate.FromEnvironment();
+        _editorBridgeFeatureGate = editorBridgeFeatureGate ?? PS7ScriptDesk.Application.Services.PsesEditorBridgeFeatureGate.FromEnvironment();
     }
 
     public bool IsSessionRunning => _conPty is { HasExited: false } && !_sessionFaulted;
-    public bool IsInputWritable => IsSessionRunning && !_shutdownRequested && !_interactiveReadinessUnverified;
+    public bool IsInputWritable => IsSessionRunning && !_shutdownRequested && !_interactiveReadinessUnverified &&
+        (!_editorBridgeFeatureGate.IsEnabled || _editorBridgeClient is not null);
     public bool IsCommandInProgress
     {
         get
@@ -387,6 +395,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         await ShutdownCoreAsync(cancellationToken).ConfigureAwait(false);
 
         var root = ResolvePsesRoot();
+        if (_editorBridgeFeatureGate.IsEnabled)
+            ValidateEditorBridgeRuntime(root);
         var startScript = Path.Combine(root, "PowerShellEditorServices", "Start-EditorServices.ps1");
         if (!File.Exists(startScript))
             throw new FileNotFoundException("PSES Start-EditorServices.ps1 was not found.", startScript);
@@ -417,7 +427,23 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             ["startedAtUtc"] = startedAtUtc
         });
 
-        var conPty = ConPtyProcess.Start(runtime.LaunchExecutablePath, arguments, workingDirectory);
+        Dictionary<string, string>? bridgeEnvironment = null;
+        string? bridgePipeName = null;
+        if (_editorBridgeFeatureGate.IsEnabled)
+        {
+            bridgePipeName = "PS7SD_Editor_" + Guid.NewGuid().ToString("N");
+            _editorBridgeGeneration = Guid.NewGuid().ToString("N");
+            _editorBridgeSecret = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+            bridgeEnvironment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["PS7SD_EDITOR_BRIDGE_PIPE"] = bridgePipeName,
+                ["PS7SD_EDITOR_BRIDGE_GENERATION"] = _editorBridgeGeneration,
+                ["PS7SD_EDITOR_BRIDGE_AUTH"] = _editorBridgeSecret,
+                ["PS7SD_EDITOR_BRIDGE_CLIENT_PID"] = Environment.ProcessId.ToString(CultureInfo.InvariantCulture)
+            };
+        }
+        var conPty = ConPtyProcess.Start(runtime.LaunchExecutablePath, arguments, workingDirectory,
+            environmentOverrides: bridgeEnvironment);
         var process = conPty.Identity.Process;
         lock (_syncRoot)
         {
@@ -478,6 +504,13 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             languageServiceClient.SessionFaulted += languageServiceFaultHandler;
             await languageServiceClient.InitializeAsync(languageServicePipeName, process.Id, generation,
                 (data, token) => SendSyntheticTerminalInputAsync(generation, data, token), cancellationToken).ConfigureAwait(false);
+            if (_editorBridgeFeatureGate.IsEnabled)
+            {
+                if (string.IsNullOrWhiteSpace(bridgePipeName) || string.IsNullOrWhiteSpace(_editorBridgeGeneration) || string.IsNullOrWhiteSpace(_editorBridgeSecret))
+                    throw new InvalidOperationException("The requested PSES editor bridge was not configured for this session.");
+                _editorBridgeClient = await PsesEditorExecutionBridgeClient.ConnectAsync(bridgePipeName, _editorBridgeSecret,
+                    process.Id, _editorBridgeGeneration, cancellationToken).ConfigureAwait(false);
+            }
             lock (_syncRoot)
             {
                 if (_runtimeSessionIdentity != Guid.Empty && _runtimeGeneration is { } runtimeGeneration)
@@ -520,6 +553,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                     _conPty = null;
                     _outputTask = null;
                     _languageServiceClient = null;
+                    if (_editorBridgeClient is not null) _ = _editorBridgeClient.DisposeAsync();
+                    _editorBridgeClient = null;
+                    _editorBridgeGeneration = null;
+                    _editorBridgeSecret = null;
                     _languageServiceFaultHandler = null;
                     _activeRuntime = null;
                     _workingDirectory = null;
@@ -654,287 +691,53 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     public Task<LiveConsoleCommandResult> ExecuteScriptAsync(string documentDisplayName, string scriptContent, Action<ExecutionOutputRecord> onOutput, bool executeInCurrentScope = false, CancellationToken cancellationToken = default)
         => ExecuteScriptForRequestAsync(Guid.NewGuid(), documentDisplayName, scriptContent, onOutput, executeInCurrentScope, cancellationToken);
 
-    private async Task<AuthoritativeStructuredExecutionResult> ExecuteNativeSelectionAsync(
-        Guid requestId, int sessionGeneration, string scriptContent,
-        Action<ExecutionOutputRecord> onOutput, CancellationToken cancellationToken)
-    {
-        if (sessionGeneration != SessionGeneration || !IsSessionRunning)
-            return new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory,
-                "The interactive session changed before Run Selection.", false);
-
-        var snapshotDirectory = Path.Combine(Path.GetTempPath(), "PS7ScriptDesk", "EditorExecution");
-        Directory.CreateDirectory(snapshotDirectory);
-        var snapshotPath = Path.Combine(snapshotDirectory, "selection-" + requestId.ToString("N", CultureInfo.InvariantCulture) + ".ps1");
-        var completionMarkerPath = Path.Combine(snapshotDirectory, "selection-" + requestId.ToString("N", CultureInfo.InvariantCulture) + ".completed");
-        TryDeleteFile(completionMarkerPath);
-        TryDeleteFile(completionMarkerPath + ".tmp");
-        var completion = new TaskCompletionSource<LiveConsoleCommandCompletion>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var sessionStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var cancellationRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var markerWatcher = new FileSystemWatcher(snapshotDirectory, Path.GetFileName(completionMarkerPath))
-        {
-            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
-            IncludeSubdirectories = false
-        };
-        FileSystemEventHandler onMarkerChanged = (_, _) => ObserveNativeSelectionCompletionMarker(requestId, sessionGeneration);
-        RenamedEventHandler onMarkerRenamed = (_, _) => ObserveNativeSelectionCompletionMarker(requestId, sessionGeneration);
-        markerWatcher.Created += onMarkerChanged;
-        markerWatcher.Changed += onMarkerChanged;
-        markerWatcher.Renamed += onMarkerRenamed;
-        markerWatcher.EnableRaisingEvents = true;
-        using var cancellationRegistration = cancellationToken.Register(() => cancellationRequested.TrySetResult());
-        var submitted = false;
-        var submissionAttempted = false;
-        var settled = false;
-        StructuredEchoFilter? requestEchoFilter = null;
-        void OnCompleted(LiveConsoleCommandCompletion observed)
-        {
-            if (observed.RequestId == requestId && observed.SessionGeneration == sessionGeneration)
-                completion.TrySetResult(observed);
-        }
-        void OnStopping(int generation)
-        {
-            if (generation == sessionGeneration) sessionStopped.TrySetResult();
-        }
-        InteractiveCommandCompleted += OnCompleted;
-        TerminalSessionStopping += OnStopping;
-        try
-        {
-            await File.WriteAllTextAsync(snapshotPath, scriptContent, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
-            // A prompt can be observed while a submitted line is still waiting in
-            // PSReadLine's input path. Keep the snapshot until PowerShell has
-            // returned from the dot-source command and written this request marker.
-            // try/finally does not introduce a scriptblock invocation scope, so the
-            // selected code still runs in the interactive console scope.
-            var invocation = BuildNativeSelectionInvocation(snapshotPath, completionMarkerPath, requestId);
-            requestEchoFilter = new StructuredEchoFilter(requestId, preservePromptPrefix: true,
-                BuildInvocationEchoForms(invocation, executeInCurrentScope: true));
-            lock (_syncRoot)
-            {
-                if (_activeStructuredEchoFilter is not null)
-                    throw new InvalidOperationException("A terminal echo filter is already active.");
-                _activeStructuredEchoFilter = requestEchoFilter;
-            }
-            DeveloperDiagnostics.LogInfo("PSES", "Run Selection submitted through native interactive input.", new Dictionary<string, object?>
-            {
-                ["requestId"] = requestId, ["sessionGeneration"] = sessionGeneration,
-                ["processId"] = ProcessId, ["scriptLength"] = scriptContent.Length,
-                ["snapshotPath"] = DeveloperDiagnostics.SanitizePath(snapshotPath),
-                ["completionMarkerPath"] = DeveloperDiagnostics.SanitizePath(completionMarkerPath),
-                ["completionGuard"] = "request-scoped-result-marker-and-fresh-prompt",
-                ["echoFilter"] = "request-scoped-prompt-anchored-generated-invocation", ["contentOmitted"] = true
-            });
-            submissionAttempted = true;
-            var submission = await ExecuteTextAsync(invocation, onOutput, requestId, cancellationToken, completionMarkerPath).ConfigureAwait(false);
-            submitted = submission.Outcome == LiveConsoleCommandOutcome.Submitted;
-            if (!submitted || submission.SessionGeneration != sessionGeneration)
-                return new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
-                    "Native Run Selection submission was not verified.", false, true);
-
-            var winner = await Task.WhenAny(completion.Task, sessionStopped.Task, cancellationRequested.Task).ConfigureAwait(false);
-            if (winner == completion.Task || completion.Task.IsCompletedSuccessfully)
-            {
-                var observed = await completion.Task.ConfigureAwait(false);
-                settled = true;
-                var interrupted = observed.Outcome == LiveConsoleCommandOutcome.Interrupted;
-                var failed = observed.Outcome == LiveConsoleCommandOutcome.ExecutionFailed;
-                return new(interrupted ? EditorExecutionStatus.Cancelled : failed ? EditorExecutionStatus.Failed : EditorExecutionStatus.Completed,
-                    CurrentWorkingDirectory,
-                    interrupted ? "Run Selection was interrupted." : failed ? "Run Selection completed with an error." : null,
-                    true);
-            }
-            if (winner == sessionStopped.Task)
-                return new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
-                    "The native session stopped before Run Selection completed.", false, true);
-
-            bool ownsPendingCommand;
-            lock (_syncRoot)
-                ownsPendingCommand = _pendingInteractiveCommand is { } pending &&
-                    pending.RequestId == requestId && pending.Generation == sessionGeneration;
-            if (!ownsPendingCommand)
-                return new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
-                    "Run Selection cancellation raced completion; native readiness was not verified.", false, true);
-
-            var recovery = await StopConsoleForGenerationAsync(sessionGeneration).ConfigureAwait(false);
-            if (recovery.Outcome == LiveConsoleInterruptOutcome.RecoveredAtPrompt)
-            {
-                settled = true;
-                return new(EditorExecutionStatus.Cancelled, CurrentWorkingDirectory,
-                    "Run Selection was interrupted in the native console.", true);
-            }
-            return new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
-                "Run Selection cancellation could not verify prompt recovery.", false, true);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            if (!submitted) return submissionAttempted
-                ? new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
-                    "Run Selection cancellation raced native submission.", false, true)
-                : new(EditorExecutionStatus.Cancelled, CurrentWorkingDirectory,
-                    "Run Selection was cancelled before native submission.", false);
-            var recovery = await StopConsoleForGenerationAsync(sessionGeneration).ConfigureAwait(false);
-            settled = recovery.Outcome == LiveConsoleInterruptOutcome.RecoveredAtPrompt;
-            return new(settled ? EditorExecutionStatus.Cancelled : EditorExecutionStatus.Unknown,
-                CurrentWorkingDirectory, settled ? "Run Selection was interrupted." : "Native cancellation was not verified.", settled, !settled);
-        }
-        catch (Exception ex)
-        {
-            DeveloperDiagnostics.LogException("PSES", ex, "Native Run Selection failed before verified completion.",
-                new Dictionary<string, object?> { ["requestId"] = requestId, ["sessionGeneration"] = sessionGeneration,
-                    ["submissionAttempted"] = submissionAttempted, ["contentOmitted"] = true });
-            return new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
-                "Native Run Selection completion was not verified: " + ex.Message, false, submissionAttempted);
-        }
-        finally
-        {
-            InteractiveCommandCompleted -= OnCompleted;
-            TerminalSessionStopping -= OnStopping;
-            string echoRemainder = string.Empty;
-            lock (_syncRoot)
-            {
-                if (requestEchoFilter is not null && ReferenceEquals(_activeStructuredEchoFilter, requestEchoFilter))
-                {
-                    echoRemainder = requestEchoFilter.Flush();
-                    _activeStructuredEchoFilter = null;
-                }
-            }
-            if (!string.IsNullOrEmpty(echoRemainder))
-                PublishVisibleOutput(ExecutionOutputStreamKind.StandardOutput, sessionGeneration, echoRemainder);
-            if (!submissionAttempted || settled)
-            {
-                TryDeleteFile(snapshotPath);
-                TryDeleteFile(completionMarkerPath);
-                TryDeleteFile(completionMarkerPath + ".tmp");
-            }
-            else DeveloperDiagnostics.LogWarning("PSES", "Run Selection snapshot retained because native completion was unverified.", new Dictionary<string, object?>
-            {
-                ["requestId"] = requestId, ["sessionGeneration"] = sessionGeneration,
-                ["snapshotPath"] = DeveloperDiagnostics.SanitizePath(snapshotPath),
-                ["completionMarkerPath"] = DeveloperDiagnostics.SanitizePath(completionMarkerPath)
-            });
-            DeveloperDiagnostics.LogInfo("PSES", "Native Run Selection request observers were released.", new Dictionary<string, object?>
-            {
-                ["requestId"] = requestId,
-                ["sessionGeneration"] = sessionGeneration,
-                ["markerWatcherDisposed"] = true,
-                ["matchedEchoCount"] = requestEchoFilter?.MatchedEchoCount ?? 0,
-                ["unmatchedEchoRemainderLength"] = echoRemainder.Length,
-                ["settled"] = settled,
-                ["contentOmitted"] = true
-            });
-        }
-    }
-
     public async Task<LiveConsoleCommandResult> ExecuteScriptForRequestAsync(Guid requestId, string documentDisplayName, string scriptContent, Action<ExecutionOutputRecord> onOutput, bool executeInCurrentScope, CancellationToken cancellationToken)
     {
         if (requestId == Guid.Empty) throw new ArgumentException("A nonempty execution request ID is required.", nameof(requestId));
+        ArgumentException.ThrowIfNullOrWhiteSpace(documentDisplayName);
         ArgumentNullException.ThrowIfNull(scriptContent);
         ArgumentNullException.ThrowIfNull(onOutput);
         if (!IsSessionRunning || _languageServiceClient is null)
             throw new InvalidOperationException("The authoritative PSES session is not ready for editor execution.");
 
-        if (executeInCurrentScope)
+        var generation = SessionGeneration;
+        var startedAt = DateTime.Now;
+        var mode = executeInCurrentScope ? EditorExecutionMode.RunSelection : EditorExecutionMode.ScriptCall;
+        var result = await ExecuteStructuredScriptAsync(
+            requestId,
+            generation,
+            documentDisplayName,
+            scriptContent,
+            executeInCurrentScope,
+            onOutput,
+            cancellationToken,
+            mode: mode).ConfigureAwait(false);
+
+        var outcome = result.Status switch
         {
-            var started = DateTime.Now;
-            var generation = SessionGeneration;
-            var native = await ExecuteNativeSelectionAsync(requestId, generation, scriptContent, onOutput, cancellationToken).ConfigureAwait(false);
-            if (native.Status is EditorExecutionStatus.Unknown or EditorExecutionStatus.Rejected)
-                throw new InvalidOperationException(native.ErrorMessage ?? "Native Run Selection completion was not verified.");
-            if (native.Status == EditorExecutionStatus.Failed)
-                throw new InvalidOperationException(native.ErrorMessage ?? "Native Run Selection reported an execution error.");
+            EditorExecutionStatus.Completed => LiveConsoleCommandOutcome.Completed,
+            EditorExecutionStatus.Cancelled => LiveConsoleCommandOutcome.Interrupted,
+            EditorExecutionStatus.Failed => LiveConsoleCommandOutcome.ExecutionFailed,
+            EditorExecutionStatus.Rejected => LiveConsoleCommandOutcome.WriteFailed,
+            _ => LiveConsoleCommandOutcome.RecoveryUnverified
+        };
+        if (result.CompletionObserved || result.Status is EditorExecutionStatus.Rejected or EditorExecutionStatus.Cancelled)
+        {
             ScriptExecutionCompleted?.Invoke();
             CommandExecutionCompleted?.Invoke(generation);
-            return new LiveConsoleCommandResult(documentDisplayName,
-                native.Status == EditorExecutionStatus.Cancelled, CurrentWorkingDirectory,
-                started, DateTime.Now, requestId, generation, ProcessId,
-                native.Status switch
-                {
-                    EditorExecutionStatus.Completed => LiveConsoleCommandOutcome.Completed,
-                    EditorExecutionStatus.Cancelled => LiveConsoleCommandOutcome.Interrupted,
-                    _ => LiveConsoleCommandOutcome.RecoveryUnverified
-                });
         }
 
-        var commandCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        lock (_syncRoot)
-        {
-            if (_commandInProgress)
-            {
-                commandCancellation.Dispose();
-                throw new InvalidOperationException("Another PSES editor operation is already running.");
-            }
-
-            _commandInProgress = true;
-            _activeCommandCancellation = commandCancellation;
-        }
-
-        var sessionGeneration = SessionGeneration;
-        var startedAt = DateTimeOffset.UtcNow;
-        DeveloperDiagnostics.LogInfo(
-            "Phase2CProof",
-            "PSES-owned ExecuteScriptAsync entered through DAP staging and foreground PSES execution.",
-            new Dictionary<string, object?>
-            {
-                ["providerType"] = GetType().FullName,
-                ["documentDisplayName"] = DeveloperDiagnostics.SanitizePreview(documentDisplayName, 120),
-                ["scriptLength"] = scriptContent.Length,
-                ["executeInCurrentScope"] = executeInCurrentScope,
-                ["requestId"] = requestId,
-                ["sessionGeneration"] = sessionGeneration,
-                ["processId"] = ProcessId,
-                ["inputWritable"] = IsInputWritable,
-                ["rawMultilineTerminalInjection"] = false,
-                ["contentOmitted"] = true
-            });
-
-        try
-        {
-            var result = await ExecuteStructuredScriptAsync(
-                requestId,
-                sessionGeneration,
-                documentDisplayName,
-                scriptContent,
-                executeInCurrentScope,
-                onOutput,
-                commandCancellation.Token,
-                mode: EditorExecutionMode.ScriptCall).ConfigureAwait(false);
-
-            var wasStopped = result.Status == EditorExecutionStatus.Cancelled || commandCancellation.IsCancellationRequested;
-            var commandResult = new LiveConsoleCommandResult(
-                documentDisplayName,
-                wasStopped,
-                CurrentWorkingDirectory,
-                startedAt.LocalDateTime,
-                DateTime.Now);
-            ScriptExecutionCompleted?.Invoke();
-            CommandExecutionCompleted?.Invoke(sessionGeneration);
-            return commandResult;
-        }
-        finally
-        {
-            lock (_syncRoot)
-            {
-                if (ReferenceEquals(_activeCommandCancellation, commandCancellation))
-                {
-                    _activeCommandCancellation = null;
-                    _commandInProgress = false;
-                }
-            }
-            commandCancellation.Dispose();
-            DeveloperDiagnostics.LogInfo(
-                "Phase2CProof",
-                "PSES-owned ExecuteScriptAsync exited after foreground execution and prompt observation.",
-                new Dictionary<string, object?>
-                {
-                    ["providerType"] = GetType().FullName,
-                    ["requestId"] = requestId,
-                    ["sessionGeneration"] = sessionGeneration,
-                    ["processId"] = ProcessId,
-                    ["commandInProgressAfterExit"] = IsCommandInProgress
-                });
-        }
+        return new LiveConsoleCommandResult(
+            documentDisplayName,
+            result.Status == EditorExecutionStatus.Cancelled,
+            result.CurrentWorkingDirectory,
+            startedAt,
+            DateTime.Now,
+            requestId,
+            generation,
+            ProcessId,
+            outcome);
     }
-
     public async Task<AuthoritativeStructuredExecutionResult> ExecuteStructuredScriptAsync(
         Guid requestId,
         int sessionGeneration,
@@ -946,7 +749,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         EditorExecutionSourceInfo? sourceInfo = null,
         EditorExecutionMode mode = EditorExecutionMode.ScriptCall,
         bool directRunSelectionApproved = false,
-        string? savedScriptPath = null)
+        string? savedScriptPath = null,
+        bool directReadHostSelectionApproved = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(documentDisplayName);
         ArgumentNullException.ThrowIfNull(scriptContent);
@@ -970,9 +774,23 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 CompletionObserved: false);
         }
 
-        if (mode == EditorExecutionMode.RunSelection && executeInCurrentScope &&
-            !_experimentalRunSelectionBridge.ShouldUseDirectBridge(mode, executeInCurrentScope, directRunSelectionApproved))
-            return await ExecuteNativeSelectionAsync(requestId, sessionGeneration, scriptContent, onOutput, cancellationToken).ConfigureAwait(false);
+        if (mode == EditorExecutionMode.RunSelection && executeInCurrentScope)
+        {
+            if (!_editorBridgeFeatureGate.IsEnabled || _editorBridgeClient is null)
+                return new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory,
+                    "Run Selection requires the authenticated PSES execution bridge; no fallback launcher is permitted.", false);
+            return await ExecuteBridgeRunSelectionAsync(requestId, sessionGeneration, scriptContent, onOutput, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (mode == EditorExecutionMode.ScriptCall && !executeInCurrentScope)
+        {
+            if (!_editorBridgeFeatureGate.IsEnabled || _editorBridgeClient is null)
+                return new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory,
+                    "Run File requires the authenticated PSES execution bridge; no fallback launcher is permitted.", false);
+            return await ExecuteBridgeRunFileAsync(requestId, sessionGeneration, documentDisplayName,
+                scriptContent, savedScriptPath, onOutput, cancellationToken).ConfigureAwait(false);
+        }
 
         var startedAt = DateTimeOffset.UtcNow;
         PsesStructuredEvaluationResult? protocolResult = null;
@@ -1098,7 +916,12 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 ["matchScope"] = "exact-generated-editor-invocation",
                 ["contentOmitted"] = true
             });
-            var useExperimentalDirectRunSelection = _experimentalRunSelectionBridge.ShouldUseDirectBridge(mode, executeInCurrentScope, directRunSelectionApproved);
+            // The coordinator-approved Read-Host subset uses the PSES DAP staging
+            // plus foreground LSP path. That path owns interactive input and avoids
+            // the snapshot/status wrapper emitted by the experimental direct bridge.
+            // Keep the bridge available for its other explicitly enabled callers.
+            var useExperimentalDirectRunSelection = !directReadHostSelectionApproved &&
+                _experimentalRunSelectionBridge.ShouldUseDirectBridge(mode, executeInCurrentScope, directRunSelectionApproved);
             var useExperimentalDirectRunFile = !useExperimentalDirectRunSelection &&
                 mode != EditorExecutionMode.RunSelection &&
                 _experimentalRunFileBridge.ShouldUseDirectBridge(executeInCurrentScope);
@@ -1251,6 +1074,42 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                     }
                     foregroundCompletionVerified = foregroundCompleted;
                     if (foregroundCompleted) phase.AdvanceTo(StructuredExecutionPhase.PromptReconciled);
+                    if (foregroundCompleted && directReadHostSelectionApproved && !useExperimentalDirectBridge)
+                    {
+                        // The foreground PSReadLine entry is added to runspace history
+                        // after the submitted command finishes, so it cannot remove
+                        // itself from inside the staged scriptblock. Once PSES reports
+                        // idle, use its same-session DAP endpoint to remove exactly the
+                        // generated launcher line and verify the private acknowledgment.
+                        var historyStatusPath = statusPath + ".history";
+                        var quotedHistoryStatusPath = QuotePowerShellSingleQuotedString(historyStatusPath);
+                        var quotedInvocation = QuotePowerShellSingleQuotedString(invocation);
+                        var historyCleanupExpression = "$__ps7sdHistoryEntries = @(Get-History -Count 256 | Where-Object { $_.CommandLine.Trim() -ceq " + quotedInvocation + " }); " +
+                            "if ($__ps7sdHistoryEntries.Count -eq 1) { Clear-History -Id $__ps7sdHistoryEntries[0].Id -ErrorAction Stop; [System.IO.File]::WriteAllText(" + quotedHistoryStatusPath + ", 'REMOVED') } " +
+                            "else { [System.IO.File]::WriteAllText(" + quotedHistoryStatusPath + ", 'COUNT=' + $__ps7sdHistoryEntries.Count) }; Remove-Variable -Name __ps7sdHistoryEntries -ErrorAction SilentlyContinue";
+                        var debugPipe = _debugServicePipeName;
+                        var historyCleanup = debugPipe is null
+                            ? new PsesStructuredEvaluationResult(EditorExecutionStatus.Unknown, false, false, "DAP endpoint unavailable", "PSES history cleanup endpoint is unavailable.")
+                            : await PsesDapEvaluationClient.EvaluateAsync(debugPipe, requestId, sessionGeneration,
+                                historyCleanupExpression, cancellationToken).ConfigureAwait(false);
+                        var historyCleanupVerified = historyCleanup.Status == EditorExecutionStatus.Completed &&
+                            historyCleanup.ResponseReceived && File.Exists(historyStatusPath) &&
+                            (await File.ReadAllTextAsync(historyStatusPath, cancellationToken).ConfigureAwait(false)).Trim() == "REMOVED";
+                        TryDeleteFile(historyStatusPath);
+                        DeveloperDiagnostics.LogInfo("PSES", "Coordinator-approved Read-Host generated history entry cleanup settled.", new Dictionary<string, object?>
+                        {
+                            ["requestId"] = requestId,
+                            ["sessionGeneration"] = sessionGeneration,
+                            ["processId"] = ProcessId,
+                            ["cleanupVerified"] = historyCleanupVerified,
+                            ["contentOmitted"] = true
+                        });
+                        if (!historyCleanupVerified)
+                        {
+                            status = EditorExecutionStatus.Unknown;
+                            errorMessage = "The editor invocation completed, but its generated PowerShell history entry could not be isolated.";
+                        }
+                    }
                     if (!foregroundCompleted)
                     {
                         DeveloperDiagnostics.LogWarning("PSES", "Foreground editor execution did not satisfy request-specific prompt restoration predicates.", new Dictionary<string, object?>
@@ -1477,7 +1336,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                     Reason: $"phase={settledPhase};foregroundSubmitted={foregroundEvaluationSubmitted}"));
             var foregroundSettled = !foregroundHandoffStarted || foregroundCompletionVerified || foregroundTerminationVerified;
             if (foregroundSettled)
+            {
                 TryDeleteFile(statusPath);
+                TryDeleteFile(statusPath + ".history");
+            }
             else
                 DeveloperDiagnostics.LogWarning("PSES", "Private status file retained because foreground termination was not verified.", new Dictionary<string, object?>
                 {
@@ -1584,6 +1446,253 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 ["sessionGeneration"] = sessionGeneration
             });
         }
+    }
+
+    private async Task<AuthoritativeStructuredExecutionResult> ExecuteBridgeRunSelectionAsync(
+        Guid requestId, int sessionGeneration, string script, Action<ExecutionOutputRecord> onOutput,
+        CancellationToken cancellationToken)
+    {
+        var client = _editorBridgeClient;
+        if (client is null || !IsSessionRunning || sessionGeneration != SessionGeneration || !IsInputWritable)
+            return new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory,
+                "The authenticated PSES editor bridge is not ready for this session.", false);
+
+        if (!await _structuredExecutionGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+            return new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory,
+                "Another editor operation owns the PSES execution admission gate.", false);
+
+        // Debugger ownership is authoritative only inside PSES's serialized task
+        // boundary. The application snapshot may be Unknown before DAP has reported
+        // lifecycle state, so it cannot veto a bridge request here.
+        if (_commandInProgress || _shutdownRequested || _sessionFaulted ||
+            !ReferenceEquals(client, _editorBridgeClient) || sessionGeneration != SessionGeneration)
+        {
+            _structuredExecutionGate.Release();
+            return new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory,
+                "The PSES bridge rejected admission because session or debugger ownership is not idle.", false);
+        }
+
+        lock (_syncRoot)
+        {
+            _activeStructuredRequestId = requestId;
+            _commandInProgress = true;
+        }
+
+        try
+        {
+            var bridgeGeneration = _runtimeGeneration ?? sessionGeneration;
+            var result = await client.ExecuteAsync(requestId, bridgeGeneration, script, scriptScope: false, cancellationToken)
+                .ConfigureAwait(false);
+            NotifyVerifiedBridgeCompletionReadiness(requestId, sessionGeneration, result.Status);
+            return result.Status switch
+            {
+                BridgeExecutionStatus.Completed => new(EditorExecutionStatus.Completed, CurrentWorkingDirectory, null, true),
+                BridgeExecutionStatus.Cancelled => new(EditorExecutionStatus.Cancelled, CurrentWorkingDirectory, null, true),
+                BridgeExecutionStatus.Rejected => new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory, result.Error, true),
+                _ => new(EditorExecutionStatus.Failed, CurrentWorkingDirectory, result.Error ?? "PSES bridge execution failed.", true)
+            };
+        }
+        catch (Exception ex)
+        {
+            lock (_syncRoot) _interactiveReadinessUnverified = true;
+            DeveloperDiagnostics.LogException("PSESBridge", ex, "Bridge completion was not confirmed; session readiness was closed.",
+                new Dictionary<string, object?> { ["requestId"] = requestId, ["sessionGeneration"] = sessionGeneration, ["processId"] = ProcessId });
+            return new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
+                "PSES bridge completion was not confirmed; the session requires recovery.", false, RecoveryRequired: true);
+        }
+        finally
+        {
+            lock (_syncRoot)
+            {
+                if (_activeStructuredRequestId == requestId) _activeStructuredRequestId = null;
+                if (IsInputWritable && !_sessionFaulted) _commandInProgress = false;
+            }
+            _structuredExecutionGate.Release();
+        }
+    }
+
+    private async Task<AuthoritativeStructuredExecutionResult> ExecuteBridgeRunFileAsync(
+        Guid requestId, int sessionGeneration, string documentDisplayName, string scriptContent,
+        string? savedScriptPath, Action<ExecutionOutputRecord> onOutput, CancellationToken cancellationToken)
+    {
+        var client = _editorBridgeClient;
+        if (client is null || !IsSessionRunning || sessionGeneration != SessionGeneration || !IsInputWritable)
+            return new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory,
+                "The authenticated PSES editor bridge is not ready for this session.", false);
+
+        if (!await _structuredExecutionGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+            return new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory,
+                "Another editor operation owns the PSES execution admission gate.", false);
+
+        string? snapshotPath = null;
+        FileStream? savedScriptReadLock = null;
+        var snapshotCreated = false;
+        var bridgeInvocationStarted = false;
+        var bridgeCompletionObserved = false;
+        try
+        {
+            if (_commandInProgress || _shutdownRequested || _sessionFaulted ||
+                !ReferenceEquals(client, _editorBridgeClient) || sessionGeneration != SessionGeneration)
+                return new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory,
+                    "The PSES bridge rejected Run File because session or debugger ownership is not idle.", false);
+
+            lock (_syncRoot)
+            {
+                _activeStructuredRequestId = requestId;
+                _commandInProgress = true;
+            }
+
+            snapshotPath = TryOpenMatchingSavedScript(savedScriptPath, scriptContent, out savedScriptReadLock);
+            if (snapshotPath is null)
+            {
+                // Keep dirty saved-file snapshots beside their document. PowerShell
+                // derives $PSScriptRoot from the physical invocation path, so placing
+                // the snapshot under %TEMP% breaks normal sibling-file/module lookup.
+                // Unsaved documents have no source directory; use the session's current
+                // directory so their relative references follow the console context.
+                var snapshotDirectory = GetRunFileSnapshotDirectory(savedScriptPath, CurrentWorkingDirectory);
+                Directory.CreateDirectory(snapshotDirectory);
+                snapshotPath = Path.Combine(snapshotDirectory, ".ps7sd-editor-" + requestId.ToString("N", CultureInfo.InvariantCulture) + ".ps1");
+                await using var stream = new FileStream(snapshotPath, FileMode.CreateNew, FileAccess.Write,
+                    FileShare.Read, 4096, FileOptions.Asynchronous);
+                snapshotCreated = true;
+                await using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+                await writer.WriteAsync(scriptContent.AsMemory(), cancellationToken).ConfigureAwait(false);
+            }
+
+            DeveloperDiagnostics.LogInfo("PSESBridge", "Run File snapshot submitted as a script-file invocation.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = sessionGeneration,
+                ["processId"] = ProcessId,
+                ["documentDisplayNameLength"] = documentDisplayName.Length,
+                ["originalDocumentPath"] = DeveloperDiagnostics.SanitizePath(savedScriptPath),
+                ["intendedWorkingDirectory"] = DeveloperDiagnostics.SanitizePath(CurrentWorkingDirectory),
+                ["executionPath"] = DeveloperDiagnostics.SanitizePath(snapshotPath),
+                ["savedSourcePathUsed"] = savedScriptReadLock is not null,
+                ["snapshotCreated"] = snapshotCreated,
+                ["scriptLength"] = scriptContent.Length,
+                ["contentOmitted"] = true
+            });
+
+            var bridgeGeneration = _runtimeGeneration ?? sessionGeneration;
+            bridgeInvocationStarted = true;
+            var result = await client.ExecuteFileAsync(requestId, bridgeGeneration, snapshotPath, cancellationToken)
+                .ConfigureAwait(false);
+            bridgeCompletionObserved = true;
+            NotifyVerifiedBridgeCompletionReadiness(requestId, sessionGeneration, result.Status);
+            return result.Status switch
+            {
+                BridgeExecutionStatus.Completed => new(EditorExecutionStatus.Completed, CurrentWorkingDirectory, null, true),
+                BridgeExecutionStatus.Cancelled => new(EditorExecutionStatus.Cancelled, CurrentWorkingDirectory, null, true),
+                BridgeExecutionStatus.Rejected => new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory, result.Error, true),
+                _ => new(EditorExecutionStatus.Failed, CurrentWorkingDirectory, result.Error ?? "PSES bridge Run File failed.", true)
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (bridgeInvocationStarted && !bridgeCompletionObserved)
+            {
+                lock (_syncRoot) _interactiveReadinessUnverified = true;
+                return new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
+                    "Run File cancellation was not confirmed by the PSES bridge; the session requires recovery.",
+                    CompletionObserved: false, RecoveryRequired: true);
+            }
+
+            return new(EditorExecutionStatus.Cancelled, CurrentWorkingDirectory,
+                "Run File was canceled before bridge submission.", CompletionObserved: false);
+        }
+        catch (Exception ex)
+        {
+            lock (_syncRoot) _interactiveReadinessUnverified = true;
+            DeveloperDiagnostics.LogException("PSESBridge", ex, "Run File bridge completion was not confirmed; session readiness was closed.",
+                new Dictionary<string, object?> { ["requestId"] = requestId, ["sessionGeneration"] = sessionGeneration, ["processId"] = ProcessId });
+            return new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
+                "PSES bridge Run File completion was not confirmed; the session requires recovery.", false, RecoveryRequired: true);
+        }
+        finally
+        {
+            savedScriptReadLock?.Dispose();
+            if (snapshotCreated && snapshotPath is not null)
+            {
+                if (!bridgeInvocationStarted || bridgeCompletionObserved)
+                    TryDeleteFile(snapshotPath);
+                else
+                    DeveloperDiagnostics.LogWarning("PSESBridge", "Run File snapshot retained because bridge completion was not confirmed.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["sessionGeneration"] = sessionGeneration,
+                        ["executionPath"] = DeveloperDiagnostics.SanitizePath(snapshotPath)
+                    });
+            }
+            lock (_syncRoot)
+            {
+                if (_activeStructuredRequestId == requestId) _activeStructuredRequestId = null;
+                if (IsInputWritable && !_sessionFaulted) _commandInProgress = false;
+            }
+            _structuredExecutionGate.Release();
+        }
+    }
+
+    private void NotifyVerifiedBridgeCompletionReadiness(
+        Guid requestId,
+        int sessionGeneration,
+        BridgeExecutionStatus status)
+    {
+        if (status is not (BridgeExecutionStatus.Completed or BridgeExecutionStatus.Cancelled or BridgeExecutionStatus.Failed))
+        {
+            return;
+        }
+
+        int processId;
+        string workingDirectory;
+        lock (_syncRoot)
+        {
+            if (_shutdownRequested || _sessionFaulted || sessionGeneration != _generation ||
+                _activeStructuredRequestId != requestId ||
+                _conPty is not { HasExited: false } process)
+            {
+                DeveloperDiagnostics.LogDecision(
+                    "PSESBridge",
+                    "BridgeCompletionReadinessRejected",
+                    "A bridge completion did not match the current PSES request, generation, or process identity.",
+                    "IdentityMismatch",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["sessionGeneration"] = sessionGeneration,
+                        ["currentSessionGeneration"] = _generation,
+                        ["activeStructuredRequestId"] = _activeStructuredRequestId,
+                        ["processId"] = ProcessId,
+                        ["contentOmitted"] = true
+                    });
+                return;
+            }
+
+            processId = process.ProcessId;
+            workingDirectory = _workingDirectory ?? string.Empty;
+        }
+
+        // The bridge response is the authoritative completion boundary for its
+        // request. The ViewModel retains this request-owned observation until the
+        // coordinator and runtime execution lease have both settled before it
+        // promotes the shared terminal to idle.
+        NotifyStructuredPromptReadyObserved(new StructuredPromptReadyObservation(
+            requestId,
+            sessionGeneration,
+            processId,
+            workingDirectory));
+        DeveloperDiagnostics.LogInfo(
+            "PSESBridge",
+            "Verified bridge completion published for post-lease terminal reconciliation.",
+            new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = sessionGeneration,
+                ["processId"] = processId,
+                ["status"] = status.ToString(),
+                ["contentOmitted"] = true
+            });
     }
 
     public async Task<bool> StopConsoleAsync(Action<ExecutionOutputRecord>? onOutput = null)
@@ -2321,9 +2430,15 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         TerminalSessionStopping?.Invoke(generation);
         try
         {
+            PsesEditorExecutionBridgeClient? activeBridgeClient;
+            lock (_syncRoot) activeBridgeClient = _editorBridgeClient;
+            var bridgeCancellationRequested = activeBridgeClient is not null &&
+                await activeBridgeClient.RequestActiveCancellationAsync().ConfigureAwait(false);
+
             try
             {
-                executionGateHeld = await _structuredExecutionGate.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+                var executionDrainTimeout = bridgeCancellationRequested ? TimeSpan.FromSeconds(8) : TimeSpan.FromSeconds(2);
+                executionGateHeld = await _structuredExecutionGate.WaitAsync(executionDrainTimeout, cancellationToken).ConfigureAwait(false);
                 if (executionGateHeld)
                 {
                     _structuredExecutionGate.Release();
@@ -2343,6 +2458,16 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                     ["sessionGeneration"] = generation
                 });
             }
+            PsesEditorExecutionBridgeClient? editorBridgeClient;
+            lock (_syncRoot)
+            {
+                editorBridgeClient = _editorBridgeClient;
+                _editorBridgeClient = null;
+                _editorBridgeSecret = null;
+                _editorBridgeGeneration = null;
+            }
+            if (editorBridgeClient is not null)
+                await editorBridgeClient.DisposeAsync().ConfigureAwait(false);
             if (!conPty.HasExited)
             {
                 DeveloperDiagnostics.LogInfo("PSES", "EXIT_COMMAND_WRITE_BEGIN.", new Dictionary<string, object?>
@@ -2388,13 +2513,22 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         finally
         {
             PsesLanguageServiceClient? languageServiceClient;
+            PsesEditorExecutionBridgeClient? editorBridgeClient;
             Action<Exception>? languageServiceFaultHandler;
             lock (_syncRoot)
             {
+                editorBridgeClient = _editorBridgeClient;
+                _editorBridgeClient = null;
+                _editorBridgeSecret = null;
+                _editorBridgeGeneration = null;
                 languageServiceClient = _languageServiceClient;
                 languageServiceFaultHandler = _languageServiceFaultHandler;
                 _languageServiceClient = null;
                 _languageServiceFaultHandler = null;
+            }
+            if (editorBridgeClient is not null)
+            {
+                try { await editorBridgeClient.DisposeAsync().ConfigureAwait(false); } catch { }
             }
             if (languageServiceClient is not null)
             {
@@ -2476,9 +2610,6 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 false, false, false, false, false, processId, PromptRecoveryTimeout,
                 LiveConsoleInterruptOutcome.NotAttempted, signalDelivered: false);
         }
-        CancellationTokenSource? activeCommandCancellation;
-        lock (_syncRoot) activeCommandCancellation = _activeCommandCancellation;
-        try { activeCommandCancellation?.Cancel(); } catch (ObjectDisposedException) { }
         var recovery = await StopConsoleForGenerationAsync(CurrentSessionGeneration).ConfigureAwait(false);
         var outcome = recovery.Outcome;
         return new LiveConsoleInterruptResult(
@@ -2503,7 +2634,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         _lifecycleGate.Dispose();
     }
 
-    private async Task<LiveConsoleCommandResult> ExecuteTextAsync(string text, Action<ExecutionOutputRecord> onOutput, Guid requestId, CancellationToken cancellationToken, string? completionMarkerPath = null)
+    private async Task<LiveConsoleCommandResult> ExecuteTextAsync(string text, Action<ExecutionOutputRecord> onOutput, Guid requestId, CancellationToken cancellationToken)
     {
         var started = DateTime.UtcNow;
         var generation = SessionGeneration;
@@ -2518,7 +2649,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 throw new InvalidOperationException("Interactive readiness is unverified. Use Reset Console before submitting another command.");
             if (_pendingInteractiveCommand is not null || _commandInProgress)
                 throw new InvalidOperationException("Another PSES interactive or editor operation already owns terminal admission.");
-            pending = new PendingInteractiveCommand(requestId, generation, processId, _promptReadyObservation, started, completionMarkerPath);
+            pending = new PendingInteractiveCommand(requestId, generation, processId, _promptReadyObservation, started);
             _pendingInteractiveCommand = pending;
             _commandInProgress = true;
         }
@@ -2546,7 +2677,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                     _conPty is { HasExited: false } currentOwner && currentOwner.ProcessId == processId && _generation == generation)
                 {
                     pending.Submitted = true;
-                    settled = pending.ObservedPromptSequence > pending.PromptSequenceAtAdmission && IsCompletionMarkerObserved(pending);
+                    settled = pending.ObservedPromptSequence > pending.PromptSequenceAtAdmission;
                 }
             }
             if (settled) CompleteInteractiveCommand(pending, pending.InterruptRequested ? LiveConsoleCommandOutcome.Interrupted : LiveConsoleCommandOutcome.PromptObserved, pending.ObservedPromptSequence);
@@ -2577,64 +2708,21 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
     }
 
-    private void ObserveNativeSelectionCompletionMarker(Guid requestId, int generation)
-    {
-        PendingInteractiveCommand? pending;
-        bool markerObserved;
-        bool markerSucceeded;
-        bool freshPromptObserved;
-        bool submitted;
-        lock (_syncRoot)
-        {
-            pending = _pendingInteractiveCommand;
-            if (pending is null || pending.RequestId != requestId || pending.Generation != generation || generation != _generation)
-                return;
-            markerObserved = TryReadCompletionMarker(pending.CompletionMarkerPath, out markerSucceeded);
-            freshPromptObserved = pending.ObservedPromptSequence > pending.PromptSequenceAtAdmission;
-            submitted = pending.Submitted;
-        }
-
-        if (!markerObserved) return;
-        DeveloperDiagnostics.LogInfo("PSES", "Native Run Selection completion marker observed for its admitted request.", new Dictionary<string, object?>
-        {
-            ["requestId"] = requestId,
-            ["sessionGeneration"] = generation,
-            ["processId"] = pending!.ProcessId,
-            ["markerStatus"] = markerSucceeded ? "OK" : "ERROR",
-            ["submissionConfirmed"] = submitted,
-            ["freshPromptAlreadyObserved"] = freshPromptObserved,
-            ["completionEvidenceReady"] = IsNativeSelectionCompletionReady(submitted, freshPromptObserved, markerObserved),
-            ["contentOmitted"] = true
-        });
-        if (!submitted) return;
-
-        // The marker notification closes the prompt-before-marker race. The same
-        // admission checks as prompt-driven completion still require the current
-        // request, process, generation, and a fresh prompt observation.
-        CompleteInteractiveCommand(pending,
-            pending.InterruptRequested ? LiveConsoleCommandOutcome.Interrupted : CompletionMarkerSucceeded(pending)
-                ? LiveConsoleCommandOutcome.PromptObserved : LiveConsoleCommandOutcome.ExecutionFailed,
-            pending.ObservedPromptSequence);
-    }
-
     private void CompleteInteractiveCommand(PendingInteractiveCommand pending, LiveConsoleCommandOutcome outcome, long promptSequence)
     {
         LiveConsoleCommandCompletion? completion = null;
         lock (_syncRoot)
         {
-            if (!IsNativeSelectionCompletionReady(pending.Submitted,
-                    pending.ObservedPromptSequence > pending.PromptSequenceAtAdmission,
-                    IsCompletionMarkerObserved(pending)) || !ReferenceEquals(_pendingInteractiveCommand, pending) ||
+            var freshPromptObserved = pending.ObservedPromptSequence > pending.PromptSequenceAtAdmission;
+            if (!pending.Submitted || !freshPromptObserved || !ReferenceEquals(_pendingInteractiveCommand, pending) ||
                 pending.Generation != _generation || _interactiveReadinessUnverified ||
                 _conPty is not { HasExited: false } owner || owner.ProcessId != pending.ProcessId)
+            {
                 return;
+            }
             _pendingInteractiveCommand = null;
             _commandInProgress = false;
-            var completionOutcome = pending.InterruptRequested
-                ? LiveConsoleCommandOutcome.Interrupted
-                : CompletionMarkerSucceeded(pending)
-                    ? outcome
-                    : LiveConsoleCommandOutcome.ExecutionFailed;
+            var completionOutcome = pending.InterruptRequested ? LiveConsoleCommandOutcome.Interrupted : outcome;
             completion = new LiveConsoleCommandCompletion(
                 pending.RequestId,
                 pending.Generation,
@@ -2644,6 +2732,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 DateTimeOffset.UtcNow);
         }
 
+        if (completion is null) return;
         DeveloperDiagnostics.LogInfo("PSES", "Direct console command reached a same-generation prompt observation.", new Dictionary<string, object?>
         {
             ["requestId"] = completion.RequestId,
@@ -2673,42 +2762,13 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
     }
 
-    private static bool IsCompletionMarkerObserved(PendingInteractiveCommand pending)
-        => pending.CompletionMarkerPath is null || TryReadCompletionMarker(pending.CompletionMarkerPath, out _);
-
-    internal static bool IsNativeSelectionCompletionReady(bool submitted, bool freshPromptObserved, bool requestMarkerObserved)
-        => submitted && freshPromptObserved && requestMarkerObserved;
-
-    private static bool CompletionMarkerSucceeded(PendingInteractiveCommand pending)
-        => pending.CompletionMarkerPath is null ||
-           (TryReadCompletionMarker(pending.CompletionMarkerPath, out var succeeded) && succeeded);
-
-    private static bool TryReadCompletionMarker(string? path, out bool succeeded)
-    {
-        succeeded = false;
-        if (path is null) return true;
-        try
-        {
-            var marker = File.ReadAllText(path).Trim();
-            if (string.Equals(marker, "OK", StringComparison.Ordinal))
-            {
-                succeeded = true;
-                return true;
-            }
-            return string.Equals(marker, "ERROR", StringComparison.Ordinal);
-        }
-        catch (IOException) { return false; }
-        catch (UnauthorizedAccessException) { return false; }
-    }
-
-    private sealed class PendingInteractiveCommand(Guid requestId, int generation, int processId, long promptSequenceAtAdmission, DateTime startedAt, string? completionMarkerPath)
+    private sealed class PendingInteractiveCommand(Guid requestId, int generation, int processId, long promptSequenceAtAdmission, DateTime startedAt)
     {
         public Guid RequestId { get; } = requestId;
         public int Generation { get; } = generation;
         public int ProcessId { get; } = processId;
         public long PromptSequenceAtAdmission { get; } = promptSequenceAtAdmission;
         public DateTime StartedAt { get; } = startedAt;
-        public string? CompletionMarkerPath { get; } = completionMarkerPath;
         public long ObservedPromptSequence { get; set; }
         public bool Submitted { get; set; }
         public bool InterruptRequested { get; set; }
@@ -2818,7 +2878,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 {
                     try { CursorVisibilityChanged?.Invoke(generation, cursorVisibility.Value); } catch { }
                 }
-                var promptBoundaryObserved = ObservePromptBoundary(text, generation);
+                var promptBoundaryObserved = ObservePromptBoundaryCore(text, generation, out var promptCandidateObserved);
                 Guid? activeRequestId;
                 bool cursorVisibleNow;
                 lock (_syncRoot)
@@ -2827,10 +2887,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                     cursorVisibleNow = _cursorVisible;
                 }
                 var frameDiagnostic = _promptFrameDiagnostics.Record(buffer.AsSpan(0, count), generation,
-                    activeRequestId, promptBoundaryObserved, promptBoundaryObserved,
-                    promptBoundaryObserved ? "accepted-by-existing-predicate" : "no-prompt-candidate",
+                    activeRequestId, promptCandidateObserved, promptBoundaryObserved,
+                    promptBoundaryObserved ? "accepted-by-existing-predicate" : promptCandidateObserved ? "candidate-rejected-by-boundary-predicate" : "no-prompt-candidate",
                     cursorVisibleNow, promptBoundaryObserved);
-                if (promptBoundaryObserved || frameDiagnostic.CsiSpannedFrames)
+                if (promptCandidateObserved || frameDiagnostic.CsiSpannedFrames)
                 {
                     DeveloperDiagnostics.LogInfo("PSES", "ConPTY prompt frame/control-sequence observation.", new Dictionary<string, object?>
                     {
@@ -2845,7 +2905,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                         ["pendingControlSequence"] = frameDiagnostic.PendingControlSequence,
                         ["sequenceTypes"] = frameDiagnostic.SequenceTypes,
                         ["controlHex"] = frameDiagnostic.ControlHex,
-                        ["promptCandidate"] = promptBoundaryObserved,
+                        ["promptCandidate"] = promptCandidateObserved,
                         ["promptAccepted"] = promptBoundaryObserved,
                         ["cursorVisible"] = cursorVisibleNow,
                         ["authoritative"] = false
@@ -2871,6 +2931,15 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                     promptRecoveryWaiter?.TrySetResult(promptObservation);
                     if (pendingInteractiveCommand is not null && pendingInteractiveCommand.Generation == generation)
                     {
+                        DeveloperDiagnostics.LogInfo("PSES", "Interactive request observed an accepted prompt boundary.", new Dictionary<string, object?>
+                        {
+                            ["requestId"] = pendingInteractiveCommand.RequestId,
+                            ["sessionGeneration"] = generation,
+                            ["promptObservationSequence"] = promptObservation,
+                            ["promptSequenceAtAdmission"] = pendingInteractiveCommand.PromptSequenceAtAdmission,
+                            ["submitted"] = pendingInteractiveCommand.Submitted,
+                            ["contentOmitted"] = true
+                        });
                         CompleteInteractiveCommand(
                             pendingInteractiveCommand,
                             pendingInteractiveCommand.InterruptRequested ? LiveConsoleCommandOutcome.Interrupted : LiveConsoleCommandOutcome.PromptObserved,
@@ -2897,11 +2966,15 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     }
 
     private bool ObservePromptBoundary(string text, int generation)
+        => ObservePromptBoundaryCore(text, generation, out _);
+
+    private bool ObservePromptBoundaryCore(string text, int generation, out bool promptCandidateObserved)
     {
         // Write-Progress can move the cursor to column one before PSReadLine
         // prints the next prompt without emitting a newline in the raw stream.
         lock (_syncRoot)
         {
+            promptCandidateObserved = false;
             if (generation != _generation || _shutdownRequested || _sessionFaulted)
             {
                 return false;
@@ -2915,9 +2988,13 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 .Replace('\r', '\n');
             _promptRecognitionBuffer = normalized.Length > 1024 ? normalized[^1024..] : normalized;
 
+            promptCandidateObserved = PromptCandidateRegex.IsMatch(_promptRecognitionBuffer);
             var boundaryObserved = PromptBoundaryRegex.IsMatch(_promptRecognitionBuffer);
             if (boundaryObserved)
             {
+                // The next read must not reclassify this accepted prompt as a
+                // fresh prompt for an interactive request admitted afterward.
+                _promptAnsiCarry = string.Empty;
                 _promptRecognitionBuffer = string.Empty;
             }
 
@@ -3060,6 +3137,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     {
         var configured = Environment.GetEnvironmentVariable("PS7SCRIPTDESK_PSES_ROOT");
         if (!string.IsNullOrWhiteSpace(configured)) return configured;
+        var packagedRoot = Path.Combine(AppContext.BaseDirectory, "PSES");
+        if (File.Exists(Path.Combine(packagedRoot, "PowerShellEditorServices", "Start-EditorServices.ps1"))) return packagedRoot;
         var extensions = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".vscode", "extensions");
         var candidates = Directory.Exists(extensions)
             ? Directory.GetDirectories(extensions, "ms-vscode.powershell-*")
@@ -3071,6 +3150,16 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             if (File.Exists(Path.Combine(root, "PowerShellEditorServices", "Start-EditorServices.ps1"))) return root;
         }
         throw new DirectoryNotFoundException("No installed PSES bundle was found. Set PS7SCRIPTDESK_PSES_ROOT to its modules directory.");
+    }
+
+    private static void ValidateEditorBridgeRuntime(string root)
+    {
+        if (!PsesEditorBridgeRuntimeContract.TryValidate(root, out var identity))
+            throw new InvalidOperationException("The selected PSES runtime does not match the private PSES 4.4.0 bridge protocol and assembly hash contract.");
+        DeveloperDiagnostics.LogInfo("PSESBridge", "PRIVATE_RUNTIME_IDENTITY_VERIFIED.", new Dictionary<string, object?>
+        {
+            ["identity"] = identity
+        });
     }
 
     internal static IReadOnlyList<string> BuildArguments(string root, string startScript, string sessionDetailsPath, string logDirectory, string hostVersion)
@@ -3595,18 +3684,37 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
     }
 
-    internal static string BuildNativeSelectionInvocation(string snapshotPath, string completionMarkerPath, Guid requestId)
+    private static string GetRunFileSnapshotDirectory(string? savedScriptPath, string? workingDirectory)
     {
-        var snapshot = QuotePowerShellSingleQuotedString(snapshotPath);
-        var marker = QuotePowerShellSingleQuotedString(completionMarkerPath);
-        var temporaryMarker = QuotePowerShellSingleQuotedString(completionMarkerPath + ".tmp");
-        var statusVariable = "__ps7sd_selection_success_" + requestId.ToString("N", CultureInfo.InvariantCulture);
-        var statusName = QuotePowerShellSingleQuotedString(statusVariable);
-        return "$" + statusVariable + " = $true; try { . " + snapshot + "; $" + statusVariable + " = $? } " +
-            "catch { $" + statusVariable + " = $false; throw } finally { " +
-            "[System.IO.File]::WriteAllText(" + temporaryMarker + ", $(if ($" + statusVariable + ") { 'OK' } else { 'ERROR' })); " +
-            "[System.IO.File]::Move(" + temporaryMarker + ", " + marker + ", $true); " +
-            "Remove-Variable -Name " + statusName + " -ErrorAction SilentlyContinue }";
+        if (!string.IsNullOrWhiteSpace(savedScriptPath))
+        {
+            try
+            {
+                var sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(savedScriptPath));
+                if (!string.IsNullOrWhiteSpace(sourceDirectory) && Directory.Exists(sourceDirectory))
+                    return sourceDirectory;
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                // The path is diagnostic context only when it cannot be normalized.
+                // The unsaved-file fallback below still preserves the console location.
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            try
+            {
+                var fullWorkingDirectory = Path.GetFullPath(workingDirectory);
+                if (Directory.Exists(fullWorkingDirectory)) return fullWorkingDirectory;
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                // Fall through to the app-owned private temp area.
+            }
+        }
+
+        return Path.Combine(Path.GetTempPath(), "PS7ScriptDesk", "EditorExecution");
     }
 
     internal static string BuildExperimentalDirectRunFileInvocation(string quotedSnapshotPath, string quotedStatusPath, string statusVariable)
@@ -3934,6 +4042,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         private readonly string[] _normalizedExpectedForms;
         private readonly int _retainedSuffixLength;
         private readonly bool _preservePromptPrefix;
+        private readonly bool _nativeSelectionLauncherEcho;
         private readonly StringBuilder _pending = new();
         private int _suppressedCharacters;
         private int _promptPrefixedSuppressedCharacters;
@@ -3958,6 +4067,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         {
             _requestId = requestId;
             _preservePromptPrefix = preservePromptPrefix;
+            _nativeSelectionLauncherEcho = scriptContents.Any(static value =>
+                value?.Contains(".launcher.ps1", StringComparison.OrdinalIgnoreCase) == true);
             _expectedForms = scriptContents
                 .Where(static value => !string.IsNullOrEmpty(value))
                 .SelectMany(static value =>
@@ -3987,6 +4098,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             var pendingText = _pending.ToString();
             if (_consumeEchoLineTerminator ||
                 IsAwaitingPromptPrefixedNormalizedEcho(pendingText) ||
+                IsAwaitingNativeSelectionLauncherEchoLine(pendingText) ||
                 IsAwaitingRequestScopedGeneratedInvocationEcho(pendingText))
             {
                 return string.Empty;
@@ -4050,25 +4162,38 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             // redraw emitted by the interactive PSES host.
             while (true)
             {
-                var promptPrefixedMatch = FindPromptPrefixedEcho(_pending.ToString());
+                var promptPrefixedMatch = _nativeSelectionLauncherEcho
+                    ? FindNativeSelectionLauncherEchoLine(_pending.ToString())
+                    : FindPromptPrefixedEcho(_pending.ToString());
+                var nativeLauncherLineMatch = _nativeSelectionLauncherEcho && promptPrefixedMatch.Length > 0;
                 if (promptPrefixedMatch.Length == 0)
                 {
                     var pendingText = _pending.ToString();
-                    var hasRequestMarker = ContainsRequestScopedGeneratedEchoMarker(pendingText);
-                    promptPrefixedMatch = FindPromptPrefixedNormalizedEcho(
-                        pendingText, allowPayloadBoundaryFallback: !hasRequestMarker);
-                    if (promptPrefixedMatch.Length == 0)
+                    if (!nativeLauncherLineMatch)
                     {
-                        promptPrefixedMatch = FindRequestScopedGeneratedEcho(pendingText);
+                        // The normalized payload-length fallback can cut a redrawn
+                        // launcher in half before its line ends. Wait for the owned
+                        // input line rather than releasing its trailing path into output.
+                        if (_nativeSelectionLauncherEcho && _candidateEchoObserved) return;
+                        var hasRequestMarker = ContainsRequestScopedGeneratedEchoMarker(pendingText);
+                        promptPrefixedMatch = FindPromptPrefixedNormalizedEcho(
+                            pendingText, allowPayloadBoundaryFallback: !hasRequestMarker);
                         if (promptPrefixedMatch.Length == 0)
                         {
-                            promptPrefixedMatch = FindRequestScopedGeneratedEchoLine(pendingText);
-                            if (promptPrefixedMatch.Length == 0) return;
+                            promptPrefixedMatch = FindRequestScopedGeneratedEcho(pendingText);
+                            if (promptPrefixedMatch.Length == 0)
+                            {
+                                promptPrefixedMatch = FindRequestScopedGeneratedEchoLine(pendingText);
+                                if (promptPrefixedMatch.Length == 0) return;
+                            }
                         }
                     }
                 }
 
-                var preservedControls = _preservePromptPrefix
+                // Cursor moves inside a native launcher redraw belong to the
+                // removed command. Keep the surrounding prompt and ConPTY line
+                // break so the next Read-Host prompt starts on its own row.
+                var preservedControls = _preservePromptPrefix && !_nativeSelectionLauncherEcho && !nativeLauncherLineMatch
                     ? ExtractAnsiControlSequences(_pending.ToString(promptPrefixedMatch.Index, promptPrefixedMatch.Length))
                     : string.Empty;
                 _pending.Remove(promptPrefixedMatch.Index, promptPrefixedMatch.Length);
@@ -4076,9 +4201,19 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 _suppressedCharacters += promptPrefixedMatch.Length;
                 _promptPrefixedSuppressedCharacters += promptPrefixedMatch.Length;
                 _matchedEchoCount++;
-                _consumeEchoLineTerminator = true;
+                _consumeEchoLineTerminator = !_nativeSelectionLauncherEcho;
                 _echoLineTerminatorIndex = promptPrefixedMatch.Index + preservedControls.Length;
-                ConsumeEchoLineTerminator();
+                if (_nativeSelectionLauncherEcho)
+                {
+                    DeveloperDiagnostics.LogInfo("PSES", "Native Run Selection launcher echo removed; ConPTY line terminator retained for terminal cursor continuity.",
+                        new Dictionary<string, object?>
+                        {
+                            ["requestId"] = _requestId,
+                            ["echoLength"] = promptPrefixedMatch.Length,
+                            ["contentOmitted"] = true
+                        });
+                }
+                else ConsumeEchoLineTerminator();
             }
         }
 
@@ -4118,6 +4253,67 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 if (pending[lineStart..tokenIndex].Contains('>')) return true;
             }
             return false;
+        }
+
+        private (int Index, int Length) FindNativeSelectionLauncherEchoLine(string pending)
+        {
+            if (!_nativeSelectionLauncherEcho || _requestId == Guid.Empty) return (0, 0);
+            var lineEnd = pending.IndexOf('\n');
+            if (lineEnd < 0) return (0, 0);
+            // The CR in CRLF belongs to terminal cursor movement, not the
+            // launcher command. Retain both bytes for the next visible prompt.
+            var commandEnd = lineEnd > 0 && pending[lineEnd - 1] == '\r' ? lineEnd - 1 : lineEnd;
+            var promptEnd = pending.IndexOf('>');
+            if (promptEnd < 0 || promptEnd >= commandEnd) return (0, 0);
+            var commandStart = promptEnd + 1;
+            while (commandStart < commandEnd && char.IsWhiteSpace(pending[commandStart])) commandStart++;
+            var commandLine = NormalizeEchoText(pending[commandStart..commandEnd]);
+            if (!commandLine.StartsWith(".'", StringComparison.Ordinal) &&
+                !commandLine.StartsWith("'", StringComparison.Ordinal)) return (0, 0);
+            var requestToken = _requestId.ToString("N", CultureInfo.InvariantCulture);
+            if (
+                !commandLine.Contains("selection-", StringComparison.OrdinalIgnoreCase) ||
+                !commandLine.Contains(".launcher.ps1", StringComparison.OrdinalIgnoreCase) ||
+                (!commandLine.Contains(requestToken[..8], StringComparison.OrdinalIgnoreCase) &&
+                 !commandLine.Contains(requestToken[^8..], StringComparison.OrdinalIgnoreCase))) return (0, 0);
+            // A PSReadLine redraw can begin with an absolute move and a prompt
+            // fragment (even just '>') before the owned launcher command. The
+            // move and fragment belong to that hidden redraw, not to user output.
+            // Only remove them after the request-specific launcher line matched.
+            var lineStart = pending.LastIndexOf('\n', Math.Max(0, promptEnd - 1));
+            lineStart = lineStart < 0 ? 0 : lineStart + 1;
+            var cursorMove = NativeLauncherCursorMoveRegex.Match(pending, lineStart, promptEnd - lineStart);
+            var removalStart = commandStart;
+            if (cursorMove.Success)
+            {
+                removalStart = string.IsNullOrWhiteSpace(AnsiSequenceRegex.Replace(
+                    pending[lineStart..cursorMove.Index], string.Empty))
+                    ? lineStart : cursorMove.Index;
+            }
+            DeveloperDiagnostics.LogInfo("PSES", "Native Run Selection PSReadLine launcher redraw removed at the owned input line boundary.",
+                new Dictionary<string, object?>
+                {
+                    ["requestId"] = _requestId,
+                    ["echoLineLength"] = commandEnd - commandStart,
+                    ["redrawPrefixLength"] = commandStart - removalStart,
+                    ["absoluteCursorMoveSuppressed"] = cursorMove.Success,
+                    ["contentOmitted"] = true
+                });
+            return (removalStart, commandEnd - removalStart);
+        }
+
+        private bool IsAwaitingNativeSelectionLauncherEchoLine(string pending)
+        {
+            if (!_nativeSelectionLauncherEcho || !_candidateEchoObserved || _matchedEchoCount > 0 || pending.Length > 4096)
+                return false;
+            var promptEnd = pending.IndexOf('>');
+            if (promptEnd < 0) return false;
+            var commandStart = promptEnd + 1;
+            while (commandStart < pending.Length && char.IsWhiteSpace(pending[commandStart])) commandStart++;
+            if (commandStart >= pending.Length || pending.IndexOf('\n', commandStart) >= 0) return false;
+            var normalized = NormalizeEchoText(pending[commandStart..]);
+            return normalized.StartsWith(".'", StringComparison.Ordinal) ||
+                normalized.StartsWith("'", StringComparison.Ordinal);
         }
 
         private (int Index, int Length) FindPromptPrefixedEcho(string pending)
@@ -4223,7 +4419,8 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 return false;
             }
 
-            return pending.Contains("__ps7sd_status_" + _requestId.ToString("N", CultureInfo.InvariantCulture), StringComparison.Ordinal);
+            return pending.Contains("__ps7sd_status_" + _requestId.ToString("N", CultureInfo.InvariantCulture), StringComparison.Ordinal) ||
+                pending.Contains("__ps7sd_selection_success_" + _requestId.ToString("N", CultureInfo.InvariantCulture), StringComparison.Ordinal);
         }
 
         private (int Index, int Length) FindRequestScopedGeneratedEcho(string pending)
@@ -4304,6 +4501,40 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         {
             if (!_preservePromptPrefix || _requestId == Guid.Empty) return (0, 0);
 
+            var selectionMarker = "__ps7sd_selection_success_" + _requestId.ToString("N", CultureInfo.InvariantCulture);
+            var selectionMarkerIndex = pending.IndexOf(selectionMarker, StringComparison.Ordinal);
+            if (selectionMarkerIndex > 0)
+            {
+                var selectionPromptIndex = pending.LastIndexOf('>', selectionMarkerIndex - 1);
+                var selectionInvocationStart = selectionMarkerIndex - 1;
+                if (selectionPromptIndex >= 0 && pending[selectionInvocationStart] == '$')
+                {
+                    var selectionLineEnd = pending.IndexOf('\n', selectionMarkerIndex + selectionMarker.Length);
+                    if (selectionLineEnd >= 0)
+                    {
+                        var selectionCandidate = pending[selectionInvocationStart..selectionLineEnd];
+                        var normalized = NormalizeEchoText(selectionCandidate);
+                        var hasNativeSelectionStructure =
+                            normalized.Contains("$" + selectionMarker + "=$true;try{.", StringComparison.Ordinal) &&
+                            normalized.Contains(".ps1", StringComparison.OrdinalIgnoreCase) &&
+                            normalized.Contains(".completed.tmp", StringComparison.OrdinalIgnoreCase) &&
+                            normalized.Contains("[System.IO.File]::WriteAllText(", StringComparison.Ordinal) &&
+                            normalized.Contains("[System.IO.File]::Move(", StringComparison.Ordinal) &&
+                            normalized.Contains("Remove-Variable-Name'" + selectionMarker + "'-ErrorActionSilentlyContinue", StringComparison.Ordinal);
+                        if (hasNativeSelectionStructure)
+                        {
+                            DeveloperDiagnostics.LogInfo("PSES", "Request-scoped native selection launcher echo recovered at its submitted line boundary.", new Dictionary<string, object?>
+                            {
+                                ["requestId"] = _requestId,
+                                ["candidateLength"] = selectionCandidate.Length,
+                                ["contentOmitted"] = true
+                            });
+                            return (selectionInvocationStart, selectionLineEnd - selectionInvocationStart);
+                        }
+                    }
+                }
+            }
+
             // A PSReadLine redraw can duplicate printable text inside the cleanup
             // tail, defeating both exact and normalized matching. The generated
             // direct Run File command is a single submitted line. Only recover a
@@ -4360,12 +4591,23 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 return false;
             }
 
-            // Direct Run File's generated command carries its request ID in the
-            // private status variable. PSReadLine can redraw the submitted line
+            // Generated commands carry their request ID in a private variable.
+            // PSReadLine can redraw the submitted line
             // with cursor controls or partial chunks that temporarily break the
             // normalized-prefix check above. Once the prompt and this exact
             // request marker are both present, keep the candidate intact until
             // its line terminator lets the normal exact echo matcher decide.
+            var selectionMarker = "__ps7sd_selection_success_" + _requestId.ToString("N", CultureInfo.InvariantCulture);
+            var selectionMarkerIndex = pending.IndexOf(selectionMarker, StringComparison.Ordinal);
+            if (selectionMarkerIndex > 0 && pending[selectionMarkerIndex - 1] == '$')
+            {
+                var selectionPromptIndex = pending.LastIndexOf('>', selectionMarkerIndex - 1);
+                if (selectionPromptIndex >= 0 && pending.IndexOfAny(['\r', '\n'], selectionMarkerIndex + selectionMarker.Length) < 0)
+                {
+                    return true;
+                }
+            }
+
             var requestMarker = "__ps7sd_status_" + _requestId.ToString("N", CultureInfo.InvariantCulture);
             var markerIndex = pending.IndexOf(requestMarker, StringComparison.Ordinal);
             if (markerIndex < 0)

@@ -67,16 +67,36 @@ public sealed class StructuredPromptReconciliationTests
         var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.UI", "ViewModels", "MainWindowViewModel.cs");
 
         var coordinatorCompletion = source.IndexOf("structuredRequestCompleted = _structuredPromptReadinessSource is not null &&", StringComparison.Ordinal);
-        var adapterCompletion = source.IndexOf("structuredRequestCompleted = !result.RecoveryRequired", StringComparison.Ordinal);
         var recoveryDisposition = source.IndexOf("if (result.RecoveryRequired)", StringComparison.Ordinal);
         var unknownDisposition = source.IndexOf("else if (result.Status == EditorExecutionStatus.Unknown)", StringComparison.Ordinal);
 
-        Assert.True(coordinatorCompletion >= 0 && adapterCompletion > coordinatorCompletion);
+        Assert.True(coordinatorCompletion >= 0);
         Assert.Contains("!result.RecoveryRequired", source[coordinatorCompletion..source.IndexOf(';', coordinatorCompletion)], StringComparison.Ordinal);
-        Assert.Contains("result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed", source[coordinatorCompletion..source.IndexOf(';', coordinatorCompletion)], StringComparison.Ordinal);
+        Assert.Contains("result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Cancelled or EditorExecutionStatus.Failed", source[coordinatorCompletion..source.IndexOf(';', coordinatorCompletion)], StringComparison.Ordinal);
         Assert.Contains("_activeCoordinatorExecutionRequestId == observation.RequestId", source, StringComparison.Ordinal);
         Assert.True(recoveryDisposition >= 0 && unknownDisposition > recoveryDisposition);
         Assert.Contains("runtimeExecutionLease?.MarkRecoveryRequired(", source[recoveryDisposition..unknownDisposition], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BridgeSettlementsPublishIdentityBoundReadinessForPostLeaseReconciliation()
+    {
+        var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.PowerShell", "Services", "PsesOwnedInteractiveSessionService.cs");
+        var helperStart = source.IndexOf("private void NotifyVerifiedBridgeCompletionReadiness(", StringComparison.Ordinal);
+        var helperEnd = source.IndexOf("public async Task<bool> StopConsoleAsync", helperStart, StringComparison.Ordinal);
+        Assert.True(helperStart >= 0 && helperEnd > helperStart);
+        var helper = source[helperStart..helperEnd];
+
+        Assert.Contains("BridgeExecutionStatus.Completed or BridgeExecutionStatus.Cancelled or BridgeExecutionStatus.Failed", helper, StringComparison.Ordinal);
+        Assert.Contains("sessionGeneration != _generation", helper, StringComparison.Ordinal);
+        Assert.Contains("_activeStructuredRequestId != requestId", helper, StringComparison.Ordinal);
+        Assert.Contains("_conPty is not { HasExited: false } process", helper, StringComparison.Ordinal);
+        Assert.Contains("new StructuredPromptReadyObservation(", helper, StringComparison.Ordinal);
+
+        var selection = source[source.IndexOf("private async Task<AuthoritativeStructuredExecutionResult> ExecuteBridgeRunSelectionAsync", StringComparison.Ordinal)..];
+        var file = source[source.IndexOf("private async Task<AuthoritativeStructuredExecutionResult> ExecuteBridgeRunFileAsync", StringComparison.Ordinal)..];
+        Assert.Contains("NotifyVerifiedBridgeCompletionReadiness(requestId, sessionGeneration, result.Status);", selection, StringComparison.Ordinal);
+        Assert.Contains("NotifyVerifiedBridgeCompletionReadiness(requestId, sessionGeneration, result.Status);", file, StringComparison.Ordinal);
     }
 
     [Fact]

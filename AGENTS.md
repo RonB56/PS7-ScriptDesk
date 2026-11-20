@@ -1,271 +1,97 @@
 # PS7 ScriptDesk — Codex Repository Instructions
 
-## 1. Product identity and technical baseline
+## 1. Product and scope
 
-This repository builds **PS7 ScriptDesk**. The internal code/project-safe root name is `PS7ScriptDesk`.
+This repository builds **PS7 ScriptDesk** (`PS7ScriptDesk` internally), a Windows 11 WPF application for editing, running, and debugging PowerShell 7.x scripts. It uses .NET 10; inspect the relevant `.csproj` for the exact target framework. Preserve the current layered architecture, packaging model, public contracts, and major dependencies unless the owner explicitly authorizes a change.
 
-PS7 ScriptDesk is a Windows desktop application for opening, editing, running, and debugging user-selected PowerShell 7.x scripts.
+**Operating principle:** inspect the current source and relevant call paths, then make the smallest *complete* change that meets the requested outcome. Current source and verified task evidence take precedence over historical reports or assumptions. Missing documentation is not a blocker: do not repeatedly search for it or invent replacements.
 
-Assume the established product baseline is:
+## 2. Ownership, safety, and repository boundaries
 
-- Windows 11
-- .NET 8
-- WPF
-- PowerShell 7.x
-- Existing layered architecture and repository conventions
+- **Never run Git commands or use Git tooling.** The owner performs all Git operations in GitHub Desktop.
+- Preserve existing and unrelated user changes. Never reset, revert, discard, broadly reformat, rename, or remove behavior without authorization.
+- Do not make opportunistic refactors, architectural rewrites, new dependency additions, project/namespace/API renames, or unrelated UI changes.
+- Prefer existing abstractions, commands, services, styles, and tests when sound; avoid duplicate execution paths, state owners, and services.
+- Do not modify generated outputs, caches, third-party code, or package artifacts unless explicitly required and justified.
+- Before editing a file, inspect its current contents and the directly affected entry points. Report material uncertainty instead of guessing.
+- Never expose secrets or user script contents in reports, diagnostics, test artifacts, or public exports.
+- If an unrelated pre-existing failure is encountered, record it accurately and continue only where safe.
 
-Do not change the product name, internal root name, target framework, UI framework, packaging model, or major dependencies unless the user explicitly requests it.
+## 3. Task modes and authority
 
-## 2. Primary operating rule
+Follow the mode stated in the task. Otherwise infer from the request:
 
-**Inspect first, understand the current behavior, then make the smallest complete change that satisfies the request.**
+- **Investigate / audit / plan / review-only:** inspect and report; **do not modify files** or repair defects without authorization. Identify evidence, root cause versus hypothesis, affected files, risk, and observable acceptance criteria.
+- **Implement / fix:** inspect current behavior, implement the requested end-to-end change across affected layers, and validate it. No placeholders, mock-only fixes, or TODO-only implementations.
+- **Review and repair / harden:** review affected paths and acceptance criteria; fix only defects covered by the expressly approved repair scope. A request to review alone is read-only.
 
-Before editing code, Codex must:
+Prefer one cohesive implementation, not multiple speculative passes. When broader changes are essential, explain why a narrower fix would be incorrect or unsafe.
 
-1. Read this file.
-2. Check the relevant supporting documents in `docs/`.
-3. Inspect the current implementation and all directly related call paths.
-4. Check the working tree for existing user changes.
-5. Identify fragile areas, dependencies, and likely regression risks.
-6. State any material uncertainty instead of guessing.
+## 4. Console/editor/debugger architecture — enduring contract
 
-Do not spend time rediscovering the entire repository when the supporting documentation already answers the question.
+The goal is a native-feeling, independent PowerShell console, with clear responsibilities:
 
-## 3. Preserve user work and repository integrity
+- **Editor:** owns documents, text, selection, and editor UI. It submits Run File, Run Selection, and Debug requests; it does not synthesize console prompts, cursor placement, or interactive input echo.
+- **PowerShell/PSES/ConPTY:** owns the shared interactive session, execution state, working directory, functions/variables, native application input/output, `Read-Host`, interruption, and recovery.
+- **Terminal renderer (xterm):** renders the correctly ordered VT stream. Do not strip terminal-control bytes by naive substring filtering or break screen-state semantics.
+- **Debugger:** preserves distinct debugging semantics, breakpoint behavior, stepping, and call-stack/variable state. Do not conflate Run and Debug.
 
-- Never discard, overwrite, revert, reset, or reformat unrelated user changes.
-- Never use destructive Git operations unless the user explicitly requests them.
-- Do not modify generated files, build outputs, package outputs, caches, or third-party source unless required and explicitly justified.
-- Avoid broad formatting-only changes.
-- Keep diffs focused on the requested behavior.
-- Do not rename projects, namespaces, folders, assemblies, packages, public APIs, or persisted settings without explicit approval.
-- Do not introduce a new dependency when the existing platform or repository already provides a reasonable solution.
-- Do not remove existing behavior merely because it appears unused. Verify first.
+**Migration state is not permanent policy.** Before changing a path, identify the *currently active* production routing, retired paths, experimental gates, and remaining acceptance gaps in source and recent applicable evidence. Do not revive a retired legacy path, silently promote an experimental one, or create a separate PowerShell session to bypass an issue.
 
-If unrelated repository damage or a pre-existing build failure is discovered, report it clearly and continue only where safe.
+For execution, input, terminal, or debugging changes, trace request admission, process/session lifecycle, streams, VT output, cancellation, prompt/readiness signaling, teardown, and UI state restoration. Preserve execution paths and temporary-file semantics; prevent duplicate output, hidden command echo, races, and lost input. Check recovery after failure or interruption, repeated invocation, and session continuity.
 
-## 4. Architecture and scope discipline
+## 5. WPF, editor, and behavioral correctness
 
-Preserve the current layered architecture unless the user explicitly asks for a redesign.
+- Trace all relevant entry points: toolbar, menu, keyboard, context menu, programmatic requests, settings, and startup restoration.
+- Preserve keyboard/focus behavior, accessibility semantics, binding/command routing, and persisted preferences.
+- Reuse existing templates, resource dictionaries, and theme conventions. Consider resize, DPI scaling, and relevant enabled/disabled/error states; avoid unnecessary hard-coded dimensions.
+- Never block the UI thread. Respect dispatcher, cancellation, async, and process-lifecycle ownership.
+- Consider success, failure, cancellation, timeout, re-entry, shutdown, null state, disposal/unsubscription, and ordering races where applicable.
+- Do not hide exceptions silently or change behavior outside the stated acceptance criteria.
+- Screenshots and explicit measurements are requirements for the affected UI; avoid unrelated visual changes.
 
-Prefer:
+## 6. Developer diagnostics — proportionate and safe
 
-- Targeted fixes over broad refactors
-- Existing services, abstractions, commands, styles, and resource dictionaries over parallel replacements
-- Cohesive changes that fully implement one requested outcome
-- Reuse of existing patterns when those patterns are sound
+For behavior or state-machine changes, **consider** whether existing diagnostics need to be updated or stale events removed. Add diagnostic events where they materially help explain faults, important transitions, rejected actions, lifecycle events, or race/timing behavior. Use correlation IDs and durations for multi-stage asynchronous operations when useful. Avoid routine per-character, per-frame, and entry/exit spam.
 
-Avoid:
+- Logging is best-effort: it must not block, crash, alter behavior, or materially slow normal operation. Disabled-mode overhead must be negligible.
+- Never log full scripts, raw terminal buffers, complete selections/commands, passwords, tokens, private keys, or environment dumps. Prefer lengths, counts, hashes, and carefully sanitized bounded metadata; omit content previews when unsafe.
+- Keep developer diagnostics separate from normal application logs, under `%LOCALAPPDATA%\PS7ScriptDesk\DeveloperDebugging\` where applicable.
+- In the final response state **either** `Developer diagnostics updated: <reason>` **or** `Developer diagnostics not changed: <reason>`.
 
-- Opportunistic cleanup outside the task
-- Large rewrites to solve a local problem
-- New architectural layers without a demonstrated need
-- Moving logic into code-behind when the current design places it elsewhere
-- Duplicating state, services, styles, or command paths
-- Silent behavior changes outside the acceptance criteria
+## 7. Build, testing, and acceptance — bounded by risk
 
-When a broader change is genuinely required, explain why the narrow approach is unsafe or incomplete before proceeding.
+Solution: `PS7ScriptDesk.slnx` (verify actual projects/configuration). Use the existing Windows/.NET 10/PowerShell 7 toolchain; do not alter machine-wide tooling or security settings without approval.
 
-## 5. Work phases
+1. Review changed files for accidental edits; build the smallest appropriate affected target. Use a solution-wide build only when warranted.
+2. Run focused tests relevant to the change. Prefer existing **bounded production-service acceptance runners** for console/session behavior; avoid unnecessary new harnesses and duplicate suites.
+3. For VSTest/testhost or MSBuild infrastructure stalls, record the exact failure, perform **at most one** targeted diagnostic if justified, then stop that route and report the blocker. Do not repeatedly retry, weaken tests, or present a workaround as a platform repair.
+4. Re-run only the failing or directly affected checks after a concrete fix; reserve broad regression for requested or high-risk changes.
+5. State precise coverage: source inspection, compilation, synthetic/unit test, live production-service test, and **owner-operated WPF GUI UAT are different levels**. Do not claim GUI acceptance from service-level results or use GUI automation.
+6. Check newly introduced warnings and state which acceptance criteria passed, failed, or remain unverified. A successful build alone does not prove runtime behavior.
 
-Use the phase named in the user prompt. When no phase is named, infer the safest applicable phase.
+For interactive terminal changes, check Run/Interrupt restoration **without an extra Enter**, prompt/cursor placement, echoed input and Backspace for `Read-Host`, native input/output, and continuity of the shared session. For async/lifecycle changes, test relevant cancellation, repeat, failure/recovery, shutdown, and UI-thread cases.
 
-### Phase A — Investigation only
+## 8. Documentation, evidence, and file placement
 
-Use when the user asks Codex to inspect, diagnose, map, or plan.
+- Read only pertinent, existing guidance: this file, directly affected source/tests, applicable current roadmap, and latest relevant task evidence when available. Search symbols/callers before opening large files. Do not repeatedly summarize project history.
+- Update documentation only when the change affects documented architecture, build/release, diagnostics, workflows, or developer instructions. Do not create missing historical documents as placeholders.
+- **Never place task reports, logs, temporary test sessions, captures, or evidence in the repository root.** Put task-local artifacts in one unique subfolder under:
 
-- Do not edit files.
-- Trace the complete relevant behavior.
-- Identify the files, classes, commands, events, services, settings, and resources involved.
-- Explain current behavior based on evidence from the repository.
-- Identify likely causes, risks, and unknowns.
-- Propose the smallest safe implementation.
-- List the files expected to change.
-- Define observable acceptance criteria.
+  `C:\Users\rbarn\source\repos\PowerShellStudio\docs\LocalOnly_NotForGitHub\Codex_Work\<TASK-ID>`
 
-### Phase B — Implementation
+- Keep production changes and checked-in tests within their normal project directories. Keep user data, private logs, secrets, and large evidence out of public source exports.
+- Generate only evidence needed to substantiate the task. A brief ordinary fix requires a concise final response, **not** a mandatory report file. For architecture migrations, investigations, regressions, or tasks requesting evidence, prefer one consolidated `FINAL_REPORT.md` in the private task folder, plus only indispensable raw outputs.
 
-Use when the user explicitly asks Codex to make the change.
+## 9. Efficient execution and final response
 
-- Re-inspect the relevant implementation before editing.
-- Implement the complete requested behavior; do not leave placeholders, TODO-only stubs, mock logic, or half-connected UI.
-- Keep the change narrow but include every layer required for correctness.
-- Update diagnostics, settings, resources, tests, and documentation when affected.
-- Build and test before declaring completion.
+Keep tool use and context proportional to the question: targeted searches, bounded tests, one coherent implementation, no repeated large suites, no redundant reports. Ask questions only when a consequential decision cannot be resolved from source, evidence, or the task's scope. Do not interrupt work to request information already available.
 
-### Phase C — Review and hardening
+The final response should briefly identify:
 
-Use when the user asks for review, regression analysis, or final validation.
+- Mode and what changed (exact file paths, or **none** for read-only tasks).
+- Acceptance criteria and **actual** build/test commands with outcomes, including unrun checks.
+- Diagnostics updated/not changed, with reason (as specified above).
+- Remaining risks and any specific owner GUI UAT needed.
 
-- Review the full diff and affected call paths.
-- Look for regressions, race conditions, UI-thread violations, stale diagnostics, dead code, null-state failures, disposal issues, cancellation defects, and inconsistent state transitions.
-- Verify every acceptance criterion.
-- Fix defects within the approved scope.
-- Do not redesign working code merely to express a preference.
-
-## 6. WPF and visual-change rules
-
-For any UI or appearance change:
-
-- Inspect existing styles, templates, resource dictionaries, layout conventions, and theme handling before adding new ones.
-- Preserve keyboard navigation, focus behavior, tab order, access keys, and accessibility semantics.
-- Preserve behavior at common DPI scaling levels and when the window is resized.
-- Avoid hard-coded dimensions unless the requested design or existing convention requires them.
-- Prefer shared resources for genuinely reusable values; do not create a global resource for a one-off value.
-- Keep visual changes consistent with the rest of PS7 ScriptDesk unless the user explicitly requests a broader redesign.
-- Add or update tooltips where a new or changed control is not self-explanatory.
-- Do not solve a visual problem by breaking command routing, bindings, automation IDs, or existing interaction behavior.
-- Check both enabled and disabled states, hover/focus states, selected states, empty states, error states, and narrow-window behavior when relevant.
-
-When screenshots or explicit measurements are provided, treat them as requirements. When the request is subjective, translate it into concrete layout and behavior decisions and identify assumptions.
-
-## 7. Behavior-change rules
-
-For any behavioral change:
-
-- Trace all entry points, not only the most obvious button or handler.
-- Identify keyboard shortcuts, menus, toolbar commands, context menus, startup restoration, settings, and automated paths that may invoke the same behavior.
-- Preserve unrelated behavior and persisted user preferences.
-- Define what happens during success, failure, cancellation, timeout, repeated invocation, shutdown, and re-entry when applicable.
-- Avoid blocking the UI thread.
-- Use existing cancellation, dispatcher, async, command, and process-lifecycle patterns where available.
-- Ensure state exposed to the UI remains internally consistent.
-- Do not suppress exceptions without appropriate handling and diagnostics.
-
-## 8. PowerShell execution, terminal, and debugger safeguards
-
-These are fragile, stateful subsystems. Changes require end-to-end inspection.
-
-When touching execution, terminal hosting, live input/output, script snapshots, prompt detection, sentinels, breakpoints, stepping, variables, call stack, run/stop/continue, or process management:
-
-- Read `docs/DEBUGGER_AND_TERMINAL.md` and `docs/KNOWN_FRAGILE_AREAS.md` first.
-- Trace process creation, stream handling, cancellation, teardown, and UI state transitions.
-- Preserve script path and temporary-file semantics.
-- Preserve output ordering and avoid duplicate output.
-- Avoid races between process exit, stream completion, cancellation, and UI cleanup.
-- Verify repeated runs and recovery after a failed or interrupted run.
-- Treat diagnostics updates as required unless there is a clear, documented reason otherwise.
-
-## 9. Developer diagnostics/debugging maintenance contract
-
-The developer diagnostics system is part of the application's maintainability contract. Every code addition, behavior change, workflow change, and bug fix must consider whether developer diagnostics need to be added, updated, corrected, or removed.
-
-Diagnostics normally require updates when the task touches:
-
-- User actions, menu handlers, toolbar handlers, keyboard shortcuts, or command routing
-- Debugging, breakpoints, stepping, continue/stop behavior, debugger state, prompts, processes, variables, or call stack logic
-- Terminal hosting, live console input/output, prompt detection, command execution, sentinels, run script, run selection, temporary snapshots, or process lifecycle
-- Editor actions, active-document changes, dirty state, save/open/close behavior, selection/caret behavior, diagnostics, hover/help, completion, metadata warmup, or command catalog loading
-- Settings load/save, runtime toggles, startup, shutdown, background services, file I/O, cleanup, retention, packaging, install helpers, or error handling
-- Any async workflow, background task, state machine, retry path, cancellation path, timeout path, or recovery path
-
-Diagnostics should be detailed enough to reconstruct what happened in order. Add or update logs for the following where useful:
-
-- Method or event-handler entry and exit
-- User action accepted or rejected, including the reason
-- Important decision branches
-- Relevant state before and after a change
-- State transitions
-- Operation or correlation IDs for actions spanning classes or async calls
-- Elapsed time for operations that can block, race, fail, or feel slow
-- File paths involved in execution or debugging, when safe
-- Counts, lengths, hashes, and capped previews instead of full user content
-- Exceptions with enough surrounding context to diagnose the failure
-
-When behavior changes, update or remove stale messages so logs do not become misleading.
-
-### Diagnostics safety
-
-- Never log full scripts, full terminal buffers, passwords, tokens, API keys, cookies, certificates, private keys, authorization headers, or full environment dumps.
-- For script, command, terminal, or selected text, log only length, line count, a hash when useful, and a sanitized capped preview.
-- Logging must be best-effort and must never crash, freeze, or materially alter application behavior.
-- When developer diagnostics are disabled, overhead must remain minimal.
-- Developer debugging logs must remain separate from normal application logs, preferably under `%LOCALAPPDATA%\PS7ScriptDesk\DeveloperDebugging\`.
-
-The final response must contain exactly one of these statements, completed with a specific reason:
-
-- `Developer diagnostics updated: <brief reason>`
-- `Developer diagnostics not changed: <brief reason why the affected behavior does not require it>`
-
-If the task modifies debugger, terminal, execution, editor metadata, settings, startup, or an async state machine, assume diagnostics need updating unless clearly proven otherwise.
-
-## 10. Testing and validation requirements
-
-Before reporting an implementation complete:
-
-1. Review the final diff for accidental or unrelated changes.
-2. Build the appropriate project or full solution using the documented repository command.
-3. Run relevant automated tests when present.
-4. Run targeted validation for the changed behavior when the environment allows it.
-5. Confirm every acceptance criterion individually.
-6. Check for new warnings introduced by the change.
-7. Report any validation that could not be performed and why.
-
-Do not claim that a behavior works merely because the code compiles.
-
-For async, debugger, terminal, editor, settings, or lifecycle changes, explicitly consider:
-
-- Repeated invocation
-- Cancellation or interruption
-- Failure and recovery
-- Application shutdown during the operation
-- Null or missing state
-- Timing and ordering races
-- UI-thread safety
-- Disposal and event unsubscription
-
-Do not weaken tests or delete failing tests to make the build pass unless the user explicitly requests a test change and the revised expectation is correct.
-
-## 11. Documentation maintenance
-
-Update documentation when the change alters:
-
-- Architecture or major ownership boundaries
-- Build, packaging, installation, or release steps
-- Debugger or terminal behavior
-- Known fragile areas
-- User-visible workflows that existing documentation describes
-- The Codex workflow itself
-
-Do not rewrite unrelated documentation. Keep changes factual and synchronized with the implementation.
-
-## 12. Supporting documents
-
-Use these documents before re-deriving repository knowledge:
-
-- `docs/CODEBASE_OVERVIEW.md`
-- `docs/BUILD_AND_PACKAGING.md`
-- `docs/DEBUGGER_AND_TERMINAL.md`
-- `docs/RELEASE_READINESS.md`
-- `docs/KNOWN_FRAGILE_AREAS.md`
-- `docs/CODEX_WORKFLOW.md`
-
-If a listed document is missing or stale, report that fact rather than inventing its contents.
-
-## 13. Efficient Codex behavior
-
-To conserve context and usage while maintaining quality:
-
-- Read only the files needed for the current feature after consulting the repository docs.
-- Search for symbols and call sites before opening large files in full.
-- Do not repeatedly restate repository history or these instructions.
-- Do not paste full source files into the final response.
-- Keep progress updates focused on findings, decisions, blockers, and validation.
-- Prefer one cohesive implementation over multiple partial passes.
-- Ask no question that can be answered by inspecting the repository.
-- When a requirement is genuinely ambiguous, make the safest narrow assumption, state it, and keep the implementation reversible.
-
-## 14. Required final response format
-
-Every Codex task must end with a concise report containing:
-
-1. **Phase attempted**
-2. **Exact files changed** — or `None` for investigation-only work
-3. **Action summary**
-4. **Acceptance criteria status**
-5. **Developer diagnostics updated or not changed, with reason**
-6. **Build/test result**, including command and outcome
-7. **Remaining risks or manual tests needed**
-
-Do not paste full files in the final summary unless the user explicitly requests them.
-Do not claim completion when required validation failed or was not performed; describe the actual state precisely.
+Do not paste full source files or declare completion when material acceptance remains unverified. Report partial completion candidly.
