@@ -395,56 +395,6 @@ public sealed class TerminalBrokerWave2RendererIntegrationTests
             bridge.Submit(Envelope(1, TerminalOutputSource.StructuredEditor, Guid.NewGuid(), 1, 1, 1, "##PSSTUDIO_EXEC_DONE_x")));
     }
 
-    [Theory]
-    [InlineData("cmd /c echo hello")]
-    [InlineData("dotnet --version")]
-    public async Task Broker_CapturesNativeOutputAsVisibleStructuredOutput(string script)
-    {
-        await using var broker = await PersistentPowerShellSessionBroker.CreateAsync("wave2-native");
-
-        var result = await broker.ExecuteAsync(Request(script));
-
-        Assert.Equal(EditorExecutionStatus.Completed, result.Status);
-        Assert.NotEmpty(result.Outputs);
-        Assert.DoesNotContain(result.Outputs, item => TerminalOutputMultiplexer.ContainsPrivateProtocol(item.Payload));
-    }
-
-    [Fact]
-    public async Task Broker_WriteHostReachesVisibleInformationOutput()
-    {
-        await using var broker = await PersistentPowerShellSessionBroker.CreateAsync("wave2-host");
-
-        var result = await broker.ExecuteAsync(Request("Write-Host 'host-output'"));
-
-        Assert.Contains(result.Outputs, item =>
-            item.StreamKind == EditorOutputStreamKind.Information &&
-            item.Payload.Contains("host-output", StringComparison.OrdinalIgnoreCase));
-    }
-
-    [Fact]
-    public async Task Broker_ReadHostDoesNotFallBackToInteractiveTerminalInput()
-    {
-        await using var broker = await PersistentPowerShellSessionBroker.CreateAsync("wave2-readhost");
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
-
-        var result = await broker.ExecuteAsync(Request("Read-Host 'value'"), cancellation.Token);
-
-        Assert.True(result.Status is EditorExecutionStatus.Rejected or EditorExecutionStatus.Cancelled or EditorExecutionStatus.Failed);
-    }
-
-    [Fact]
-    public async Task Broker_ExitIsContainedAsStructuredFailureOrRecoveryState()
-    {
-        await using var broker = await PersistentPowerShellSessionBroker.CreateAsync("wave2-exit");
-
-        var result = await broker.ExecuteAsync(Request("exit"));
-        var later = await broker.ExecuteAsync(Request("'after-exit'", sessionGeneration: broker.Snapshot.SessionGeneration));
-
-        Assert.True(result.Status is EditorExecutionStatus.Completed or EditorExecutionStatus.Failed);
-        Assert.NotEqual(PersistentSessionLifecycle.Disposed, broker.Snapshot.Lifecycle);
-        Assert.NotEqual(EditorExecutionStatus.Rejected, later.Status);
-    }
-
     [Fact]
     public void MainWindowViewModel_SourceRoutesStructuredRunBehindFeatureGateOnly()
     {
@@ -568,13 +518,6 @@ public sealed class TerminalBrokerWave2RendererIntegrationTests
             EditorOutputStreamKind.VirtualTerminal,
             payload,
             DateTimeOffset.UtcNow);
-
-    private static EditorExecutionRequest Request(string script, int sessionGeneration = 1) => new(
-        Guid.NewGuid(),
-        sessionGeneration,
-        EditorExecutionMode.ScriptCall,
-        "Wave 2 test.ps1",
-        script);
 
     private static string ReadRepositoryFile(params string[] relativeSegments)
     {

@@ -5,7 +5,7 @@ using PS7ScriptDesk.Application.Interfaces;
 namespace PS7ScriptDesk.Application.Diagnostics;
 
 /// <summary>
-/// Opt-in sink for Phase 1 controller correlation. It records IDs and state only;
+/// Opt-in sink for terminal controller correlation. It records IDs and state only;
 /// it never records script, command, or terminal content.
 /// </summary>
 public static class TerminalControllerDiagnostics

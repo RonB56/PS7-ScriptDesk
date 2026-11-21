@@ -320,8 +320,6 @@ namespace PS7ScriptDesk.Shell
         private readonly AdministratorModeBannerState _administratorModeBannerState;
         private bool _allowWindowClose;
         private bool _terminalShutdownInProgress;
-        private CancellationTokenSource? _phase2BProofCancellation;
-        private Task? _phase2BProofTask;
         private Task? _deferredInitializationTask;
         private bool _shellLayoutApplied;
         private double _lastKnownExplorerWidth = 220;
@@ -1873,7 +1871,6 @@ namespace PS7ScriptDesk.Shell
                     TerminalConsole.ApplyAppTheme(_themeService.CurrentTheme);
                     ViewModel?.NotifyTerminalRendererReady();
                     RequestConsoleWarmStart("TerminalReadyFallback");
-                    StartPhase2BProofHarnessIfEnabled();
                 };
 
                 AttachTerminalObserver();
@@ -11967,115 +11964,11 @@ namespace PS7ScriptDesk.Shell
             _metadataToastDismissal.Dispose();
             _metadataInitializationWindow?.Close();
             _metadataInitializationWindow = null;
-            _phase2BProofCancellation?.Cancel();
-            _phase2BProofCancellation?.Dispose();
-            _phase2BProofCancellation = null;
             _terminalOutputObservationSubscription.Dispose();
             _terminalOutputObservationHub.Dispose();
             _terminalObserverLifetime?.Dispose();
             _terminalObserverLifetime = null;
             _uiScaleService.ScaleChanged -= UiScaleService_ScaleChanged;
-        }
-
-        private void StartPhase2BProofHarnessIfEnabled()
-        {
-            if (!string.Equals(Environment.GetEnvironmentVariable("PS7_SCRIPT_DESK_PHASE2B_PROOF"), "1", StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            var directory = Environment.GetEnvironmentVariable("PS7_SCRIPT_DESK_PHASE2B_PROOF_DIR");
-            if (string.IsNullOrWhiteSpace(directory) || ViewModel is null || _phase2BProofTask is not null)
-            {
-                DeveloperDiagnostics.LogWarning("Terminal", "Phase 2B proof harness was requested but its directory or view model was unavailable.");
-                return;
-            }
-
-            directory = Path.GetFullPath(directory);
-            Directory.CreateDirectory(directory);
-            var markerPath = Path.Combine(directory, "terminal-marker.txt");
-            var readbackRequestPath = Path.Combine(directory, "terminal-readback.request");
-            var readbackPath = Path.Combine(directory, "terminal-readback.txt");
-            var stopRequestPath = Path.Combine(directory, "terminal-stop.request");
-            File.Delete(markerPath);
-            File.Delete(readbackRequestPath);
-            File.Delete(readbackPath);
-            File.Delete(stopRequestPath);
-
-            _phase2BProofCancellation = new CancellationTokenSource();
-            var cancellationToken = _phase2BProofCancellation.Token;
-            _phase2BProofTask = RunPhase2BProofHarnessAsync(
-                directory,
-                markerPath,
-                readbackRequestPath,
-                readbackPath,
-                stopRequestPath,
-                cancellationToken);
-            DeveloperDiagnostics.LogInfo(
-                "Terminal",
-                "Phase 2B proof harness enabled; marker and read-back commands will use the existing terminal input path.",
-                new Dictionary<string, object?>
-                {
-                    ["directory"] = directory,
-                    ["markerPath"] = markerPath,
-                    ["readbackPath"] = readbackPath,
-                    ["contentOmitted"] = true
-                });
-        }
-
-        private async Task RunPhase2BProofHarnessAsync(
-            string directory,
-            string markerPath,
-            string readbackRequestPath,
-            string readbackPath,
-            string stopRequestPath,
-            CancellationToken cancellationToken)
-        {
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(true);
-                if (ViewModel is null)
-                {
-                    return;
-                }
-
-                var markerCommand = "$global:PS7SameRuntimeProof = [guid]::NewGuid().ToString(); Set-Content -LiteralPath '" + EscapePowerShellSingleQuotedPath(markerPath) + "' -Value $global:PS7SameRuntimeProof\r";
-                await ViewModel.WriteRawInputAsync(markerCommand).ConfigureAwait(true);
-                DeveloperDiagnostics.LogInfo("Terminal", "Phase 2B terminal marker command submitted through the live input path.", new Dictionary<string, object?> { ["length"] = markerCommand.Length, ["contentOmitted"] = true });
-
-                while (!cancellationToken.IsCancellationRequested)
-                {
-                    if (File.Exists(stopRequestPath))
-                    {
-                        File.Delete(stopRequestPath);
-                        const string stopCommand = "Wait-Debugger\r";
-                        await ViewModel.WriteRawInputAsync(stopCommand).ConfigureAwait(true);
-                        DeveloperDiagnostics.LogInfo("Terminal", "Phase 2B controlled debugger stop command submitted through the live input path.", new Dictionary<string, object?> { ["length"] = stopCommand.Length, ["contentOmitted"] = true });
-                    }
-
-                    if (File.Exists(readbackRequestPath))
-                    {
-                        File.Delete(readbackRequestPath);
-                        var readbackCommand = "Set-Content -LiteralPath '" + EscapePowerShellSingleQuotedPath(readbackPath) + "' -Value $global:PS7SameRuntimeProof\r";
-                        await ViewModel.WriteRawInputAsync(readbackCommand).ConfigureAwait(true);
-                        DeveloperDiagnostics.LogInfo("Terminal", "Phase 2B terminal read-back command submitted through the live input path.", new Dictionary<string, object?> { ["length"] = readbackCommand.Length, ["contentOmitted"] = true });
-                    }
-
-                    await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(true);
-                }
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-            }
-            catch (Exception ex)
-            {
-                DeveloperDiagnostics.LogException("Terminal", ex, "Phase 2B proof harness failed.");
-            }
-        }
-
-        private static string EscapePowerShellSingleQuotedPath(string path)
-        {
-            return path.Replace("'", "''", StringComparison.Ordinal);
         }
 
         private void ViewModel_ExeExportProgressChanged(object? sender, ExeExportProgressUpdate update)

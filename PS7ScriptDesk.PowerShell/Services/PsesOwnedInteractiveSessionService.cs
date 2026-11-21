@@ -12,9 +12,8 @@ using PS7ScriptDesk.Domain.Models;
 namespace PS7ScriptDesk.PowerShell.Services;
 
 /// <summary>
-/// Phase 2C foundation provider. PSES is the process/host owner and its
-/// console-repl stdio is the terminal transport. This type intentionally does
-/// not create a second PowerShell process for debugging.
+/// Owns the PSES process lifecycle and exposes its console REPL through the
+/// native terminal transport.
 /// </summary>
 public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, ICorrelatedLiveConsoleScriptExecution, IRuntimeSessionIdentityAware, IStructuredPromptReadinessSource, IAuthoritativeSessionStructuredExecution, IAuthoritativePsesDebugEndpoint, IAuthoritativeLiveCompletionProvider
 {
@@ -394,7 +393,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         {
         await ShutdownCoreAsync(cancellationToken).ConfigureAwait(false);
 
-        var root = ResolvePsesRoot();
+        var root = await Task.Run(ResolvePsesRoot, cancellationToken).ConfigureAwait(false);
         if (_editorBridgeFeatureGate.IsEnabled)
             ValidateEditorBridgeRuntime(root);
         var startScript = Path.Combine(root, "PowerShellEditorServices", "Start-EditorServices.ps1");
@@ -3138,7 +3137,18 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         var configured = Environment.GetEnvironmentVariable("PS7SCRIPTDESK_PSES_ROOT");
         if (!string.IsNullOrWhiteSpace(configured)) return configured;
         var packagedRoot = Path.Combine(AppContext.BaseDirectory, "PSES");
-        if (File.Exists(Path.Combine(packagedRoot, "PowerShellEditorServices", "Start-EditorServices.ps1"))) return packagedRoot;
+        if (File.Exists(Path.Combine(packagedRoot, "PowerShellEditorServices", "Start-EditorServices.ps1")))
+        {
+            var packageFullName = PsesPackageRuntimeStager.TryGetCurrentPackageFullName();
+            if (packageFullName is null &&
+                string.Equals(Directory.GetParent(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory))?.Name,
+                    "WindowsApps", StringComparison.OrdinalIgnoreCase))
+                packageFullName = Path.GetFileName(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory));
+            return packageFullName is null
+                ? packagedRoot
+                : PsesPackageRuntimeStager.Stage(packagedRoot, packageFullName,
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+        }
         var extensions = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".vscode", "extensions");
         var candidates = Directory.Exists(extensions)
             ? Directory.GetDirectories(extensions, "ms-vscode.powershell-*")

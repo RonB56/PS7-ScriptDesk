@@ -6,10 +6,8 @@ using PS7ScriptDesk.Domain.Models;
 namespace PS7ScriptDesk.PowerShell.Services;
 
 /// <summary>
-/// Phase 1 authority for the application's real PowerShell terminal session.
-/// LiveConsoleService remains the protected ConPTY/process implementation; this
-/// coordinator owns admission, logical identity, lifecycle state, and future
-/// terminal/debugger attachment points around it.
+/// Coordinates admission, identity, and lifecycle state for the application's
+/// PowerShell terminal session.
 /// </summary>
 public sealed class PowerShellRuntimeSessionCoordinator : IPowerShellRuntimeSessionCoordinator
 {

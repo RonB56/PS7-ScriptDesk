@@ -85,9 +85,7 @@ namespace PS7ScriptDesk.Shell.Composition
                 if (structuredStartup.IsAvailable)
                 {
                     structuredAvailability = ExecutionBackendAvailability.Available;
-                    structuredBackend = psesOwnedSessionFeatureGate.IsEnabled
-                        ? new AuthoritativeSessionStructuredExecutionBackend(editorExecutionAdapter!)
-                        : new StructuredEditorExecutionBackend(editorExecutionAdapter!);
+                    structuredBackend = new AuthoritativeSessionStructuredExecutionBackend(editorExecutionAdapter!);
                 }
                 else
                 {

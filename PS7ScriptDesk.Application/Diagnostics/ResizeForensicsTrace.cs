@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace PS7ScriptDesk.Application.Diagnostics;
 
 /// <summary>
-/// Temporary, opt-in Phase 2C resize-boundary diagnostics. Disabled unless
+/// Opt-in resize-boundary diagnostics. Disabled unless
 /// PS7SCRIPTDESK_RESIZE_FORENSICS=1. This class never changes terminal data.
 /// </summary>
 public static class ResizeForensicsTrace

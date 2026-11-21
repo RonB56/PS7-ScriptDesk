@@ -16,8 +16,7 @@ public sealed record DiagnosticPublication(
     string RequestId);
 
 /// <summary>
-/// Boundary for future debounce, cancellation, stale-result validation, and publication coordination.
-/// Phase 0 defines the seam; producers and scheduling remain outside this interface for now.
+/// Coordinates publication of validated diagnostics for a document revision.
 /// </summary>
 public interface IDiagnosticsCoordinator
 {
