@@ -27,29 +27,23 @@ namespace PS7ScriptDesk.Shell.Composition
             var gitService = new GitService(gitCommandRunner, gitRepositoryLocator);
             var gitWorkspaceCoordinator = new GitWorkspaceCoordinator(gitService);
             var userPromptService = new UserPromptService();
-            var psesOwnedSessionFeatureGate = PsesOwnedInteractiveSessionFeatureGate.FromEnvironment();
             var experimentalRunFileBridgeFeatureGate = ExperimentalRunFileBridgeFeatureGate.FromEnvironment();
             var experimentalRunSelectionBridgeFeatureGate = ExperimentalRunSelectionBridgeFeatureGate.FromEnvironment();
-            var psesOwnedSessionGateValue = Environment.GetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName);
-            ILiveConsoleService liveConsoleService = psesOwnedSessionFeatureGate.IsEnabled
-                ? new PsesOwnedInteractiveSessionService(experimentalRunFileBridgeFeatureGate, experimentalRunSelectionBridgeFeatureGate)
-                : new LiveConsoleService();
+            ILiveConsoleService liveConsoleService = new PsesOwnedInteractiveSessionService(
+                experimentalRunFileBridgeFeatureGate, experimentalRunSelectionBridgeFeatureGate);
             DeveloperDiagnostics.LogInfo(
                 "Startup",
                 "Interactive session ownership path selected.",
                 new Dictionary<string, object?>
                 {
-                    ["psesOwnedInteractiveSession"] = psesOwnedSessionFeatureGate.IsEnabled,
-                    ["featureGate"] = PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName,
-                    ["featureGateSource"] = "process-environment",
-                    ["featureGateValuePresent"] = !string.IsNullOrWhiteSpace(psesOwnedSessionGateValue),
-                    ["experimentalDirectRunFileBridge"] = psesOwnedSessionFeatureGate.IsEnabled && experimentalRunFileBridgeFeatureGate.IsEnabled,
+                    ["psesOwnedInteractiveSession"] = true,
+                    ["experimentalDirectRunFileBridge"] = experimentalRunFileBridgeFeatureGate.IsEnabled,
                     ["experimentalRunFileFeatureGate"] = ExperimentalRunFileBridgeFeatureGate.EnvironmentVariableName,
-                    ["directRunSelectionEnabled"] = psesOwnedSessionFeatureGate.IsEnabled && experimentalRunSelectionBridgeFeatureGate.IsEnabled,
+                    ["directRunSelectionEnabled"] = experimentalRunSelectionBridgeFeatureGate.IsEnabled,
                     ["experimentalRunSelectionFeatureGate"] = ExperimentalRunSelectionBridgeFeatureGate.EnvironmentVariableName,
                     ["provider"] = liveConsoleService.GetType().Name,
-                    ["expectedDebuggerBackend"] = psesOwnedSessionFeatureGate.IsEnabled ? "PsesDapDebugSession" : "PsesDebugSession",
-                    ["fallbackPolicy"] = psesOwnedSessionFeatureGate.IsEnabled ? "NoSilentLegacyFallback" : "LegacyByExplicitSelection"
+                    ["expectedDebuggerBackend"] = "PsesDapDebugSession",
+                    ["fallbackPolicy"] = "NoSilentLegacyFallback"
                 });
             var runtimeSessionCoordinator = new PowerShellRuntimeSessionCoordinator(liveConsoleService);
             TerminalStartupTrace.Write("LIVE_CONSOLE_SERVICE_CONSTRUCTED", $"serviceId={liveConsoleService.GetHashCode():X8}");
@@ -69,11 +63,6 @@ namespace PS7ScriptDesk.Shell.Composition
                 StructuredExecutionStartupResult structuredStartup;
                 structuredStartup = TryInitializeStructuredExecution(() =>
                 {
-                    if (!psesOwnedSessionFeatureGate.IsEnabled)
-                    {
-                        throw new InvalidOperationException("Editor execution requires the PSES-owned interactive session; an independent editor runspace is not created.");
-                    }
-
                     if (liveConsoleService is not IAuthoritativeSessionStructuredExecution authoritativeSession)
                     {
                         throw new InvalidOperationException("The PSES-owned interactive service does not expose the authoritative structured execution contract.");

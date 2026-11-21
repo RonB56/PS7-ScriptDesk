@@ -17,21 +17,6 @@ public sealed class PsesProductionAdapterContractTests
     }
 
     [Fact]
-    public void PsesOwnedSessionFeatureGateIsDisabledByDefault()
-    {
-        var previous = Environment.GetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName);
-        try
-        {
-            Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, null);
-            Assert.True(PsesOwnedInteractiveSessionFeatureGate.FromEnvironment().IsEnabled);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, previous);
-        }
-    }
-
-    [Fact]
     public void PsesOwnedArgumentsUsePinnedVsCodeHostIdentity()
     {
         var arguments = PsesOwnedInteractiveSessionService.BuildArguments(

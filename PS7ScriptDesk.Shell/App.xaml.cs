@@ -108,7 +108,7 @@ namespace PS7ScriptDesk.Shell
             AppLogger.Info("App", "Cleaning stale execution snapshots from previous sessions.");
             DeveloperDiagnostics.LogInfo("Execution", "Cleaning stale execution snapshots from previous sessions.");
             LiveConsoleService.CleanupStaleExecutionSnapshots();
-            ScriptExecutionService.CleanupStaleExecutionSnapshots();
+            RetiredExecutionSnapshotCleanup.CleanupStaleExecutionSnapshots();
 
             base.OnStartup(e);
             AppLogger.Info("App", "Base startup completed.");
@@ -646,7 +646,8 @@ namespace PS7ScriptDesk.Shell
 
         private static void ShowNonBlockingStoreUpdateNotificationIfNeeded(Window shellWindow, StoreUpdateService storeUpdateService, StoreUpdateCheckResult? storeUpdateCheckResult)
         {
-            if (shellWindow is null || storeUpdateCheckResult is null || !storeUpdateCheckResult.ShouldShowAutomaticNotification)
+            if (shellWindow is null || storeUpdateCheckResult is null || !storeUpdateCheckResult.ShouldShowAutomaticNotification ||
+                !StoreUpdateStartupState.ShouldShowStartupNotification)
             {
                 return;
             }
@@ -655,6 +656,11 @@ namespace PS7ScriptDesk.Shell
             {
                 try
                 {
+                    if (!StoreUpdateStartupState.ShouldShowStartupNotification)
+                    {
+                        return;
+                    }
+
                     if (shellWindow is MainWindow mainWindow)
                     {
                         mainWindow.ShowStoreUpdateBanner(storeUpdateService, storeUpdateCheckResult);

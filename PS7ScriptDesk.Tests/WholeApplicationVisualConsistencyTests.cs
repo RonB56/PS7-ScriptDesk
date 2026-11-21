@@ -97,13 +97,11 @@ public sealed class WholeApplicationVisualConsistencyTests
         var mainWindowXaml = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml");
         var mainWindowCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
 
-        // The command is intentionally presented as a status action because
-        // local/unpackaged builds may only have manual Store instructions.
-        Assert.Equal(1, CountOccurrences(mainWindowXaml, "Header=\"Store Update _Status\""));
+        Assert.Equal(1, CountOccurrences(mainWindowXaml, "Header=\"Check for _Updates\""));
         Assert.Contains("Click=\"CheckForUpdates_Click\"", mainWindowXaml, StringComparison.Ordinal);
         Assert.Contains("help:ContextHelp.Key=\"App.StoreUpdate\"", mainWindowXaml, StringComparison.Ordinal);
-        Assert.Contains("private void CheckForUpdates_Click", mainWindowCode, StringComparison.Ordinal);
-        Assert.DoesNotContain("Header=\"Store Update _Status\"", mainWindowXaml[..mainWindowXaml.IndexOf("<MenuItem Header=\"_Help\"", StringComparison.Ordinal)], StringComparison.Ordinal);
+        Assert.Contains("private async void CheckForUpdates_Click", mainWindowCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("Header=\"Check for _Updates\"", mainWindowXaml[..mainWindowXaml.IndexOf("<MenuItem Header=\"_Help\"", StringComparison.Ordinal)], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -112,12 +110,8 @@ public sealed class WholeApplicationVisualConsistencyTests
         var mainWindowCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
         var appCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "App.xaml.cs");
 
-        // Re-entry is now represented by the cached startup result and a
-        // status window; the former private in-progress gate was removed.
-        Assert.Contains("StoreUpdateStartupState.Read()", mainWindowCode, StringComparison.Ordinal);
-        Assert.Contains("snapshot.CheckInProgress", mainWindowCode, StringComparison.Ordinal);
-        Assert.Contains("ShowManualStoreUpdateWindow(snapshot.Service, checkResult)", mainWindowCode, StringComparison.Ordinal);
-        Assert.Contains("ShowManualStoreUpdateWindow(snapshot.Service, checkResult)", mainWindowCode, StringComparison.Ordinal);
+        Assert.Contains("StoreUpdateStartupState.TryStartManualCheck", mainWindowCode, StringComparison.Ordinal);
+        Assert.Contains("ShowManualStoreUpdateWindow(completed.Service, completed.Result)", mainWindowCode, StringComparison.Ordinal);
 
         Assert.Contains("!storeUpdateCheckResult.ShouldShowAutomaticNotification", appCode, StringComparison.Ordinal);
         Assert.Contains("ShowStoreUpdateBanner(storeUpdateService, storeUpdateCheckResult)", appCode, StringComparison.Ordinal);

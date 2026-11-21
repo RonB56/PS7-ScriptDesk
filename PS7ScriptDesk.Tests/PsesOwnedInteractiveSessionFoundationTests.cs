@@ -1,4 +1,3 @@
-using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.PowerShell.Services;
 
 namespace PS7ScriptDesk.Tests;
@@ -6,57 +5,6 @@ namespace PS7ScriptDesk.Tests;
 [Collection(PsesOwnedSessionEnvironmentCollection.Name)]
 public sealed class PsesOwnedInteractiveSessionFoundationTests
 {
-    [Fact]
-    public void FeatureGate_IsEnabledByDefaultWhenEnvironmentIsUnset()
-    {
-        var original = Environment.GetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName);
-        try
-        {
-            Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, null);
-            Assert.True(PsesOwnedInteractiveSessionFeatureGate.FromEnvironment().IsEnabled);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, original);
-        }
-    }
-
-    [Theory]
-    [InlineData("1")]
-    [InlineData("true")]
-    [InlineData("yes")]
-    public void FeatureGate_RecognizesExplicitOptIn(string value)
-    {
-        var original = Environment.GetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName);
-        try
-        {
-            Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, value);
-            Assert.True(PsesOwnedInteractiveSessionFeatureGate.FromEnvironment().IsEnabled);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, original);
-        }
-    }
-
-    [Theory]
-    [InlineData("0")]
-    [InlineData("false")]
-    [InlineData("no")]
-    public void FeatureGate_RecognizesExplicitOptOut(string value)
-    {
-        var original = Environment.GetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName);
-        try
-        {
-            Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, value);
-            Assert.False(PsesOwnedInteractiveSessionFeatureGate.FromEnvironment().IsEnabled);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(PsesOwnedInteractiveSessionFeatureGate.EnvironmentVariableName, original);
-        }
-    }
-
     [Fact]
     public void PsesOwnedProvider_ImplementsTheExistingTerminalContract()
     {

@@ -351,18 +351,18 @@ public sealed class LiveConsoleRealSessionHardeningTests
     }
 
     [Fact]
-    public void ArchitectureBoundaries_PreserveDebuggerApiAndLegacyExecutionIsolation()
+    public void ArchitectureBoundaries_PreservePsesOwnershipAndApiIsolation()
     {
         var root = FindRepositoryRoot();
         var bootstrapper = File.ReadAllText(Path.Combine(root, "PS7ScriptDesk.Shell", "Composition", "AppBootstrapper.cs"));
-        var debugger = File.ReadAllText(Path.Combine(root, "PS7ScriptDesk.Shell", "Debugger", "PsesDebugSession.cs"));
+        var shell = File.ReadAllText(Path.Combine(root, "PS7ScriptDesk.Shell", "MainWindow.xaml.cs"));
         var apiRunspace = File.ReadAllText(Path.Combine(root, "PS7ScriptDesk.RestApiProofHost", "PowerShell", "RunspacePoolManager.cs"));
         var apiInvoker = File.ReadAllText(Path.Combine(root, "PS7ScriptDesk.RestApiProofHost", "PowerShell", "PowerShellFunctionInvoker.cs"));
 
-        Assert.Contains("new LiveConsoleService()", bootstrapper, StringComparison.Ordinal);
-        Assert.DoesNotContain("new ScriptExecutionService()", bootstrapper, StringComparison.Ordinal);
-        Assert.Contains("new ProcessStartInfo", debugger, StringComparison.Ordinal);
-        Assert.Contains("-NoLogo -NoProfile -ExecutionPolicy Bypass -Command -", debugger, StringComparison.Ordinal);
+        Assert.Contains("ILiveConsoleService liveConsoleService = new PsesOwnedInteractiveSessionService(", bootstrapper, StringComparison.Ordinal);
+        Assert.DoesNotContain("new LiveConsoleService()", bootstrapper, StringComparison.Ordinal);
+        Assert.Contains("new PsesDapDebugSession(authoritativeDebugEndpoint)", shell, StringComparison.Ordinal);
+        Assert.DoesNotContain("new PsesDebugSession()", shell, StringComparison.Ordinal);
         Assert.Contains("RunspaceFactory.CreateRunspacePool", apiRunspace, StringComparison.Ordinal);
         Assert.Contains("InitialSessionState.CreateDefault2", apiRunspace, StringComparison.Ordinal);
         Assert.Contains("PowerShell.Create()", apiInvoker, StringComparison.Ordinal);

@@ -562,7 +562,7 @@
                           help:ContextHelp.Key="Help.Context" />
                 <MenuItem Header="PS7 ScriptDesk _Help" Click="HelpOverview_Click" help:ContextHelp.Key="App.Overview" />
                 <Separator />
-                <MenuItem Header="Store Update _Status" Click="CheckForUpdates_Click" help:ContextHelp.Key="App.StoreUpdate" />
+                <MenuItem Header="Check for _Updates" Click="CheckForUpdates_Click" help:ContextHelp.Key="App.StoreUpdate" />
                 <Separator />
                 <MenuItem Header="_About" Click="About_Click" help:ContextHelp.Key="Help.About" />
             </MenuItem>

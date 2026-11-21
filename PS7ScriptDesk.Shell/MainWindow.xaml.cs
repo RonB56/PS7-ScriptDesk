@@ -3953,64 +3953,94 @@ namespace PS7ScriptDesk.Shell
             ContextHelp.OpenOverview(this);
         }
 
-        private void CheckForUpdates_Click(object sender, RoutedEventArgs e)
+        private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
         {
             DeveloperDiagnostics.LogUserAction(
                 "StoreUpdate",
-                "StartupStatusRequested",
-                "User requested the Microsoft Store update status captured during application startup.");
+                "ManualCheckRequested",
+                "User requested a fresh Microsoft Store update check.");
 
-            var snapshot = StoreUpdateStartupState.Read();
-            if (snapshot.CheckInProgress)
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+            if (!StoreUpdateStartupState.TryStartManualCheck(cancellation.Token, out var checkTask))
             {
                 if (ViewModel is not null)
                 {
-                    ViewModel.StatusText = "Startup update check is still in progress.";
+                    ViewModel.StatusText = "A Store update check is already in progress.";
                 }
-
-                ShowIdeMessage("PS7 ScriptDesk - Store Update Status",
-                    "PS7 ScriptDesk is still completing the one-time Microsoft Store update check that started with the application.\n\n" +
-                    "Open Store Update Status again in a moment.");
                 return;
             }
 
-            if (snapshot.Service is null || snapshot.Result is null)
+            var closed = false;
+            void CancelOnClose(object? _, EventArgs __)
             {
-                if (ViewModel is not null)
-                {
-                    ViewModel.StatusText = "No startup update status is available.";
-                }
-
-                ShowIdeMessage("PS7 ScriptDesk - Store Update Status",
-                    "No Microsoft Store update status was captured for this application session.\n\n" +
-                    "ScriptDesk checks Microsoft Store once after startup and does not poll again during the session.");
-                return;
+                closed = true;
+                cancellation.Cancel();
             }
 
-            var checkResult = snapshot.Result;
-            var resultKind = ClassifyStoreUpdateResult(checkResult);
-            DeveloperDiagnostics.LogDecision(
-                "StoreUpdate",
-                "StartupStatusDisplay",
-                $"Displayed cached startup Store update status '{resultKind}'.",
-                resultKind,
-                BuildStoreUpdateDiagnosticsProperties(checkResult, "StartupCache"));
-
-            ShowManualStoreUpdateWindow(snapshot.Service, checkResult);
+            Closed += CancelOnClose;
+            if (sender is WpfMenuItem menuItem)
+            {
+                menuItem.IsEnabled = false;
+            }
 
             if (ViewModel is not null)
             {
-                ViewModel.StatusText = resultKind switch
+                ViewModel.StatusText = "Checking Microsoft Store for updates...";
+            }
+
+            if (StoreUpdateBannerHost.Content is StoreUpdateBanner banner)
+            {
+                banner.DismissRequested -= StoreUpdateBanner_DismissRequested;
+                StoreUpdateBannerHost.Content = null;
+                StoreUpdateBannerHost.Visibility = Visibility.Collapsed;
+            }
+
+            try
+            {
+                var completed = await checkTask!;
+                if (closed)
                 {
-                    "MandatoryUpdate" => "Mandatory update detected at startup.",
-                    "UpdateAvailable" => "Update available.",
-                    "NoUpdateAvailable" => "No updates were available at startup.",
-                    "ManualInstructions" => "Startup Store status requires manual Store instructions.",
-                    "LocalBuildUnavailable" => "Store updates are not available for this local build.",
-                    "CheckUnavailable" => "Startup Store update check was unavailable.",
-                    "Failure" => "Startup Store update check failed.",
-                    _ => "Store update status displayed."
-                };
+                    return;
+                }
+
+                DeveloperDiagnostics.LogDecision(
+                    "StoreUpdate",
+                    "ManualCheckCompleted",
+                    "Fresh Microsoft Store update check completed.",
+                    ClassifyStoreUpdateResult(completed.Result),
+                    BuildStoreUpdateDiagnosticsProperties(completed.Result, "HelpMenu"));
+                ShowManualStoreUpdateWindow(completed.Service, completed.Result);
+            }
+            catch (OperationCanceledException) when (closed)
+            {
+                // The owning window is gone; no result window should be shown.
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("StoreUpdate", "Manual Microsoft Store update check failed.", ex);
+                DeveloperDiagnostics.LogException("StoreUpdate", ex, "Manual Microsoft Store update check failed.");
+                if (!closed)
+                {
+                    var failedResult = new StoreUpdateCheckResult
+                    {
+                        AvailabilityState = StoreUpdateAvailabilityState.UpdateCheckUnavailable,
+                        StatusMessage = cancellation.IsCancellationRequested
+                            ? "Microsoft Store update check timed out."
+                            : "Microsoft Store update check failed.",
+                        ExceptionSummary = $"{ex.GetType().Name}: {ex.Message}",
+                        ShouldShowManualInstructions = true,
+                        ManualInstructions = "Microsoft Store -> Library -> Get updates."
+                    };
+                    ShowManualStoreUpdateWindow(StoreUpdateStartupState.Read().Service ?? new StoreUpdateService(), failedResult);
+                }
+            }
+            finally
+            {
+                Closed -= CancelOnClose;
+                if (!closed && sender is WpfMenuItem enabledMenuItem)
+                {
+                    enabledMenuItem.IsEnabled = true;
+                }
             }
         }
 
@@ -9761,23 +9791,22 @@ namespace PS7ScriptDesk.Shell
                         ["selectedTabDirty"] = selectedTab.IsDirty
                     });
                 TraceDebugShell("StartDebug_Click", $"Launch plan prepared; tab='{selectedTab.Title}'; launchPath='{Path.GetFileName(launchScriptPath)}'; breakpointCount={breakpoints.Count}; before session creation; {DescribeDebugUiState()}");
-                var authoritativeDebugEndpoint = _liveConsoleServiceForObservation as IAuthoritativePsesDebugEndpoint;
+                var authoritativeDebugEndpoint = _liveConsoleServiceForObservation as IAuthoritativePsesDebugEndpoint
+                    ?? throw new InvalidOperationException("The PSES-owned session is required for debugging.");
                 DeveloperDiagnostics.LogInfo(
                     "Debugger",
                     "Debugger backend selection resolved before session creation.",
                     new Dictionary<string, object?>
                     {
-                        ["selectedDebuggerBackend"] = authoritativeDebugEndpoint is not null ? "PsesDapDebugSession" : "PsesDebugSession",
-                        ["authoritativeSessionSelected"] = authoritativeDebugEndpoint is not null,
-                        ["authoritativeSessionRunning"] = authoritativeDebugEndpoint?.IsSessionRunning,
-                        ["authoritativeProcessId"] = authoritativeDebugEndpoint?.ProcessId,
-                        ["authoritativeSessionGeneration"] = authoritativeDebugEndpoint?.SessionGeneration,
-                        ["debugServicePipePublished"] = !string.IsNullOrWhiteSpace(authoritativeDebugEndpoint?.DebugServicePipeName),
-                        ["silentFallbackAllowed"] = authoritativeDebugEndpoint is null
+                        ["selectedDebuggerBackend"] = "PsesDapDebugSession",
+                        ["authoritativeSessionSelected"] = true,
+                        ["authoritativeSessionRunning"] = authoritativeDebugEndpoint.IsSessionRunning,
+                        ["authoritativeProcessId"] = authoritativeDebugEndpoint.ProcessId,
+                        ["authoritativeSessionGeneration"] = authoritativeDebugEndpoint.SessionGeneration,
+                        ["debugServicePipePublished"] = !string.IsNullOrWhiteSpace(authoritativeDebugEndpoint.DebugServicePipeName),
+                        ["silentFallbackAllowed"] = false
                     });
-                IDebugSession debugSession = authoritativeDebugEndpoint is not null
-                    ? new PsesDapDebugSession(authoritativeDebugEndpoint)
-                    : new PsesDebugSession();
+                IDebugSession debugSession = new PsesDapDebugSession(authoritativeDebugEndpoint);
                 _debugSession = debugSession;
                 if (ExecutionCorrelationTelemetry.Shared.IsEnabled)
                 {

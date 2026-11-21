@@ -912,6 +912,7 @@ namespace PS7ScriptDesk.Shell.Services
                 cancellationToken.ThrowIfCancellationRequested();
 
                 StoreContext? storeContext = null;
+                Action? cancelQuery = null;
                 try
                 {
                     storeContext = StoreContext.GetDefault();
@@ -927,14 +928,15 @@ namespace PS7ScriptDesk.Shell.Services
                     {
                         return StoreUpdateQueryResult.Unavailable(
                             StoreUpdateAvailabilityState.UpdateCheckUnavailable,
-                            "Microsoft Store update status could not be queried at startup.",
+                            "Microsoft Store update status could not be queried.",
                             "StoreContext.GetDefault() returned null.",
                             storeContextAttempted: true);
                     }
 
                     LogCheckStep("Calling direct GetAppAndOptionalStorePackageUpdatesAsync.");
-                    var queryTask = QueryUpdatesAsync(storeContext);
-                    var updates = await queryTask.WaitAsync(CheckTimeout, cancellationToken).ConfigureAwait(false);
+                    var query = StartQuery(storeContext);
+                    cancelQuery = query.Cancel;
+                    var updates = await query.Task.WaitAsync(CheckTimeout, cancellationToken).ConfigureAwait(false);
 
                     return StoreUpdateQueryResult.UpdatesReturned(
                         storeContext,
@@ -943,34 +945,50 @@ namespace PS7ScriptDesk.Shell.Services
                 }
                 catch (TimeoutException ex)
                 {
+                    TryCancelQuery(cancelQuery);
                     LogCheckException("Direct Microsoft Store update query timed out.", ex);
                     return StoreUpdateQueryResult.Unavailable(
                         StoreUpdateAvailabilityState.UpdateCheckUnavailable,
-                        "Microsoft Store update status could not be queried at startup.",
+                        "Microsoft Store update status could not be queried.",
                         "Direct Store update query timed out.",
                         storeContext,
                         storeContextAttempted: true);
                 }
                 catch (OperationCanceledException)
                 {
+                    TryCancelQuery(cancelQuery);
                     throw;
                 }
                 catch (Exception ex)
                 {
+                    TryCancelQuery(cancelQuery);
                     LogCheckException("Direct Microsoft Store update query failed.", ex);
                     return StoreUpdateQueryResult.Unavailable(
                         StoreUpdateAvailabilityState.UpdateCheckUnavailable,
-                        "Microsoft Store update status could not be queried at startup.",
+                        "Microsoft Store update status could not be queried.",
                         $"Direct Store update query failed: {BuildExceptionSummary(ex)}",
                         storeContext,
                         storeContextAttempted: true);
                 }
             }
 
-            private static async Task<IReadOnlyList<StorePackageUpdate>> QueryUpdatesAsync(StoreContext storeContext)
+            private static (Task<IReadOnlyList<StorePackageUpdate>> Task, Action Cancel) StartQuery(StoreContext storeContext)
             {
-                var updates = await storeContext.GetAppAndOptionalStorePackageUpdatesAsync();
-                return updates;
+                var operation = storeContext.GetAppAndOptionalStorePackageUpdatesAsync();
+                async Task<IReadOnlyList<StorePackageUpdate>> AwaitUpdatesAsync() => await operation;
+                return (AwaitUpdatesAsync(), operation.Cancel);
+            }
+
+            private static void TryCancelQuery(Action? cancelQuery)
+            {
+                try
+                {
+                    cancelQuery?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    LogCheckException("Direct Microsoft Store query cancellation failed.", ex);
+                }
             }
 
             private static StoreUpdatePackageInfo ToPackageInfo(StorePackageUpdate update)

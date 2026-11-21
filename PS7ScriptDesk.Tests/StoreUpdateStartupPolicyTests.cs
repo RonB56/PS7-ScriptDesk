@@ -3,7 +3,7 @@ namespace PS7ScriptDesk.Tests;
 public sealed class StoreUpdateStartupPolicyTests
 {
     [Fact]
-    public void ProductionUpdater_UsesDirectWinRtStoreApiAndSingleStartupCheck()
+    public void ProductionUpdater_UsesDirectWinRtStoreApiAndFreshManualChecks()
     {
         var serviceSource = ReadRepositoryFile(
             "PS7ScriptDesk.Shell",
@@ -77,10 +77,9 @@ public sealed class StoreUpdateStartupPolicyTests
         var windowRestartIndex = updateWindowSource.IndexOf("TryRestartAfterSuccessfulInstall", StringComparison.Ordinal);
         Assert.True(windowNoticeIndex >= 0 && windowNoticeIndex < windowRestartIndex);
 
-        Assert.Contains("StoreUpdateStartupState.Read()", mainWindowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("Manual Store/MSIX update check requested from Help", mainWindowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("await storeUpdateService.CheckForUpdatesAsync", mainWindowSource, StringComparison.Ordinal);
-        Assert.Contains("Store Update _Status", mainWindowXaml, StringComparison.Ordinal);
+        Assert.Contains("StoreUpdateStartupState.TryStartManualCheck", mainWindowSource, StringComparison.Ordinal);
+        Assert.Contains("await checkTask!", mainWindowSource, StringComparison.Ordinal);
+        Assert.Contains("Check for _Updates", mainWindowXaml, StringComparison.Ordinal);
     }
 
     [Fact]

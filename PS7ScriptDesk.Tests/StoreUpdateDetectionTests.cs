@@ -214,6 +214,27 @@ public sealed class StoreUpdateDetectionTests
     }
 
     [Fact]
+    public async Task TimedOutStoreQueryIsUnavailableRatherThanNoUpdate()
+    {
+        var service = CreateService(
+            StorePackage("Store", isDevelopmentMode: false),
+            FakeStoreQuery.Returning(StoreUpdateQueryResult.Unavailable(
+                StoreUpdateAvailabilityState.UpdateCheckUnavailable,
+                "Microsoft Store update status could not be queried.",
+                "Direct Store update query timed out.",
+                storeContext: new object(),
+                storeContextAttempted: true)));
+
+        var result = await service.CheckForUpdatesAsync(CancellationToken.None);
+
+        Assert.Equal(StoreUpdateAvailabilityState.UpdateCheckUnavailable, result.AvailabilityState);
+        Assert.False(result.StoreUpdateCheckAvailable);
+        Assert.True(result.ShouldShowManualInstructions);
+        Assert.True(result.StoreContextAttempted);
+        Assert.False(result.PerPackageUpdateListReturned);
+    }
+
+    [Fact]
     public async Task StoreUpdateQueryExceptionsReturnUnavailableResultForManualRecovery()
     {
         var service = CreateService(
