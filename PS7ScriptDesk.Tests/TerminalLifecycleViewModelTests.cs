@@ -1057,6 +1057,47 @@ public sealed class TerminalLifecycleViewModelTests
     }
 
     [Fact]
+    public async Task StopCommand_ReconcilesPromptObservedWhileStopGuardWasActive()
+    {
+        var console = new RecordingLiveConsoleService
+        {
+            IsSessionRunning = true,
+            IsCommandInProgress = true,
+            InterruptResult = new LiveConsoleInterruptResult(
+                interruptAttempted: true,
+                completedGracefully: true,
+                escalationRequired: false,
+                processTerminationSucceeded: false,
+                sessionRestarted: false,
+                ownedProcessId: 4322,
+                gracefulTimeout: TimeSpan.FromSeconds(2),
+                outcome: LiveConsoleInterruptOutcome.RecoveredAtPrompt,
+                signalDelivered: true),
+            DuringInterrupt = session =>
+            {
+                session.IsCommandInProgress = false;
+                session.RaisePromptReady(session.CurrentSessionGeneration, "C:\\\\");
+            }
+        };
+        var terminal = new InteractiveTerminalCoordinator();
+        terminal.SetState(InteractiveTerminalState.InteractiveCommandRunning, "loop running in console");
+        console.PrimeSession(1, CreateRuntime());
+        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), terminal);
+
+        viewModel.StopCommand.Execute(null);
+
+        await console.InterruptObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => terminal.State == InteractiveTerminalState.InteractiveIdleAtPrompt &&
+                                   !viewModel.StopCommand.CanExecute(null));
+
+        Assert.True(viewModel.RunCommand.CanExecute(null));
+        Assert.False(viewModel.IsExecutionRunning);
+        Assert.Equal(1, console.CurrentSessionGeneration);
+        Assert.Equal(4322, console.ProcessId);
+        viewModel.Dispose();
+    }
+
+    [Fact]
     public async Task RestartCommand_StopsActiveManagedCommandBeforeStartingReplacement()
     {
         var console = new RecordingLiveConsoleService
@@ -1696,6 +1737,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService, IStruct
     public bool StopResult { get; set; } = true;
     public Exception? StartException { get; set; }
     public Action<RecordingLiveConsoleService, int>? SessionStartCallback { get; set; }
+    public Action<RecordingLiveConsoleService>? DuringInterrupt { get; set; }
 
     public event Action? ScriptExecutionCompleted;
     public event Action<int>? CommandExecutionCompleted;
@@ -1822,6 +1864,7 @@ internal sealed class RecordingLiveConsoleService : ILiveConsoleService, IStruct
     {
         Operations.Add("interrupt");
         InterruptObserved.TrySetResult(true);
+        DuringInterrupt?.Invoke(this);
         var result = InterruptCompletion is null
             ? InterruptResult
             : await InterruptCompletion.Task.ConfigureAwait(false);

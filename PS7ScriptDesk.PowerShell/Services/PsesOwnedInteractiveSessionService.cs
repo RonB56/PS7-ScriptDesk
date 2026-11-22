@@ -411,6 +411,23 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         var workingDirectory = startupWorkingDirectory ?? Environment.CurrentDirectory;
         var arguments = BuildArguments(root, startScript, sessionDetailsPath, logDirectory, hostVersion);
         var startedAtUtc = DateTimeOffset.UtcNow;
+        var launchId = Guid.NewGuid();
+        var requestedGeneration = _generation + 1;
+        if (DeveloperDiagnostics.IsEnabled)
+            DeveloperDiagnostics.LogCriticalForensic("PSESPolicy", "PsesLaunchRequested",
+                "PSES process launch contract captured before CreateProcess.", new Dictionary<string, object?>
+                {
+                    ["launchId"] = launchId,
+                    ["requestedGeneration"] = requestedGeneration,
+                    ["timestampUtc"] = startedAtUtc,
+                    ["runtimeExecutable"] = DeveloperDiagnostics.SanitizePath(runtime.LaunchExecutablePath),
+                    ["argumentNames"] = PsesExecutionPolicyDiagnostics.DescribeArguments(arguments),
+                    ["expectedExecutionPolicy"] = "Bypass",
+                    ["parentProcessPolicyOverridePresent"] = Environment.GetEnvironmentVariable("PSExecutionPolicyPreference") is not null,
+                    ["packaged"] = PsesPackageRuntimeStager.TryGetCurrentPackageFullName() is not null,
+                    ["runtimeSource"] = PsesExecutionPolicyDiagnostics.ClassifyRuntimeSource(root),
+                    ["workingDirectory"] = DeveloperDiagnostics.SanitizePath(workingDirectory)
+                });
         var stdoutCapture = new BoundedStartupCapture(StartupOutputCaptureLimit);
         var stderrCapture = new BoundedStartupCapture(StartupOutputCaptureLimit);
         DeveloperDiagnostics.LogInfo("PSES", "Preparing PSES-owned interactive session launch.", new Dictionary<string, object?>
@@ -473,6 +490,14 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
 
         var generation = _generation;
+        if (DeveloperDiagnostics.IsEnabled)
+            DeveloperDiagnostics.LogCriticalForensic("PSESPolicy", "PsesProcessCreated",
+                "ConPTY created the requested PSES process.", new Dictionary<string, object?>
+                {
+                    ["launchId"] = launchId, ["requestedGeneration"] = requestedGeneration,
+                    ["sessionGeneration"] = generation, ["processId"] = process.Id,
+                    ["expectedExecutionPolicy"] = "Bypass"
+                });
         StartRawConPtyCapture(generation, process.Id);
         EventHandler processExitedHandler = (_, _) => OnProcessExited(conPty, generation);
         process.EnableRaisingEvents = true;
@@ -524,6 +549,18 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 ["languageServicePipeName"] = _languageServicePipeName,
                 ["consoleReplActivation"] = true
             });
+            if (DeveloperDiagnostics.IsEnabled)
+                DeveloperDiagnostics.LogCriticalForensic("PSESPolicy", "PsesStartupPolicyObservation",
+                    "PSES identity verified; effective policy requires an owner console observation.",
+                    new Dictionary<string, object?>
+                    {
+                        ["launchId"] = launchId, ["sessionGeneration"] = generation,
+                        ["processId"] = process.Id, ["expectedExecutionPolicy"] = "Bypass",
+                        ["effectivePolicyObserved"] = false,
+                        ["scopeListObserved"] = false,
+                        ["processPolicyEnvironmentObserved"] = false,
+                        ["reason"] = "Existing PSES evaluation is foreground and can interfere with prompt, Read-Host, or debugging."
+                    });
         }
         catch (Exception ex)
         {
@@ -1477,11 +1514,23 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             _commandInProgress = true;
         }
 
+        var policyDiagnosticPid = ProcessId;
+        BridgeExecutionResult? policyDiagnosticResult = null;
+        if (DeveloperDiagnostics.IsEnabled)
+            DeveloperDiagnostics.LogCriticalForensic("PSESPolicy", "EditorExecutionBefore",
+                "Run Selection admitted to the PSES bridge.", new Dictionary<string, object?>
+                {
+                    ["requestId"] = requestId, ["sessionGeneration"] = sessionGeneration,
+                    ["processId"] = policyDiagnosticPid, ["requestType"] = "RunSelection",
+                    ["bridgeScope"] = "Current", ["executedPathKind"] = "None",
+                    ["effectivePolicyObserved"] = false
+                });
         try
         {
             var bridgeGeneration = _runtimeGeneration ?? sessionGeneration;
             var result = await client.ExecuteAsync(requestId, bridgeGeneration, script, scriptScope: false, cancellationToken)
                 .ConfigureAwait(false);
+            policyDiagnosticResult = result;
             NotifyVerifiedBridgeCompletionReadiness(requestId, sessionGeneration, result.Status);
             return result.Status switch
             {
@@ -1501,6 +1550,18 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
         finally
         {
+            if (DeveloperDiagnostics.IsEnabled)
+                DeveloperDiagnostics.LogCriticalForensic("PSESPolicy", "EditorExecutionAfter",
+                    "Run Selection bridge request settled.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId, ["requestType"] = "RunSelection",
+                        ["sessionGeneration"] = sessionGeneration, ["processIdBefore"] = policyDiagnosticPid,
+                        ["sessionGenerationAfter"] = SessionGeneration, ["processIdAfter"] = ProcessId,
+                        ["identityChanged"] = sessionGeneration != SessionGeneration || policyDiagnosticPid != ProcessId,
+                        ["outcome"] = policyDiagnosticResult?.Status.ToString() ?? (cancellationToken.IsCancellationRequested ? "CancelledOrUnconfirmed" : "Unknown"),
+                        ["policyExceptionClassification"] = PsesExecutionPolicyDiagnostics.ClassifyError(policyDiagnosticResult?.Error),
+                        ["policyComparisonAvailable"] = false
+                    });
             lock (_syncRoot)
             {
                 if (_activeStructuredRequestId == requestId) _activeStructuredRequestId = null;
@@ -1528,6 +1589,10 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         var snapshotCreated = false;
         var bridgeInvocationStarted = false;
         var bridgeCompletionObserved = false;
+        var policyDiagnosticPid = ProcessId;
+        BridgeExecutionResult? policyDiagnosticResult = null;
+        string? policyDiagnosticPathKind = null;
+        ZoneObservation? policyDiagnosticZone = null;
         try
         {
             if (_commandInProgress || _shutdownRequested || _sessionFaulted ||
@@ -1574,10 +1639,29 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 ["contentOmitted"] = true
             });
 
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                policyDiagnosticPathKind = savedScriptReadLock is not null ? "OriginalSavedFile" : "GeneratedSnapshot";
+                policyDiagnosticZone = await PsesExecutionPolicyDiagnostics.ObserveZoneAsync(snapshotPath).ConfigureAwait(false);
+                DeveloperDiagnostics.LogCriticalForensic("PSESPolicy", "EditorExecutionBefore",
+                    "Run File path metadata captured before bridge submission.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId, ["sessionGeneration"] = sessionGeneration,
+                        ["processId"] = policyDiagnosticPid, ["requestType"] = "RunFile",
+                        ["bridgeScope"] = "File", ["executedPathKind"] = policyDiagnosticPathKind,
+                        ["pathExists"] = policyDiagnosticZone.PathExists,
+                        ["hasZoneIdentifier"] = policyDiagnosticZone.HasZoneIdentifier,
+                        ["zoneId"] = policyDiagnosticZone.ZoneId,
+                        ["zoneObservationStatus"] = policyDiagnosticZone.Status,
+                        ["effectivePolicyObserved"] = false
+                    });
+            }
+
             var bridgeGeneration = _runtimeGeneration ?? sessionGeneration;
             bridgeInvocationStarted = true;
             var result = await client.ExecuteFileAsync(requestId, bridgeGeneration, snapshotPath, cancellationToken)
                 .ConfigureAwait(false);
+            policyDiagnosticResult = result;
             bridgeCompletionObserved = true;
             NotifyVerifiedBridgeCompletionReadiness(requestId, sessionGeneration, result.Status);
             return result.Status switch
@@ -1611,6 +1695,20 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
         finally
         {
+            if (DeveloperDiagnostics.IsEnabled)
+                DeveloperDiagnostics.LogCriticalForensic("PSESPolicy", "EditorExecutionAfter",
+                    "Run File bridge request settled.", new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId, ["requestType"] = "RunFile",
+                        ["sessionGeneration"] = sessionGeneration, ["processIdBefore"] = policyDiagnosticPid,
+                        ["sessionGenerationAfter"] = SessionGeneration, ["processIdAfter"] = ProcessId,
+                        ["identityChanged"] = sessionGeneration != SessionGeneration || policyDiagnosticPid != ProcessId,
+                        ["executedPathKind"] = policyDiagnosticPathKind,
+                        ["zoneId"] = policyDiagnosticZone?.ZoneId,
+                        ["outcome"] = policyDiagnosticResult?.Status.ToString() ?? (cancellationToken.IsCancellationRequested ? "CancelledOrUnconfirmed" : "Unknown"),
+                        ["policyExceptionClassification"] = PsesExecutionPolicyDiagnostics.ClassifyError(policyDiagnosticResult?.Error),
+                        ["policyComparisonAvailable"] = false
+                    });
             savedScriptReadLock?.Dispose();
             if (snapshotCreated && snapshotPath is not null)
             {

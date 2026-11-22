@@ -5747,11 +5747,15 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
+            var interruptGeneration = _liveConsoleService.CurrentSessionGeneration;
+            var interruptProcessId = _liveConsoleService.ProcessId;
+            LiveConsoleInterruptResult? completedInterruptResult = null;
             try
             {
                 var interruptResult = await _liveConsoleService
                     .InterruptOrRestartAsync(AppendExecutionOutput)
                     .ConfigureAwait(false);
+                completedInterruptResult = interruptResult;
 
                 var executionResolved = _executionCoordinator?.ActiveExecution is null &&
                                         (interruptResult.CompletedGracefully ||
@@ -5849,6 +5853,24 @@ namespace PS7ScriptDesk.UI.ViewModels
                 PostToUi(() =>
                 {
                     IsStopInProgress = false;
+                    if (completedInterruptResult is
+                            { CompletedGracefully: true, Outcome: LiveConsoleInterruptOutcome.RecoveredAtPrompt, SessionRestarted: false } &&
+                        interruptProcessId is > 0 &&
+                        completedInterruptResult.OwnedProcessId == interruptProcessId &&
+                        interruptGeneration == _liveConsoleService.CurrentSessionGeneration &&
+                        interruptGeneration == Volatile.Read(ref _currentTerminalGeneration) &&
+                        interruptProcessId == _liveConsoleService.ProcessId &&
+                        _liveConsoleService.IsSessionRunning && _liveConsoleService.IsInputWritable &&
+                        !_liveConsoleService.IsCommandInProgress &&
+                        _interactiveTerminalCoordinator.State != InteractiveTerminalState.InteractiveIdleAtPrompt)
+                    {
+                        // The backend's accepted post-interrupt prompt can arrive while
+                        // IsStopInProgress still blocks prompt admission. Reconcile that
+                        // same-session recovery result once the stop guard has cleared.
+                        ApplyTerminalPromptReadyObservation(
+                            interruptGeneration,
+                            _liveConsoleService.CurrentWorkingDirectory);
+                    }
                     RefreshCommandStates();
                 });
             }
