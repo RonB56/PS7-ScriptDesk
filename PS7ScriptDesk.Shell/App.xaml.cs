@@ -54,8 +54,7 @@ namespace PS7ScriptDesk.Shell
                     new Dictionary<string, object?>
                     {
                         ["startupArgumentCount"] = startupArgs.Length,
-                        ["packagedProcessGuess"] = DetectPackagedProcess(),
-                        ["repairedOutputDispatchImplementationActive"] = true
+                        ["packagedProcessGuess"] = DetectPackagedProcess()
                     });
             }
             catch (Exception ex)
@@ -186,6 +185,28 @@ namespace PS7ScriptDesk.Shell
             EditorInputTrace.Stop();
             DeveloperDiagnostics.Shutdown();
             PerformanceTrace.Stop();
+            var criticalTraceHealth = TerminalCriticalTrace.Health;
+            TerminalCriticalTrace.LogStage("TraceHealth.Shutdown", new Dictionary<string, object?>
+            {
+                ["accepted"] = criticalTraceHealth.Accepted,
+                ["droppedVerbose"] = criticalTraceHealth.DroppedVerbose,
+                ["droppedBoundary"] = criticalTraceHealth.DroppedBoundary,
+                ["writeFailures"] = criticalTraceHealth.WriteFailures,
+                ["slowWrites"] = criticalTraceHealth.SlowWrites,
+                ["pending"] = criticalTraceHealth.Pending,
+                ["lastFailureType"] = criticalTraceHealth.LastFailureType
+            });
+            TerminalCriticalTrace.Stop();
+            criticalTraceHealth = TerminalCriticalTrace.Health;
+            if (criticalTraceHealth.DroppedVerbose > 0 || criticalTraceHealth.DroppedBoundary > 0 ||
+                criticalTraceHealth.WriteFailures > 0 || criticalTraceHealth.Pending > 0)
+            {
+                AppLogger.Warning("TerminalCriticalTrace",
+                    $"Diagnostic trace degraded. DroppedVerbose={criticalTraceHealth.DroppedVerbose}, " +
+                    $"DroppedBoundary={criticalTraceHealth.DroppedBoundary}, " +
+                    $"WriteFailures={criticalTraceHealth.WriteFailures}, Pending={criticalTraceHealth.Pending}, " +
+                    $"LastFailureType={criticalTraceHealth.LastFailureType ?? "none"}.");
+            }
             base.OnExit(e);
         }
 

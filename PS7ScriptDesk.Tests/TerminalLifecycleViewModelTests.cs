@@ -92,7 +92,7 @@ public sealed class TerminalLifecycleViewModelTests
         var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(dispatch);
 
-        var executeTask = (Task)dispatch!.Invoke(viewModel, ["lease-test.ps1", "Write-Output 'ok'", EditorExecutionMode.ScriptCall, false, null, null])!;
+        var executeTask = (Task)dispatch!.Invoke(viewModel, ["lease-test.ps1", "Write-Output 'ok'", EditorExecutionMode.ScriptCall, false, null, null, null])!;
         await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(PowerShellRuntimeSessionState.Executing, runtimeCoordinator.Snapshot.State);
         console.RaisePromptReady(console.CurrentSessionGeneration, "C:\\");
@@ -131,7 +131,7 @@ public sealed class TerminalLifecycleViewModelTests
         var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
         var executeTask = (Task)dispatch.Invoke(viewModel,
-            ["selection", "$answer = Read-Host 'Enter value'", EditorExecutionMode.RunSelection, true, null, null])!;
+            ["selection", "$answer = Read-Host 'Enter value'", EditorExecutionMode.RunSelection, true, null, null, null])!;
         await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
         terminal.SetState(InteractiveTerminalState.InteractiveCommandRunning, "native selection awaits input");
         console.IsCommandInProgress = true;
@@ -177,7 +177,7 @@ public sealed class TerminalLifecycleViewModelTests
         var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
         var executeTask = (Task)dispatch.Invoke(viewModel,
-            ["selection", "$answer = Read-Host 'Enter value'", EditorExecutionMode.RunSelection, true, null, null])!;
+            ["selection", "$answer = Read-Host 'Enter value'", EditorExecutionMode.RunSelection, true, null, null, null])!;
         await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
         terminal.SetState(InteractiveTerminalState.InteractiveCommandRunning, "native selection awaits input");
         console.IsCommandInProgress = true;
@@ -215,7 +215,7 @@ public sealed class TerminalLifecycleViewModelTests
         var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
         var executeTask = (Task)dispatch.Invoke(viewModel,
-            ["selection", "$answer = Read-Host 'Enter value'", EditorExecutionMode.RunSelection, true, null, null])!;
+            ["selection", "$answer = Read-Host 'Enter value'", EditorExecutionMode.RunSelection, true, null, null, null])!;
         await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
         terminal.SetState(InteractiveTerminalState.InteractiveCommandRunning, "native selection awaits input");
         console.IsCommandInProgress = true;
@@ -251,7 +251,7 @@ public sealed class TerminalLifecycleViewModelTests
         var viewModel = await CreateViewModelAsync(console, runtime, executionCoordinator: executionCoordinator, runtimeSessionCoordinator: runtimeCoordinator);
         console.RaiseSessionStarted(console.CurrentSessionGeneration);
         var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        var executeTask = (Task)dispatch!.Invoke(viewModel, ["fault-test.ps1", "throw 'fault'", EditorExecutionMode.ScriptCall, false, null, null])!;
+        var executeTask = (Task)dispatch!.Invoke(viewModel, ["fault-test.ps1", "throw 'fault'", EditorExecutionMode.ScriptCall, false, null, null, null])!;
         await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
         backend.Complete();
         await executeTask.WaitAsync(TimeSpan.FromSeconds(2));
@@ -275,7 +275,7 @@ public sealed class TerminalLifecycleViewModelTests
             ExecutionBackendAvailability.Unavailable, new PowerShellExecutionRequestClassifier());
         var viewModel = await CreateViewModelAsync(console, runtime, executionCoordinator: executionCoordinator, runtimeSessionCoordinator: runtimeCoordinator);
         var dispatch = typeof(MainWindowViewModel).GetMethod("ExecuteEditorThroughCoordinatorAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        var executeTask = (Task)dispatch!.Invoke(viewModel, ["unknown-test.ps1", "Write-Output 'uncertain'", EditorExecutionMode.ScriptCall, false, null, null])!;
+        var executeTask = (Task)dispatch!.Invoke(viewModel, ["unknown-test.ps1", "Write-Output 'uncertain'", EditorExecutionMode.ScriptCall, false, null, null, null])!;
         await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
         backend.Complete();
         await executeTask.WaitAsync(TimeSpan.FromSeconds(2));
@@ -658,54 +658,6 @@ public sealed class TerminalLifecycleViewModelTests
         Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
         Assert.True(viewModel.IsRunAvailable);
         Assert.True(viewModel.RunCommand.CanExecute(null));
-        viewModel.Dispose();
-    }
-
-    [Fact]
-    public async Task RenderedDriveRootPrompt_ReenablesRunAfterInteractiveCommand()
-    {
-        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
-        var coordinator = new InteractiveTerminalCoordinator();
-        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
-        console.RaiseSessionStarted(1);
-        coordinator.SetState(InteractiveTerminalState.InteractiveIdleAtPrompt, "initial prompt");
-
-        await viewModel.WriteRawInputAsync("2 + 2\r");
-        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, coordinator.State);
-        Assert.False(viewModel.IsRunAvailable);
-
-        viewModel.PublishInteractiveTerminalOutput(1, "4\r\nPS C:\\>");
-
-        Assert.Equal(InteractiveTerminalState.InteractiveIdleAtPrompt, coordinator.State);
-        Assert.True(viewModel.IsRunAvailable);
-        Assert.True(viewModel.RunCommand.CanExecute(null));
-        Assert.Null(viewModel.RunDisabledReason);
-        viewModel.Dispose();
-    }
-
-    [Fact]
-    public async Task RenderedDriveRootPrompt_DoesNotAdmitBusyOrStaleSession()
-    {
-        var console = new RecordingLiveConsoleService { IsSessionRunning = true };
-        var coordinator = new InteractiveTerminalCoordinator();
-        var viewModel = await CreateViewModelAsync(console, CreateRuntime(), coordinator);
-        console.RaiseSessionStarted(1);
-        coordinator.SetState(InteractiveTerminalState.InteractiveCommandRunning, "command active");
-
-        console.IsCommandInProgress = true;
-        viewModel.PublishInteractiveTerminalOutput(1, "PS C:\\>");
-        Assert.Equal(InteractiveTerminalState.InteractiveCommandRunning, coordinator.State);
-        Assert.False(viewModel.IsRunAvailable);
-
-        console.IsCommandInProgress = false;
-        console.RaiseSessionStarted(2);
-        viewModel.PublishInteractiveTerminalOutput(1, "PS C:\\>");
-        Assert.Equal(2, coordinator.Snapshot.Generation);
-        Assert.Equal(InteractiveTerminalState.Starting, coordinator.State);
-        Assert.False(viewModel.IsRunAvailable);
-
-        viewModel.PublishInteractiveTerminalOutput(2, "PS C:\\>");
-        Assert.True(viewModel.IsRunAvailable);
         viewModel.Dispose();
     }
 

@@ -217,6 +217,7 @@ namespace PS7ScriptDesk.PowerShell.Services
 
         public event Action<int, string>? RawOutputReceived;
 
+
         public bool IsHostAttached
         {
             get

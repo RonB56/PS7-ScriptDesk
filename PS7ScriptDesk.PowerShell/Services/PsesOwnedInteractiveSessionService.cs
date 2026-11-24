@@ -15,7 +15,7 @@ namespace PS7ScriptDesk.PowerShell.Services;
 /// Owns the PSES process lifecycle and exposes its console REPL through the
 /// native terminal transport.
 /// </summary>
-public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, ICorrelatedLiveConsoleScriptExecution, IRuntimeSessionIdentityAware, IStructuredPromptReadinessSource, IAuthoritativeSessionStructuredExecution, IAuthoritativePsesDebugEndpoint, IAuthoritativeLiveCompletionProvider
+public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IAwaitableTerminalOutputSource, ICorrelatedLiveConsoleScriptExecution, IRuntimeSessionIdentityAware, IStructuredPromptReadinessSource, IAuthoritativeSessionStructuredExecution, IAuthoritativePsesDebugEndpoint, IAuthoritativeLiveCompletionProvider
 {
     private const string FallbackPsesHostVersion = "2025.4.0";
     private const int StartupOutputCaptureLimit = 32 * 1024;
@@ -48,6 +48,9 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     private Action<Exception>? _languageServiceFaultHandler;
     private EventHandler? _processExitedHandler;
     private Action<ExecutionOutputRecord>? _onOutput;
+    private long _nextPerformanceReadId;
+    private int? _visibleOutputPublishingFailedGeneration;
+    private Func<int, ExecutionOutputStreamKind, string, ValueTask>? _visibleOutputPublishingAsync;
     private PowerShellRuntimeInfo? _activeRuntime;
     private string? _workingDirectory;
     private string? _sessionDetailsPath;
@@ -142,7 +145,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     public string? SessionDetailsPath => _sessionDetailsPath;
 
     /// <summary>Filters only the prompt-prefixed invocation used to launch one debugger snapshot.</summary>
-    public IDisposable RegisterDebuggerLaunchEcho(Guid debugSessionId, string snapshotPath)
+    public IAsyncDisposable RegisterDebuggerLaunchEcho(Guid debugSessionId, string snapshotPath)
     {
         if (debugSessionId == Guid.Empty) throw new ArgumentException("A debugger session ID is required.", nameof(debugSessionId));
         ArgumentException.ThrowIfNullOrWhiteSpace(snapshotPath);
@@ -168,7 +171,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         return new DebuggerLaunchEchoRegistration(this, filter, generation);
     }
 
-    private void ReleaseDebuggerLaunchEchoFilter(StructuredEchoFilter filter, int generation)
+    private async ValueTask ReleaseDebuggerLaunchEchoFilterAsync(StructuredEchoFilter filter, int generation)
     {
         string remainder = string.Empty;
         var wasActive = false;
@@ -196,17 +199,21 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             ["contentOmitted"] = true
         });
         if (!string.IsNullOrEmpty(remainder))
-            PublishVisibleOutput(ExecutionOutputStreamKind.StandardOutput, generation, remainder);
+            await PublishVisibleOutputAsync(ExecutionOutputStreamKind.StandardOutput, generation, remainder).ConfigureAwait(false);
     }
 
-    private sealed class DebuggerLaunchEchoRegistration : IDisposable
+    private sealed class DebuggerLaunchEchoRegistration : IAsyncDisposable
     {
         private PsesOwnedInteractiveSessionService? _owner;
         private readonly StructuredEchoFilter _filter;
         private readonly int _generation;
         public DebuggerLaunchEchoRegistration(PsesOwnedInteractiveSessionService owner, StructuredEchoFilter filter, int generation)
         { _owner = owner; _filter = filter; _generation = generation; }
-        public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseDebuggerLaunchEchoFilter(_filter, _generation);
+        public ValueTask DisposeAsync()
+        {
+            var owner = Interlocked.Exchange(ref _owner, null);
+            return owner is null ? ValueTask.CompletedTask : owner.ReleaseDebuggerLaunchEchoFilterAsync(_filter, _generation);
+        }
     }
     public string? LanguageServicePipeName => _languageServicePipeName;
     public string? DebugServicePipeName => _debugServicePipeName;
@@ -311,6 +318,33 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     public event Action<int, string>? PromptReadyObserved;
     public event Action<StructuredPromptReadyObservation>? StructuredPromptReadyObserved;
     public event Action<int, string>? RawOutputReceived;
+    /// <summary>
+    /// The single transport owner for visible ConPTY output. Multiple transport owners are
+    /// rejected because each callback owns admission of the same ordered VT stream.
+    /// </summary>
+    public event Func<int, ExecutionOutputStreamKind, string, ValueTask>? VisibleOutputPublishingAsync
+    {
+        add
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            lock (_syncRoot)
+            {
+                if (_visibleOutputPublishingAsync is not null && _visibleOutputPublishingAsync != value)
+                    throw new InvalidOperationException("Only one authoritative visible-output transport owner may be registered.");
+                _visibleOutputPublishingAsync = value;
+            }
+        }
+        remove
+        {
+            lock (_syncRoot)
+            {
+                if (_visibleOutputPublishingAsync == value)
+                    _visibleOutputPublishingAsync = null;
+            }
+        }
+    }
+    /// <summary>Reports a generation-local presentation transport failure without faulting PSES.</summary>
+    public event Action<int, Exception>? VisibleOutputPublishingFailed;
     internal event Action<int, string>? OutputObservedBeforeDisplayFiltering;
 
     public void AttachHost(IntPtr hostHandle, int width, int height) { }
@@ -321,9 +355,36 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         var generation = SessionGeneration;
         var processId = ProcessId;
         var resizeOwner = _conPty;
+        var startedAt = Stopwatch.GetTimestamp();
+        if (DeveloperDiagnostics.IsEnabled)
+        {
+            DeveloperDiagnostics.LogCriticalForensic("PSES", "NativeConPtyResize.Begin", "Authoritative native resize entered.", new Dictionary<string, object?>
+            {
+                ["resizeSequence"] = resizeSequence,
+                ["sessionGeneration"] = generation,
+                ["processId"] = processId,
+                ["requestedColumns"] = cols,
+                ["requestedRows"] = rows,
+                ["nativeResizeAttempted"] = resizeOwner is not null,
+                ["contentOmitted"] = true
+            });
+        }
         try
         {
             resizeOwner?.Resize(cols, rows);
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                DeveloperDiagnostics.LogCriticalForensic("PSES", "NativeConPtyResize.End", "Authoritative native resize returned.", new Dictionary<string, object?>
+                {
+                    ["resizeSequence"] = resizeSequence,
+                    ["sessionGeneration"] = generation,
+                    ["processId"] = processId,
+                    ["elapsedMilliseconds"] = Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
+                    ["nativeResizeAttempted"] = resizeOwner is not null,
+                    ["nativeResizeSucceeded"] = resizeOwner is not null,
+                    ["contentOmitted"] = true
+                });
+            }
             if (DeveloperDiagnostics.IsEnabled)
             {
                 DeveloperDiagnostics.LogInfo("PSES", "NativeConPtyResizeResult", new Dictionary<string, object?>
@@ -355,6 +416,21 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
         catch (Exception ex)
         {
+            if (DeveloperDiagnostics.IsEnabled)
+            {
+                DeveloperDiagnostics.LogCriticalForensic("PSES", "NativeConPtyResize.End", "Authoritative native resize failed.", new Dictionary<string, object?>
+                {
+                    ["resizeSequence"] = resizeSequence,
+                    ["sessionGeneration"] = generation,
+                    ["processId"] = processId,
+                    ["elapsedMilliseconds"] = Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
+                    ["nativeResizeAttempted"] = resizeOwner is not null,
+                    ["nativeResizeSucceeded"] = false,
+                    ["errorType"] = ex.GetType().FullName,
+                    ["errorCode"] = ex.HResult,
+                    ["contentOmitted"] = true
+                });
+            }
             if (DeveloperDiagnostics.IsEnabled)
             {
                 DeveloperDiagnostics.LogInfo("PSES", "NativeConPtyResizeResult", new Dictionary<string, object?>
@@ -469,6 +545,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             _workingDirectory = workingDirectory;
             _sessionDetailsPath = sessionDetailsPath;
             _generation++;
+            _visibleOutputPublishingFailedGeneration = null;
             _pendingInteractiveCommand = null;
             _commandInProgress = false;
             _shutdownRequested = false;
@@ -490,6 +567,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
 
         var generation = _generation;
+        TerminalOutputCorrelationTrace.ResetForSession(generation);
         if (DeveloperDiagnostics.IsEnabled)
             DeveloperDiagnostics.LogCriticalForensic("PSESPolicy", "PsesProcessCreated",
                 "ConPTY created the requested PSES process.", new Dictionary<string, object?>
@@ -1442,7 +1520,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             }
             if (!string.IsNullOrEmpty(filteredEchoRemainder))
             {
-                PublishVisibleOutput(ExecutionOutputStreamKind.StandardOutput, sessionGeneration, filteredEchoRemainder);
+                await PublishVisibleOutputAsync(ExecutionOutputStreamKind.StandardOutput, sessionGeneration, filteredEchoRemainder).ConfigureAwait(false);
             }
             if (requestEchoFilter is not null)
             {
@@ -1612,27 +1690,22 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 // Keep dirty saved-file snapshots beside their document. PowerShell
                 // derives $PSScriptRoot from the physical invocation path, so placing
                 // the snapshot under %TEMP% breaks normal sibling-file/module lookup.
-                // Unsaved documents have no source directory; use the session's current
-                // directory so their relative references follow the console context.
+                // Unsaved documents have no authoritative $PSScriptRoot; stage those
+                // under the application-owned private temp directory without changing $PWD.
+                var hasSavedScriptPath = !string.IsNullOrWhiteSpace(savedScriptPath);
                 var snapshotDirectory = GetRunFileSnapshotDirectory(savedScriptPath, CurrentWorkingDirectory);
-                Directory.CreateDirectory(snapshotDirectory);
-                snapshotPath = Path.Combine(snapshotDirectory, ".ps7sd-editor-" + requestId.ToString("N", CultureInfo.InvariantCulture) + ".ps1");
-                await using var stream = new FileStream(snapshotPath, FileMode.CreateNew, FileAccess.Write,
-                    FileShare.Read, 4096, FileOptions.Asynchronous);
+                snapshotPath = await CreateRunFileSnapshotAsync(snapshotDirectory, !hasSavedScriptPath,
+                    requestId, scriptContent, cancellationToken).ConfigureAwait(false);
                 snapshotCreated = true;
-                await using var writer = new StreamWriter(stream, new UTF8Encoding(false));
-                await writer.WriteAsync(scriptContent.AsMemory(), cancellationToken).ConfigureAwait(false);
             }
 
-            DeveloperDiagnostics.LogInfo("PSESBridge", "Run File snapshot submitted as a script-file invocation.", new Dictionary<string, object?>
+            policyDiagnosticPathKind = savedScriptReadLock is not null ? "OriginalSavedFile" :
+                string.IsNullOrWhiteSpace(savedScriptPath) ? "PrivateTemp" : "AdjacentSavedDirectory";
+            DeveloperDiagnostics.LogUserAction("PSESBridge", "RunFileSnapshotPrepared", "Run File snapshot was prepared for file-scope bridge execution.", new Dictionary<string, object?>
             {
                 ["requestId"] = requestId,
                 ["sessionGeneration"] = sessionGeneration,
-                ["processId"] = ProcessId,
-                ["documentDisplayNameLength"] = documentDisplayName.Length,
-                ["originalDocumentPath"] = DeveloperDiagnostics.SanitizePath(savedScriptPath),
-                ["intendedWorkingDirectory"] = DeveloperDiagnostics.SanitizePath(CurrentWorkingDirectory),
-                ["executionPath"] = DeveloperDiagnostics.SanitizePath(snapshotPath),
+                ["pathClassification"] = policyDiagnosticPathKind,
                 ["savedSourcePathUsed"] = savedScriptReadLock is not null,
                 ["snapshotCreated"] = snapshotCreated,
                 ["scriptLength"] = scriptContent.Length,
@@ -1641,7 +1714,6 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
 
             if (DeveloperDiagnostics.IsEnabled)
             {
-                policyDiagnosticPathKind = savedScriptReadLock is not null ? "OriginalSavedFile" : "GeneratedSnapshot";
                 policyDiagnosticZone = await PsesExecutionPolicyDiagnostics.ObserveZoneAsync(snapshotPath).ConfigureAwait(false);
                 DeveloperDiagnostics.LogCriticalForensic("PSESPolicy", "EditorExecutionBefore",
                     "Run File path metadata captured before bridge submission.", new Dictionary<string, object?>
@@ -1659,10 +1731,24 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
 
             var bridgeGeneration = _runtimeGeneration ?? sessionGeneration;
             bridgeInvocationStarted = true;
+            DeveloperDiagnostics.LogUserAction("PSESBridge", "RunFileBridgeSubmissionStarted", "Run File submission started through the authenticated PSES bridge.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = sessionGeneration,
+                ["pathClassification"] = policyDiagnosticPathKind,
+                ["contentOmitted"] = true
+            });
             var result = await client.ExecuteFileAsync(requestId, bridgeGeneration, snapshotPath, cancellationToken)
                 .ConfigureAwait(false);
             policyDiagnosticResult = result;
             bridgeCompletionObserved = true;
+            DeveloperDiagnostics.LogUserAction("PSESBridge", "RunFileBridgeCompletionConfirmed", "PSES bridge returned a confirmed Run File completion.", new Dictionary<string, object?>
+            {
+                ["requestId"] = requestId,
+                ["sessionGeneration"] = sessionGeneration,
+                ["bridgeStatus"] = result.Status.ToString(),
+                ["contentOmitted"] = true
+            });
             NotifyVerifiedBridgeCompletionReadiness(requestId, sessionGeneration, result.Status);
             return result.Status switch
             {
@@ -1677,6 +1763,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             if (bridgeInvocationStarted && !bridgeCompletionObserved)
             {
                 lock (_syncRoot) _interactiveReadinessUnverified = true;
+                LogUnconfirmedRunFileBridge(requestId, sessionGeneration, policyDiagnosticPathKind, "Cancelled");
                 return new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
                     "Run File cancellation was not confirmed by the PSES bridge; the session requires recovery.",
                     CompletionObserved: false, RecoveryRequired: true);
@@ -1687,9 +1774,24 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
         catch (Exception ex)
         {
+            if (!bridgeInvocationStarted)
+            {
+                DeveloperDiagnostics.LogDecision("PSESBridge", "RunFileSnapshotPreparationFailed",
+                    "Run File snapshot preparation failed before PSES bridge submission.", "Rejected",
+                    new Dictionary<string, object?>
+                    {
+                        ["requestId"] = requestId,
+                        ["sessionGeneration"] = sessionGeneration,
+                        ["pathClassification"] = string.IsNullOrWhiteSpace(savedScriptPath) ? "PrivateTemp" : "AdjacentSavedDirectory",
+                        ["errorType"] = ex.GetType().Name,
+                        ["contentOmitted"] = true
+                    });
+                return new(EditorExecutionStatus.Rejected, CurrentWorkingDirectory,
+                    GetRunFileSnapshotPreparationError(ex), CompletionObserved: false, RecoveryRequired: false);
+            }
+
             lock (_syncRoot) _interactiveReadinessUnverified = true;
-            DeveloperDiagnostics.LogException("PSESBridge", ex, "Run File bridge completion was not confirmed; session readiness was closed.",
-                new Dictionary<string, object?> { ["requestId"] = requestId, ["sessionGeneration"] = sessionGeneration, ["processId"] = ProcessId });
+            LogUnconfirmedRunFileBridge(requestId, sessionGeneration, policyDiagnosticPathKind, ex.GetType().Name);
             return new(EditorExecutionStatus.Unknown, CurrentWorkingDirectory,
                 "PSES bridge Run File completion was not confirmed; the session requires recovery.", false, RecoveryRequired: true);
         }
@@ -2873,6 +2975,13 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
 
     private async Task WriteInputCoreAsync(string data, CancellationToken cancellationToken, ConPtyProcess? expectedConPty = null, int? expectedGeneration = null)
     {
+        // Capture the transport boundary for an actual ETX write. This is diagnostic
+        // only; neither admission nor the ConPTY write waits on the trace channel.
+        var traceInterrupt = DeveloperDiagnostics.IsEnabled && data.Length == 1 && data[0] == '\u0003';
+        var interruptAdmittedAt = traceInterrupt ? Stopwatch.GetTimestamp() : 0;
+        var interruptAdmittedUtc = traceInterrupt ? DateTimeOffset.UtcNow : default;
+        var interruptTransportId = traceInterrupt ? Guid.NewGuid() : Guid.Empty;
+        var interruptOperationId = traceInterrupt ? DeveloperDiagnostics.CurrentOperationId : null;
         ConPtyProcess conPty;
         int generation;
         lock (_syncRoot)
@@ -2884,6 +2993,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
         var bytes = Encoding.UTF8.GetBytes(data);
         await _terminalInputGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var interruptGateAcquiredAt = traceInterrupt ? Stopwatch.GetTimestamp() : 0;
         InputOutputProbe? inputProbe = null;
         try
         {
@@ -2909,8 +3019,28 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                     ["processAlive"] = !conPty.HasExited,
                     ["contentOmitted"] = true
                 });
+            var interruptWriteStartedAt = traceInterrupt ? Stopwatch.GetTimestamp() : 0;
             await conPty.Input.WriteAsync(bytes.AsMemory(), cancellationToken).ConfigureAwait(false);
             await conPty.Input.FlushAsync(cancellationToken).ConfigureAwait(false);
+            if (traceInterrupt)
+            {
+                var interruptFlushedAt = Stopwatch.GetTimestamp();
+                DeveloperDiagnostics.LogCriticalForensic("PSES", "ConPtyInterruptSubmitted",
+                    "ETX was flushed to the authoritative ConPTY input pipe.",
+                    new Dictionary<string, object?>
+                    {
+                        ["transportId"] = interruptTransportId,
+                        ["operationId"] = interruptOperationId,
+                        ["admittedUtc"] = interruptAdmittedUtc,
+                        ["sessionGeneration"] = generation,
+                        ["processId"] = conPty.ProcessId,
+                        ["inputGateWaitMilliseconds"] = Stopwatch.GetElapsedTime(interruptAdmittedAt, interruptGateAcquiredAt).TotalMilliseconds,
+                        ["preWriteMilliseconds"] = Stopwatch.GetElapsedTime(interruptGateAcquiredAt, interruptWriteStartedAt).TotalMilliseconds,
+                        ["writeAndFlushMilliseconds"] = Stopwatch.GetElapsedTime(interruptWriteStartedAt, interruptFlushedAt).TotalMilliseconds,
+                        ["admissionToFlushMilliseconds"] = Stopwatch.GetElapsedTime(interruptAdmittedAt, interruptFlushedAt).TotalMilliseconds,
+                        ["contentOmitted"] = true
+                    });
+            }
             DeveloperDiagnostics.LogInfo(
                 "Phase2CProof",
                 "PSES-owned ConPTY write flushed successfully.",
@@ -2959,9 +3089,14 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
             {
                 var count = await stream.ReadAsync(buffer).ConfigureAwait(false);
                 if (count == 0) break;
+                var performanceReadId = PerformanceTrace.IsEnabled
+                    ? Interlocked.Increment(ref _nextPerformanceReadId)
+                    : 0;
                 CaptureRawConPtyBytes(buffer, count, generation, owner.ProcessId, kind);
                 var text = decoder.Decode(buffer, count);
                 if (text.Length == 0) continue;
+                if (performanceReadId != 0)
+                    TerminalOutputCorrelationTrace.RecordRawRead(generation, text, performanceReadId);
                 var cursorVisibility = ObserveCursorVisibility(text, generation);
                 ResizeForensicsTrace.Record(
                     $"PsesReceive.{kind}",
@@ -2970,7 +3105,6 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                     processId: ProcessId,
                     file: "pses-fingerprints.jsonl");
                 capture.Append(text);
-                PublishOutput(kind, generation, text);
                 if (cursorVisibility.HasValue)
                 {
                     try { CursorVisibilityChanged?.Invoke(generation, cursorVisibility.Value); } catch { }
@@ -3044,12 +3178,17 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                     }
                     NotifyPromptReadyObserved(generation, text);
                 }
+                // Finish native prompt/parser and request-readiness observation before
+                // invoking application presentation subscribers. The visible-output
+                // transformation remains source ordered, but renderer backpressure must
+                // never delay this decoded read's backend readiness transition.
+                await PublishOutputAsync(kind, generation, text, performanceReadId).ConfigureAwait(false);
             }
             var trailingText = decoder.Flush();
             if (trailingText.Length > 0)
             {
                 capture.Append(trailingText);
-                PublishOutput(kind, generation, trailingText);
+                await PublishOutputAsync(kind, generation, trailingText).ConfigureAwait(false);
             }
         }
         catch (ObjectDisposedException ex)
@@ -3498,7 +3637,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         if (_disposed) throw new ObjectDisposedException(nameof(PsesOwnedInteractiveSessionService));
     }
 
-    private void PublishOutput(ExecutionOutputStreamKind kind, int generation, string text)
+    private async ValueTask PublishOutputAsync(ExecutionOutputStreamKind kind, int generation, string text, long performanceReadId = 0)
     {
         if (string.IsNullOrEmpty(text))
         {
@@ -3568,6 +3707,74 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 ["contentOmitted"] = true
             });
         }
+        if (performanceReadId != 0)
+            TerminalOutputCorrelationTrace.Record(
+                "PsesPostFilterAcceptance",
+                generation,
+                visibleText,
+                readId: performanceReadId,
+                chunkId: performanceReadId);
+        await PublishVisibleOutputAsync(kind, generation, visibleText).ConfigureAwait(false);
+    }
+
+    private async ValueTask PublishVisibleOutputAsync(ExecutionOutputStreamKind kind, int generation, string visibleText)
+    {
+        if (string.IsNullOrEmpty(visibleText)) return;
+        Func<int, ExecutionOutputStreamKind, string, ValueTask>? transportOwner;
+        bool transportAlreadyDegraded;
+        lock (_syncRoot)
+        {
+            if (_shutdownRequested || generation != _generation || _sessionFaulted) return;
+            transportOwner = _visibleOutputPublishingAsync;
+            transportAlreadyDegraded = _visibleOutputPublishingFailedGeneration == generation;
+        }
+
+        if (transportAlreadyDegraded)
+        {
+            PublishExecutionOutputRecord(kind, generation, visibleText);
+            return;
+        }
+        if (transportOwner is not null)
+        {
+            try
+            {
+                await transportOwner(generation, kind, visibleText).ConfigureAwait(false);
+                PublishExecutionOutputRecord(kind, generation, visibleText);
+                return;
+            }
+            catch (Exception ex)
+            {
+                // The callback may have partially admitted or rendered this chunk before it
+                // failed. Never replay it through the legacy path; quarantine presentation
+                // for this PSES generation while leaving the shared session alive.
+                lock (_syncRoot)
+                {
+                    if (generation == _generation)
+                        _visibleOutputPublishingFailedGeneration = generation;
+                }
+                DeveloperDiagnostics.LogException("PSES", ex,
+                    "Awaitable visible-output transport failed; presentation is quarantined for this PSES generation.",
+                    new Dictionary<string, object?>
+                    {
+                        ["sessionGeneration"] = generation,
+                        ["processId"] = ProcessId,
+                        ["outputLength"] = visibleText.Length,
+                        ["contentOmitted"] = true
+                    });
+                try { VisibleOutputPublishingFailed?.Invoke(generation, ex); }
+                catch (Exception observerException)
+                {
+                    DeveloperDiagnostics.LogException("PSES", observerException,
+                        "Visible-output failure observer threw while recording the quarantined presentation state.",
+                        new Dictionary<string, object?> { ["sessionGeneration"] = generation });
+                }
+                PublishExecutionOutputRecord(kind, generation, visibleText);
+                return;
+            }
+        }
+
+        // The legacy callback and raw event are one presentation path. Keep both only
+        // when no authoritative awaitable transport owner is registered.
         PublishVisibleOutput(kind, generation, visibleText);
     }
 
@@ -3609,6 +3816,27 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     private void PublishVisibleOutput(ExecutionOutputStreamKind kind, int generation, string visibleText)
     {
         if (string.IsNullOrEmpty(visibleText)) return;
+        PublishExecutionOutputRecord(kind, generation, visibleText);
+        var rawSubscribers = RawOutputReceived;
+        if (rawSubscribers is null) return;
+        foreach (Action<int, string> subscriber in rawSubscribers.GetInvocationList())
+        {
+            try { subscriber(generation, visibleText); }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException("PSES", ex, "Raw terminal output subscriber failed; remaining subscribers will still receive the output.", new Dictionary<string, object?>
+                {
+                    ["sessionGeneration"] = generation,
+                    ["processId"] = ProcessId,
+                    ["outputLength"] = visibleText.Length,
+                    ["contentOmitted"] = true
+                });
+            }
+        }
+    }
+
+    private void PublishExecutionOutputRecord(ExecutionOutputStreamKind kind, int generation, string visibleText)
+    {
         Action<ExecutionOutputRecord>? onOutput;
         lock (_syncRoot)
         {
@@ -3626,22 +3854,6 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
                 ["outputLength"] = visibleText.Length,
                 ["contentOmitted"] = true
             });
-        }
-        var rawSubscribers = RawOutputReceived;
-        if (rawSubscribers is null) return;
-        foreach (Action<int, string> subscriber in rawSubscribers.GetInvocationList())
-        {
-            try { subscriber(generation, visibleText); }
-            catch (Exception ex)
-            {
-                DeveloperDiagnostics.LogException("PSES", ex, "Raw terminal output subscriber failed; remaining subscribers will still receive the output.", new Dictionary<string, object?>
-                {
-                    ["sessionGeneration"] = generation,
-                    ["processId"] = ProcessId,
-                    ["outputLength"] = visibleText.Length,
-                    ["contentOmitted"] = true
-                });
-            }
         }
     }
 
@@ -3750,7 +3962,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
     private static string QuotePowerShellSingleQuotedString(string value)
         => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
 
-    private static string? TryOpenMatchingSavedScript(string? candidatePath, string scriptContent, out FileStream? readLock)
+    internal static string? TryOpenMatchingSavedScript(string? candidatePath, string scriptContent, out FileStream? readLock)
     {
         readLock = null;
         if (string.IsNullOrWhiteSpace(candidatePath)) return null;
@@ -3792,38 +4004,61 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IC
         }
     }
 
-    private static string GetRunFileSnapshotDirectory(string? savedScriptPath, string? workingDirectory)
+    internal static string GetRunFileSnapshotDirectory(string? savedScriptPath, string? workingDirectory)
     {
         if (!string.IsNullOrWhiteSpace(savedScriptPath))
         {
-            try
-            {
-                var sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(savedScriptPath));
-                if (!string.IsNullOrWhiteSpace(sourceDirectory) && Directory.Exists(sourceDirectory))
-                    return sourceDirectory;
-            }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-            {
-                // The path is diagnostic context only when it cannot be normalized.
-                // The unsaved-file fallback below still preserves the console location.
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(workingDirectory))
-        {
-            try
-            {
-                var fullWorkingDirectory = Path.GetFullPath(workingDirectory);
-                if (Directory.Exists(fullWorkingDirectory)) return fullWorkingDirectory;
-            }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-            {
-                // Fall through to the app-owned private temp area.
-            }
+            var sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(savedScriptPath));
+            if (string.IsNullOrWhiteSpace(sourceDirectory) || !Directory.Exists(sourceDirectory))
+                throw new DirectoryNotFoundException("The saved script's directory does not exist.");
+            return sourceDirectory;
         }
 
         return Path.Combine(Path.GetTempPath(), "PS7ScriptDesk", "EditorExecution");
     }
+
+    internal static async Task<string> CreateRunFileSnapshotAsync(
+        string snapshotDirectory, bool applicationOwnedDirectory, Guid requestId, string scriptContent,
+        CancellationToken cancellationToken = default)
+    {
+        if (applicationOwnedDirectory) Directory.CreateDirectory(snapshotDirectory);
+        var snapshotPath = Path.Combine(snapshotDirectory,
+            ".ps7sd-editor-" + requestId.ToString("N", CultureInfo.InvariantCulture) + ".ps1");
+        var created = false;
+        try
+        {
+            await using var stream = new FileStream(snapshotPath, FileMode.CreateNew, FileAccess.Write,
+                FileShare.Read, 4096, FileOptions.Asynchronous);
+            created = true;
+            await using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+            await writer.WriteAsync(scriptContent.AsMemory(), cancellationToken).ConfigureAwait(false);
+            return snapshotPath;
+        }
+        catch
+        {
+            if (created) TryDeleteFile(snapshotPath);
+            throw;
+        }
+    }
+
+    private static string GetRunFileSnapshotPreparationError(Exception exception)
+        => exception switch
+        {
+            UnauthorizedAccessException => "The Run File staging directory is not writable.",
+            DirectoryNotFoundException => "The saved script's directory no longer exists; Run File could not stage the edited contents.",
+            IOException => "Could not create the Run File snapshot in its staging directory.",
+            _ => "Could not prepare the Run File snapshot before PSES submission."
+        };
+
+    private static void LogUnconfirmedRunFileBridge(Guid requestId, int sessionGeneration, string? pathClassification, string reason)
+        => DeveloperDiagnostics.LogDecision("PSESBridge", "RunFileBridgeCompletionUnconfirmed", "Run File bridge completion was not confirmed; session recovery remains required.", "RecoveryRequired", new Dictionary<string, object?>
+        {
+            ["requestId"] = requestId,
+            ["sessionGeneration"] = sessionGeneration,
+            ["pathClassification"] = pathClassification,
+            ["reason"] = reason,
+            ["contentOmitted"] = true
+        });
 
     internal static string BuildExperimentalDirectRunFileInvocation(string quotedSnapshotPath, string quotedStatusPath, string statusVariable)
         => "& { $" + statusVariable + " = $true; try { if (-not [System.IO.File]::Exists(" + quotedSnapshotPath + ")) { throw 'The editor snapshot is missing.' }; & " + quotedSnapshotPath + "; $" + statusVariable + " = $? } catch { $" + statusVariable + " = $false; throw } finally { if ($" + statusVariable + ") { [System.IO.File]::WriteAllText(" + quotedStatusPath + ", 'OK') } else { [System.IO.File]::WriteAllText(" + quotedStatusPath + ", 'ERROR') }; Remove-Variable -Name '" + statusVariable + "' -ErrorAction SilentlyContinue } }";

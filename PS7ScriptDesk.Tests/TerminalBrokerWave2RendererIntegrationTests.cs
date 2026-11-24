@@ -41,151 +41,7 @@ public sealed class TerminalBrokerWave2RendererIntegrationTests
     }
 
     [Fact]
-    public void Multiplexer_PublishesInteractiveAndEditorThroughOneOrderedStream()
-    {
-        var multiplexer = new TerminalOutputMultiplexer();
-        var observed = new List<TerminalOutputEnvelope>();
-        var requestId = Guid.NewGuid();
-        multiplexer.OutputPublished += observed.Add;
-
-        Assert.True(multiplexer.TryReplaceInteractiveGeneration(7, InteractiveTerminalState.InteractiveIdleAtPrompt));
-        Assert.True(multiplexer.TryBeginEditorExecution(requestId, AdmissionFacts(multiplexer.InteractiveState), out _));
-        var interactive = multiplexer.PublishInteractive(7, EditorOutputStreamKind.VirtualTerminal, "PS C:\\> ");
-        var editor = multiplexer.PublishEditor(Output(requestId, 3, 9, EditorOutputStreamKind.Success, "hello"));
-
-        Assert.Equal([interactive, editor], observed);
-        Assert.True(interactive.Sequence < editor.Sequence);
-        Assert.Equal(TerminalOutputSource.InteractiveTerminal, interactive.Source);
-        Assert.Equal(TerminalOutputSource.StructuredEditor, editor.Source);
-        Assert.Equal(3, editor.BrokerSessionGeneration);
-        Assert.Equal(7, editor.InteractiveTerminalSessionGeneration);
-        Assert.Equal(7, editor.RendererGeneration);
-        Assert.Equal(9, editor.SourceSequence);
-    }
-
-    [Fact]
-    public void Multiplexer_SubscriberFailureDoesNotEscapeOrStopLaterOutput()
-    {
-        var multiplexer = new TerminalOutputMultiplexer();
-        var observed = new List<TerminalOutputEnvelope>();
-        multiplexer.OutputPublished += _ => throw new InvalidOperationException("consumer failed");
-        multiplexer.OutputPublished += observed.Add;
-
-        var first = multiplexer.PublishInteractive(1, EditorOutputStreamKind.VirtualTerminal, "first");
-        var second = multiplexer.PublishInteractive(1, EditorOutputStreamKind.VirtualTerminal, "second");
-
-        Assert.Equal([first, second], observed);
-    }
-
-    [Fact]
-    public void Multiplexer_RemovedSubscriberReceivesNoFurtherOutput()
-    {
-        var multiplexer = new TerminalOutputMultiplexer();
-        var observed = new List<TerminalOutputEnvelope>();
-        Action<TerminalOutputEnvelope> subscriber = observed.Add;
-        multiplexer.OutputPublished += subscriber;
-
-        multiplexer.PublishInteractive(1, EditorOutputStreamKind.VirtualTerminal, "first");
-        multiplexer.OutputPublished -= subscriber;
-        multiplexer.PublishInteractive(1, EditorOutputStreamKind.VirtualTerminal, "second");
-
-        Assert.Single(observed);
-        Assert.Equal("first", observed[0].Payload);
-    }
-
-    [Fact]
-    public void Multiplexer_DoesNotRetainPublishedHistoryAndDrainsNotifications()
-    {
-        var multiplexer = new TerminalOutputMultiplexer();
-        for (var index = 0; index < 10_000; index++)
-        {
-            multiplexer.PublishInteractive(1, EditorOutputStreamKind.VirtualTerminal, index.ToString());
-        }
-
-        var fields = typeof(TerminalOutputMultiplexer).GetFields(
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        Assert.DoesNotContain(fields, field => field.FieldType == typeof(List<TerminalOutputEnvelope>));
-        Assert.DoesNotContain(typeof(TerminalOutputMultiplexer).GetProperties(), property => property.Name == "Published");
-        var pending = fields.Single(field => field.Name == "_pendingNotifications").GetValue(multiplexer);
-        Assert.Equal(0, (int)pending!.GetType().GetProperty("Count")!.GetValue(pending)!);
-    }
-
-    [Fact]
-    public void Multiplexer_GenerationReplacementDoesNotRetainOldPublishedEnvelopes()
-    {
-        var multiplexer = new TerminalOutputMultiplexer();
-        var observed = new List<TerminalOutputEnvelope>();
-        multiplexer.OutputPublished += observed.Add;
-        multiplexer.PublishInteractive(1, EditorOutputStreamKind.VirtualTerminal, "old generation");
-
-        Assert.True(multiplexer.TryReplaceInteractiveGeneration(2, InteractiveTerminalState.Starting));
-        multiplexer.PublishInteractive(2, EditorOutputStreamKind.VirtualTerminal, "new generation");
-
-        Assert.Equal([1, 2], observed.Select(item => item.InteractiveTerminalSessionGeneration));
-        var fields = typeof(TerminalOutputMultiplexer).GetFields(
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        Assert.DoesNotContain(fields, field => field.FieldType == typeof(List<TerminalOutputEnvelope>));
-    }
-
-    [Fact]
-    public async Task Multiplexer_ConcurrentPublishNotificationsFollowGlobalSequence()
-    {
-        var multiplexer = new TerminalOutputMultiplexer();
-        var observed = new List<long>();
-        var syncRoot = new object();
-        multiplexer.OutputPublished += envelope =>
-        {
-            lock (syncRoot)
-            {
-                observed.Add(envelope.Sequence);
-            }
-        };
-
-        await Task.WhenAll(
-            Enumerable.Range(0, 50).Select(index =>
-                Task.Run(() => multiplexer.PublishInteractive(1, EditorOutputStreamKind.VirtualTerminal, index.ToString()))));
-
-        Assert.Equal(observed.OrderBy(item => item), observed);
-        Assert.Equal(50, observed.Count);
-    }
-
-    [Theory]
-    [InlineData("##PSSTUDIO_EXEC_START_abc")]
-    [InlineData("##PSSTUDIO_EXEC_DONE_abc")]
-    [InlineData("##PSSTUDIO_LOCATION_abc_QzpcV29yaw==")]
-    [InlineData("##PSSTUDIO_DISPATCH_DIAG## begin")]
-    [InlineData("& 'hidden-helper.ps1'")]
-    public void Multiplexer_RejectsPrivateProtocolInStructuredEditorOutput(string payload)
-    {
-        var multiplexer = new TerminalOutputMultiplexer();
-        var requestId = Guid.NewGuid();
-        multiplexer.TryReplaceInteractiveGeneration(1, InteractiveTerminalState.InteractiveIdleAtPrompt);
-        multiplexer.TryBeginEditorExecution(requestId, AdmissionFacts(multiplexer.InteractiveState), out _);
-
-        Assert.Throws<InvalidOperationException>(() =>
-            multiplexer.PublishEditor(Output(requestId, 1, 1, EditorOutputStreamKind.Success, payload)));
-    }
-
-    [Theory]
-    [InlineData("plain output")]
-    [InlineData("\u001b[31mred\u001b[0m")]
-    [InlineData("10%\r20%")]
-    [InlineData("Unicode 日本語")]
-    [InlineData("line1\nline2")]
-    public void Multiplexer_PreservesVisibleStructuredPayloads(string payload)
-    {
-        var multiplexer = new TerminalOutputMultiplexer();
-        var requestId = Guid.NewGuid();
-        multiplexer.TryReplaceInteractiveGeneration(2, InteractiveTerminalState.InteractiveIdleAtPrompt);
-        multiplexer.TryBeginEditorExecution(requestId, AdmissionFacts(multiplexer.InteractiveState), out _);
-
-        var envelope = multiplexer.PublishEditor(Output(requestId, 1, 1, EditorOutputStreamKind.VirtualTerminal, payload));
-
-        Assert.Equal(payload, envelope.Payload);
-    }
-
-    [Fact]
-    public void Multiplexer_BlocksEditorOutputWhileInteractiveInputIsEditing()
+    public void Multiplexer_AdmissionRejectsInteractiveInputEditing()
     {
         var multiplexer = new TerminalOutputMultiplexer();
         multiplexer.SetInteractiveState(InteractiveTerminalState.InteractiveInputEditing);
@@ -195,7 +51,7 @@ public sealed class TerminalBrokerWave2RendererIntegrationTests
     }
 
     [Fact]
-    public void Multiplexer_BlocksEditorOutputWhileInteractiveCommandRuns()
+    public void Multiplexer_AdmissionRejectsActiveInteractiveCommand()
     {
         var multiplexer = new TerminalOutputMultiplexer();
         multiplexer.SetInteractiveState(InteractiveTerminalState.InteractiveCommandRunning);
@@ -215,30 +71,6 @@ public sealed class TerminalBrokerWave2RendererIntegrationTests
         var reason = EditorExecutionAdmissionPolicy.ExplainRejection(state);
 
         Assert.Contains(expectedReasonFragment, reason, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Theory]
-    [InlineData(EditorOutputStreamKind.Success, "success")]
-    [InlineData(EditorOutputStreamKind.Error, "error")]
-    [InlineData(EditorOutputStreamKind.Warning, "warning")]
-    [InlineData(EditorOutputStreamKind.Verbose, "verbose")]
-    [InlineData(EditorOutputStreamKind.Debug, "debug")]
-    [InlineData(EditorOutputStreamKind.Information, "information")]
-    [InlineData(EditorOutputStreamKind.Host, "host")]
-    [InlineData(EditorOutputStreamKind.Native, "native")]
-    [InlineData(EditorOutputStreamKind.VirtualTerminal, "\u001b[33mvt\u001b[0m")]
-    public void Multiplexer_PreservesStructuredStreamKindsWithoutTypeReordering(EditorOutputStreamKind kind, string payload)
-    {
-        var multiplexer = new TerminalOutputMultiplexer();
-        var requestId = Guid.NewGuid();
-        multiplexer.TryReplaceInteractiveGeneration(3, InteractiveTerminalState.InteractiveIdleAtPrompt);
-        multiplexer.TryBeginEditorExecution(requestId, AdmissionFacts(multiplexer.InteractiveState), out _);
-
-        var envelope = multiplexer.PublishEditor(Output(requestId, 1, 8, kind, payload));
-
-        Assert.Equal(kind, envelope.StreamKind);
-        Assert.Equal(8, envelope.SourceSequence);
-        Assert.Equal(payload, envelope.Payload);
     }
 
     [Theory]
@@ -407,53 +239,18 @@ public sealed class TerminalBrokerWave2RendererIntegrationTests
     }
 
     [Fact]
-    public void MainWindow_SourceUsesOneMultiplexedRendererVisibleStream()
+    public void MainWindow_UsesBoundedPsesAsTheOnlyTerminalPresentationSubscriber()
     {
         var source = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
 
-        Assert.Contains("ViewModel.SubscribeRawOutput(OnRawTerminalOutputReceived)", source, StringComparison.Ordinal);
-        Assert.Contains("private MainWindowViewModel? ViewModel => Volatile.Read(ref _viewModel)", source, StringComparison.Ordinal);
-        Assert.Contains("viewModel.PublishInteractiveTerminalOutput(generation, rawOutput)", source, StringComparison.Ordinal);
-        Assert.Contains("TerminalOutputPublished += EnqueueTerminalOutputForRenderer", source, StringComparison.Ordinal);
-        Assert.Contains("ConcurrentQueue<TerminalOutputEnvelope>", source, StringComparison.Ordinal);
-        Assert.Contains("DrainTerminalOutputForRenderer", source, StringComparison.Ordinal);
-        Assert.Contains("TerminalConsole.WriteStructuredOutput", source, StringComparison.Ordinal);
-        Assert.Contains("TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload)", source, StringComparison.Ordinal);
+        Assert.Contains("EnableBoundedPsesTerminalIngress();", source, StringComparison.Ordinal);
+        Assert.Contains("awaitableSource.VisibleOutputPublishingAsync += OnBoundedPsesTerminalOutputAsync;", source, StringComparison.Ordinal);
+        Assert.Contains("TerminalConsole.WriteRawAwaitableAsync(sessionGeneration, text)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("SubscribeRawOutput", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("TerminalOutputPublished", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("DrainTerminalOutputForRenderer", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ConnectedTerminalOutputOwner", source, StringComparison.Ordinal);
     }
-
-    [Fact]
-    public void MainWindow_SourceDoesNotTouchTerminalControlFromOutputSubscriber()
-    {
-        var source = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
-        var enqueueIndex = source.IndexOf("private void EnqueueTerminalOutputForRenderer", StringComparison.Ordinal);
-        var drainIndex = source.IndexOf("private void DrainTerminalOutputForRenderer", StringComparison.Ordinal);
-
-        Assert.True(enqueueIndex >= 0);
-        Assert.True(drainIndex >= 0);
-        Assert.DoesNotContain("TerminalConsole.Write", source[enqueueIndex..drainIndex], StringComparison.Ordinal);
-        Assert.Contains("TerminalOutputPublished += EnqueueTerminalOutputForRenderer", source, StringComparison.Ordinal);
-        Assert.Contains("_terminalOutputDispatcher.BeginInvoke", source, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void MainWindow_RawOutputSubscriberDoesNotReadWpfDataContextOrTouchRenderer()
-    {
-        var source = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
-        var handlerIndex = source.IndexOf("private void OnRawTerminalOutputReceived", StringComparison.Ordinal);
-        var enqueueIndex = source.IndexOf("private void EnqueueTerminalOutputForRenderer", StringComparison.Ordinal);
-
-        Assert.True(handlerIndex >= 0);
-        Assert.True(enqueueIndex > handlerIndex);
-        var handlerBlock = source[handlerIndex..enqueueIndex];
-        Assert.Contains("Volatile.Read(ref _viewModel)", handlerBlock, StringComparison.Ordinal);
-        Assert.Contains("viewModel.PublishInteractiveTerminalOutput(generation, rawOutput)", handlerBlock, StringComparison.Ordinal);
-        Assert.DoesNotContain("DataContext", handlerBlock, StringComparison.Ordinal);
-        Assert.DoesNotContain("GetValue", handlerBlock, StringComparison.Ordinal);
-        Assert.DoesNotContain("Dispatcher.", handlerBlock, StringComparison.Ordinal);
-        Assert.DoesNotContain("TerminalConsole.", handlerBlock, StringComparison.Ordinal);
-        Assert.DoesNotContain("ViewModel?", handlerBlock, StringComparison.Ordinal);
-    }
-
     [Fact]
     public void AppBootstrapper_AttachesViewModelThroughMainWindowOwnershipMethod()
     {
@@ -486,19 +283,6 @@ public sealed class TerminalBrokerWave2RendererIntegrationTests
         Assert.DoesNotContain("WriteStructuredOutput", source[resizeIndex..Math.Min(source.Length, resizeIndex + 600)], StringComparison.Ordinal);
         Assert.DoesNotContain("WriteVisibleOutput", source[resizeIndex..Math.Min(source.Length, resizeIndex + 600)], StringComparison.Ordinal);
     }
-
-    private static EditorOutputRecord Output(
-        Guid requestId,
-        int brokerGeneration,
-        long sourceSequence,
-        EditorOutputStreamKind kind,
-        string payload) => new(
-            requestId,
-            brokerGeneration,
-            sourceSequence,
-            kind,
-            payload,
-            DateTimeOffset.UtcNow);
 
     private static TerminalOutputEnvelope Envelope(
         long sequence,

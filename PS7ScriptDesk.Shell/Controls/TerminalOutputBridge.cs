@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Domain.Models;
@@ -16,6 +18,9 @@ namespace PS7ScriptDesk.Shell.Controls
     {
         public const int DefaultMaximumPendingCharacters = 512 * 1024;
         public const int DefaultMaximumBatchCharacters = 32 * 1024;
+        public static readonly TimeSpan AcknowledgmentTimeout = TimeSpan.FromSeconds(5);
+
+        public static bool HasAcknowledgmentTimedOut(TimeSpan elapsed) => elapsed >= AcknowledgmentTimeout;
 
         private readonly object _syncRoot = new();
         private readonly LinkedList<string> _pendingChunks = new();
@@ -28,6 +33,7 @@ namespace PS7ScriptDesk.Shell.Controls
         private long _nextSequence;
         private TerminalOutputBatch? _inFlightBatch;
         private int _pendingCharacters;
+        private TaskCompletionSource<bool> _capacityChanged = CreateCapacitySignal();
 
         public TerminalOutputFlowController(
             int maximumPendingCharacters = DefaultMaximumPendingCharacters,
@@ -69,6 +75,21 @@ namespace PS7ScriptDesk.Shell.Controls
             }
         }
 
+        public int PendingCharacters
+        {
+            get { lock (_syncRoot) return _pendingCharacters; }
+        }
+
+        public bool HasCapacity(int generation, int characterCount)
+        {
+            lock (_syncRoot)
+            {
+                return _activeGeneration == generation &&
+                    !_rendererUnavailable &&
+                    characterCount <= _maximumPendingCharacters - _pendingCharacters;
+            }
+        }
+
         public TerminalOutputGenerationInvalidationResult ActivateGeneration(int generation)
         {
             lock (_syncRoot)
@@ -80,6 +101,7 @@ namespace PS7ScriptDesk.Shell.Controls
 
                 var discardedCharacters = DiscardAllOutput();
                 _activeGeneration = generation;
+                SignalCapacityChanged();
                 return new TerminalOutputGenerationInvalidationResult(generation, discardedCharacters);
             }
         }
@@ -95,6 +117,7 @@ namespace PS7ScriptDesk.Shell.Controls
 
                 var discardedCharacters = DiscardAllOutput();
                 _activeGeneration = null;
+                SignalCapacityChanged();
                 return new TerminalOutputGenerationInvalidationResult(generation, discardedCharacters);
             }
         }
@@ -146,6 +169,39 @@ namespace PS7ScriptDesk.Shell.Controls
             }
         }
 
+        /// <summary>Waits until an existing xterm-accounted queue has room for a chunk.</summary>
+        public async Task<bool> WaitForCapacityAsync(
+            int generation,
+            int characterCount,
+            CancellationToken cancellationToken = default)
+        {
+            if (characterCount < 0 || characterCount > _maximumPendingCharacters)
+            {
+                throw new ArgumentOutOfRangeException(nameof(characterCount));
+            }
+
+            while (true)
+            {
+                Task signal;
+                lock (_syncRoot)
+                {
+                    if (_activeGeneration != generation || _rendererUnavailable)
+                    {
+                        return false;
+                    }
+
+                    if (characterCount <= _maximumPendingCharacters - _pendingCharacters)
+                    {
+                        return true;
+                    }
+
+                    signal = _capacityChanged.Task;
+                }
+
+                await signal.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         public bool SetRendererReady()
         {
             lock (_syncRoot)
@@ -171,8 +227,18 @@ namespace PS7ScriptDesk.Shell.Controls
                 _rendererUnavailable = false;
                 _rendererReady = false;
                 _flushScheduled = false;
-                _inFlightBatch = null;
+                // Pending and in-flight characters are both represented in
+                // _pendingCharacters. The caller rebuilds this queue from persistent
+                // session history immediately after restoration, so discard the old
+                // renderer's queue as one unit and wake capacity waiters.
+                DiscardAllOutput();
+                SignalCapacityChanged();
             }
+        }
+
+        public bool HasInFlightBatch
+        {
+            get { lock (_syncRoot) return _inFlightBatch is not null; }
         }
 
         /// <summary>
@@ -185,7 +251,9 @@ namespace PS7ScriptDesk.Shell.Controls
             {
                 _rendererUnavailable = true;
                 _rendererReady = false;
-                return new TerminalOutputRendererUnavailableResult(DiscardAllOutput());
+                var discardedCharacters = DiscardAllOutput();
+                SignalCapacityChanged();
+                return new TerminalOutputRendererUnavailableResult(discardedCharacters);
             }
         }
 
@@ -239,6 +307,7 @@ namespace PS7ScriptDesk.Shell.Controls
 
                 _pendingCharacters -= batch.Data.Length;
                 _inFlightBatch = null;
+                SignalCapacityChanged();
                 return TryScheduleFlush();
             }
         }
@@ -255,6 +324,7 @@ namespace PS7ScriptDesk.Shell.Controls
 
                 _pendingCharacters -= batch.Data.Length;
                 _inFlightBatch = null;
+                SignalCapacityChanged();
                 return batch.Data.Length;
             }
         }
@@ -279,6 +349,16 @@ namespace PS7ScriptDesk.Shell.Controls
             _flushScheduled = false;
             return discardedCharacters;
         }
+
+        private void SignalCapacityChanged()
+        {
+            var previous = _capacityChanged;
+            _capacityChanged = CreateCapacitySignal();
+            previous.TrySetResult(true);
+        }
+
+        private static TaskCompletionSource<bool> CreateCapacitySignal() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     internal enum TerminalRendererRecoveryPhase
@@ -496,6 +576,7 @@ namespace PS7ScriptDesk.Shell.Controls
         private readonly int _maximumBufferedChunks;
         private readonly TimeSpan _maximumDuration;
         private ResizeTransaction? _active;
+        private TaskCompletionSource<bool> _releaseChanged = CreateReleaseSignal();
         private long _nextDiagnosticInsertionId;
         private long _nextDiagnosticReleaseId;
 
@@ -533,6 +614,34 @@ namespace PS7ScriptDesk.Shell.Controls
                 {
                     return _active is not null;
                 }
+            }
+        }
+
+        public async Task<bool> WaitForReleaseAsync(
+            int rendererGeneration,
+            int terminalSessionGeneration,
+            CancellationToken cancellationToken = default)
+        {
+            while (true)
+            {
+                Task releaseChanged;
+                lock (_syncRoot)
+                {
+                    if (_active is null)
+                    {
+                        return true;
+                    }
+
+                    if (_active.RendererGeneration != rendererGeneration ||
+                        _active.TerminalSessionGeneration != terminalSessionGeneration)
+                    {
+                        return false;
+                    }
+
+                    releaseChanged = _releaseChanged.Task;
+                }
+
+                await releaseChanged.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -658,6 +767,7 @@ namespace PS7ScriptDesk.Shell.Controls
                     ReleasedOutput: released,
                     BufferedCharacters: _active.BufferedCharacters);
                 _active = null;
+                SignalReleaseChanged();
                 return result;
             }
         }
@@ -692,8 +802,19 @@ namespace PS7ScriptDesk.Shell.Controls
                     _active.BufferedChunks,
                     _active.Chunks.ToArray());
                 _active = null;
+                SignalReleaseChanged();
                 return result;
             }
+        }
+
+        private static TaskCompletionSource<bool> CreateReleaseSignal() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private void SignalReleaseChanged()
+        {
+            var previous = _releaseChanged;
+            _releaseChanged = CreateReleaseSignal();
+            previous.TrySetResult(true);
         }
 
         private sealed class ResizeTransaction

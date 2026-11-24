@@ -6,6 +6,8 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -13,6 +15,7 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Services;
+using PS7ScriptDesk.PowerShell.Services;
 using PS7ScriptDesk.UI.ViewModels;
 
 namespace PS7ScriptDesk.Shell.Controls
@@ -22,7 +25,7 @@ namespace PS7ScriptDesk.Shell.Controls
     /// control, providing full VT100/ANSI rendering of ConPTY output.
     ///
     /// Data flow:
-    ///   ConPTY → LiveConsoleService.RawOutputReceived (generation, output) → WriteRaw() → xterm.js
+    ///   PSES visible-output publication → bounded WriteRawAwaitableAsync() → xterm.js
     ///   xterm.js onData → UserInput event → ILiveConsoleService.WriteRawInputAsync()
     ///   ResizeObserver → proposed exact grid → TerminalResized event → ILiveConsoleService.ResizeConsole() → xterm.js resize commit
     /// </summary>
@@ -1693,6 +1696,7 @@ namespace PS7ScriptDesk.Shell.Controls
         private readonly TerminalProtocolOutputFilter _terminalProtocolOutputFilter = new();
         private readonly TerminalResizePolicy _terminalResizePolicy = new();
         private readonly DispatcherTimer _resizeOutputBarrierTimer;
+        private readonly DispatcherTimer _outputAcknowledgmentTimer;
         private volatile bool          _isReady;
         private bool                   _webView2Available = true;
         private bool                   _firstOutputQueuedLogged;
@@ -1701,6 +1705,9 @@ namespace PS7ScriptDesk.Shell.Controls
         private bool                   _firstInputObservedForDiagnostics;
         private bool                   _firstOutputAfterInputLogged;
         private bool                   _rendererReadyReplayPending;
+        private bool                   _applicationShutdownInProgress;
+        private bool                   _presentationDegraded;
+        private int?                   _presentationDegradedSessionGeneration;
         private int                    _inputInfoLogCount;
         private bool                   _clipboardCopyFailureEpisodeActive;
         private bool                   _clipboardPasteReadFailureEpisodeActive;
@@ -1708,12 +1715,17 @@ namespace PS7ScriptDesk.Shell.Controls
         private long                   _reportedDroppedOutputCharacters;
         private readonly object _rendererSyncRoot = new();
         private readonly object _resizeOutputIntegrationSyncRoot = new();
+        private readonly SemaphoreSlim _coordinatedOutputAvailabilityPulse = new(0, 1);
         private WebView2? _webView;
         private TerminalWebView2LifecyclePolicy _webViewLifecycle = new();
         private CoreWebView2?          _subscribedCoreWebView2;
         private bool                   _webViewDetachedFromLayout;
         private int                    _rendererInstanceGeneration;
         private long                   _nextOutputSubmissionId;
+        private long                   _lastOutputPostTimestamp;
+        private long                   _lastOutputPostSequence;
+        private int                    _lastOutputPostGeneration;
+        private int                    _lastOutputPostRendererGeneration;
         private DateTimeOffset         _lastResizeCommitAcknowledgedUtc = DateTimeOffset.MinValue;
         private long                   _lastResizeCommitAcknowledgedGeneration;
         private int                    _lastResizeCommitAcknowledgedColumns;
@@ -1753,6 +1765,24 @@ namespace PS7ScriptDesk.Shell.Controls
         /// <summary>Current WebView2/xterm renderer identity for diagnostics and UAT correlation.</summary>
         public int RendererGeneration => Volatile.Read(ref _rendererInstanceGeneration);
 
+        private async ValueTask<bool> WaitUntilOutputCanBePostedForGenerationAsync(
+            int generation,
+            CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_outputFlowController.ActiveGeneration != generation ||
+                    Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+                    return false;
+                var isAvailable = await Dispatcher.InvokeAsync(
+                    () => _isReady && _webView2Available && !_resizeOutputBarrier.IsActive,
+                    DispatcherPriority.Background).Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (isAvailable) return true;
+                await _coordinatedOutputAvailabilityPulse.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         /// <summary>Current PowerShell terminal session generation accepted by the output flow.</summary>
         public int? ActiveSessionGeneration => _outputFlowController.ActiveGeneration;
 
@@ -1780,6 +1810,11 @@ namespace PS7ScriptDesk.Shell.Controls
                 Interval = TimeSpan.FromMilliseconds(100)
             };
             _resizeOutputBarrierTimer.Tick += OnResizeOutputBarrierTimerTick;
+            _outputAcknowledgmentTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromSeconds(1)
+            };
+            _outputAcknowledgmentTimer.Tick += OnOutputAcknowledgmentTimerTick;
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
         }
@@ -1809,7 +1844,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
-            if (!IsLoaded || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            if (!IsLoaded || _applicationShutdownInProgress || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
             {
                 return;
             }
@@ -1820,6 +1855,56 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             _ = InitializeRendererAsync(renderer, lifecycle);
+        }
+
+        public void SetApplicationShutdownInProgress()
+        {
+            _applicationShutdownInProgress = true;
+            if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            {
+                RetryDisplayButton.IsEnabled = false;
+                return;
+            }
+            Dispatcher.BeginInvoke(new Action(() => RetryDisplayButton.IsEnabled = false), DispatcherPriority.Send);
+        }
+
+        public void SetPresentationDegraded(int sessionGeneration, Exception exception)
+        {
+            ArgumentNullException.ThrowIfNull(exception);
+            void Update()
+            {
+                if (_outputFlowController.ActiveGeneration != sessionGeneration)
+                {
+                    DeveloperDiagnostics.LogDecision(
+                        "Terminal",
+                        "PresentationDegraded",
+                        "Ignored a stale PSES presentation failure notification.",
+                        "StaleGeneration",
+                        new Dictionary<string, object?>
+                        {
+                            ["failedSessionGeneration"] = sessionGeneration,
+                            ["activeSessionGeneration"] = _outputFlowController.ActiveGeneration,
+                            ["contentOmitted"] = true
+                        });
+                    return;
+                }
+
+                _presentationDegraded = true;
+                _presentationDegradedSessionGeneration = sessionGeneration;
+                FallbackMessageText.Text = "Terminal presentation is degraded for this PowerShell session. Restart the console session to restore output.";
+                RetryDisplayButton.Visibility = Visibility.Collapsed;
+                FallbackBanner.Visibility = Visibility.Visible;
+            }
+            if (Dispatcher.CheckAccess()) Update();
+            else if (!Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished)
+                Dispatcher.BeginInvoke(new Action(Update), DispatcherPriority.Send);
+        }
+
+        private void RetryDisplayButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_applicationShutdownInProgress || _presentationDegraded || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+                return;
+            ResetRendererForRetry();
         }
 
         private bool TryCreateRenderer(
@@ -1997,6 +2082,7 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void OnUnloaded(object sender, RoutedEventArgs e)
         {
+            _outputAcknowledgmentTimer.Stop();
             RetireWebView2Renderer("TerminalControlUnloaded", null);
         }
 
@@ -2176,6 +2262,7 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             CancelResizeTransaction(reason);
+            _outputAcknowledgmentTimer.Stop();
             TerminalCriticalTrace.LogStage(
                 "TerminalRendererRecoveryBegin",
                 new Dictionary<string, object?>
@@ -2215,6 +2302,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 retiredLifecycle.MarkFaulted();
                 retiredLifecycle.TryBeginDisposal();
             }
+
 
             var firstTransition = retiredLifecycle.State == TerminalWebView2LifecycleState.Disposing;
             var discardedOutput = _outputFlowController.MarkRendererUnavailable();
@@ -2322,6 +2410,8 @@ namespace PS7ScriptDesk.Shell.Controls
         private void ShowFallback(TerminalWebView2FallbackState state)
         {
             FallbackMessageText.Text = TerminalWebView2FallbackPolicy.GetMessage(state);
+            RetryDisplayButton.Visibility = _presentationDegraded ? Visibility.Collapsed : Visibility.Visible;
+            RetryDisplayButton.IsEnabled = !_applicationShutdownInProgress;
             FallbackDetailsText.Visibility = TerminalWebView2FallbackPolicy.ShowsRuntimeInstallDetails(state)
                 ? Visibility.Visible
                 : Visibility.Collapsed;
@@ -2412,13 +2502,51 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             CancelResizeTransaction("session-start");
-            _firstInputObservedForDiagnostics = false;
-            _firstOutputAfterInputLogged = false;
-            _terminalProtocolOutputFilter.Reset();
-            _persistentOutputHistory.ActivateGeneration(generation);
-            var result = _outputFlowController.ActivateGeneration(generation);
+            TerminalOutputGenerationInvalidationResult result;
+            lock (_resizeOutputIntegrationSyncRoot)
+            {
+                _firstInputObservedForDiagnostics = false;
+                _firstOutputAfterInputLogged = false;
+                _terminalProtocolOutputFilter.Reset();
+                _persistentOutputHistory.ActivateGeneration(generation);
+                result = _outputFlowController.ActivateGeneration(generation);
+                PulseCoordinatedOutputAvailability();
+            }
+            QueuePresentationDegradedResetForNewGeneration(generation);
             ReportDiscardedTerminalOutput(result, "session-start");
             QueueTerminalGeometryResynchronization(generation);
+        }
+
+        private void QueuePresentationDegradedResetForNewGeneration(int generation)
+        {
+            void Reset()
+            {
+                if (_outputFlowController.ActiveGeneration != generation ||
+                    _presentationDegradedSessionGeneration == generation)
+                {
+                    return;
+                }
+
+                _presentationDegraded = false;
+                _presentationDegradedSessionGeneration = null;
+                if (_webView2Available && _fallbackState == TerminalWebView2FallbackState.None)
+                {
+                    FallbackBanner.Visibility = Visibility.Collapsed;
+                }
+                else
+                {
+                    ShowFallback(_fallbackState);
+                }
+            }
+
+            if (Dispatcher.CheckAccess())
+            {
+                Reset();
+            }
+            else if (!Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished)
+            {
+                Dispatcher.BeginInvoke(new Action(Reset), DispatcherPriority.Send);
+            }
         }
 
         private void QueueTerminalGeometryResynchronization(int sessionGeneration)
@@ -2485,9 +2613,14 @@ namespace PS7ScriptDesk.Shell.Controls
         public void InvalidateTerminalOutputGeneration(int generation)
         {
             CancelResizeTransaction("session-stop");
-            _terminalProtocolOutputFilter.Reset();
-            _persistentOutputHistory.InvalidateGeneration(generation);
-            var result = _outputFlowController.InvalidateGeneration(generation);
+            TerminalOutputGenerationInvalidationResult result;
+            lock (_resizeOutputIntegrationSyncRoot)
+            {
+                _terminalProtocolOutputFilter.Reset();
+                _persistentOutputHistory.InvalidateGeneration(generation);
+                result = _outputFlowController.InvalidateGeneration(generation);
+                PulseCoordinatedOutputAvailability();
+            }
             ReportDiscardedTerminalOutput(result, "session-stop");
         }
 
@@ -2502,10 +2635,10 @@ namespace PS7ScriptDesk.Shell.Controls
                 "Terminal",
                 "RendererWriteRaw",
                 generation: generation,
-                properties: new Dictionary<string, object?>
+                properties: PerformanceTrace.IsEnabled ? new Dictionary<string, object?>
                 {
                     ["payloadCharacters"] = data.Length
-                });
+                } : null);
             TerminalOutputCorrelationTrace.Record("TerminalControlWriteRaw", generation, data);
 
             if (_outputFlowController.ActiveGeneration is null)
@@ -2525,16 +2658,17 @@ namespace PS7ScriptDesk.Shell.Controls
                     });
             }
 
-            TerminalCriticalTrace.LogStage(
-                "TerminalControl.WriteRaw.Begin",
-                new Dictionary<string, object?>
-                {
-                    ["terminalSessionGeneration"] = generation,
-                    ["rendererGeneration"] = _rendererInstanceGeneration,
-                    ["outputCharacterLength"] = data.Length,
-                    ["rawControlSummary"] = TerminalOutputControlClassifier.Summarize(data).ToDiagnosticString(),
-                    ["contentOmitted"] = true
-                });
+            if (TerminalCriticalTrace.IsVerboseEnabled)
+                TerminalCriticalTrace.LogStage(
+                    "TerminalControl.WriteRaw.Begin",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = generation,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["outputCharacterLength"] = data.Length,
+                        ["rawControlSummary"] = TerminalOutputControlClassifier.Summarize(data).ToDiagnosticString(),
+                        ["contentOmitted"] = true
+                    });
             var filteredOutput = _terminalProtocolOutputFilter.Process(data);
             if (filteredOutput.FilteredRecordCount > 0)
             {
@@ -2557,7 +2691,8 @@ namespace PS7ScriptDesk.Shell.Controls
                         ["preservedProtocolControlSummary"] = filteredOutput.PreservedProtocolControlSummary.ToDiagnosticString(),
                         ["contentOmitted"] = true
                     });
-                TerminalCriticalTrace.LogStage(
+                if (TerminalCriticalTrace.IsVerboseEnabled)
+                    TerminalCriticalTrace.LogStage(
                     "TerminalControl.ProtocolFilter.Characterized",
                     new Dictionary<string, object?>
                     {
@@ -2577,17 +2712,210 @@ namespace PS7ScriptDesk.Shell.Controls
 
             data = filteredOutput.VisibleText;
             WriteVisibleOutput(generation, data, "ConPTY");
-            TerminalCriticalTrace.LogStage(
-                "TerminalControl.WriteRaw.End",
-                new Dictionary<string, object?>
+            if (TerminalCriticalTrace.IsVerboseEnabled)
+                TerminalCriticalTrace.LogStage(
+                    "TerminalControl.WriteRaw.End",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = generation,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["outputCharacterLength"] = data.Length,
+                        ["filteredRecordCount"] = filteredOutput.FilteredRecordCount,
+                        ["visibleControlSummary"] = TerminalOutputControlClassifier.Summarize(data).ToDiagnosticString(),
+                        ["contentOmitted"] = true
+                    });
+        }
+
+        /// <summary>
+        /// Awaitable ConPTY ingress for an explicitly guarded PSES presentation route.
+        /// It uses the same protocol filter, history, flow controller, renderer
+        /// submission, and output_ack accounting as <see cref="WriteRaw"/>. During a
+        /// resize it waits for the existing barrier to release before admission.
+        /// </summary>
+        public async Task<bool> WriteRawAwaitableAsync(
+            int generation,
+            string data,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrEmpty(data))
+            {
+                return true;
+            }
+
+            if (_outputFlowController.ActiveGeneration is null)
+            {
+                BeginTerminalOutputGeneration(generation);
+            }
+
+            if (TerminalCriticalTrace.IsVerboseEnabled)
+            {
+                TerminalCriticalTrace.LogStage(
+                    "TerminalControl.WriteRawAwaitable.Begin",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = generation,
+                        ["outputCharacterLength"] = data.Length,
+                        ["contentOmitted"] = true
+                    });
+            }
+
+            var filteredOutput = _terminalProtocolOutputFilter.Process(data);
+            if (filteredOutput.VisibleText.Length > 0)
+            {
+                DateTimeOffset? rendererWaitStarted = null;
+                while (true)
                 {
-                    ["terminalSessionGeneration"] = generation,
-                    ["rendererGeneration"] = _rendererInstanceGeneration,
-                    ["outputCharacterLength"] = data.Length,
-                    ["filteredRecordCount"] = filteredOutput.FilteredRecordCount,
-                    ["visibleControlSummary"] = TerminalOutputControlClassifier.Summarize(data).ToDiagnosticString(),
-                    ["contentOmitted"] = true
-                });
+                    Task<bool>? resizeRelease = null;
+                    bool rendererAvailable;
+                    lock (_resizeOutputIntegrationSyncRoot)
+                    {
+                        if (_outputFlowController.ActiveGeneration != generation ||
+                            Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+                            return false;
+
+                        rendererAvailable = _isReady && _webView2Available;
+                        if (rendererAvailable && _resizeOutputBarrier.IsActive)
+                        {
+                            resizeRelease = _resizeOutputBarrier.WaitForReleaseAsync(
+                                _rendererInstanceGeneration,
+                                generation,
+                                cancellationToken);
+                        }
+                    }
+
+                    if (!rendererAvailable)
+                    {
+                        rendererWaitStarted ??= DateTimeOffset.UtcNow;
+                        var elapsed = DateTimeOffset.UtcNow - rendererWaitStarted.Value;
+                        var remaining = TimeSpan.FromSeconds(10) - elapsed;
+                        if (remaining <= TimeSpan.Zero)
+                        {
+                            throw new TimeoutException(
+                                $"Terminal renderer recovery did not complete within 10 seconds for session generation {generation}.");
+                        }
+                        using var recoveryTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                        recoveryTimeout.CancelAfter(remaining);
+                        try
+                        {
+                            var recovered = await WaitUntilOutputCanBePostedForGenerationAsync(
+                                generation, recoveryTimeout.Token).ConfigureAwait(false);
+                            if (!recovered) return false;
+                        }
+                        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                        {
+                            if (_outputFlowController.ActiveGeneration != generation) return false;
+                            throw new TimeoutException(
+                                $"Terminal renderer recovery did not complete within 10 seconds for session generation {generation}.");
+                        }
+                        continue;
+                    }
+
+                    if (resizeRelease is not null)
+                    {
+                        try
+                        {
+                            var resizeReleased = await resizeRelease.WaitAsync(
+                                TerminalResizeOutputBarrier.DefaultMaximumDuration + TimeSpan.FromMilliseconds(250),
+                                cancellationToken).ConfigureAwait(false);
+                            if (!resizeReleased)
+                            {
+                                if (_outputFlowController.ActiveGeneration != generation ||
+                                    Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+                                {
+                                    return false;
+                                }
+
+                                // A false result can mean the renderer identity changed while
+                                // this wait was pending. Keep the filtered chunk and observe the
+                                // current renderer/resize transaction on the next loop pass.
+                                continue;
+                            }
+                        }
+                        catch (TimeoutException)
+                        {
+                            // The dispatcher timer normally expires the resize. This
+                            // independent bound also covers a stalled dispatcher.
+                            TerminalCriticalTrace.LogStage(
+                                "TerminalControl.WriteRawAwaitable.ResizeWaitTimeout",
+                                new Dictionary<string, object?>
+                                {
+                                    ["terminalSessionGeneration"] = generation,
+                                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                                    ["contentOmitted"] = true
+                                });
+                            DeveloperDiagnostics.LogWarning(
+                                "Terminal",
+                                "Awaitable terminal output admission timed out waiting for resize release.",
+                                new Dictionary<string, object?>
+                                {
+                                    ["sessionGeneration"] = generation,
+                                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                                    ["contentOmitted"] = true
+                                });
+                            if (!Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished)
+                            {
+                                Dispatcher.BeginInvoke(
+                                    new Action(() => CancelResizeTransaction("awaitable-admission-timeout")),
+                                    DispatcherPriority.Send);
+                            }
+                            return false;
+                        }
+
+                        continue;
+                    }
+
+                    var hasCapacity = await _outputFlowController.WaitForCapacityAsync(
+                        generation,
+                        filteredOutput.VisibleText.Length,
+                        cancellationToken).ConfigureAwait(false);
+                    if (_outputFlowController.ActiveGeneration != generation ||
+                        Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+                    {
+                        return false;
+                    }
+                    if (!hasCapacity || !_webView2Available || !_isReady)
+                        continue;
+
+                    lock (_resizeOutputIntegrationSyncRoot)
+                    {
+                        if (_outputFlowController.ActiveGeneration != generation ||
+                            Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+                        {
+                            return false;
+                        }
+
+                        if (!_webView2Available || !_isReady)
+                            continue;
+
+                        if (_resizeOutputBarrier.IsActive)
+                        {
+                            continue;
+                        }
+
+                        if (_outputFlowController.HasCapacity(generation, filteredOutput.VisibleText.Length))
+                        {
+                            var admitted = WriteVisibleOutputCore(generation, filteredOutput.VisibleText, "ConPTY");
+                            if (admitted) return true;
+                            // A renderer retirement can race the availability check, but
+                            // WriteVisibleOutputCore rejects before enqueue in that case.
+                            // Retry only when the renderer is now known unavailable.
+                            if (!_webView2Available || !_isReady) continue;
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            // Keep all established renderer policy in one path after admission.
+            // The PSES awaitable source serializes callbacks for this generation.
+            if (filteredOutput.VisibleText.Length == 0)
+            {
+                return _outputFlowController.ActiveGeneration == generation &&
+                    !Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished;
+            }
+
+            return _outputFlowController.ActiveGeneration == generation &&
+                !Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished;
         }
 
         public void WriteStructuredOutput(int generation, string data)
@@ -2597,15 +2925,16 @@ namespace PS7ScriptDesk.Shell.Controls
                 return;
             }
 
-            TerminalCriticalTrace.LogStage(
-                "TerminalControl.WriteStructuredOutput.Begin",
-                new Dictionary<string, object?>
-                {
-                    ["terminalSessionGeneration"] = generation,
-                    ["rendererGeneration"] = _rendererInstanceGeneration,
-                    ["outputCharacterLength"] = data.Length,
-                    ["contentOmitted"] = true
-                });
+            if (TerminalCriticalTrace.IsVerboseEnabled)
+                TerminalCriticalTrace.LogStage(
+                    "TerminalControl.WriteStructuredOutput.Begin",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = generation,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["outputCharacterLength"] = data.Length,
+                        ["contentOmitted"] = true
+                    });
             if (TerminalOutputMultiplexer.ContainsPrivateProtocol(data))
             {
                 AppLogger.Error("Terminal", $"Structured editor output contained private ScriptDesk terminal protocol. SessionGeneration={generation}, Length={data.Length}, ContentOmitted=True.");
@@ -2622,15 +2951,16 @@ namespace PS7ScriptDesk.Shell.Controls
             }
 
             WriteVisibleOutput(generation, data, "StructuredEditor");
-            TerminalCriticalTrace.LogStage(
-                "TerminalControl.WriteStructuredOutput.End",
-                new Dictionary<string, object?>
-                {
-                    ["terminalSessionGeneration"] = generation,
-                    ["rendererGeneration"] = _rendererInstanceGeneration,
-                    ["outputCharacterLength"] = data.Length,
-                    ["contentOmitted"] = true
-                });
+            if (TerminalCriticalTrace.IsVerboseEnabled)
+                TerminalCriticalTrace.LogStage(
+                    "TerminalControl.WriteStructuredOutput.End",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = generation,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["outputCharacterLength"] = data.Length,
+                        ["contentOmitted"] = true
+                    });
         }
 
         private void WriteVisibleOutput(int generation, string data, string source)
@@ -2644,21 +2974,20 @@ namespace PS7ScriptDesk.Shell.Controls
             }
         }
 
-        private void WriteVisibleOutputCore(int generation, string data, string source)
+        private bool WriteVisibleOutputCore(int generation, string data, string source)
         {
             if (string.IsNullOrEmpty(data))
             {
-                return;
+                return _outputFlowController.ActiveGeneration == generation;
             }
 
             if (_outputFlowController.ActiveGeneration != generation)
             {
-                return;
+                return false;
             }
 
-            _persistentOutputHistory.Append(generation, data);
-
-            TerminalCriticalTrace.LogStage(
+            if (TerminalCriticalTrace.IsVerboseEnabled)
+                TerminalCriticalTrace.LogStage(
                 "TerminalControl.WriteVisibleOutput.Begin",
                 new Dictionary<string, object?>
                 {
@@ -2697,7 +3026,7 @@ namespace PS7ScriptDesk.Shell.Controls
                         ["outputCharacterLength"] = data.Length,
                         ["contentOmitted"] = true
                     });
-                return;
+                return false;
             }
 
             var barrierCapture = _resizeOutputBarrier.Capture(
@@ -2718,7 +3047,7 @@ namespace PS7ScriptDesk.Shell.Controls
                         ["bufferedCharacters"] = barrierCapture.TotalBufferedCharacters,
                         ["contentOmitted"] = true
                     });
-                return;
+                return true;
             }
 
             if (barrierCapture.Status == TerminalResizeBarrierCaptureStatus.BoundedLimitExceeded)
@@ -2749,9 +3078,9 @@ namespace PS7ScriptDesk.Shell.Controls
                     });
                 var cancelled = CancelResizeTransaction("buffer-limit-exceeded");
                 RequeueCancelledResizeOutput(cancelled, generation);
-                EnqueueVisibleOutputAfterResizeCancellation(generation, data);
+                var currentChunkAccepted = EnqueueVisibleOutputAfterResizeCancellation(generation, data);
                 RequestOutputFlush(scheduleFlush: true);
-                return;
+                return currentChunkAccepted;
             }
 
             if (!_isReady && !_firstOutputQueuedLogged)
@@ -2769,7 +3098,10 @@ namespace PS7ScriptDesk.Shell.Controls
                     });
             }
 
+            var flowEnqueueStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
             var enqueueResult = _outputFlowController.Enqueue(generation, data);
+            TerminalCriticalTrace.RecordTiming("TerminalFlowEnqueue", flowEnqueueStartedAt,
+                generation, _rendererInstanceGeneration);
             ResizeForensicsTrace.Record(
                 "BridgeEnqueue",
                 generation,
@@ -2783,21 +3115,22 @@ namespace PS7ScriptDesk.Shell.Controls
                 generation,
                 data,
                 pendingCharacters: enqueueResult.PendingCharacters);
-            TerminalCriticalTrace.LogStage(
-                "TerminalOutputFlowController.Enqueue.Result",
-                new Dictionary<string, object?>
-                {
-                    ["terminalSessionGeneration"] = generation,
-                    ["rendererGeneration"] = _rendererInstanceGeneration,
-                    ["source"] = source,
-                    ["outputCharacterLength"] = data.Length,
-                    ["scheduleFlush"] = enqueueResult.ScheduleFlush,
-                    ["acceptedCharacters"] = enqueueResult.AcceptedCharacters,
-                    ["droppedCharacters"] = enqueueResult.DroppedCharacters,
-                    ["pendingCharacters"] = enqueueResult.PendingCharacters,
-                    ["rejectedStaleCharacters"] = enqueueResult.RejectedStaleCharacters,
-                    ["contentOmitted"] = true
-                });
+            if (TerminalCriticalTrace.IsVerboseEnabled)
+                TerminalCriticalTrace.LogStage(
+                    "TerminalOutputFlowController.Enqueue.Result",
+                    new Dictionary<string, object?>
+                    {
+                        ["terminalSessionGeneration"] = generation,
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["source"] = source,
+                        ["outputCharacterLength"] = data.Length,
+                        ["scheduleFlush"] = enqueueResult.ScheduleFlush,
+                        ["acceptedCharacters"] = enqueueResult.AcceptedCharacters,
+                        ["droppedCharacters"] = enqueueResult.DroppedCharacters,
+                        ["pendingCharacters"] = enqueueResult.PendingCharacters,
+                        ["rejectedStaleCharacters"] = enqueueResult.RejectedStaleCharacters,
+                        ["contentOmitted"] = true
+                    });
             if (enqueueResult.RejectedStaleCharacters > 0)
             {
                 DeveloperDiagnostics.LogDebug("Terminal", "Stale terminal output was rejected before WebView dispatch.", new Dictionary<string, object?>
@@ -2806,20 +3139,18 @@ namespace PS7ScriptDesk.Shell.Controls
                     ["length"] = enqueueResult.RejectedStaleCharacters,
                     ["contentOmitted"] = true
                 });
-                return;
+                return false;
             }
             if (enqueueResult.DroppedCharacters > 0)
             {
                 RecordDroppedTerminalOutput(enqueueResult.DroppedCharacters);
-                return;
+                return false;
             }
 
-            if (!_isReady)
+            if (enqueueResult.AcceptedCharacters == data.Length)
             {
-                TerminalStartupTrace.Write("BUFFERED_FOR_RENDERER", $"generation={generation}; chars={data.Length}; pendingCharacters={enqueueResult.PendingCharacters}; contentOmitted=true");
+                _persistentOutputHistory.Append(generation, data);
             }
-
-            TerminalStartupTrace.Write("FIRST_TERMINAL_WRITE_REQUESTED", $"generation={generation}; chars={data.Length}; rendererReady={_isReady}; source={source}");
 
             if (_isReady && !_firstOutputPostedLogged)
             {
@@ -2861,6 +3192,7 @@ namespace PS7ScriptDesk.Shell.Controls
                     ["scheduleFlush"] = enqueueResult.ScheduleFlush,
                     ["contentOmitted"] = true
                 });
+            return enqueueResult.AcceptedCharacters == data.Length;
         }
 
         /// <summary>Clears the xterm.js terminal display and returns keyboard focus to it.</summary>
@@ -3175,13 +3507,14 @@ namespace PS7ScriptDesk.Shell.Controls
             var batch = _outputFlowController.TryBeginDelivery();
             if (batch is not { } outputBatch)
             {
-                TerminalCriticalTrace.LogStage(
-                    "TerminalOutputFlowController.TryBeginDelivery.Empty",
-                    new Dictionary<string, object?>
-                    {
-                        ["rendererGeneration"] = _rendererInstanceGeneration,
-                        ["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration
-                    });
+                if (TerminalCriticalTrace.IsVerboseEnabled)
+                    TerminalCriticalTrace.LogStage(
+                        "TerminalOutputFlowController.TryBeginDelivery.Empty",
+                        new Dictionary<string, object?>
+                        {
+                            ["rendererGeneration"] = _rendererInstanceGeneration,
+                            ["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration
+                        });
                 return;
             }
 
@@ -3191,16 +3524,17 @@ namespace PS7ScriptDesk.Shell.Controls
                 TerminalStartupTrace.Write("REPLAY_OUTPUT", $"sequence={outputBatch.Sequence}; chars={outputBatch.Data.Length}; contentOmitted=true");
             }
 
-            TerminalCriticalTrace.LogStage(
-                "TerminalOutputFlowController.TryBeginDelivery.Batch",
-                new Dictionary<string, object?>
-                {
-                    ["rendererGeneration"] = _rendererInstanceGeneration,
-                    ["terminalSessionGeneration"] = outputBatch.Generation,
-                    ["outputSequence"] = outputBatch.Sequence,
-                    ["outputCharacterLength"] = outputBatch.Data.Length,
-                    ["contentOmitted"] = true
-                });
+            if (TerminalCriticalTrace.IsVerboseEnabled)
+                TerminalCriticalTrace.LogStage(
+                    "TerminalOutputFlowController.TryBeginDelivery.Batch",
+                    new Dictionary<string, object?>
+                    {
+                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                        ["terminalSessionGeneration"] = outputBatch.Generation,
+                        ["outputSequence"] = outputBatch.Sequence,
+                        ["outputCharacterLength"] = outputBatch.Data.Length,
+                        ["contentOmitted"] = true
+                    });
             if (!TryGetCoreWebView2("FlushPendingOutput", out var coreWebView2))
             {
                 RecordDroppedTerminalOutput(
@@ -3223,6 +3557,7 @@ namespace PS7ScriptDesk.Shell.Controls
             {
                 var submissionId = System.Threading.Interlocked.Increment(ref _nextOutputSubmissionId);
                 var outputDiagnostics = CreateRendererOutputDiagnostics(outputBatch);
+                var webViewPostStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
                 coreWebView2.PostWebMessageAsString(
                     TerminalWebMessageSerializer.SerializeOutput(
                         outputBatch.Generation,
@@ -3235,7 +3570,14 @@ namespace PS7ScriptDesk.Shell.Controls
                         outputDiagnostics.ResizeElapsedMilliseconds,
                         outputDiagnostics.ControlSummary,
                         TerminalScreenStateDiagnostics.ContainsInterruptMarker(outputBatch.Data)));
-                TerminalStartupTrace.Write("JS_WRITE_INVOKED", $"sequence={outputBatch.Sequence}; submissionId={submissionId}; chars={outputBatch.Data.Length}; contentOmitted=true");
+                _lastOutputPostTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                _lastOutputPostSequence = outputBatch.Sequence;
+                _lastOutputPostGeneration = outputBatch.Generation;
+                _lastOutputPostRendererGeneration = _rendererInstanceGeneration;
+                _outputAcknowledgmentTimer.Start();
+                TerminalCriticalTrace.RecordTiming("WebViewOutputPost", webViewPostStartedAt,
+                    outputBatch.Generation, _rendererInstanceGeneration, outputBatch.Sequence);
+
                 ResizeForensicsTrace.Record(
                     "BridgeDispatch",
                     outputBatch.Generation,
@@ -3251,23 +3593,24 @@ namespace PS7ScriptDesk.Shell.Controls
                     outputBatch.Generation,
                     outputBatch.Data,
                     rendererSequence: outputBatch.Sequence);
-                TerminalCriticalTrace.LogStage(
-                    "TerminalControl.WebView2.PostOutput",
-                    new Dictionary<string, object?>
-                    {
-                        ["submissionId"] = submissionId,
-                        ["rendererGeneration"] = _rendererInstanceGeneration,
-                        ["terminalSessionGeneration"] = outputBatch.Generation,
-                        ["outputSequence"] = outputBatch.Sequence,
-                        ["outputCharacterLength"] = outputBatch.Data.Length,
-                        ["resizeAdjacent"] = outputDiagnostics.ResizeAdjacent,
-                        ["resizeGeneration"] = outputDiagnostics.ResizeGeneration,
-                        ["resizeElapsedMilliseconds"] = outputDiagnostics.ResizeElapsedMilliseconds,
-                        ["resizeColumns"] = outputDiagnostics.ResizeColumns,
-                        ["resizeRows"] = outputDiagnostics.ResizeRows,
-                        ["visibleControlSummary"] = outputDiagnostics.ControlSummary,
-                        ["contentOmitted"] = true
-                    });
+                if (TerminalCriticalTrace.IsVerboseEnabled)
+                    TerminalCriticalTrace.LogStage(
+                        "TerminalControl.WebView2.PostOutput",
+                        new Dictionary<string, object?>
+                        {
+                            ["submissionId"] = submissionId,
+                            ["rendererGeneration"] = _rendererInstanceGeneration,
+                            ["terminalSessionGeneration"] = outputBatch.Generation,
+                            ["outputSequence"] = outputBatch.Sequence,
+                            ["outputCharacterLength"] = outputBatch.Data.Length,
+                            ["resizeAdjacent"] = outputDiagnostics.ResizeAdjacent,
+                            ["resizeGeneration"] = outputDiagnostics.ResizeGeneration,
+                            ["resizeElapsedMilliseconds"] = outputDiagnostics.ResizeElapsedMilliseconds,
+                            ["resizeColumns"] = outputDiagnostics.ResizeColumns,
+                            ["resizeRows"] = outputDiagnostics.ResizeRows,
+                            ["visibleControlSummary"] = outputDiagnostics.ControlSummary,
+                            ["contentOmitted"] = true
+                        });
                 DeveloperDiagnostics.LogDebug(
                     "Terminal",
                     "Submitted terminal output batch to xterm.js.",
@@ -3689,12 +4032,17 @@ namespace PS7ScriptDesk.Shell.Controls
             TerminalResizeDecision resizeDecision,
             int terminalSessionGeneration)
         {
-            var beginResult = _resizeOutputBarrier.Begin(
-                _rendererInstanceGeneration,
-                terminalSessionGeneration,
-                resizeDecision.ResizeGeneration,
-                resizeDecision.Columns,
-                resizeDecision.Rows);
+            TerminalResizeBarrierBeginResult beginResult;
+            lock (_resizeOutputIntegrationSyncRoot)
+            {
+                beginResult = _resizeOutputBarrier.Begin(
+                    _rendererInstanceGeneration,
+                    terminalSessionGeneration,
+                    resizeDecision.ResizeGeneration,
+                    resizeDecision.Columns,
+                    resizeDecision.Rows);
+            }
+
             if (!beginResult.Accepted)
             {
                 _pendingResizeDecision = resizeDecision;
@@ -3779,11 +4127,18 @@ namespace PS7ScriptDesk.Shell.Controls
                         var enqueueResult = _outputFlowController.Enqueue(
                             bufferedOutput.TerminalSessionGeneration,
                             bufferedOutput.Data);
+                        if (enqueueResult.AcceptedCharacters == bufferedOutput.Data.Length)
+                        {
+                            _persistentOutputHistory.Append(
+                                bufferedOutput.TerminalSessionGeneration,
+                                bufferedOutput.Data);
+                        }
                         if (enqueueResult.DroppedCharacters > 0)
                         {
                             RecordDroppedTerminalOutput(enqueueResult.DroppedCharacters);
                         }
                     }
+
                 }
             }
 
@@ -3861,6 +4216,7 @@ namespace PS7ScriptDesk.Shell.Controls
             _lastResizeCommitAcknowledgedColumns = columns;
             _lastResizeCommitAcknowledgedRows = rows;
             _resizeOutputBarrierTimer.Stop();
+            PulseCoordinatedOutputAvailability();
             // The release is deliberately posted after the host commit message. A queued
             // resize waits until those released bytes have also drained and been acked.
             RequestOutputFlush(scheduleFlush: true);
@@ -3893,16 +4249,59 @@ namespace PS7ScriptDesk.Shell.Controls
             StartResizeTransaction(pendingDecision, sessionGeneration);
         }
 
-        private void OnResizeOutputBarrierTimerTick(object? sender, EventArgs e)
+        private void OnOutputAcknowledgmentTimerTick(object? sender, EventArgs e)
         {
-            var expiration = _resizeOutputBarrier.Expire();
-            if (!expiration.Expired)
+            if (!_outputFlowController.HasInFlightBatch || _lastOutputPostTimestamp == 0)
+            {
+                _outputAcknowledgmentTimer.Stop();
+                return;
+            }
+
+            var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(_lastOutputPostTimestamp);
+            if (!TerminalOutputFlowController.HasAcknowledgmentTimedOut(elapsed))
             {
                 return;
             }
 
+            TerminalCriticalTrace.LogStage(
+                "TerminalOutputAcknowledgmentTimeout",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["terminalSessionGeneration"] = _outputFlowController.ActiveGeneration,
+                    ["elapsedMilliseconds"] = elapsed.TotalMilliseconds,
+                    ["contentOmitted"] = true
+                });
+            DeveloperDiagnostics.LogError(
+                "Terminal",
+                "xterm.js did not acknowledge terminal output within the bounded recovery interval; retiring the renderer.",
+                new Dictionary<string, object?>
+                {
+                    ["rendererGeneration"] = _rendererInstanceGeneration,
+                    ["sessionGeneration"] = _outputFlowController.ActiveGeneration,
+                    ["elapsedMilliseconds"] = elapsed.TotalMilliseconds,
+                    ["contentOmitted"] = true
+                });
+            _outputAcknowledgmentTimer.Stop();
+            RetireWebView2Renderer("OutputAcknowledgmentTimeout", null);
+        }
+
+        private void OnResizeOutputBarrierTimerTick(object? sender, EventArgs e)
+        {
+            TerminalResizeBarrierExpirationResult expiration;
+            TerminalResizeBarrierCancellationResult cancelled;
+            lock (_resizeOutputIntegrationSyncRoot)
+            {
+                expiration = _resizeOutputBarrier.Expire();
+                if (!expiration.Expired)
+                {
+                    return;
+                }
+
+                cancelled = _resizeOutputBarrier.Cancel();
+            }
+
             _resizeOutputBarrierTimer.Stop();
-            var cancelled = _resizeOutputBarrier.Cancel();
             _pendingResizeDecision = null;
             TerminalCriticalTrace.LogStage(
                 "ResizeOutputBarrierTimeout",
@@ -3948,6 +4347,7 @@ namespace PS7ScriptDesk.Shell.Controls
                 cancelled = _resizeOutputBarrier.Cancel();
             }
 
+            PulseCoordinatedOutputAvailability();
             _pendingResizeDecision = null;
             if (Dispatcher.CheckAccess())
             {
@@ -3996,6 +4396,12 @@ namespace PS7ScriptDesk.Shell.Controls
                 var enqueueResult = _outputFlowController.Enqueue(
                     bufferedOutput.TerminalSessionGeneration,
                     bufferedOutput.Data);
+                if (enqueueResult.AcceptedCharacters == bufferedOutput.Data.Length)
+                {
+                    _persistentOutputHistory.Append(
+                        bufferedOutput.TerminalSessionGeneration,
+                        bufferedOutput.Data);
+                }
                 if (enqueueResult.DroppedCharacters > 0)
                 {
                     RecordDroppedTerminalOutput(enqueueResult.DroppedCharacters);
@@ -4003,11 +4409,11 @@ namespace PS7ScriptDesk.Shell.Controls
             }
         }
 
-        private void EnqueueVisibleOutputAfterResizeCancellation(int generation, string data)
+        private bool EnqueueVisibleOutputAfterResizeCancellation(int generation, string data)
         {
             if (string.IsNullOrEmpty(data))
             {
-                return;
+                return true;
             }
 
             var enqueueResult = _outputFlowController.Enqueue(generation, data);
@@ -4015,6 +4421,12 @@ namespace PS7ScriptDesk.Shell.Controls
             {
                 RecordDroppedTerminalOutput(enqueueResult.DroppedCharacters);
             }
+            var accepted = enqueueResult.AcceptedCharacters == data.Length;
+            if (accepted)
+            {
+                _persistentOutputHistory.Append(generation, data);
+            }
+            return accepted;
         }
 
         private static bool TryReadResizeCommitAcknowledgement(
@@ -4353,7 +4765,19 @@ namespace PS7ScriptDesk.Shell.Controls
                             root.TryGetProperty("sequence", out var sequenceProp) &&
                             sequenceProp.TryGetInt64(out var sequence))
                         {
+                            if (sequence == _lastOutputPostSequence &&
+                                generation == _lastOutputPostGeneration &&
+                                outputAckRendererGeneration == _lastOutputPostRendererGeneration)
+                            {
+                                TerminalCriticalTrace.RecordTiming("WebViewOutputPostToAck",
+                                    _lastOutputPostTimestamp, generation, outputAckRendererGeneration, sequence);
+                                _lastOutputPostTimestamp = 0;
+                            }
                             var scheduleFlush = _outputFlowController.Acknowledge(generation, sequence);
+                            if (!_outputFlowController.HasInFlightBatch)
+                            {
+                                _outputAcknowledgmentTimer.Stop();
+                            }
                             TerminalOutputCorrelationTrace.RecordRendererAcknowledgement(generation, outputAckRendererGeneration, sequence);
                             PerformanceTrace.Record(
                                 "instant",
@@ -4368,16 +4792,17 @@ namespace PS7ScriptDesk.Shell.Controls
                                     ["hasOutstandingOutput"] = _outputFlowController.HasOutstandingOutput,
                                     ["contentOmitted"] = true
                                 });
-                            TerminalStartupTrace.Write("JS_WRITE_COMPLETED", $"sequence={sequence}; generation={generation}; replayScheduled={scheduleFlush}");
-                            TerminalCriticalTrace.LogStage(
-                                "TerminalControl.RendererAcknowledgement",
-                                new Dictionary<string, object?>
-                                {
-                                    ["rendererGeneration"] = _rendererInstanceGeneration,
-                                    ["terminalSessionGeneration"] = generation,
-                                    ["outputSequence"] = sequence,
-                                    ["scheduleFlush"] = scheduleFlush
-                            });
+
+                            if (TerminalCriticalTrace.IsVerboseEnabled)
+                                TerminalCriticalTrace.LogStage(
+                                    "TerminalControl.RendererAcknowledgement",
+                                    new Dictionary<string, object?>
+                                    {
+                                        ["rendererGeneration"] = _rendererInstanceGeneration,
+                                        ["terminalSessionGeneration"] = generation,
+                                        ["outputSequence"] = sequence,
+                                        ["scheduleFlush"] = scheduleFlush
+                                });
                             RequestOutputFlush(scheduleFlush);
                             if (!_outputFlowController.HasOutstandingOutput &&
                                 _rendererRecovery.ReplayCompleted(_rendererInstanceGeneration))
@@ -5099,8 +5524,6 @@ namespace PS7ScriptDesk.Shell.Controls
 
         private void FlushOutputQueue()
         {
-            _isReady = true;
-            TerminalStartupTrace.Write("RENDERER_READY", $"controlId={GetHashCode():X8}; uiThread={Dispatcher.CheckAccess()}");
             var activeGeneration = _outputFlowController.ActiveGeneration;
             var replayedHistoryCharacters = 0;
             var replacingRenderer = _rendererRecovery.RendererReady(_rendererInstanceGeneration);
@@ -5115,18 +5538,20 @@ namespace PS7ScriptDesk.Shell.Controls
                         ["recoveryCycle"] = _rendererRecovery.Cycle,
                         ["contentOmitted"] = true
                     });
-                _outputFlowController.RestoreRenderer();
-            }
-
-            if (replacingRenderer && activeGeneration is { } generation)
-            {
-                foreach (var historyChunk in _persistentOutputHistory.Snapshot(generation))
+                lock (_resizeOutputIntegrationSyncRoot)
                 {
-                    var replayResult = _outputFlowController.Enqueue(generation, historyChunk);
-                    replayedHistoryCharacters += replayResult.AcceptedCharacters;
+                    _outputFlowController.RestoreRenderer();
+                    if (activeGeneration is { } generation)
+                    {
+                        foreach (var historyChunk in _persistentOutputHistory.Snapshot(generation))
+                        {
+                            var replayResult = _outputFlowController.Enqueue(generation, historyChunk);
+                            replayedHistoryCharacters += replayResult.AcceptedCharacters;
+                        }
+                    }
                 }
 
-                if (!_outputFlowController.HasOutstandingOutput)
+                if (activeGeneration is { } replayGeneration && !_outputFlowController.HasOutstandingOutput)
                 {
                     _rendererRecovery.ReplayCompleted(_rendererInstanceGeneration);
                     TerminalCriticalTrace.LogStage(
@@ -5134,7 +5559,7 @@ namespace PS7ScriptDesk.Shell.Controls
                         new Dictionary<string, object?>
                         {
                             ["rendererGeneration"] = _rendererInstanceGeneration,
-                            ["terminalSessionGeneration"] = generation,
+                            ["terminalSessionGeneration"] = replayGeneration,
                             ["replayedHistoryCharacters"] = replayedHistoryCharacters,
                             ["rawOutputNotReplayed"] = true,
                             ["contentOmitted"] = true
@@ -5142,8 +5567,14 @@ namespace PS7ScriptDesk.Shell.Controls
                 }
             }
 
+            // Availability is published only after the replacement queue has been
+            // rebuilt from confirmed, filtered persistent history. Pending admissions
+            // therefore cannot overtake replay data.
+            _isReady = true;
+            PulseCoordinatedOutputAvailability();
             var scheduleFlush = _outputFlowController.SetRendererReady();
             _rendererReadyReplayPending = scheduleFlush;
+            TerminalStartupTrace.Write("RENDERER_READY", $"controlId={GetHashCode():X8}; uiThread={Dispatcher.CheckAccess()}");
             TerminalStartupTrace.Write("RENDERER_READY_REPLAY_START", $"controlId={GetHashCode():X8}; replayScheduled={scheduleFlush}; outstandingOutput={_outputFlowController.HasOutstandingOutput}");
 
             AppLogger.Info("Terminal", $"xterm.js renderer is ready; bounded terminal output delivery is enabled. ReplayedHistoryCharacters={replayedHistoryCharacters}.");
@@ -5167,6 +5598,18 @@ namespace PS7ScriptDesk.Shell.Controls
             // This is the signal to start the ConPTY session so output has
             // somewhere to go as soon as it arrives.
             TerminalReady?.Invoke();
+        }
+
+        private void PulseCoordinatedOutputAvailability()
+        {
+            try
+            {
+                if (_coordinatedOutputAvailabilityPulse.CurrentCount == 0)
+                    _coordinatedOutputAvailabilityPulse.Release();
+            }
+            catch (SemaphoreFullException)
+            {
+            }
         }
 
         private void WebView_PreviewMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)

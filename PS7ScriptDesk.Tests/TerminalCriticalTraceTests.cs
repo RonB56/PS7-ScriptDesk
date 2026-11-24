@@ -49,6 +49,7 @@ public sealed class TerminalCriticalTraceTests : IDisposable
                 ["pipelineStage"] = "reader-outer-catch"
             });
 
+        Assert.True(TerminalCriticalTrace.FlushForTests());
         var trace = File.ReadAllText(_tracePath);
         Assert.Contains("stage=ConPTY.Reader.FatalException", trace, StringComparison.Ordinal);
         Assert.Contains("managedThreadId=", trace, StringComparison.Ordinal);
@@ -78,6 +79,7 @@ public sealed class TerminalCriticalTraceTests : IDisposable
                 ["appDataRoot"] = @"C:\Users\example\AppData\Local\PS7ScriptDesk"
             });
 
+        Assert.True(TerminalCriticalTrace.FlushForTests());
         var trace = File.ReadAllText(_tracePath);
         Assert.DoesNotContain("secret terminal output", trace, StringComparison.Ordinal);
         Assert.DoesNotContain("secret script text", trace, StringComparison.Ordinal);
@@ -108,6 +110,7 @@ public sealed class TerminalCriticalTraceTests : IDisposable
                 ["diagnosticNote"] = new string('x', 100_000)
             });
 
+        Assert.True(TerminalCriticalTrace.FlushForTests());
         var entry = Assert.Single(captured);
         Assert.True(moved);
         Assert.True(entry.Length < 70_000);
@@ -132,6 +135,8 @@ public sealed class TerminalCriticalTraceTests : IDisposable
 
         Assert.Null(exception);
         Assert.True(laterSubscriberCalled);
+        Assert.True(TerminalCriticalTrace.FlushForTests());
+        Assert.True(TerminalCriticalTrace.Health.WriteFailures > 0);
     }
 
     [Fact]
@@ -142,6 +147,7 @@ public sealed class TerminalCriticalTraceTests : IDisposable
 
         Publish(service, "PS C:\\> ");
 
+        Assert.True(TerminalCriticalTrace.FlushForTests());
         var trace = File.ReadAllText(_tracePath);
         Assert.Contains("stage=LiveConsole.RawOutputReceivedSubscriber.Exception", trace, StringComparison.Ordinal);
         Assert.Contains("metadata.subscriberDeclaringType=PS7ScriptDesk.Tests.TerminalCriticalTraceTests", trace, StringComparison.Ordinal);
@@ -156,30 +162,164 @@ public sealed class TerminalCriticalTraceTests : IDisposable
     public void StartupIdentity_CapturesBinaryIdentityFields()
     {
         TerminalCriticalTrace.LogStartupIdentity(
-            new Dictionary<string, object?>
-            {
-                ["repairedOutputDispatchImplementationActive"] = true
-            });
+            new Dictionary<string, object?>());
 
+        Assert.True(TerminalCriticalTrace.FlushForTests());
         var trace = File.ReadAllText(_tracePath);
         Assert.Contains("stage=Startup.BinaryIdentity", trace, StringComparison.Ordinal);
         Assert.Contains("metadata.executablePath=", trace, StringComparison.Ordinal);
         Assert.Contains("metadata.applicationAssemblyVersion=", trace, StringComparison.Ordinal);
         Assert.Contains("metadata.applicationInformationalVersion=", trace, StringComparison.Ordinal);
         Assert.Contains("metadata.processId=", trace, StringComparison.Ordinal);
-        Assert.Contains("metadata.terminalOutputDispatchImplementation=MainWindowDispatcherEnvelopeQueue", trace, StringComparison.Ordinal);
-        Assert.Contains("metadata.repairedOutputDispatchImplementationActive=True", trace, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void RendererDrainExceptionInstrumentation_IsPresentAtUiBoundary()
+    public void ConcurrentProducers_PersistEveryAcceptedRecordInAdmissionOrder()
     {
-        var source = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+        var observed = new List<string>();
+        TerminalCriticalTrace.ConfigureForTests(_tracePath,
+            appendAllText: (_, entry, _) => observed.Add(entry));
+        Parallel.For(0, 200, index =>
+            TerminalCriticalTrace.LogStage("Concurrent.Record", new Dictionary<string, object?>
+            {
+                ["index"] = index
+            }));
 
-        Assert.Contains("MainWindow.DispatcherBeginInvoke.Scheduled", source, StringComparison.Ordinal);
-        Assert.Contains("MainWindow.DrainTerminalOutputForRenderer.EnvelopeException", source, StringComparison.Ordinal);
-        Assert.Contains("uiDispatcherTransition", source, StringComparison.Ordinal);
-        Assert.Contains("TerminalControl.WebView2.PostOutputException", ReadRepositoryFile("PS7ScriptDesk.Shell", "Controls", "TerminalControl.xaml.cs"), StringComparison.Ordinal);
+        Assert.True(TerminalCriticalTrace.FlushForTests());
+        Assert.Equal(200, observed.Count);
+        Assert.Equal(200, TerminalCriticalTrace.Health.Accepted);
+        Assert.Equal(0, TerminalCriticalTrace.Health.DroppedVerbose);
+        var persistedSequences = observed.Select(entry =>
+        {
+            var marker = "traceSequence=";
+            var start = entry.IndexOf(marker, StringComparison.Ordinal) + marker.Length;
+            var end = entry.IndexOf(';', start);
+            return long.Parse(entry[start..end], System.Globalization.CultureInfo.InvariantCulture);
+        }).ToArray();
+        Assert.Equal(Enumerable.Range(1, 200).Select(static value => (long)value), persistedSequences);
+    }
+
+    [Fact]
+    public void FullOptionalQueue_CountsRejectedRecordsWhilePreservingBoundaryCapacity()
+    {
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        TerminalCriticalTrace.ConfigureForTests(_tracePath,
+            appendAllText: (_, _, _) =>
+            {
+                entered.Set();
+                release.Wait(TimeSpan.FromSeconds(5));
+            });
+        TerminalCriticalTrace.LogStage("Optional.First");
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+        for (var index = 0; index < 3200; index++) TerminalCriticalTrace.LogStage("Optional.Burst");
+        TerminalCriticalTrace.LogException("Boundary.Exception", new IOException("test failure"));
+        Assert.True(TerminalCriticalTrace.Health.DroppedVerbose > 0);
+        Assert.Equal(0, TerminalCriticalTrace.Health.DroppedBoundary);
+        release.Set();
+        Assert.True(TerminalCriticalTrace.FlushForTests(5000));
+    }
+
+    [Fact]
+    public void WriterFailure_ExposesHealthAndCanRestartForTests()
+    {
+        TerminalCriticalTrace.ConfigureForTests(_tracePath,
+            appendAllText: (_, _, _) => throw new IOException("locked log"));
+        TerminalCriticalTrace.LogStage("Boundary.Exception");
+        Assert.True(TerminalCriticalTrace.FlushForTests());
+        Assert.True(TerminalCriticalTrace.Health.WriteFailures > 0);
+        Assert.Equal(nameof(IOException), TerminalCriticalTrace.Health.LastFailureType);
+
+        TerminalCriticalTrace.ResetForTests();
+        TerminalCriticalTrace.ConfigureForTests(_tracePath);
+        TerminalCriticalTrace.LogStage("Recovery.AfterWriterFailure");
+        Assert.True(TerminalCriticalTrace.FlushForTests());
+        Assert.Contains("Recovery.AfterWriterFailure", File.ReadAllText(_tracePath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LockedTraceFile_CountsFailureAndRecoversAfterRelease()
+    {
+        using (var locked = new FileStream(_tracePath, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+        {
+            TerminalCriticalTrace.LogStage("Boundary.Exception.Locked");
+            Assert.True(TerminalCriticalTrace.FlushForTests());
+            Assert.True(TerminalCriticalTrace.Health.WriteFailures > 0);
+        }
+
+        TerminalCriticalTrace.LogStage("Boundary.Exception.Recovered");
+        Assert.True(TerminalCriticalTrace.FlushForTests());
+        Assert.Contains("Boundary.Exception.Recovered", File.ReadAllText(_tracePath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TimingSamples_AggregateOnWriterAndRetainGenerationSequenceWithoutPayload()
+    {
+        var observed = new List<string>();
+        TerminalCriticalTrace.ConfigureForTests(_tracePath,
+            appendAllText: (_, entry, _) => observed.Add(entry));
+        for (var index = 0; index < 128; index++)
+            TerminalCriticalTrace.RecordDurationMicroseconds("WpfCallbackTotal", 500 + index,
+                sessionGeneration: 7, rendererGeneration: 11, sequence: index + 1, queueDepth: 3,
+                envelopeCount: 1);
+
+        Assert.True(TerminalCriticalTrace.FlushForTests());
+        var summary = Assert.Single(observed);
+        Assert.Contains("stage=TerminalTiming.WpfCallbackTotal", summary, StringComparison.Ordinal);
+        Assert.Contains("count=128", summary, StringComparison.Ordinal);
+        Assert.Contains("p50Us=", summary, StringComparison.Ordinal);
+        Assert.Contains("p95Us=", summary, StringComparison.Ordinal);
+        Assert.Contains("p99Us=", summary, StringComparison.Ordinal);
+        Assert.Contains("terminalSessionGeneration=7", summary, StringComparison.Ordinal);
+        Assert.Contains("rendererGeneration=11", summary, StringComparison.Ordinal);
+        Assert.Contains("sequence=128", summary, StringComparison.Ordinal);
+        Assert.Contains("contentOmitted=true", summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SlowWriter_DoesNotBlockAdmissionAndStopIsBounded()
+    {
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        TerminalCriticalTrace.ConfigureForTests(_tracePath,
+            appendAllText: (_, _, _) =>
+            {
+                entered.Set();
+                release.Wait(TimeSpan.FromSeconds(5));
+                Thread.Sleep(60);
+            });
+        TerminalCriticalTrace.LogStage("Slow.Writer.First");
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        TerminalCriticalTrace.LogStage("Slow.Writer.Second");
+        Assert.True(started.Elapsed < TimeSpan.FromMilliseconds(500));
+
+        release.Set();
+        Assert.True(TerminalCriticalTrace.FlushForTests());
+        Assert.True(TerminalCriticalTrace.Health.SlowWrites > 0);
+    }
+
+    [Fact]
+    public void Stop_ReturnsWithinBoundWhenStorageIsBlocked()
+    {
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        TerminalCriticalTrace.ConfigureForTests(_tracePath,
+            appendAllText: (_, _, _) =>
+            {
+                entered.Set();
+                release.Wait(TimeSpan.FromSeconds(5));
+            });
+        TerminalCriticalTrace.LogStage("Shutdown.BlockedStorage");
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        TerminalCriticalTrace.Stop();
+        Assert.InRange(started.ElapsedMilliseconds, 0, 3000);
+        release.Set();
+        Assert.True(SpinWait.SpinUntil(() => TerminalCriticalTrace.Health.Pending == 0,
+            TimeSpan.FromSeconds(3)));
     }
 
     private static Exception CaptureNestedException()

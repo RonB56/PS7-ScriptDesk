@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Collections.Generic;
 using System.Collections.Specialized;
@@ -132,10 +131,6 @@ namespace PS7ScriptDesk.Shell
         private const int AuthoringDiagnosticsLargeLineThreshold = 800;
         private const int AuthoringDiagnosticsVeryLargeCharacterThreshold = 120000;
         private const int AuthoringDiagnosticsVeryLargeLineThreshold = 2000;
-        private const int MaximumQueuedTerminalOutputEnvelopes = 8192;
-        private const int MaximumTerminalOutputDrainEnvelopes = 128;
-        private const int MaximumTerminalOutputDrainCharacters = 64 * 1024;
-        private const double MaximumTerminalOutputDrainMilliseconds = 2;
         private const int EditorFoldingDebounceMilliseconds = 350;
         private const int EditorHoverDelayMilliseconds = 450;
         private const int EditorMetadataWarmupDebounceMilliseconds = 150;
@@ -146,18 +141,14 @@ namespace PS7ScriptDesk.Shell
         private const string ThemeAccentPrimaryResourceKey = "Theme.Accent.Primary";
         private const string ThemeBorderStrongResourceKey = "Theme.Border.Strong";
         private const string ThemeIconAccentResourceKey = "Theme.Icon.Accent";
-        private readonly ConcurrentQueue<TerminalOutputEnvelope> _terminalOutputEnvelopeQueue = new();
-        private readonly Dispatcher _terminalOutputDispatcher;
         private readonly ILiveConsoleService? _liveConsoleServiceForObservation;
         private readonly IPowerShellRuntimeSessionCoordinator? _runtimeSessionCoordinator;
+        private IAwaitableTerminalOutputSource? _boundedPsesTerminalOutputSource;
         private readonly TerminalOutputObservationHub _terminalOutputObservationHub = new();
         private readonly IDisposable _terminalOutputObservationSubscription;
         private TerminalObserverLifetime? _terminalObserverLifetime;
-        private DispatcherOperation? _terminalOutputDrainOperation;
         private MainWindowViewModel? _viewModel;
         private CommandPaletteWindow? _commandPaletteWindow;
-        private int _terminalOutputDrainScheduled;
-        private int _terminalOutputQueuedEnvelopeCount;
         private long _terminalInputSequence;
         private const string ThemeIconSuccessResourceKey = "Theme.Icon.Success";
         private const string ThemeStatusErrorBackgroundResourceKey = "Theme.Status.Error.Background";
@@ -342,7 +333,7 @@ namespace PS7ScriptDesk.Shell
         private readonly ThemeService _themeService = new();
         private IDebugSession? _debugSession;
         private IPowerShellRuntimeExecutionLease? _debugRuntimeExecutionLease;
-        private IDisposable? _debugLaunchEchoRegistration;
+        private IAsyncDisposable? _debugLaunchEchoRegistration;
         private readonly DebuggerExecutionControlGate _debugExecutionControlGate = new();
         private Action<DebugSessionState>? _debugSessionStateChangedHandler;
         private Action<DebuggerEvent>? _debugSessionTypedEventHandler;
@@ -536,7 +527,6 @@ namespace PS7ScriptDesk.Shell
             TerminalStartupTrace.Write("MAINWINDOW_CONSTRUCTOR_ENTER", $"windowId={GetHashCode():X8}");
             StartupLifecycleTrace.Write("MainWindow.Constructor", "ENTER");
             DeveloperDiagnostics.LogMethodEntry("UI", "MainWindow constructor entry.");
-            _terminalOutputDispatcher = Dispatcher;
             _applicationSettingsService = applicationSettingsService;
             _liveConsoleServiceForObservation = liveConsoleServiceForObservation;
             _runtimeSessionCoordinator = runtimeSessionCoordinator;
@@ -614,6 +604,7 @@ namespace PS7ScriptDesk.Shell
             AddHandler(TextCompositionManager.PreviewTextInputEvent, new TextCompositionEventHandler(Window_PreviewTextInputTrace), handledEventsToo: true);
             AddHandler(TextCompositionManager.TextInputEvent, new TextCompositionEventHandler(Window_TextInputTrace), handledEventsToo: true);
             SizeChanged += MainWindow_SizeChanged;
+            StateChanged += MainWindow_StateChanged;
             TerminalConsole.SizeChanged += TerminalConsole_SizeChanged;
             StartupLifecycleTrace.Write("MainWindow.InitializeComponent", "EXIT");
             GitMenuItem.Visibility = GitFeatureAvailability.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
@@ -1152,6 +1143,32 @@ namespace PS7ScriptDesk.Shell
             LogDebugSplitterWriterSnapshot("CaptureConceptualLayoutState", "After", null);
         }
 
+        private void MainWindow_StateChanged(object? sender, EventArgs e)
+        {
+            if (!DeveloperDiagnostics.IsEnabled)
+            {
+                return;
+            }
+
+            DeveloperDiagnostics.LogCriticalForensic(
+                "UI",
+                "MainWindow.StateChanged",
+                "Main window state transition observed.",
+                new Dictionary<string, object?>
+                {
+                    ["windowHandle"] = new System.Windows.Interop.WindowInteropHelper(this).Handle.ToInt64(),
+                    ["windowState"] = WindowState.ToString(),
+                    ["isEnabled"] = IsEnabled,
+                    ["isVisible"] = IsVisible,
+                    ["isThreadModal"] = System.Windows.Interop.ComponentDispatcher.IsThreadModal,
+                    ["ownedWindowCount"] = OwnedWindows.Count,
+                    ["restoreBoundsLeft"] = RestoreBounds.Left,
+                    ["restoreBoundsTop"] = RestoreBounds.Top,
+                    ["restoreBoundsWidth"] = RestoreBounds.Width,
+                    ["restoreBoundsHeight"] = RestoreBounds.Height
+                });
+        }
+
         private void MainWindow_SizeChanged(object sender, SizeChangedEventArgs e)
         {
             LogDebugSplitterWriterSnapshot("MainWindow_SizeChanged", "Before", null);
@@ -1332,372 +1349,55 @@ namespace PS7ScriptDesk.Shell
             StartupLifecycleTrace.Write("MainWindow.ConsoleSessionStatusTextBlock", "TARGET_UPDATED", $"dataContextId={(ConsoleSessionStatusTextBlock.DataContext?.GetHashCode() ?? 0):X8}; targetText={ConsoleSessionStatusTextBlock.Text}");
         }
 
-        private void OnRawTerminalOutputReceived(int generation, string raw)
+        private void EnableBoundedPsesTerminalIngress()
         {
-            var rawOutput = raw ?? string.Empty;
-            if (rawOutput.Length == 0)
-            {
-                return;
-            }
+            if (_liveConsoleServiceForObservation is not IAwaitableTerminalOutputSource awaitableSource)
+                throw new InvalidOperationException("Bounded ConPTY ingress requires the authoritative awaitable PSES source.");
 
-            TerminalStartupTrace.Write("BACKEND_OUTPUT_RECEIVED", $"generation={generation}; chars={rawOutput.Length}; contentOmitted=true");
-            _terminalOutputObservationHub.Publish(new TerminalOutputObservation(generation, rawOutput, Source: "ConPTY"));
+            _boundedPsesTerminalOutputSource = awaitableSource;
+            awaitableSource.VisibleOutputPublishingAsync += OnBoundedPsesTerminalOutputAsync;
+            if (_liveConsoleServiceForObservation is PsesOwnedInteractiveSessionService pses)
+                pses.VisibleOutputPublishingFailed += OnBoundedPsesPublishingFailed;
+        }
 
-            TerminalCriticalTrace.LogStage(
-                "MainWindow.RawOutputReceivedSubscriber.Begin",
-                new Dictionary<string, object?>
-                {
-                    ["terminalSessionGeneration"] = generation,
-                    ["rendererGeneration"] = generation,
-                    ["outputCharacterLength"] = rawOutput.Length,
-                    ["contentOmitted"] = true
-                });
-            var viewModel = Volatile.Read(ref _viewModel);
-            if (viewModel is null)
+        private void OnBoundedPsesPublishingFailed(int generation, Exception exception)
+        {
+            var authoritativeGeneration = _liveConsoleServiceForObservation?.CurrentSessionGeneration;
+            if (authoritativeGeneration != generation || TerminalConsole.ActiveSessionGeneration != generation)
             {
-                TerminalCriticalTrace.LogStage(
-                    "MainWindow.RawOutputReceivedSubscriber.DroppedNoViewModel",
+                DeveloperDiagnostics.LogDecision(
+                    "Terminal",
+                    "BoundedPsesPresentationFailure",
+                    "Ignored a stale PSES presentation failure notification.",
+                    "StaleGeneration",
                     new Dictionary<string, object?>
                     {
-                        ["terminalSessionGeneration"] = generation,
-                        ["rendererGeneration"] = generation,
-                        ["outputCharacterLength"] = rawOutput.Length,
+                        ["failedSessionGeneration"] = generation,
+                        ["authoritativeSessionGeneration"] = authoritativeGeneration,
+                        ["terminalSessionGeneration"] = TerminalConsole.ActiveSessionGeneration,
                         ["contentOmitted"] = true
                     });
                 return;
             }
 
-            viewModel.PublishInteractiveTerminalOutput(generation, rawOutput);
-            TerminalStartupTrace.FirstRendererOutput($"generation={generation}; chars={rawOutput.Length}; contentOmitted=true");
-            TerminalCriticalTrace.LogStage(
-                "MainWindow.RawOutputReceivedSubscriber.End",
-                new Dictionary<string, object?>
-                {
-                    ["terminalSessionGeneration"] = generation,
-                    ["rendererGeneration"] = generation,
-                    ["outputCharacterLength"] = rawOutput.Length,
-                    ["contentOmitted"] = true
-                });
+            DeveloperDiagnostics.LogException("Terminal", exception,
+                "PSES quarantined bounded terminal presentation after an unconfirmed or failed admission.",
+                new Dictionary<string, object?> { ["sessionGeneration"] = generation, ["contentOmitted"] = true });
+            TerminalConsole.SetPresentationDegraded(generation, exception);
         }
 
-        private void EnqueueTerminalOutputForRenderer(TerminalOutputEnvelope envelope)
+        private async ValueTask OnBoundedPsesTerminalOutputAsync(
+            int sessionGeneration,
+            ExecutionOutputStreamKind streamKind,
+            string text)
         {
-            TerminalStartupTrace.Write("OUTPUT_SINK_ATTACHED", $"sequence={envelope.Sequence}; source={envelope.Source}; chars={envelope.Payload.Length}; contentOmitted=true");
-            TerminalCriticalTrace.LogStage(
-                "MainWindow.EnqueueTerminalOutputForRenderer.Begin",
-                CreateTerminalEnvelopeMetadata(envelope));
-            var queuedCount = Interlocked.Increment(ref _terminalOutputQueuedEnvelopeCount);
-            TerminalOutputCorrelationTrace.Record(
-                "WpfEnvelopeQueued",
-                envelope.RendererGeneration,
-                envelope.Payload,
-                envelopeSequence: envelope.Sequence,
-                queueDepth: queuedCount);
-            if (queuedCount > MaximumQueuedTerminalOutputEnvelopes)
+            _terminalOutputObservationHub.Publish(new TerminalOutputObservation(sessionGeneration, text, Source: "ConPTY"));
+            var accepted = await TerminalConsole.WriteRawAwaitableAsync(sessionGeneration, text).ConfigureAwait(false);
+            if (!accepted && TerminalConsole.ActiveSessionGeneration == sessionGeneration)
             {
-                Interlocked.Decrement(ref _terminalOutputQueuedEnvelopeCount);
-                AppLogger.Warning("Terminal", $"Dropping terminal output envelope because the UI renderer queue is full. Sequence={envelope.Sequence}, Source={envelope.Source}, ContentOmitted=True.");
-                DeveloperDiagnostics.LogWarning(
-                    "Terminal",
-                    "Terminal output envelope dropped before UI dispatch because the renderer queue was full.",
-                    new Dictionary<string, object?>
-                    {
-                        ["sequence"] = envelope.Sequence,
-                        ["source"] = envelope.Source.ToString(),
-                        ["maxQueuedEnvelopes"] = MaximumQueuedTerminalOutputEnvelopes,
-                        ["contentOmitted"] = true
-                    });
-                TerminalCriticalTrace.LogStage(
-                    "MainWindow.EnqueueTerminalOutputForRenderer.DroppedQueueFull",
-                    CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
-                    {
-                        ["queuedEnvelopeCount"] = queuedCount,
-                        ["maximumQueuedEnvelopes"] = MaximumQueuedTerminalOutputEnvelopes
-                    }));
-                return;
+                throw new InvalidOperationException(
+                    $"TerminalControl rejected authoritative PSES output for session generation {sessionGeneration}.");
             }
-
-            if (_terminalOutputDispatcher.HasShutdownStarted ||
-                _terminalOutputDispatcher.HasShutdownFinished)
-            {
-                Interlocked.Decrement(ref _terminalOutputQueuedEnvelopeCount);
-                AppLogger.Warning("Terminal", $"Dropping terminal output envelope because the UI dispatcher is shutting down. Sequence={envelope.Sequence}, Source={envelope.Source}, ContentOmitted=True.");
-                DeveloperDiagnostics.LogWarning(
-                    "Terminal",
-                    "Terminal output envelope dropped because the UI dispatcher is shutting down.",
-                    new Dictionary<string, object?>
-                    {
-                        ["sequence"] = envelope.Sequence,
-                        ["source"] = envelope.Source.ToString(),
-                        ["contentOmitted"] = true
-                    });
-                TerminalCriticalTrace.LogStage(
-                    "MainWindow.EnqueueTerminalOutputForRenderer.DroppedDispatcherShutdown",
-                    CreateTerminalEnvelopeMetadata(envelope));
-                return;
-            }
-
-            _terminalOutputEnvelopeQueue.Enqueue(envelope);
-            TerminalCriticalTrace.LogStage(
-                "MainWindow.EnqueueTerminalOutputForRenderer.Queued",
-                CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
-                {
-                    ["queuedEnvelopeCount"] = queuedCount,
-                    ["dispatcherShutdownStarted"] = _terminalOutputDispatcher.HasShutdownStarted,
-                    ["dispatcherShutdownFinished"] = _terminalOutputDispatcher.HasShutdownFinished
-                }));
-            if (Interlocked.Exchange(ref _terminalOutputDrainScheduled, 1) == 1)
-            {
-                TerminalCriticalTrace.LogStage(
-                    "MainWindow.DispatcherDrain.AlreadyScheduled",
-                    CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
-                    {
-                        ["queuedEnvelopeCount"] = queuedCount
-                    }));
-                return;
-            }
-
-            try
-            {
-                TerminalCriticalTrace.LogStage(
-                    "DISPATCHER_CALLBACK_SCHEDULED",
-                    CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
-                    {
-                        ["callbackIdentity"] = "MainWindow.DrainTerminalOutputForRenderer",
-                        ["dispatcherPriority"] = DispatcherPriority.Background.ToString()
-                    }));
-                var operation = _terminalOutputDispatcher.BeginInvoke(
-                    new Action(DrainTerminalOutputForRenderer),
-                    DispatcherPriority.Background);
-                Volatile.Write(ref _terminalOutputDrainOperation, operation);
-                operation.Aborted += TerminalOutputDrainOperation_Aborted;
-                TerminalCriticalTrace.LogStage(
-                    "MainWindow.DispatcherBeginInvoke.Scheduled",
-                    CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
-                    {
-                        ["queuedEnvelopeCount"] = queuedCount,
-                        ["dispatcherPriority"] = DispatcherPriority.Background.ToString(),
-                        ["dispatcherThreadId"] = _terminalOutputDispatcher.Thread.ManagedThreadId,
-                        ["dispatcherCheckAccess"] = _terminalOutputDispatcher.CheckAccess(),
-                        ["operationStatus"] = operation.Status.ToString()
-                    }));
-                if (operation.Status == DispatcherOperationStatus.Aborted)
-                {
-                    TerminalOutputDrainOperation_Aborted(operation, EventArgs.Empty);
-                }
-            }
-            catch (Exception ex)
-            {
-                Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
-                TerminalCriticalTrace.LogException(
-                    "MainWindow.DispatcherBeginInvoke.Exception",
-                    ex,
-                    CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
-                    {
-                        ["queuedEnvelopeCount"] = queuedCount,
-                        ["uiDispatcherTransition"] = "before-dispatcher-drain"
-                    }));
-                AppLogger.Error("Terminal", "Unable to schedule terminal output renderer drain.", ex);
-                DeveloperDiagnostics.LogException(
-                    "Terminal",
-                    ex,
-                    "Unable to schedule terminal output renderer drain.",
-                    new Dictionary<string, object?> { ["contentOmitted"] = true });
-            }
-        }
-
-        private void DrainTerminalOutputForRenderer()
-        {
-            var drainStartedAt = Stopwatch.GetTimestamp();
-            var drainedEnvelopeCount = 0;
-            long drainedCharacterCount = 0;
-            TerminalCriticalTrace.LogStage(
-                "DISPATCHER_CALLBACK_ENTER",
-                new Dictionary<string, object?>
-                {
-                    ["callbackIdentity"] = "MainWindow.DrainTerminalOutputForRenderer",
-                    ["dispatcherPriority"] = DispatcherPriority.Background.ToString(),
-                    ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount)
-                });
-            TerminalCriticalTrace.LogStage(
-                "MainWindow.DrainTerminalOutputForRenderer.Begin",
-                new Dictionary<string, object?>
-                {
-                    ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount)
-                });
-            try
-            {
-                while (_terminalOutputEnvelopeQueue.TryDequeue(out var envelope))
-                {
-                    Interlocked.Decrement(ref _terminalOutputQueuedEnvelopeCount);
-                    drainedEnvelopeCount++;
-                    drainedCharacterCount += envelope.Payload.Length;
-                    try
-                    {
-                        TerminalCriticalTrace.LogStage(
-                            "MainWindow.DrainTerminalOutputForRenderer.EnvelopeBegin",
-                            CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
-                            {
-                                ["uiDispatcherTransition"] = "during-dispatcher-drain"
-                            }));
-                        if (envelope.Source == TerminalOutputSource.StructuredEditor)
-                        {
-                            TerminalConsole.WriteStructuredOutput(envelope.RendererGeneration, envelope.Payload);
-                            TerminalCriticalTrace.LogStage(
-                                "MainWindow.DrainTerminalOutputForRenderer.EnvelopeEnd",
-                                CreateTerminalEnvelopeMetadata(envelope));
-                        }
-                        else
-                        {
-                            TerminalOutputCorrelationTrace.Record(
-                                "WpfEnvelopeDrainedToTerminalControl",
-                                envelope.RendererGeneration,
-                                envelope.Payload,
-                                envelopeSequence: envelope.Sequence);
-                            TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload);
-                            TerminalCriticalTrace.LogStage(
-                                "MainWindow.DrainTerminalOutputForRenderer.EnvelopeEnd",
-                                CreateTerminalEnvelopeMetadata(envelope));
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        TerminalCriticalTrace.LogException(
-                            "MainWindow.DrainTerminalOutputForRenderer.EnvelopeException",
-                            ex,
-                            CreateTerminalEnvelopeMetadata(envelope, new Dictionary<string, object?>
-                            {
-                                ["uiDispatcherTransition"] = "during-dispatcher-drain"
-                            }));
-                        AppLogger.Error("Terminal", $"Terminal output renderer consumer failed. Sequence={envelope.Sequence}, Source={envelope.Source}, ContentOmitted=True.", ex);
-                        DeveloperDiagnostics.LogException(
-                            "Terminal",
-                            ex,
-                            "Terminal output renderer consumer failed during UI dispatcher drain.",
-                            new Dictionary<string, object?>
-                            {
-                                ["sequence"] = envelope.Sequence,
-                                ["source"] = envelope.Source.ToString(),
-                                ["rendererGeneration"] = envelope.RendererGeneration,
-                                ["interactiveTerminalSessionGeneration"] = envelope.InteractiveTerminalSessionGeneration,
-                                ["brokerSessionGeneration"] = envelope.BrokerSessionGeneration,
-                                ["contentOmitted"] = true
-                            });
-                    }
-
-                    if (drainedEnvelopeCount >= MaximumTerminalOutputDrainEnvelopes ||
-                        drainedCharacterCount >= MaximumTerminalOutputDrainCharacters ||
-                        Stopwatch.GetElapsedTime(drainStartedAt).TotalMilliseconds >= MaximumTerminalOutputDrainMilliseconds)
-                    {
-                        break;
-                    }
-                }
-            }
-            finally
-            {
-                TerminalCriticalTrace.LogStage(
-                    "MainWindow.DrainTerminalOutputForRenderer.End",
-                    new Dictionary<string, object?>
-                    {
-                        ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
-                        ["drainedEnvelopeCount"] = drainedEnvelopeCount,
-                        ["drainedCharacterCount"] = drainedCharacterCount,
-                        ["elapsedMilliseconds"] = Stopwatch.GetElapsedTime(drainStartedAt).TotalMilliseconds,
-                        ["drainBudgetEnvelopes"] = MaximumTerminalOutputDrainEnvelopes,
-                        ["drainBudgetCharacters"] = MaximumTerminalOutputDrainCharacters,
-                        ["drainBudgetMilliseconds"] = MaximumTerminalOutputDrainMilliseconds,
-                        ["queueIsEmpty"] = _terminalOutputEnvelopeQueue.IsEmpty
-                    });
-                TerminalCriticalTrace.LogStage(
-                    "DISPATCHER_CALLBACK_EXIT",
-                    new Dictionary<string, object?>
-                    {
-                        ["callbackIdentity"] = "MainWindow.DrainTerminalOutputForRenderer",
-                        ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount)
-                    });
-                Interlocked.Exchange(ref _terminalOutputDrainOperation, null);
-                Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
-                if (!_terminalOutputEnvelopeQueue.IsEmpty &&
-                    Interlocked.Exchange(ref _terminalOutputDrainScheduled, 1) == 0)
-                {
-                    try
-                    {
-                        if (!_terminalOutputDispatcher.HasShutdownStarted &&
-                            !_terminalOutputDispatcher.HasShutdownFinished)
-                        {
-                            var operation = _terminalOutputDispatcher.BeginInvoke(
-                                new Action(DrainTerminalOutputForRenderer),
-                                DispatcherPriority.Background);
-                            Volatile.Write(ref _terminalOutputDrainOperation, operation);
-                            operation.Aborted += TerminalOutputDrainOperation_Aborted;
-                            TerminalCriticalTrace.LogStage(
-                                "MainWindow.DispatcherBeginInvoke.Rescheduled",
-                                new Dictionary<string, object?>
-                                {
-                                    ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
-                                    ["dispatcherPriority"] = DispatcherPriority.Background.ToString(),
-                                    ["dispatcherThreadId"] = _terminalOutputDispatcher.Thread.ManagedThreadId,
-                                    ["dispatcherCheckAccess"] = _terminalOutputDispatcher.CheckAccess(),
-                                    ["operationStatus"] = operation.Status.ToString()
-                                });
-                            if (operation.Status == DispatcherOperationStatus.Aborted)
-                            {
-                                TerminalOutputDrainOperation_Aborted(operation, EventArgs.Empty);
-                            }
-                        }
-                        else
-                        {
-                            Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
-                        TerminalCriticalTrace.LogException(
-                            "MainWindow.DispatcherBeginInvoke.RescheduleException",
-                            ex,
-                            new Dictionary<string, object?>
-                            {
-                                ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
-                                ["uiDispatcherTransition"] = "after-dispatcher-drain"
-                            });
-                        AppLogger.Error("Terminal", "Unable to reschedule terminal output renderer drain.", ex);
-                        DeveloperDiagnostics.LogException(
-                            "Terminal",
-                            ex,
-                            "Unable to reschedule terminal output renderer drain.",
-                            new Dictionary<string, object?> { ["contentOmitted"] = true });
-                    }
-                }
-            }
-        }
-
-        private static Dictionary<string, object?> CreateTerminalEnvelopeMetadata(
-            TerminalOutputEnvelope envelope,
-            IReadOnlyDictionary<string, object?>? additionalMetadata = null)
-        {
-            var metadata = new Dictionary<string, object?>
-            {
-                ["source"] = envelope.Source.ToString(),
-                ["sequence"] = envelope.Sequence,
-                ["brokerSessionGeneration"] = envelope.BrokerSessionGeneration,
-                ["terminalSessionGeneration"] = envelope.InteractiveTerminalSessionGeneration,
-                ["rendererGeneration"] = envelope.RendererGeneration,
-                ["sourceSequence"] = envelope.SourceSequence,
-                ["streamKind"] = envelope.StreamKind.ToString(),
-                ["outputCharacterLength"] = envelope.Payload?.Length ?? 0,
-                ["contentOmitted"] = true
-            };
-
-            if (additionalMetadata is not null)
-            {
-                foreach (var item in additionalMetadata)
-                {
-                    metadata[item.Key] = item.Value;
-                }
-            }
-
-            return metadata;
         }
 
         private void Window_SourceInitialized(object? sender, EventArgs e)
@@ -1791,11 +1491,7 @@ namespace PS7ScriptDesk.Shell
                         TerminalConsole.ReconcileAuthoritativeClear()),
                     requestTerminalWarmStart: reason => RequestConsoleWarmStart(reason));
 
-                // Forward raw (ANSI-intact) ConPTY output to xterm.js.
-                // TerminalControl applies its own bounded dispatcher/WebView flow control,
-                // so the reader callback does not queue one dispatcher operation per chunk.
-                ViewModel.SubscribeRawOutput(OnRawTerminalOutputReceived);
-                ViewModel.TerminalOutputPublished += EnqueueTerminalOutputForRenderer;
+                EnableBoundedPsesTerminalIngress();
                 ViewModel.PromptReadyForTerminalDiagnostics += generation => TerminalConsole.ObservePromptBoundary(generation);
                 TerminalStartupTrace.Write("TERMINAL_EVENT_SINKS_WIRED", $"windowId={GetHashCode():X8}; viewModelId={ViewModel.GetHashCode():X8}");
 
@@ -4742,61 +4438,6 @@ namespace PS7ScriptDesk.Shell
                 else
                 {
                     ViewModel.SetGitNotificationStatus(failureReason ?? "Unable to open the selected repository file.");
-                }
-            }
-        }
-
-        private void TerminalOutputDrainOperation_Aborted(object? sender, EventArgs e)
-        {
-            if (sender is not DispatcherOperation operation)
-            {
-                return;
-            }
-
-            Interlocked.CompareExchange(ref _terminalOutputDrainOperation, null, operation);
-            Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
-            TerminalCriticalTrace.LogStage(
-                "MainWindow.DispatcherDrain.Aborted",
-                new Dictionary<string, object?>
-                {
-                    ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
-                    ["queueIsEmpty"] = _terminalOutputEnvelopeQueue.IsEmpty,
-                    ["dispatcherThreadId"] = _terminalOutputDispatcher.Thread.ManagedThreadId,
-                    ["dispatcherCheckAccess"] = _terminalOutputDispatcher.CheckAccess(),
-                    ["scheduledFlag"] = Volatile.Read(ref _terminalOutputDrainScheduled)
-                });
-
-            if (!_terminalOutputEnvelopeQueue.IsEmpty &&
-                !_terminalOutputDispatcher.HasShutdownStarted &&
-                !_terminalOutputDispatcher.HasShutdownFinished &&
-                Interlocked.Exchange(ref _terminalOutputDrainScheduled, 1) == 0)
-            {
-                try
-                {
-                    var replacement = _terminalOutputDispatcher.BeginInvoke(
-                        new Action(DrainTerminalOutputForRenderer),
-                        DispatcherPriority.Background);
-                    Volatile.Write(ref _terminalOutputDrainOperation, replacement);
-                    replacement.Aborted += TerminalOutputDrainOperation_Aborted;
-                    TerminalCriticalTrace.LogStage(
-                        "MainWindow.DispatcherBeginInvoke.RecoveredAfterAbort",
-                        new Dictionary<string, object?>
-                        {
-                            ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
-                            ["operationStatus"] = replacement.Status.ToString()
-                        });
-                }
-                catch (Exception ex)
-                {
-                    Interlocked.Exchange(ref _terminalOutputDrainScheduled, 0);
-                    TerminalCriticalTrace.LogException(
-                        "MainWindow.DispatcherBeginInvoke.RecoveryException",
-                        ex,
-                        new Dictionary<string, object?>
-                        {
-                            ["queuedEnvelopeCount"] = Volatile.Read(ref _terminalOutputQueuedEnvelopeCount),
-                            ["queueIsEmpty"] = _terminalOutputEnvelopeQueue.IsEmpty
-                        });
                 }
             }
         }
@@ -11001,7 +10642,9 @@ namespace PS7ScriptDesk.Shell
                 });
             }
 
-            Interlocked.Exchange(ref _debugLaunchEchoRegistration, null)?.Dispose();
+            var debugLaunchEchoRegistration = Interlocked.Exchange(ref _debugLaunchEchoRegistration, null);
+            if (debugLaunchEchoRegistration is not null)
+                await debugLaunchEchoRegistration.DisposeAsync().ConfigureAwait(true);
 
             var runtimeAfterTeardown = _runtimeSessionCoordinator?.Snapshot;
             DeveloperDiagnostics.LogInfo("Debugger", "Debugger lifecycle ownership release snapshot.", new Dictionary<string, object?>
@@ -11672,6 +11315,7 @@ namespace PS7ScriptDesk.Shell
             }
 
             _terminalShutdownInProgress = true;
+            TerminalConsole.SetApplicationShutdownInProgress();
             DeveloperDiagnostics.LogStateTransition(
                 "Terminal",
                 "Window_Closing",
@@ -11986,6 +11630,10 @@ namespace PS7ScriptDesk.Shell
 
         private void Window_Closed(object? sender, EventArgs e)
         {
+            if (_boundedPsesTerminalOutputSource is not null)
+                _boundedPsesTerminalOutputSource.VisibleOutputPublishingAsync -= OnBoundedPsesTerminalOutputAsync;
+            if (_liveConsoleServiceForObservation is PsesOwnedInteractiveSessionService boundedPses)
+                boundedPses.VisibleOutputPublishingFailed -= OnBoundedPsesPublishingFailed;
             CancelStartupDocumentRecovery();
             _startupRecoveryCancellation?.Dispose();
             _startupRecoveryCancellation = null;

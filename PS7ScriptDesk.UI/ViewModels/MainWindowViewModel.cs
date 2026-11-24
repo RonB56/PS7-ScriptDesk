@@ -10,7 +10,6 @@ using System.Runtime.CompilerServices;
 using System.Security;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -28,9 +27,6 @@ namespace PS7ScriptDesk.UI.ViewModels
     {
         private const int MaximumRecentFiles = 10;
         private const string GitDiagnosticsDocumentTitle = "Git Diagnostics.txt";
-        private static readonly Regex RenderedPromptReadinessRegex = new(
-            @"(?:^|\r?\n|={2,})[ \t]*PS[ \t]+(?<path>(?:[A-Za-z]:[\\/]|/)[^\r\n>]{0,240})>[ \t]*(?:\r?\n|$)",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
         private readonly IFileDocumentService _fileDocumentService;
         private readonly IRuntimeService _runtimeService;
         private readonly ILiveConsoleService _liveConsoleService;
@@ -280,7 +276,6 @@ namespace PS7ScriptDesk.UI.ViewModels
             _interactiveTerminalCoordinator = interactiveTerminalCoordinator ?? new InteractiveTerminalCoordinator();
             _interactiveTerminalCoordinator.StateChanged += OnInteractiveTerminalStateChanged;
             _terminalOutputMultiplexer = terminalOutputMultiplexer ?? new TerminalOutputMultiplexer();
-            _terminalOutputMultiplexer.OutputPublished += OnTerminalOutputEnvelopePublished;
             if (_executionCoordinator is not null)
             {
                 _executionCoordinator.EventPublished += OnCoordinatorExecutionEvent;
@@ -416,42 +411,7 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
-        public event Action<TerminalOutputEnvelope>? TerminalOutputPublished;
         public event Action<int>? PromptReadyForTerminalDiagnostics;
-
-        private void OnTerminalOutputEnvelopePublished(TerminalOutputEnvelope envelope)
-        {
-            TerminalOutputCorrelationTrace.Record(
-                "OutputEnvelopePublished",
-                envelope.RendererGeneration,
-                envelope.Payload,
-                envelopeSequence: envelope.Sequence);
-            using var performanceScope = PerformanceTrace.Begin(
-                "Terminal",
-                "OutputPublication",
-                generation: envelope.RendererGeneration,
-                properties: new Dictionary<string, object?>
-                {
-                    ["payloadCharacters"] = envelope.Payload?.Length ?? 0,
-                    ["streamKind"] = envelope.StreamKind.ToString()
-                });
-            var metadata = new Dictionary<string, object?>
-            {
-                ["source"] = envelope.Source.ToString(),
-                ["sequence"] = envelope.Sequence,
-                ["brokerSessionGeneration"] = envelope.BrokerSessionGeneration,
-                ["terminalSessionGeneration"] = envelope.InteractiveTerminalSessionGeneration,
-                ["rendererGeneration"] = envelope.RendererGeneration,
-                ["sourceSequence"] = envelope.SourceSequence,
-                ["streamKind"] = envelope.StreamKind.ToString(),
-                ["outputCharacterLength"] = envelope.Payload?.Length ?? 0,
-                ["contentOmitted"] = true
-            };
-
-            TerminalCriticalTrace.LogStage("MainWindowViewModel.TerminalOutputPublished.Begin", metadata);
-            TerminalOutputPublished?.Invoke(envelope);
-            TerminalCriticalTrace.LogStage("MainWindowViewModel.TerminalOutputPublished.End", metadata);
-        }
 
         public string Title { get; }
 
@@ -2136,9 +2096,8 @@ namespace PS7ScriptDesk.UI.ViewModels
         }
 
         /// <summary>
-        /// Registers terminal session controls. Visible session output is wired
-        /// separately through SubscribeRawOutput so arbitrary strings cannot be
-        /// written to xterm.js through this API.
+        /// Registers terminal session controls. Authoritative visible output is
+        /// wired by the shell through bounded PSES ingress.
         /// </summary>
         public void SetTerminalSessionControls(
             Action clearTerminal,
@@ -2218,130 +2177,6 @@ namespace PS7ScriptDesk.UI.ViewModels
             // Renderer readiness is presentation-only. Backend session-start and
             // prompt observations own interactive admission state.
             RequestTerminalFocusAfterReset(Volatile.Read(ref _currentTerminalGeneration), "RendererReady");
-        }
-
-        /// <summary>
-        /// Subscribes a handler to raw (ANSI-intact) ConPTY output for forwarding
-        /// to xterm.js with its session generation. The handler is called on the thread-pool.
-        /// </summary>
-        public void SubscribeRawOutput(Action<int, string> handler)
-        {
-            _liveConsoleService.RawOutputReceived += handler;
-        }
-
-        /// <summary>Unsubscribes a handler previously added via SubscribeRawOutput.</summary>
-        public void UnsubscribeRawOutput(Action<int, string> handler)
-        {
-            _liveConsoleService.RawOutputReceived -= handler;
-        }
-
-        public void PublishInteractiveTerminalOutput(int generation, string rawOutput)
-        {
-            if (string.IsNullOrEmpty(rawOutput))
-            {
-                return;
-            }
-
-            TryPromoteRenderedPromptReadiness(generation, rawOutput);
-
-            TerminalCriticalTrace.LogStage(
-                "MainWindowViewModel.PublishInteractiveTerminalOutput.Begin",
-                new Dictionary<string, object?>
-                {
-                    ["terminalSessionGeneration"] = generation,
-                    ["rendererGeneration"] = generation,
-                    ["outputCharacterLength"] = rawOutput.Length,
-                    ["contentOmitted"] = true
-                });
-            _terminalOutputMultiplexer.PublishInteractive(
-                generation,
-                EditorOutputStreamKind.VirtualTerminal,
-                rawOutput);
-            TerminalCriticalTrace.LogStage(
-                "MainWindowViewModel.PublishInteractiveTerminalOutput.End",
-                new Dictionary<string, object?>
-                {
-                    ["terminalSessionGeneration"] = generation,
-                    ["rendererGeneration"] = generation,
-                    ["outputCharacterLength"] = rawOutput.Length,
-                    ["contentOmitted"] = true
-                });
-        }
-
-        private void TryPromoteRenderedPromptReadiness(int generation, string rawOutput)
-        {
-            var cleaned = Regex.Replace(rawOutput, @"\x1B\].*?(?:\x07|\x1B\\)", string.Empty, RegexOptions.Singleline);
-            cleaned = Regex.Replace(cleaned, @"\x1B\[[0-?]*[ -/]*[@-~]", string.Empty);
-            var match = RenderedPromptReadinessRegex.Match(cleaned);
-            if (!match.Success)
-            {
-                return;
-            }
-
-            var path = match.Groups["path"].Value.Trim();
-            if (path.Length == 0)
-            {
-                return;
-            }
-
-            var snapshot = _interactiveTerminalCoordinator.Snapshot;
-            var facts = GetEditorExecutionAdmissionFacts();
-            if (_liveConsoleService.IsCommandInProgress ||
-                Volatile.Read(ref _resetConsoleInProgress) != 0 ||
-                !TryBindCurrentTerminalGeneration(generation) ||
-                !EditorExecutionAdmissionPolicy.CanAcceptPromptObservation(
-                    snapshot.State,
-                    generation == Volatile.Read(ref _currentTerminalGeneration) &&
-                    generation == _liveConsoleService.CurrentSessionGeneration &&
-                    snapshot.Generation <= generation &&
-                    _terminalOutputMultiplexer.InteractiveSnapshot.Generation <= generation,
-                    facts,
-                    isNewerTerminalGeneration: snapshot.Generation < generation))
-            {
-                DeveloperDiagnostics.LogDecision(
-                    "Terminal",
-                    "RenderedPromptObservationRejected",
-                    "Rendered prompt-shaped output was retained as presentation evidence because the current session did not admit an interactive-idle transition.",
-                    "OwnershipOrSessionGuard",
-                    new Dictionary<string, object?>
-                    {
-                        ["terminalGeneration"] = generation,
-                        ["currentTerminalGeneration"] = Volatile.Read(ref _currentTerminalGeneration),
-                        ["interactiveState"] = snapshot.State.ToString(),
-                        ["runtimeState"] = facts.RuntimeState?.ToString(),
-                        ["lifecyclePhase"] = facts.LifecyclePhase?.ToString(),
-                        ["contentOmitted"] = true
-                    });
-                return;
-            }
-
-            var promoted = _interactiveTerminalCoordinator.TryReplaceGeneration(
-                generation,
-                InteractiveTerminalState.InteractiveIdleAtPrompt,
-                "Rendered ConPTY output contained a rooted PowerShell prompt while the session was writable and idle.");
-            _terminalOutputMultiplexer.TryReplaceInteractiveGeneration(
-                generation,
-                InteractiveTerminalState.InteractiveIdleAtPrompt,
-                "Rendered ConPTY output contained a rooted PowerShell prompt while the session was writable and idle.");
-            if (promoted && snapshot.State != InteractiveTerminalState.InteractiveIdleAtPrompt)
-            {
-                DeveloperDiagnostics.LogStateTransition(
-                    "Terminal",
-                    "InteractivePromptObservation",
-                    snapshot.State.ToString(),
-                    InteractiveTerminalState.InteractiveIdleAtPrompt.ToString(),
-                    "Rendered prompt observation marked console input idle after current-session and owner checks.",
-                    new Dictionary<string, object?>
-                    {
-                        ["generation"] = generation,
-                        ["previousGeneration"] = snapshot.Generation,
-                        ["pathLength"] = path.Length,
-                        ["backendSessionRunning"] = _liveConsoleService.IsSessionRunning,
-                        ["backendInputWritable"] = _liveConsoleService.IsInputWritable,
-                        ["backendCommandInProgress"] = _liveConsoleService.IsCommandInProgress,
-                        ["contentOmitted"] = true
-                    });
-            }
         }
 
         /// <summary>
@@ -9488,57 +9323,9 @@ namespace PS7ScriptDesk.UI.ViewModels
                     // on five commands for each line of terminal output — far too expensive.
                     UpdateConsoleSessionPresentation();
                 }
-                // Non-lifecycle stdout is no longer routed here: it now arrives via
-                // LiveConsoleService.RawOutputReceived → TerminalControl.WriteRaw (xterm.js).
-                // The else branch is kept as a no-op in case of future fallback needs.
+                // Non-lifecycle stdout is published through the authoritative bounded PSES
+                // terminal ingress and does not enter lifecycle status projection.
             });
-        }
-
-        private void OnStructuredEditorExecutionEvent(EditorExecutionEvent executionEvent)
-        {
-            if (executionEvent.Kind != EditorExecutionEventKind.Output ||
-                executionEvent.Output is not { } output ||
-                _activeStructuredExecutionRequestId != output.RequestId)
-            {
-                return;
-            }
-
-            try
-            {
-                var visibleOutput = FormatStructuredEditorOutput(output);
-                if (string.IsNullOrEmpty(visibleOutput))
-                {
-                    return;
-                }
-
-                _terminalOutputMultiplexer.PublishEditor(output with { Payload = visibleOutput });
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("Console", $"Structured editor output could not be published. RequestId={executionEvent.RequestId:N}, ErrorType={ex.GetType().Name}.", ex);
-                DeveloperDiagnostics.LogException(
-                    "Terminal",
-                    ex,
-                    "Structured editor output publication failed.",
-                    new Dictionary<string, object?>
-                    {
-                        ["requestId"] = executionEvent.RequestId,
-                        ["sessionGeneration"] = executionEvent.SessionGeneration,
-                        ["contentOmitted"] = true
-                    });
-            }
-        }
-
-        private static string FormatStructuredEditorOutput(EditorOutputRecord output)
-        {
-            if (string.IsNullOrEmpty(output.Payload))
-            {
-                return string.Empty;
-            }
-
-            return output.StreamKind is EditorOutputStreamKind.VirtualTerminal or EditorOutputStreamKind.Native
-                ? output.Payload
-                : output.Payload + Environment.NewLine;
         }
 
         private static bool ShouldSurfaceLifecycleMessageToUser(string? text)
@@ -9651,11 +9438,6 @@ namespace PS7ScriptDesk.UI.ViewModels
 
         private void OnCoordinatorExecutionEvent(EditorExecutionEvent executionEvent)
         {
-            if (executionEvent.BackendId == EditorExecutionCoordinator.StructuredBackendId)
-            {
-                OnStructuredEditorExecutionEvent(executionEvent);
-            }
-
             if (executionEvent.Kind is EditorExecutionEventKind.Accepted or
                 EditorExecutionEventKind.Started or
                 EditorExecutionEventKind.Completed or

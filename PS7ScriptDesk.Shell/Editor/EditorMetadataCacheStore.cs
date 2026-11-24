@@ -6,6 +6,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Utilities;
 
@@ -112,6 +113,7 @@ namespace PS7ScriptDesk.Shell.Editor
         private const int SnapshotFormatVersion = 1;
         private const string SnapshotFileName = "metadata-cache.bin";
         private const string ManifestFileName = "manifest.json";
+        private static readonly AsyncLocal<string?> CacheRootOverride = new();
 
         private static readonly JsonSerializerOptions ManifestSerializerOptions = new()
         {
@@ -482,11 +484,46 @@ namespace PS7ScriptDesk.Shell.Editor
             return string.Join(
                 "|",
                 NormalizeRuntimePath(runtimePath),
-                (runtimeVersion ?? string.Empty).Trim(),
+                NormalizeRuntimeVersion(runtimeVersion),
                 (powerShellEdition ?? string.Empty).Trim(),
                 (runtimeArchitecture ?? string.Empty).Trim(),
                 (runtimePsHome ?? string.Empty).Trim(),
                 $"schema:{new EditorMetadataCacheManifest().SchemaVersion}");
+        }
+
+        internal static string NormalizeRuntimeVersion(string? runtimeVersion)
+        {
+            var value = runtimeVersion?.Trim() ?? string.Empty;
+            if (value.Length == 0 || value.Any(character => !char.IsAsciiDigit(character) && character != '.'))
+            {
+                return value;
+            }
+
+            var components = value.Split('.');
+            if (components.Length is < 2 or > 4 || components.Any(component => component.Length == 0) ||
+                !Version.TryParse(value, out var parsedVersion))
+            {
+                return value;
+            }
+
+            // Keep three components as the canonical form. Existing Store builds saved
+            // 7.7.0 under that identity, while runtime discovery may report 7.7.
+            var normalized = $"{parsedVersion.Major}.{parsedVersion.Minor}.{Math.Max(0, parsedVersion.Build)}";
+            return parsedVersion.Revision > 0
+                ? $"{normalized}.{parsedVersion.Revision}"
+                : normalized;
+        }
+
+        internal static IDisposable UseCacheRootDirectoryForTesting(string cacheRootDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(cacheRootDirectory))
+            {
+                throw new ArgumentException("A cache root directory is required.", nameof(cacheRootDirectory));
+            }
+
+            var previous = CacheRootOverride.Value;
+            CacheRootOverride.Value = Path.GetFullPath(cacheRootDirectory);
+            return new CacheRootScope(previous);
         }
 
         public static IReadOnlyList<EditorMetadataCacheEntryInfo> GetCacheEntries()
@@ -762,6 +799,11 @@ namespace PS7ScriptDesk.Shell.Editor
 
         public static string GetCacheRootDirectory()
         {
+            if (!string.IsNullOrWhiteSpace(CacheRootOverride.Value))
+            {
+                return CacheRootOverride.Value!;
+            }
+
             return Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 ApplicationBranding.InternalName,
@@ -804,7 +846,7 @@ namespace PS7ScriptDesk.Shell.Editor
             }
 
             return string.Equals(NormalizeRuntimePath(manifest.RuntimePath), normalizedRuntimePath, StringComparison.OrdinalIgnoreCase) &&
-                   string.Equals((manifest.RuntimeVersion ?? string.Empty).Trim(), (runtimeVersion ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(NormalizeRuntimeVersion(manifest.RuntimeVersion), NormalizeRuntimeVersion(runtimeVersion), StringComparison.OrdinalIgnoreCase) &&
                    string.Equals((manifest.PowerShellEdition ?? string.Empty).Trim(), (powerShellEdition ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase) &&
                    string.Equals((manifest.RuntimeArchitecture ?? string.Empty).Trim(), (runtimeArchitecture ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase) &&
                    string.Equals((manifest.RuntimePsHome ?? string.Empty).Trim(), (runtimePsHome ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase);
@@ -951,6 +993,28 @@ namespace PS7ScriptDesk.Shell.Editor
             }
 
             return items;
+        }
+
+        private sealed class CacheRootScope : IDisposable
+        {
+            private readonly string? _previous;
+            private bool _disposed;
+
+            public CacheRootScope(string? previous)
+            {
+                _previous = previous;
+            }
+
+            public void Dispose()
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                CacheRootOverride.Value = _previous;
+                _disposed = true;
+            }
         }
     }
 }

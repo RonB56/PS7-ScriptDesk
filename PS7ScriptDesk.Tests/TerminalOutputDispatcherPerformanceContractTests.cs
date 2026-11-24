@@ -8,7 +8,7 @@ public sealed class TerminalOutputDispatcherPerformanceContractTests
         var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.UI", "ViewModels", "MainWindowViewModel.cs");
         var start = source.IndexOf("private void AppendExecutionOutput(ExecutionOutputRecord record)", StringComparison.Ordinal);
         Assert.True(start >= 0);
-        var end = source.IndexOf("private void OnStructuredEditorExecutionEvent", start, StringComparison.Ordinal);
+        var end = source.IndexOf("private static bool ShouldSurfaceLifecycleMessageToUser", start, StringComparison.Ordinal);
         Assert.True(end > start);
         var method = source[start..end];
 
@@ -18,16 +18,4 @@ public sealed class TerminalOutputDispatcherPerformanceContractTests
         Assert.Contains("MainWindowViewModel.AppendExecutionOutput.LifecyclePost", method, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void RendererDrainHasWorkBudgetsAndUsesExistingReschedulePath()
-    {
-        var source = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
-        Assert.Contains("MaximumTerminalOutputDrainEnvelopes = 128", source, StringComparison.Ordinal);
-        Assert.Contains("MaximumTerminalOutputDrainCharacters = 64 * 1024", source, StringComparison.Ordinal);
-        Assert.Contains("MaximumTerminalOutputDrainMilliseconds = 2", source, StringComparison.Ordinal);
-        Assert.Contains("Stopwatch.GetElapsedTime(drainStartedAt).TotalMilliseconds >= MaximumTerminalOutputDrainMilliseconds", source, StringComparison.Ordinal);
-        Assert.Contains("drainedCharacterCount >= MaximumTerminalOutputDrainCharacters", source, StringComparison.Ordinal);
-        Assert.Contains("drainedEnvelopeCount >= MaximumTerminalOutputDrainEnvelopes", source, StringComparison.Ordinal);
-        Assert.Contains("MainWindow.DispatcherBeginInvoke.Rescheduled", source, StringComparison.Ordinal);
-    }
 }

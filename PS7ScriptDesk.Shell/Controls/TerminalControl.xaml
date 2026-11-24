@@ -18,12 +18,18 @@
                 AutomationProperties.Name="Terminal unavailable">
             <StackPanel>
                 <TextBlock x:Name="FallbackMessageText"
-                           Text="The integrated terminal renderer is unavailable. Use Reset Console to retry."
+                           Text="The integrated terminal renderer is unavailable. Retry the display to restore the terminal."
                            Foreground="#cccccc"
                            FontFamily="Consolas"
                            FontSize="13"
                            TextWrapping="Wrap"
                            HorizontalAlignment="Center" />
+                <Button x:Name="RetryDisplayButton"
+                        Content="Retry Display"
+                        Click="RetryDisplayButton_Click"
+                        HorizontalAlignment="Center"
+                        Margin="0,12,0,0"
+                        AutomationProperties.Name="Retry terminal display" />
                 <TextBlock x:Name="FallbackDetailsText"
                            Text="Install it from: https://developer.microsoft.com/en-us/microsoft-edge/webview2/"
                            Foreground="#4ec9b0"

@@ -29,7 +29,7 @@ public sealed class TerminalAtRootCauseContractTests
         var lifecycleOutput = ExtractSection(
             source,
             "private void AppendExecutionOutput(ExecutionOutputRecord record)",
-            "private void OnStructuredEditorExecutionEvent(");
+            "private static bool ShouldSurfaceLifecycleMessageToUser(");
         Assert.Contains("_clearTerminalSink", lifecycleOutput, StringComparison.Ordinal);
         Assert.Contains("TerminalDisplayText = string.Empty", lifecycleOutput, StringComparison.Ordinal);
     }

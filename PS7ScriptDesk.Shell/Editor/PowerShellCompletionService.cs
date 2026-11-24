@@ -1042,7 +1042,10 @@ namespace PS7ScriptDesk.Shell.Editor
                 return false;
             }
 
-            if (!string.Equals(manifest.RuntimeVersion?.Trim(), runtimeInfo.VersionText?.Trim(), StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(
+                    EditorMetadataCacheStore.NormalizeRuntimeVersion(manifest.RuntimeVersion),
+                    EditorMetadataCacheStore.NormalizeRuntimeVersion(runtimeInfo.VersionText),
+                    StringComparison.OrdinalIgnoreCase))
             {
                 decisionReason = $"The PowerShell runtime version changed from '{manifest.RuntimeVersion}' to '{runtimeInfo.VersionText}'.";
                 return false;

@@ -4,6 +4,22 @@ namespace PS7ScriptDesk.Tests;
 
 public sealed class TerminalArchitecturePolicyTests
 {
+    [Fact]
+    public void BoundedPsesIngressIsTheUnconditionalProductionPresentationRoute()
+    {
+        var shellSource = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+
+        Assert.DoesNotContain("PS7SD_LEGACY_CONPTY_ROLLBACK", shellSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("PS7SD_BOUNDED_CONPTY_UAT", shellSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("ConnectedTerminalOutputOwner", shellSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("OnRawTerminalOutputReceived", shellSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("TerminalOutputPublished", shellSource, StringComparison.Ordinal);
+        Assert.Contains("EnableBoundedPsesTerminalIngress();", shellSource, StringComparison.Ordinal);
+        Assert.Contains("awaitableSource.VisibleOutputPublishingAsync += OnBoundedPsesTerminalOutputAsync;", shellSource, StringComparison.Ordinal);
+        Assert.Contains("TerminalConsole.WriteRawAwaitableAsync(sessionGeneration, text)", shellSource, StringComparison.Ordinal);
+        Assert.Contains("_terminalOutputObservationHub.Publish", shellSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("_boundedPsesTerminalIngressEnabled", shellSource, StringComparison.Ordinal);
+    }
     [Theory]
     [InlineData(true, true, TerminalCtrlCDisposition.CopySelection)]
     [InlineData(true, false, TerminalCtrlCDisposition.CopySelection)]
@@ -74,12 +90,12 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.DoesNotContain("SetDebuggerOutputSink", viewModelSource, StringComparison.Ordinal);
         Assert.Contains("SetTerminalSessionControls", shellSource, StringComparison.Ordinal);
         Assert.Contains("private MainWindowViewModel? ViewModel => Volatile.Read(ref _viewModel)", shellSource, StringComparison.Ordinal);
-        Assert.Contains("ViewModel.SubscribeRawOutput(OnRawTerminalOutputReceived)", shellSource, StringComparison.Ordinal);
-        Assert.Contains("viewModel.PublishInteractiveTerminalOutput(generation, rawOutput)", shellSource, StringComparison.Ordinal);
-        Assert.Contains("TerminalOutputPublished += EnqueueTerminalOutputForRenderer", shellSource, StringComparison.Ordinal);
-        Assert.Contains("DrainTerminalOutputForRenderer", shellSource, StringComparison.Ordinal);
-        Assert.Contains("TerminalConsole.WriteRaw(envelope.InteractiveTerminalSessionGeneration, envelope.Payload)", shellSource, StringComparison.Ordinal);
-        Assert.Contains("TerminalConsole.WriteStructuredOutput(envelope.RendererGeneration, envelope.Payload)", shellSource, StringComparison.Ordinal);
+
+
+
+
+
+
         Assert.DoesNotContain("raw => Dispatcher.BeginInvoke(() => TerminalConsole.WriteRaw(raw))", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("TerminalConsole.WriteDebuggerOutput", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("WriteDebuggerOutput", terminalControlSource, StringComparison.Ordinal);

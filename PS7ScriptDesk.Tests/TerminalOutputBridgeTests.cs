@@ -52,6 +52,130 @@ public sealed class TerminalOutputBridgeTests
     }
 
     [Fact]
+    public async Task FlowController_AwaitsCapacityAndKeepsSubsequentOutputOrdered()
+    {
+        var controller = new TerminalOutputFlowController(
+            maximumPendingCharacters: 4,
+            maximumBatchCharacters: 4);
+        controller.ActivateGeneration(8);
+        controller.Enqueue(8, "AA");
+        Assert.True(controller.SetRendererReady());
+        var first = Assert.IsType<TerminalOutputBatch>(controller.TryBeginDelivery());
+        controller.Enqueue(8, "B");
+
+        var capacityWait = controller.WaitForCapacityAsync(8, 2);
+        Assert.False(capacityWait.IsCompleted);
+        Assert.True(controller.Acknowledge(8, first.Sequence));
+        Assert.True(await capacityWait);
+
+        controller.Enqueue(8, "CC");
+        var second = Assert.IsType<TerminalOutputBatch>(controller.TryBeginDelivery());
+        Assert.Equal("BCC", second.Data);
+    }
+
+    [Fact]
+    public async Task FlowController_GenerationInvalidationReleasesCapacityWaiterAsStale()
+    {
+        var controller = new TerminalOutputFlowController(
+            maximumPendingCharacters: 4,
+            maximumBatchCharacters: 4);
+        controller.ActivateGeneration(12);
+        controller.Enqueue(12, "full");
+
+        var capacityWait = controller.WaitForCapacityAsync(12, 1);
+        Assert.False(capacityWait.IsCompleted);
+
+        controller.InvalidateGeneration(12);
+
+        Assert.False(await capacityWait);
+        Assert.False(await controller.WaitForCapacityAsync(12, 1));
+    }
+
+    [Fact]
+    public async Task FlowController_CancelsCapacityWaitWithoutChangingQueuedOutput()
+    {
+        var controller = new TerminalOutputFlowController(
+            maximumPendingCharacters: 4,
+            maximumBatchCharacters: 4);
+        controller.ActivateGeneration(13);
+        controller.Enqueue(13, "full");
+        using var cancellation = new CancellationTokenSource();
+
+        var capacityWait = controller.WaitForCapacityAsync(13, 1, cancellation.Token);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await capacityWait);
+        Assert.True(controller.HasOutstandingOutput);
+    }
+
+    [Fact]
+    public async Task FlowController_RestorationReconcilesInFlightCapacityAndReplaysHistoryOnceInOrder()
+    {
+        var controller = new TerminalOutputFlowController(
+            maximumPendingCharacters: 16,
+            maximumBatchCharacters: 8);
+        controller.ActivateGeneration(21);
+        controller.Enqueue(21, "abcdefgh");
+        controller.Enqueue(21, "ijkl");
+        Assert.True(controller.SetRendererReady());
+        var retiredBatch = Assert.IsType<TerminalOutputBatch>(controller.TryBeginDelivery());
+        Assert.Equal("abcdefgh", retiredBatch.Data);
+        Assert.Equal(12, controller.PendingCharacters);
+
+        var waiter = controller.WaitForCapacityAsync(21, 5);
+        Assert.False(waiter.IsCompleted);
+
+        controller.RestoreRenderer();
+        Assert.Equal(0, controller.PendingCharacters);
+        Assert.False(controller.Acknowledge(21, retiredBatch.Sequence));
+
+        controller.Enqueue(21, "abcdefghijkl"); // Replacement replays persistent session history once.
+        Assert.Equal(12, controller.PendingCharacters);
+        Assert.True(controller.SetRendererReady());
+        var replayedBatch = Assert.IsType<TerminalOutputBatch>(controller.TryBeginDelivery());
+        Assert.Equal("abcdefgh", replayedBatch.Data);
+        Assert.True(controller.Acknowledge(21, replayedBatch.Sequence));
+        Assert.True(await waiter);
+        Assert.Equal(4, controller.PendingCharacters);
+
+        var finalBatch = Assert.IsType<TerminalOutputBatch>(controller.TryBeginDelivery());
+        Assert.Equal("ijkl", finalBatch.Data);
+        Assert.False(controller.Acknowledge(21, finalBatch.Sequence)); // No subsequent flush was scheduled.
+        Assert.Equal(0, controller.PendingCharacters);
+        Assert.Null(controller.TryBeginDelivery());
+    }
+
+    [Fact]
+    public void FlowController_MissingAcknowledgmentHasBoundedRetirementThreshold()
+    {
+        Assert.False(TerminalOutputFlowController.HasAcknowledgmentTimedOut(TimeSpan.FromSeconds(4.999)));
+        Assert.True(TerminalOutputFlowController.HasAcknowledgmentTimedOut(TimeSpan.FromSeconds(5)));
+        Assert.True(TerminalOutputFlowController.HasAcknowledgmentTimedOut(TimeSpan.FromSeconds(6)));
+    }
+
+    [Fact]
+    public async Task FlowController_MissingAcknowledgmentRetirementResolvesBlockedWaiter()
+    {
+        var controller = new TerminalOutputFlowController(
+            maximumPendingCharacters: 4,
+            maximumBatchCharacters: 4);
+        controller.ActivateGeneration(22);
+        controller.Enqueue(22, "full");
+        Assert.True(controller.SetRendererReady());
+        Assert.NotNull(controller.TryBeginDelivery());
+        var waiter = controller.WaitForCapacityAsync(22, 1);
+        Assert.False(waiter.IsCompleted);
+
+        Assert.True(TerminalOutputFlowController.HasAcknowledgmentTimedOut(TimeSpan.FromSeconds(5)));
+        var retirement = controller.MarkRendererUnavailable();
+
+        Assert.Equal(4, retirement.DiscardedCharacters);
+        Assert.False(await waiter);
+        Assert.False(controller.HasInFlightBatch);
+        Assert.Equal(0, controller.PendingCharacters);
+    }
+
+    [Fact]
     public void FlowController_RepeatedGenerationActivationDoesNotDiscardBufferedStartupOutput()
     {
         var controller = new TerminalOutputFlowController(

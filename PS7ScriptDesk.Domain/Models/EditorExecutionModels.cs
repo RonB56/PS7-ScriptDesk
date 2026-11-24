@@ -245,4 +245,11 @@ public sealed record TerminalOutputEnvelope(
     DateTimeOffset Timestamp)
 {
     public bool IsEditorOutput => Source == TerminalOutputSource.StructuredEditor;
+    public long UiQueuedAtTimestampTicks { get; set; }
+
+    /// <summary>
+    /// Monotonic timestamp assigned when this renderer-visible frame receives its
+    /// global output sequence, after the authoritative PSES filters have run.
+    /// </summary>
+    public long AcceptedAtTimestampTicks { get; init; }
 }

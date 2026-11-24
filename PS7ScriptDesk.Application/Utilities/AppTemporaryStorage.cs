@@ -89,21 +89,36 @@ namespace PS7ScriptDesk.Application.Utilities
 
         private static bool TryValidateManagedRootDirectory(string candidateRoot, out string normalizedRoot, out string failureReason)
         {
+            return TryValidateManagedRootDirectory(
+                candidateRoot,
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                AppContext.BaseDirectory,
+                Environment.CurrentDirectory,
+                out normalizedRoot,
+                out failureReason);
+        }
+
+        internal static bool TryValidateManagedRootDirectory(
+            string candidateRoot,
+            string localAppData,
+            string runtimeBaseDirectory,
+            string currentDirectory,
+            out string normalizedRoot,
+            out string failureReason)
+        {
             normalizedRoot = string.Empty;
             failureReason = string.Empty;
 
-            if (string.IsNullOrWhiteSpace(candidateRoot))
+            if (string.IsNullOrWhiteSpace(candidateRoot) || string.IsNullOrWhiteSpace(localAppData))
             {
                 failureReason = "The managed temp root path was empty.";
                 return false;
             }
 
-            string localAppData;
             string managedTempBase;
 
             try
             {
-                localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                 managedTempBase = Path.GetFullPath(Path.Combine(localAppData, ApplicationFolderName, TempFolderName));
                 normalizedRoot = Path.GetFullPath(candidateRoot);
             }
@@ -121,14 +136,14 @@ namespace PS7ScriptDesk.Application.Utilities
                 return false;
             }
 
-            if (OverlapsRuntimeLocation(normalizedRoot))
+            if (OverlapsRuntimeLocation(normalizedRoot, runtimeBaseDirectory))
             {
                 failureReason = $"The managed temp root '{normalizedRoot}' overlaps the application runtime directory.";
                 normalizedRoot = string.Empty;
                 return false;
             }
 
-            if (OverlapsCurrentDirectory(normalizedRoot))
+            if (OverlapsCurrentDirectory(normalizedRoot, currentDirectory))
             {
                 failureReason = $"The managed temp root '{normalizedRoot}' overlaps the current working directory.";
                 normalizedRoot = string.Empty;
@@ -138,9 +153,8 @@ namespace PS7ScriptDesk.Application.Utilities
             return true;
         }
 
-        private static bool OverlapsRuntimeLocation(string candidateRoot)
+        private static bool OverlapsRuntimeLocation(string candidateRoot, string runtimeBaseDirectory)
         {
-            var runtimeBaseDirectory = AppContext.BaseDirectory;
             if (string.IsNullOrWhiteSpace(runtimeBaseDirectory))
             {
                 return false;
@@ -157,9 +171,8 @@ namespace PS7ScriptDesk.Application.Utilities
             }
         }
 
-        private static bool OverlapsCurrentDirectory(string candidateRoot)
+        private static bool OverlapsCurrentDirectory(string candidateRoot, string currentDirectory)
         {
-            var currentDirectory = Environment.CurrentDirectory;
             if (string.IsNullOrWhiteSpace(currentDirectory))
             {
                 return false;
@@ -168,7 +181,7 @@ namespace PS7ScriptDesk.Application.Utilities
             try
             {
                 var normalizedCurrentDirectory = Path.GetFullPath(currentDirectory);
-                return IsSameOrChildPath(candidateRoot, normalizedCurrentDirectory) || IsSameOrChildPath(normalizedCurrentDirectory, candidateRoot);
+                return IsSameOrChildPath(normalizedCurrentDirectory, candidateRoot);
             }
             catch
             {

@@ -115,7 +115,7 @@ public sealed class TerminalResizePolicyTests
         var beginStart = source.IndexOf("public void BeginTerminalOutputGeneration", StringComparison.Ordinal);
         var beginEnd = source.IndexOf("public void InvalidateTerminalOutputGeneration", beginStart, StringComparison.Ordinal);
         var syncStart = source.IndexOf("private void QueueTerminalGeometryResynchronization", StringComparison.Ordinal);
-        var syncEnd = source.IndexOf("private void InvalidateTerminalOutputGeneration", syncStart, StringComparison.Ordinal);
+        var syncEnd = source.IndexOf("public void InvalidateTerminalOutputGeneration", syncStart, StringComparison.Ordinal);
 
         Assert.True(beginStart >= 0);
         Assert.True(beginEnd > beginStart);
