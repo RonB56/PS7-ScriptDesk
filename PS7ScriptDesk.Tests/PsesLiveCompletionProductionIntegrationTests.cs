@@ -2,14 +2,61 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using ICSharpCode.AvalonEdit;
 using PS7ScriptDesk.Domain.Models;
+using PS7ScriptDesk.Shell;
 using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.PowerShell.Services;
+using Xunit.Abstractions;
 
 namespace PS7ScriptDesk.Tests;
 
 [Collection(PsesOwnedSessionEnvironmentCollection.Name)]
 public sealed class PsesLiveCompletionProductionIntegrationTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public PsesLiveCompletionProductionIntegrationTests(ITestOutputHelper output) => _output = output;
+
+    [Fact(Timeout = 90_000)]
+    public async Task QualifiedTypeCompletionCapturesActualPsesItemsAndReplacementContract()
+    {
+        var runtime = FindRuntime();
+        var psesRoot = Environment.GetEnvironmentVariable("PS7SCRIPTDESK_PSES_ROOT");
+        if (runtime is null || string.IsNullOrWhiteSpace(psesRoot) ||
+            !File.Exists(Path.Combine(psesRoot, "PowerShellEditorServices", "Start-EditorServices.ps1")))
+        {
+            throw Xunit.Sdk.SkipException.ForSkip("Qualified type probe requires PowerShell 7 and the maintained PSES runtime root.");
+        }
+
+        using var service = new PsesOwnedInteractiveSessionService();
+        await service.StartSessionAsync(runtime, _ => { }, Environment.CurrentDirectory).WaitAsync(TimeSpan.FromSeconds(45));
+        try
+        {
+            const string script = "[System.IO.fi]";
+            var caretOffset = script.Length - 1;
+            var result = await service.GetLiveCompletionsAsync(
+                "untitled:ps7scriptdesk/qualified-type-probe.ps1",
+                script,
+                caretOffset).WaitAsync(TimeSpan.FromSeconds(20));
+
+            Assert.NotNull(result);
+            var fileInfo = Assert.Single(result!.Items, item =>
+                item.CompletionText.Equals("System.IO.FileInfo", StringComparison.OrdinalIgnoreCase));
+            _output.WriteLine($"Provider=PsesOwnedInteractiveSessionService -> PsesLanguageServiceClient; RequestContext=qualified-type; Document={script}; CaretOffset={caretOffset}; ReplacementIndex={result.ReplacementIndex}; ReplacementLength={result.ReplacementLength}");
+            foreach (var item in result.Items)
+            {
+                _output.WriteLine($"Kind={item.Kind}; Label={item.ListItemText}; InsertionText={item.CompletionText}; Tooltip={item.Tooltip}");
+            }
+
+            Assert.Equal(CompletionItemKind.Type, PowerShellIntelliSenseService.MapCompletionKindForTesting(fileInfo.Kind));
+            Assert.True(result.ReplacementIndex >= 1);
+            Assert.True(result.ReplacementIndex + result.ReplacementLength <= caretOffset);
+        }
+        finally
+        {
+            await service.ShutdownAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        }
+    }
+
     [Fact(Timeout = 90_000)]
     public async Task StructuredTerminatingError_IsReportedFailedAndSessionRecovers()
     {

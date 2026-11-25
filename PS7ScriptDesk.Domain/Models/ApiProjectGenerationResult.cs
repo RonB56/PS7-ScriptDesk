@@ -9,7 +9,10 @@ public sealed class ApiProjectGenerationResult
         string summaryMessage,
         IReadOnlyList<string> generatedFiles,
         IReadOnlyList<ApiPublishValidationDiagnostic> validationErrors,
-        string detailedLog)
+        string detailedLog,
+        bool recoveryRequired,
+        string recoveryBackupPath,
+        bool wasCancelled)
     {
         Succeeded = succeeded;
         DestinationDirectory = destinationDirectory;
@@ -18,6 +21,9 @@ public sealed class ApiProjectGenerationResult
         GeneratedFiles = generatedFiles;
         ValidationErrors = validationErrors;
         DetailedLog = detailedLog;
+        RecoveryRequired = recoveryRequired;
+        RecoveryBackupPath = recoveryBackupPath;
+        WasCancelled = wasCancelled;
     }
 
     public bool Succeeded { get; }
@@ -34,6 +40,12 @@ public sealed class ApiProjectGenerationResult
 
     public string DetailedLog { get; }
 
+    public bool RecoveryRequired { get; }
+
+    public string RecoveryBackupPath { get; }
+
+    public bool WasCancelled { get; }
+
     public static ApiProjectGenerationResult Success(
         string destinationDirectory,
         string projectFilePath,
@@ -46,13 +58,19 @@ public sealed class ApiProjectGenerationResult
             "API project generated successfully.",
             generatedFiles,
             Array.Empty<ApiPublishValidationDiagnostic>(),
-            detailedLog);
+            detailedLog,
+            recoveryRequired: false,
+            recoveryBackupPath: string.Empty,
+            wasCancelled: false);
 
     public static ApiProjectGenerationResult Failure(
         string summaryMessage,
         string detailedLog,
         string? destinationDirectory = null,
-        IReadOnlyList<ApiPublishValidationDiagnostic>? validationErrors = null)
+        IReadOnlyList<ApiPublishValidationDiagnostic>? validationErrors = null,
+        bool recoveryRequired = false,
+        string? recoveryBackupPath = null,
+        bool wasCancelled = false)
         => new(
             false,
             destinationDirectory ?? string.Empty,
@@ -60,5 +78,8 @@ public sealed class ApiProjectGenerationResult
             string.IsNullOrWhiteSpace(summaryMessage) ? "API project generation failed." : summaryMessage,
             Array.Empty<string>(),
             validationErrors ?? Array.Empty<ApiPublishValidationDiagnostic>(),
-            detailedLog);
+            detailedLog,
+            recoveryRequired,
+            recoveryBackupPath ?? string.Empty,
+            wasCancelled);
 }

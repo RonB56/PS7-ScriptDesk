@@ -152,7 +152,7 @@ public sealed class ExeExportConfiguration
         ["Platform"] = Architecture == ExeTargetArchitecture.Arm64 ? "Windows ARM64" : "Windows x64",
         [".NET"] = DotNetTarget,
         ["Deployment"] = DeploymentModel == ExeDeploymentModel.SelfContained ? "Self-contained" : "Framework-dependent (.NET runtime required)",
-        ["PowerShell"] = PowerShellRuntimeModel == ExePowerShellRuntimeModel.Embedded ? "Embedded PowerShell runtime" : "Installed PowerShell required",
+        ["PowerShell"] = PowerShellRuntimeModel == ExePowerShellRuntimeModel.Embedded ? "Bundled PowerShell 7 runtime" : "Installed PowerShell 7 required",
         ["Package"] = PackageFormat == ExePackageFormat.SingleFile ? "Single EXE" : "Application folder",
         ["Optimization"] = OptimizationProfile.ToString(),
         ["Administrator"] = AdministratorMode.ToString(),

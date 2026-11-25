@@ -72,6 +72,66 @@ public sealed class IntelliSenseParameterProjectionTests
     }
 
     [Fact]
+    public void QualifiedTypePopupProjectsOnlyMatchingTypesAndNamespacesFromMixedProviderResponse()
+    {
+        WpfTestDispatcher.Run(() =>
+        {
+            const string script = "function Find-LocalFixture {}\n$ConfirmPreference = 'High'\n[System.IO.fi]";
+            var caretOffset = script.Length - 1;
+            var typeStart = script.LastIndexOf('[');
+            var provider = new FixedCompletionProvider(new AuthoritativeCompletionResult(typeStart + 1, 12, new[]
+            {
+                new AuthoritativeCompletionItem("System.IO.FileInfo", "FileInfo", 7, "System.IO file information type."),
+                new AuthoritativeCompletionItem("System.IO.FileSystem", "FileSystem", 9, "System.IO namespace."),
+                new AuthoritativeCompletionItem("Add-TrustedProvisioningCertificate", "Add-TrustedProvisioningCertificate", 3, "Unrelated command."),
+                new AuthoritativeCompletionItem("$PROFILE", "$PROFILE", 6, "Unrelated variable."),
+                new AuthoritativeCompletionItem("Find-LocalFixture", "Find-LocalFixture", 3, "Document function.")
+            }));
+            using var service = new PowerShellIntelliSenseService(provider);
+            var editor = new TextEditor { Document = new ICSharpCode.AvalonEdit.Document.TextDocument(script) };
+            editor.CaretOffset = caretOffset;
+
+            var window = service.ShowCompletionAsync(editor, pwshExecutablePath: null, includeEngine: false, engineWaitMilliseconds: 0)
+                .GetAwaiter().GetResult();
+
+            Assert.NotNull(window);
+            Assert.Equal(new[] { "FileInfo", "FileSystem" }, window!.CompletionList.CompletionData
+                .Cast<PowerShellCompletionData>()
+                .Select(item => item.Content.ToString())
+                .Order(StringComparer.OrdinalIgnoreCase));
+            Assert.Equal(1, provider.RequestCount);
+            var fileInfo = Assert.Single(window.CompletionList.CompletionData.Cast<PowerShellCompletionData>(), item => item.Text == "System.IO.FileInfo");
+            Assert.Equal(typeStart + 1, fileInfo.ReplacementOffset);
+            Assert.Equal(12, fileInfo.ReplacementLength);
+
+            var popupSegment = new ICSharpCode.AvalonEdit.Document.TextSegment { StartOffset = typeStart + 11, Length = 2 };
+            fileInfo.Complete(editor.TextArea, popupSegment, EventArgs.Empty);
+            Assert.Equal("function Find-LocalFixture {}\n$ConfirmPreference = 'High'\n[System.IO.FileInfo]", editor.Text);
+            Assert.Equal(editor.Text.Length - 1, editor.CaretOffset);
+            window.Close();
+        });
+    }
+
+    [Fact]
+    public void QualifiedTypeRequestWithNoProviderItemsDoesNotShowCommandOrVariableFallbacks()
+    {
+        WpfTestDispatcher.Run(() =>
+        {
+            const string script = "function Find-LocalFixture {}\n$ConfirmPreference = 'High'\n[System.IO.fi]";
+            var provider = new FixedCompletionProvider(new AuthoritativeCompletionResult(0, 0, Array.Empty<AuthoritativeCompletionItem>()));
+            using var service = new PowerShellIntelliSenseService(provider);
+            var editor = new TextEditor { Document = new ICSharpCode.AvalonEdit.Document.TextDocument(script) };
+            editor.CaretOffset = script.Length - 1;
+
+            var window = service.ShowCompletionAsync(editor, pwshExecutablePath: null, includeEngine: false, engineWaitMilliseconds: 0)
+                .GetAwaiter().GetResult();
+
+            Assert.Null(window);
+            Assert.Equal(1, provider.RequestCount);
+        });
+    }
+
+    [Fact]
     public void InitialPopupAndTabProviderExposeTheSameValidParameterCandidates()
     {
         WpfTestDispatcher.Run(() =>

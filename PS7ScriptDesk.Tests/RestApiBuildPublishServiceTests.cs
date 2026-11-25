@@ -63,6 +63,28 @@ public sealed class RestApiBuildPublishServiceTests
     }
 
     [Fact]
+    public async Task BuildAsync_RefusesModifiedExistingArtifactAndPreservesUserFile()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var current = CurrentTargetArchitecture();
+        var runtimeRoot = workspace.CreateRuntimeLayout(ToRuntimeIdentifier(current), current);
+        var service = workspace.CreateService(new Dictionary<string, string> { [ToRuntimeIdentifier(current)] = runtimeRoot });
+        var first = await service.BuildAsync(workspace.CreateRequest(targetArchitecture: current));
+        Assert.True(first.Succeeded, first.DetailedLog);
+        var artifact = Assert.Single(first.Artifacts);
+        var originalExecutable = await File.ReadAllBytesAsync(artifact.ExecutablePath);
+        var userFile = Path.Combine(artifact.OutputDirectory, "owner-notes.txt");
+        await File.WriteAllTextAsync(userFile, "keep me");
+
+        var second = await service.BuildAsync(workspace.CreateRequest(targetArchitecture: current));
+
+        Assert.False(second.Succeeded);
+        Assert.Contains("modified", second.DetailedLog, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("keep me", await File.ReadAllTextAsync(userFile));
+        Assert.Equal(originalExecutable, await File.ReadAllBytesAsync(artifact.ExecutablePath));
+    }
+
+    [Fact]
     public async Task PublishAsync_WinX64_CreatesValidatedSelfContainedArtifact()
     {
         using var workspace = new TemporaryWorkspace();
@@ -131,6 +153,129 @@ public sealed class RestApiBuildPublishServiceTests
         Assert.False(File.Exists(Path.Combine(artifact.OutputDirectory, "MainWindow.xaml")));
     }
 
+    [Fact]
+    public async Task R4_T01_ProductionGeneratorBuildsTwiceAndMaintainsOutputOwnership()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var current = CurrentTargetArchitecture();
+        var runtime = workspace.CreateRuntimeLayout(ToRuntimeIdentifier(current), current);
+        var service = workspace.CreateService(new Dictionary<string, string> { [ToRuntimeIdentifier(current)] = runtime }, useProductionGenerator: true);
+
+        var first = await service.BuildAsync(workspace.CreateRequest(current));
+        var second = await service.BuildAsync(workspace.CreateRequest(current));
+
+        Assert.True(first.Succeeded, first.DetailedLog);
+        Assert.True(second.Succeeded, second.DetailedLog);
+        Assert.True(File.Exists(Path.Combine(workspace.GeneratedProjectDirectory, "WidgetApi.csproj")));
+        Assert.True(RecoverableArtifactTransaction.IsOwnedDirectoryUnmodified(
+            Assert.Single(second.Artifacts).OutputDirectory, ".ps7scriptdesk-api-artifact.json"));
+    }
+
+    [Fact]
+    public async Task R4_T02_ProductionGeneratorPreservesBuildAndPublishInEitherOrder()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var current = CurrentTargetArchitecture();
+        var runtime = workspace.CreateRuntimeLayout(ToRuntimeIdentifier(current), current);
+        var service = workspace.CreateService(new Dictionary<string, string> { [ToRuntimeIdentifier(current)] = runtime }, useProductionGenerator: true);
+
+        var build = await service.BuildAsync(workspace.CreateRequest(current));
+        var publish = await service.PublishAsync(workspace.CreateRequest(current));
+        var buildAfterPublish = await service.BuildAsync(workspace.CreateRequest(current));
+
+        Assert.True(build.Succeeded, build.DetailedLog);
+        Assert.True(publish.Succeeded, publish.DetailedLog);
+        Assert.True(buildAfterPublish.Succeeded, buildAfterPublish.DetailedLog);
+        Assert.True(Directory.Exists(Path.Combine(workspace.GeneratedProjectDirectory, "publish", ToRuntimeIdentifier(current))));
+        Assert.True(Directory.Exists(Path.Combine(workspace.GeneratedProjectDirectory, "bin", "ScriptDeskBuild", ToRuntimeIdentifier(current))));
+    }
+
+    [Fact]
+    public async Task R4_T03_ProductionGeneratorPreservesArtifactsAndRefusesModifiedSourceOrUnownedOutput()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var current = CurrentTargetArchitecture();
+        var runtime = workspace.CreateRuntimeLayout(ToRuntimeIdentifier(current), current);
+        var service = workspace.CreateService(new Dictionary<string, string> { [ToRuntimeIdentifier(current)] = runtime }, useProductionGenerator: true);
+        var initial = await service.BuildAsync(workspace.CreateRequest(current));
+        Assert.True(initial.Succeeded, initial.DetailedLog);
+        var output = Assert.Single(initial.Artifacts).OutputDirectory;
+        var unowned = Path.Combine(output, "owner-notes.txt");
+        await File.WriteAllTextAsync(unowned, "preserve");
+        var refusedOutput = await new ApiProjectGenerator().GenerateAsync(new ApiProjectGenerationRequest(
+            workspace.SourceScriptPath, workspace.CreateConfiguration(), workspace.GeneratedProjectDirectory, "WidgetApi", true));
+        Assert.False(refusedOutput.Succeeded);
+        Assert.Equal("preserve", await File.ReadAllTextAsync(unowned));
+        File.Delete(unowned);
+        var regeneration = await new ApiProjectGenerator().GenerateAsync(new ApiProjectGenerationRequest(
+            workspace.SourceScriptPath, workspace.CreateConfiguration(), workspace.GeneratedProjectDirectory, "WidgetApi", true));
+        Assert.True(regeneration.Succeeded, regeneration.DetailedLog);
+        // The owned build artifact was preserved by regeneration.
+        Assert.True(Directory.Exists(output));
+        var modifiedSource = Path.Combine(workspace.GeneratedProjectDirectory, "Program.cs");
+        await File.AppendAllTextAsync(modifiedSource, "// owner change");
+        var modifiedProject = await new ApiProjectGenerator().GenerateAsync(new ApiProjectGenerationRequest(
+            workspace.SourceScriptPath, workspace.CreateConfiguration(), workspace.GeneratedProjectDirectory, "WidgetApi", true));
+        Assert.False(modifiedProject.Succeeded);
+        Assert.Contains("owner change", await File.ReadAllTextAsync(modifiedSource), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task R4R1_T01_ProductionGeneratorRefusesUnverifiedEmptyBinAndPreservesIt()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var generator = new ApiProjectGenerator();
+        var request = new ApiProjectGenerationRequest(
+            workspace.SourceScriptPath, workspace.CreateConfiguration(), workspace.GeneratedProjectDirectory, "WidgetApi", true);
+        var initial = await generator.GenerateAsync(request);
+        Assert.True(initial.Succeeded, initial.DetailedLog);
+        var marker = Path.Combine(workspace.GeneratedProjectDirectory, ".ps7scriptdesk-generated-api");
+        var originalMarker = await File.ReadAllTextAsync(marker);
+        var binDirectory = Path.Combine(workspace.GeneratedProjectDirectory, "bin");
+        Directory.CreateDirectory(binDirectory);
+
+        var regeneration = await generator.GenerateAsync(request);
+
+        Assert.False(regeneration.Succeeded);
+        Assert.True(Directory.Exists(binDirectory));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(binDirectory));
+        Assert.Equal(originalMarker, await File.ReadAllTextAsync(marker));
+    }
+
+    [Fact]
+    public async Task R4_T04_BuildResultPropagatesGenerationRecoveryInformation()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var generation = ApiProjectGenerationResult.Failure("Generation recovery required.", "Rollback failed; inspect backup.", workspace.GeneratedProjectDirectory,
+            recoveryRequired: true, recoveryBackupPath: Path.Combine(workspace.Root, "recovery-backup"));
+        var service = workspace.CreateService(new Dictionary<string, string>(), generationFailure: generation);
+
+        var result = await service.BuildAsync(workspace.CreateRequest());
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.RecoveryRequired);
+        Assert.Equal(generation.RecoveryBackupPath, result.RecoveryBackupPath);
+        Assert.Contains("Rollback failed", result.DetailedLog, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task R4_T05_LaterArchitectureFailureReportsPreviouslyCommittedArtifact()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var x64 = workspace.CreateRuntimeLayout("win-x64", ApiPublishTargetArchitecture.WinX64);
+        var service = workspace.CreateService(new Dictionary<string, string> { ["win-x64"] = x64 });
+
+        var result = await service.PublishAsync(workspace.CreateRequest(ApiPublishTargetArchitecture.Both));
+
+        Assert.False(result.Succeeded);
+        var completed = Assert.Single(result.CompletedArtifacts);
+        Assert.Equal(ApiPublishTargetArchitecture.WinX64, completed.Architecture);
+        Assert.Collection(result.ArtifactOutcomes,
+            item => Assert.Equal(ApiArtifactOutcomeStatus.Committed, item.Status),
+            item => Assert.Equal(ApiArtifactOutcomeStatus.Failed, item.Status));
+        Assert.True(File.Exists(completed.ExecutablePath));
+    }
+
     private static void AssertArtifactIsValid(ApiBuildPublishArtifact artifact, ApiPublishTargetArchitecture architecture)
     {
         Assert.True(File.Exists(artifact.ExecutablePath));
@@ -156,7 +301,7 @@ public sealed class RestApiBuildPublishServiceTests
 
     private sealed class TemporaryWorkspace : IDisposable
     {
-        private readonly string _root = Path.Combine(Path.GetTempPath(), "PS7ScriptDesk-RestBuildPublishTests", Guid.NewGuid().ToString("N"));
+        private readonly string _root = Path.Combine(Environment.GetEnvironmentVariable("PS7SCRIPTDESK_EXPORT_R4_EVIDENCE") ?? Path.GetTempPath(), "TestSessions", "ApiBuildPublish", Guid.NewGuid().ToString("N"));
 
         public TemporaryWorkspace()
         {
@@ -167,6 +312,7 @@ public sealed class RestApiBuildPublishServiceTests
         }
 
         public string SourceScriptPath { get; }
+        public string Root => _root;
 
         public string GeneratedProjectDirectory { get; }
 
@@ -175,11 +321,15 @@ public sealed class RestApiBuildPublishServiceTests
         public ApiBuildPublishService CreateService(
             IReadOnlyDictionary<string, string> runtimeRoots,
             ApiProjectGenerationResult? generationFailure = null,
-            RestApiHostSmokeTestResult? smokeResult = null)
+            RestApiHostSmokeTestResult? smokeResult = null,
+            bool useProductionGenerator = false)
         {
             SmokeTester = new FakeRestApiHostSmokeTester(smokeResult ?? RestApiHostSmokeTestResult.Success("ready"));
+            IApiProjectGenerator generator = useProductionGenerator && generationFailure is null
+                ? new ApiProjectGenerator()
+                : new FakeApiProjectGenerator(generationFailure);
             return new ApiBuildPublishService(
-                new FakeApiProjectGenerator(generationFailure),
+                generator,
                 new FakeRestApiHostRuntimeLocator(runtimeRoots),
                 SmokeTester);
         }
@@ -228,7 +378,7 @@ public sealed class RestApiBuildPublishServiceTests
             }
         }
 
-        private ApiPublishConfiguration CreateConfiguration()
+        public ApiPublishConfiguration CreateConfiguration()
         {
             var configuration = ApiPublishConfiguration.CreateDefaultForScriptPath(SourceScriptPath);
             configuration.SourceScript = "Widget.ps1";

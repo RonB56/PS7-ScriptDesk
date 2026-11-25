@@ -1,9 +1,55 @@
 using PS7ScriptDesk.Shell;
+using PS7ScriptDesk.Shell.Editor;
 
 namespace PS7ScriptDesk.Tests;
 
 public sealed class IntelliSenseCompletionContractTests
 {
+    [Theory]
+    [InlineData("[System.IO.fi]", 13, true)]
+    [InlineData("[System.IO.fi", 13, true)]
+    [InlineData("[System.IO.", 11, true)]
+    [InlineData("$Customer.Na", 12, false)]
+    [InlineData("[System.IO.File]::Ex", 19, false)]
+    [InlineData("$items[0].Na", 12, false)]
+    [InlineData("C:\\Temp\\fi", 10, false)]
+    public void QualifiedTypeLiteralContextIsSeparatedFromMemberPathAndIndexContexts(
+        string document, int caretOffset, bool expected)
+        => Assert.Equal(expected, PowerShellIntelliSenseService.IsQualifiedTypeCompletionContextForTesting(document, caretOffset));
+
+    [Theory]
+    [InlineData(7)]
+    [InlineData(13)]
+    [InlineData(25)]
+    public void PsesClassEnumAndGeneralTypeKindsMapToType(int lspKind)
+        => Assert.Equal(CompletionItemKind.Type, PowerShellIntelliSenseService.MapCompletionKindForTesting(lspKind));
+
+    [Fact]
+    public void PsesNamespaceKindMapsToNamespace()
+        => Assert.Equal(CompletionItemKind.Namespace, PowerShellIntelliSenseService.MapCompletionKindForTesting(9));
+
+    [Fact]
+    public void QualifiedTypeRequestRoutesAsTypeAndKeepsBothProvidersEligible()
+    {
+        const string script = "[System.IO.fi]";
+        const int caretOffset = 13;
+
+        Assert.Equal("type", PowerShellIntelliSenseService.GetCompletionKindForTesting(script, caretOffset));
+        Assert.True(PowerShellIntelliSenseService.ShouldQueryAuthoritativeForTesting(
+            providerAvailable: true,
+            includeEngine: false,
+            isVariableContext: false,
+            isMemberContext: false,
+            engineWouldBeQueried: false,
+            isParameterContext: false,
+            isQualifiedTypeContext: true));
+        Assert.True(PowerShellIntelliSenseService.ShouldQueryLegacyEngineForTesting(
+            script, caretOffset, includeEngine: true, engineWaitMilliseconds: 100, pwshExecutablePath: "pwsh.exe"));
+        Assert.Equal(450, PowerShellIntelliSenseService.GetEffectiveCompletionWaitMilliseconds(180, isQualifiedTypeContext: true, isMemberContext: false, isStaticMemberContext: false));
+        Assert.Equal("member", PowerShellIntelliSenseService.GetCompletionKindForTesting("$Customer.Na", 12));
+        Assert.Equal("static-member", PowerShellIntelliSenseService.GetCompletionKindForTesting("[System.IO.File]::Ex", 19));
+    }
+
     [Theory]
     [InlineData(' ')]
     [InlineData('\t')]

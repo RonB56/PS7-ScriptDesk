@@ -41,7 +41,9 @@ public sealed class ExeExportConfigurationValidator : IExeExportConfigurationVal
         if (configuration.DeploymentModel == ExeDeploymentModel.FrameworkDependent)
             result.Warnings.Add("Framework-dependent output requires a compatible .NET runtime on the destination computer.");
         if (configuration.PowerShellRuntimeModel == ExePowerShellRuntimeModel.InstalledPowerShell)
-            result.Warnings.Add("This output requires a compatible installed PowerShell 7 runtime on the destination computer.");
+            result.Warnings.Add("This output requires the selected compatible PowerShell 7 runtime at the configured runtime location on the destination computer.");
+        if (configuration.PowerShellRuntimeModel == ExePowerShellRuntimeModel.Embedded && configuration.Architecture == ExeTargetArchitecture.Arm64)
+            result.Errors.Add("Bundled PowerShell runtime export is currently supported only for Windows x64. Select an installed ARM64 PowerShell runtime or change the target architecture.");
         if (configuration.ApplicationType == ExeApplicationType.WindowsGui && !configuration.ShowFatalErrorDialog && !configuration.WriteApplicationLog)
             result.Errors.Add("A Windows GUI export must show fatal errors or write an application log so failures are not silent.");
         if (configuration.OptimizationProfile == ExeOptimizationProfile.FastStartup && configuration.DeploymentModel == ExeDeploymentModel.FrameworkDependent)

@@ -160,6 +160,45 @@ public sealed class EditorCompletionCycleSessionTests
     }
 
     [Fact]
+    public void QualifiedTypeCycleCanMoveForwardAndBackwardWithoutLeavingTypedSuffix()
+    {
+        var document = new TextDocument("[System.IO.fi]");
+        var editor = new object();
+        var session = new EditorCompletionCycleSession(
+            editor, document, document.Version, document.TextLength,
+            replacementOffset: 1, replacementLength: 12,
+            [
+                new EditorCompletionCycleCandidate("System.IO.FileInfo", 1, 12),
+                new EditorCompletionCycleCandidate("System.IO.FileStream", 1, 12)
+            ]);
+
+        Assert.True(session.TryApplyCandidate(document, session.GetNextIndex(1), out var firstCaret));
+        Assert.Equal("[System.IO.FileInfo]", document.Text);
+        Assert.Equal("[System.IO.FileInfo".Length, firstCaret);
+        Assert.True(session.TryApplyCandidate(document, session.GetNextIndex(1), out _));
+        Assert.Equal("[System.IO.FileStream]", document.Text);
+        Assert.True(session.TryApplyCandidate(document, session.GetNextIndex(-1), out _));
+        Assert.Equal("[System.IO.FileInfo]", document.Text);
+    }
+
+    [Fact]
+    public void QualifiedTypeCycleAcceptanceSupportsUndoAndRedo()
+    {
+        var document = new TextDocument("[System.IO.fi]");
+        var session = new EditorCompletionCycleSession(
+            new object(), document, document.Version, document.TextLength,
+            replacementOffset: 1, replacementLength: 12,
+            [new EditorCompletionCycleCandidate("System.IO.FileInfo", 1, 12)]);
+
+        Assert.True(session.TryApplyCandidate(document, 0, out _));
+        Assert.Equal("[System.IO.FileInfo]", document.Text);
+        document.UndoStack.Undo();
+        Assert.Equal("[System.IO.fi]", document.Text);
+        document.UndoStack.Redo();
+        Assert.Equal("[System.IO.FileInfo]", document.Text);
+    }
+
+    [Fact]
     public void CaretAndDocumentReplacementInvalidateTheActiveCycle()
     {
         var editor = new object();

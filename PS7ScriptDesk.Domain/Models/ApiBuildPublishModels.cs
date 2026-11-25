@@ -49,6 +49,25 @@ public sealed record ApiBuildPublishArtifact(
     long ExecutableLength,
     bool RuntimeValidated);
 
+public enum ApiArtifactOutcomeStatus
+{
+    Committed,
+    Failed,
+    Cancelled,
+    NotAttempted,
+    RecoveryRequired
+}
+
+public sealed record ApiBuildPublishArtifactOutcome(
+    ApiPublishTargetArchitecture Architecture,
+    string RuntimeIdentifier,
+    string OutputDirectory,
+    ApiArtifactOutcomeStatus Status,
+    string Message,
+    bool StructurallyValidated,
+    bool RuntimeValidated,
+    ApiBuildPublishArtifact? Artifact = null);
+
 public sealed class ApiBuildPublishResult
 {
     private ApiBuildPublishResult(
@@ -58,7 +77,11 @@ public sealed class ApiBuildPublishResult
         string projectDirectory,
         string projectFilePath,
         IReadOnlyList<ApiBuildPublishArtifact> artifacts,
-        bool wasCancelled)
+        bool wasCancelled,
+        bool recoveryRequired,
+        string recoveryBackupPath,
+        IReadOnlyList<ApiBuildPublishArtifact> completedArtifacts,
+        IReadOnlyList<ApiBuildPublishArtifactOutcome>? artifactOutcomes = null)
     {
         Succeeded = succeeded;
         SummaryMessage = summaryMessage;
@@ -67,6 +90,18 @@ public sealed class ApiBuildPublishResult
         ProjectFilePath = projectFilePath;
         Artifacts = artifacts;
         WasCancelled = wasCancelled;
+        RecoveryRequired = recoveryRequired;
+        RecoveryBackupPath = recoveryBackupPath;
+        CompletedArtifacts = completedArtifacts;
+        ArtifactOutcomes = artifactOutcomes ?? completedArtifacts.Select(artifact => new ApiBuildPublishArtifactOutcome(
+            artifact.Architecture,
+            artifact.RuntimeIdentifier,
+            artifact.OutputDirectory,
+            ApiArtifactOutcomeStatus.Committed,
+            "Artifact committed and structurally validated.",
+            StructurallyValidated: true,
+            artifact.RuntimeValidated,
+            artifact)).ToArray();
     }
 
     public bool Succeeded { get; }
@@ -76,6 +111,10 @@ public sealed class ApiBuildPublishResult
     public string ProjectFilePath { get; }
     public IReadOnlyList<ApiBuildPublishArtifact> Artifacts { get; }
     public bool WasCancelled { get; }
+    public bool RecoveryRequired { get; }
+    public string RecoveryBackupPath { get; }
+    public IReadOnlyList<ApiBuildPublishArtifact> CompletedArtifacts { get; }
+    public IReadOnlyList<ApiBuildPublishArtifactOutcome> ArtifactOutcomes { get; }
     public string OutputDirectory => Artifacts.LastOrDefault()?.OutputDirectory ?? string.Empty;
 
     public static ApiBuildPublishResult Success(
@@ -83,7 +122,8 @@ public sealed class ApiBuildPublishResult
         string detailedLog,
         string projectDirectory,
         string projectFilePath,
-        IReadOnlyList<ApiBuildPublishArtifact> artifacts)
+        IReadOnlyList<ApiBuildPublishArtifact> artifacts,
+        IReadOnlyList<ApiBuildPublishArtifactOutcome>? artifactOutcomes = null)
         => new(
             true,
             string.IsNullOrWhiteSpace(summaryMessage) ? "REST API operation completed successfully." : summaryMessage,
@@ -91,14 +131,22 @@ public sealed class ApiBuildPublishResult
             projectDirectory,
             projectFilePath,
             artifacts,
-            wasCancelled: false);
+            wasCancelled: false,
+            recoveryRequired: false,
+            recoveryBackupPath: string.Empty,
+            completedArtifacts: artifacts,
+            artifactOutcomes: artifactOutcomes);
 
     public static ApiBuildPublishResult Failure(
         string summaryMessage,
         string detailedLog,
         string? projectDirectory = null,
         string? projectFilePath = null,
-        bool wasCancelled = false)
+        bool wasCancelled = false,
+        bool recoveryRequired = false,
+        string? recoveryBackupPath = null,
+        IReadOnlyList<ApiBuildPublishArtifact>? completedArtifacts = null,
+        IReadOnlyList<ApiBuildPublishArtifactOutcome>? artifactOutcomes = null)
         => new(
             false,
             string.IsNullOrWhiteSpace(summaryMessage) ? "REST API operation failed." : summaryMessage,
@@ -106,5 +154,9 @@ public sealed class ApiBuildPublishResult
             projectDirectory ?? string.Empty,
             projectFilePath ?? string.Empty,
             Array.Empty<ApiBuildPublishArtifact>(),
-            wasCancelled);
+            wasCancelled,
+            recoveryRequired,
+            recoveryBackupPath ?? string.Empty,
+            completedArtifacts ?? Array.Empty<ApiBuildPublishArtifact>(),
+            artifactOutcomes);
 }

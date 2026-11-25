@@ -9,7 +9,9 @@ namespace PS7ScriptDesk.Domain.Models
             string detailedLog,
             long outputFileLength = 0,
             string? runtimeIdentifier = null,
-            bool wasCancelled = false)
+            bool wasCancelled = false,
+            bool recoveryRequired = false,
+            string? recoveryBackupPath = null)
         {
             Succeeded = succeeded;
             OutputExecutablePath = outputExecutablePath;
@@ -18,6 +20,8 @@ namespace PS7ScriptDesk.Domain.Models
             OutputFileLength = outputFileLength;
             RuntimeIdentifier = runtimeIdentifier ?? string.Empty;
             WasCancelled = wasCancelled;
+            RecoveryRequired = recoveryRequired;
+            RecoveryBackupPath = recoveryBackupPath ?? string.Empty;
         }
 
         public bool Succeeded { get; }
@@ -33,5 +37,9 @@ namespace PS7ScriptDesk.Domain.Models
         public string RuntimeIdentifier { get; }
 
         public bool WasCancelled { get; }
+
+        public bool RecoveryRequired { get; }
+
+        public string RecoveryBackupPath { get; }
     }
 }

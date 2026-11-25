@@ -9,6 +9,73 @@ namespace PS7ScriptDesk.Tests;
 public sealed class RestApiPublishWizardServiceTests
 {
     [Fact]
+    public void R4R1_T03_RecoveryPresentationKeepsFailureContextAndDisclosesBackupLimits()
+    {
+        var result = ApiBuildPublishResult.Failure(
+            "Project replacement failed.",
+            "Original commit error: access denied. Restoration could not be confirmed.",
+            projectDirectory: "C:\\api",
+            recoveryRequired: true,
+            recoveryBackupPath: "C:\\api-backup");
+
+        var presentation = ApiBuildPublishPresentation.Format(result, "Build API");
+
+        Assert.Contains("Recovery required", presentation, StringComparison.Ordinal);
+        Assert.Contains("Project replacement failed", presentation, StringComparison.Ordinal);
+        Assert.Contains("Original commit error: access denied", presentation, StringComparison.Ordinal);
+        Assert.Contains("C:\\api-backup", presentation, StringComparison.Ordinal);
+        Assert.Contains("integrity, and restoration status have not been verified", presentation, StringComparison.Ordinal);
+        Assert.DoesNotContain("backup is valid", presentation, StringComparison.OrdinalIgnoreCase);
+
+        var inspectionFailure = ApiBuildPublishPresentation.Format(ApiBuildPublishResult.Failure(
+            "Replacement failed.",
+            "Recovery material at C:\\api-backup could not be inspected (access denied). Its availability is unknown.",
+            recoveryRequired: true,
+            recoveryBackupPath: "C:\\api-backup"), "Build API");
+        Assert.Contains("could not be inspected; its availability is unknown", inspectionFailure, StringComparison.Ordinal);
+
+        var missingRecovery = ApiBuildPublishPresentation.Format(ApiBuildPublishResult.Failure(
+            "Replacement failed.",
+            "Recovery backup unavailable.",
+            recoveryRequired: true), "Build API");
+        Assert.Contains("No recovery material path was reported", missingRecovery, StringComparison.Ordinal);
+        Assert.Contains("before retrying", missingRecovery, StringComparison.Ordinal);
+
+        var generatedProject = ApiBuildPublishPresentation.Format(ApiBuildPublishResult.Success(
+            "API project generated.", string.Empty, "C:\\api", "C:\\api\\api.csproj", Array.Empty<ApiBuildPublishArtifact>()), "Generate Project");
+        Assert.Contains("No runtime artifact was built or published", generatedProject, StringComparison.Ordinal);
+        Assert.DoesNotContain("architecture targets completed", generatedProject, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void R4R1_T04_PartialPresentationIdentifiesArtifactsAndUnsuccessfulTargets()
+    {
+        var committed = new ApiBuildPublishArtifact(
+            ApiPublishTargetArchitecture.WinX64, "win-x64", "C:\\api\\publish\\win-x64",
+            "C:\\api\\publish\\win-x64\\host.exe", 42, false);
+        var result = ApiBuildPublishResult.Failure(
+            "REST API publish stopped after one target failed.",
+            "The second bundled runtime was unavailable.",
+            completedArtifacts: new[] { committed },
+            artifactOutcomes: new[]
+            {
+                new ApiBuildPublishArtifactOutcome(ApiPublishTargetArchitecture.WinX64, "win-x64", committed.OutputDirectory,
+                    ApiArtifactOutcomeStatus.Committed, "Committed.", true, false, committed),
+                new ApiBuildPublishArtifactOutcome(ApiPublishTargetArchitecture.WinArm64, "win-arm64", "C:\\api\\publish\\win-arm64",
+                    ApiArtifactOutcomeStatus.Failed, "Bundled runtime unavailable.", false, false)
+            });
+
+        var presentation = ApiBuildPublishPresentation.Format(result, "Publish API");
+
+        Assert.Contains("Operation incomplete", presentation, StringComparison.Ordinal);
+        Assert.Contains("C:\\api\\publish\\win-x64", presentation, StringComparison.Ordinal);
+        Assert.Contains("win-arm64: Failed", presentation, StringComparison.Ordinal);
+        Assert.Contains("Bundled runtime unavailable", presentation, StringComparison.Ordinal);
+        Assert.Contains("Structural validation passed; runtime execution was not verified", presentation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Complete success", presentation, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CreateDefaultEndpoints_UsesPublishableFunctionsAndQueryBindings()
     {
         var metadata = CreateMetadata();

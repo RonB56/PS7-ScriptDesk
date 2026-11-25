@@ -4325,6 +4325,39 @@ namespace PS7ScriptDesk.UI.ViewModels
                 return;
             }
 
+            ExeExportReplacementAuthorization? replacementAuthorization = null;
+            var isSingleFileExport = exportConfiguration?.PackageFormat != ExePackageFormat.ApplicationFolder;
+            if (isSingleFileExport)
+            {
+                try
+                {
+                    replacementAuthorization = ExeExportReplacementAuthorization.Capture(outputExecutablePath);
+                }
+                catch (Exception exception)
+                {
+                    StatusText = "Export as EXE failed - destination could not be reviewed";
+                    AppendOutputLine($"Export as EXE stopped: the selected destination could not be reviewed safely: {exception.Message}");
+                    return;
+                }
+            }
+            var existingExeOutput = replacementAuthorization?.Existed ?? File.Exists(outputExecutablePath);
+            var existingApplicationFolder = exportConfiguration?.PackageFormat == ExePackageFormat.ApplicationFolder &&
+                                            Directory.Exists(Path.GetDirectoryName(Path.GetFullPath(outputExecutablePath)));
+            if ((existingExeOutput || existingApplicationFolder) &&
+                !_userPromptService.ShowConfirmation(
+                    "Replace Existing Export Output?",
+                    isSingleFileExport
+                        ? $"The selected existing file will be replaced:{Environment.NewLine}{outputExecutablePath}{Environment.NewLine}{Environment.NewLine}ScriptDesk ownership of this single executable is not established. Replacement will proceed only if this file remains unchanged after review."
+                        : $"The export targets:{Environment.NewLine}{outputExecutablePath}{Environment.NewLine}{Environment.NewLine}Matching ScriptDesk-owned companion files may be replaced after ownership and integrity checks. Other files in the application folder will be preserved. If ownership is unclear, the export will stop without replacing them.",
+                    "Replace Output",
+                    "Cancel",
+                    destructive: true))
+            {
+                StatusText = "Export as EXE canceled";
+                AppendOutputLine("Export as EXE canceled: existing output was not changed.");
+                return;
+            }
+
             _isExeExportInProgress = true;
             _exportAsExeCommand.RaiseCanExecuteChanged();
             var exportOperationId = $"ExeExport-{Guid.NewGuid():N}";
@@ -4360,7 +4393,8 @@ namespace PS7ScriptDesk.UI.ViewModels
                     SelectedTab.Content,
                     outputExecutablePath,
                     runtimeToUse,
-                    exportConfiguration);
+                    exportConfiguration,
+                    replacementAuthorization);
 
                 var progress = new Progress<ExeExportProgressUpdate>(PublishExeExportProgress);
                 var result = await _exeExportService.ExportScriptAsExeAsync(request, progress: progress);

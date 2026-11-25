@@ -78,7 +78,7 @@ public partial class ExportWizardWindow : Window
         _configuration.ApplicationType = Parse<ExeApplicationType>(ApplicationTypeBox); _configuration.Architecture = Parse<ExeTargetArchitecture>(ArchitectureBox);
         _configuration.DeploymentModel = Parse<ExeDeploymentModel>(DeploymentBox); _configuration.PowerShellRuntimeModel = Parse<ExePowerShellRuntimeModel>(PowerShellBox);
         _configuration.PackageFormat = Parse<ExePackageFormat>(PackageBox); _configuration.OptimizationProfile = Parse<ExeOptimizationProfile>(OptimizationBox);
-        ImplicationsText.Text = $"{(_configuration.IsPortable ? "Portable: .NET and PowerShell are embedded." : "Dependencies required: " + string.Join(", ", new[] { _configuration.RequiresDotNetRuntime ? ".NET runtime" : null, _configuration.RequiresInstalledPowerShell ? "PowerShell 7" : null }.Where(value => value is not null)))}";
+        ImplicationsText.Text = $"{(_configuration.IsPortable ? "Portable: .NET and the complete PowerShell 7 runtime are bundled." : "Dependencies required: " + string.Join(", ", new[] { _configuration.RequiresDotNetRuntime ? ".NET runtime" : null, _configuration.RequiresInstalledPowerShell ? "the selected compatible PowerShell 7 runtime" : null }.Where(value => value is not null)))}";
     }
 
     private void RefreshSummary()

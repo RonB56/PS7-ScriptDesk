@@ -100,6 +100,8 @@ public sealed class ExeExportWorkflowTests : IDisposable
         Assert.NotNull(exporter.Request);
         Assert.Equal(sourcePath, exporter.Request!.SourceScriptPath);
         Assert.Equal(outputPath, exporter.Request.OutputExecutablePath);
+        Assert.NotNull(exporter.Request.ReplacementAuthorization);
+        Assert.False(exporter.Request.ReplacementAuthorization!.Existed);
         Assert.Contains(" ", exporter.Request.SourceScriptPath);
         Assert.Contains(" ", exporter.Request.OutputExecutablePath);
     }
@@ -120,6 +122,41 @@ public sealed class ExeExportWorkflowTests : IDisposable
         Assert.True(completion.Succeeded);
         Assert.Equal(outputPath, completion.OutputExecutablePath);
         Assert.Equal("Complete", completion.Stage);
+    }
+
+    [Fact]
+    public async Task ExistingSingleFile_ConfirmationDescribesReplacementAndBindsAuthorization()
+    {
+        var sourcePath = CreateSource("Existing.ps1");
+        var outputPath = Path.Combine(_testDirectory, "Existing.exe");
+        File.WriteAllText(outputPath, "previous executable");
+        var prompts = new ExportWorkflowPromptService { ExecutablePath = outputPath, ConfirmationResult = true };
+        var exporter = new RecordingExeExportService(request => SuccessfulResult(request.OutputExecutablePath));
+        var viewModel = CreateViewModel(sourcePath, prompts, exporter);
+
+        await viewModel.ExportSelectedTabAsExeAsync();
+
+        Assert.NotNull(exporter.Request);
+        Assert.True(exporter.Request!.ReplacementAuthorization!.Existed);
+        Assert.Equal(Path.GetFullPath(outputPath), exporter.Request.ReplacementAuthorization.DestinationPath);
+        Assert.Contains("will be replaced", prompts.ConfirmationMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ownership", prompts.ConfirmationMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExistingSingleFile_DeclinedConfirmationLeavesOriginalUnchanged()
+    {
+        var sourcePath = CreateSource("Declined.ps1");
+        var outputPath = Path.Combine(_testDirectory, "Declined.exe");
+        File.WriteAllText(outputPath, "keep existing bytes");
+        var prompts = new ExportWorkflowPromptService { ExecutablePath = outputPath, ConfirmationResult = false };
+        var exporter = new RecordingExeExportService();
+        var viewModel = CreateViewModel(sourcePath, prompts, exporter);
+
+        await viewModel.ExportSelectedTabAsExeAsync();
+
+        Assert.Null(exporter.Request);
+        Assert.Equal("keep existing bytes", File.ReadAllText(outputPath));
     }
 
     [Fact]
@@ -242,6 +279,8 @@ public sealed class ExeExportWorkflowTests : IDisposable
     private sealed class ExportWorkflowPromptService : IUserPromptService
     {
         public string? ExecutablePath { get; init; }
+        public bool ConfirmationResult { get; init; }
+        public string ConfirmationMessage { get; private set; } = string.Empty;
         public int ShowSaveExecutableDialogCallCount { get; private set; }
         public UnsavedChangesDecision ShowUnsavedChangesPrompt(string documentName) => UnsavedChangesDecision.Cancel;
         public ExternalFileConflictDecision ShowExternalFileConflictPrompt(string filePath, string conflictReason) => ExternalFileConflictDecision.Cancel;
@@ -255,7 +294,11 @@ public sealed class ExeExportWorkflowTests : IDisposable
         public string? ShowOpenFolderDialog() => null;
         public string? ShowOpenPowerShellExecutableDialog() => null;
     public void ShowWarningMessage(string title, string message) { }
-        public bool ShowConfirmation(string title, string message, string primaryText, string secondaryText, bool destructive = false) => false;
+        public bool ShowConfirmation(string title, string message, string primaryText, string secondaryText, bool destructive = false)
+        {
+            ConfirmationMessage = message;
+            return ConfirmationResult;
+        }
     }
 
     private sealed class RecordingWizardService : IExeExportWizardService

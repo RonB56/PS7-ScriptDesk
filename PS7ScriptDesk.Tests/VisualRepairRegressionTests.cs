@@ -66,6 +66,70 @@ public sealed class VisualRepairRegressionTests
         });
     }
 
+    [Theory]
+    [InlineData("[System.IO.fi]", "[System.IO.FileInfo]", 13)]
+    [InlineData("[System.IO.fi", "[System.IO.FileInfo", 13)]
+    [InlineData("[System.IO.file]", "[System.IO.FileInfo]", 15)]
+    public void QualifiedTypeCommitReplacesProviderRangeAndPreservesBracketSemantics(
+        string source, string expected, int caretOffset)
+    {
+        WpfTestDispatcher.Run(() =>
+        {
+            var editor = new ICSharpCode.AvalonEdit.TextEditor { Text = source };
+            editor.CaretOffset = caretOffset;
+            var item = new PowerShellCompletionData(
+                "System.IO.FileInfo", "FileInfo", "", 1, caretOffset - 1, CompletionItemKind.Type);
+            var popupSegment = new ICSharpCode.AvalonEdit.Document.TextSegment
+            {
+                StartOffset = 11,
+                Length = caretOffset - 11
+            };
+
+            item.Complete(editor.TextArea, popupSegment, EventArgs.Empty);
+
+            Assert.Equal(expected, editor.Text);
+            Assert.Equal(expected.Length - (source.EndsWith("]", StringComparison.Ordinal) ? 1 : 0), editor.CaretOffset);
+        });
+    }
+
+    [Fact]
+    public void QualifiedTypeCommitPreservesSuffixOnlyProviderRangeAndText()
+    {
+        WpfTestDispatcher.Run(() =>
+        {
+            var editor = new ICSharpCode.AvalonEdit.TextEditor { Text = "[System.IO.fi]" };
+            editor.CaretOffset = 13;
+            var item = new PowerShellCompletionData("FileInfo", "FileInfo", "", 11, 2, CompletionItemKind.Type);
+
+            item.Complete(
+                editor.TextArea,
+                new ICSharpCode.AvalonEdit.Document.TextSegment { StartOffset = 11, Length = 2 },
+                EventArgs.Empty);
+
+            Assert.Equal("[System.IO.FileInfo]", editor.Text);
+            Assert.Equal(19, editor.CaretOffset);
+        });
+    }
+
+    [Fact]
+    public void QualifiedTypeCommitIncludesCharactersTypedAfterPopupCreation()
+    {
+        WpfTestDispatcher.Run(() =>
+        {
+            var editor = new ICSharpCode.AvalonEdit.TextEditor { Text = "[System.IO.file]" };
+            editor.CaretOffset = 15;
+            var item = new PowerShellCompletionData("System.IO.FileInfo", "FileInfo", "", 1, 12, CompletionItemKind.Type);
+
+            item.Complete(
+                editor.TextArea,
+                new ICSharpCode.AvalonEdit.Document.TextSegment { StartOffset = 11, Length = 2 },
+                EventArgs.Empty);
+
+            Assert.Equal("[System.IO.FileInfo]", editor.Text);
+            Assert.Equal(19, editor.CaretOffset);
+        });
+    }
+
     [Fact]
     public void CompletionListCanSelectDocumentedItemsForKeyboardAndHoverPresentation()
     {

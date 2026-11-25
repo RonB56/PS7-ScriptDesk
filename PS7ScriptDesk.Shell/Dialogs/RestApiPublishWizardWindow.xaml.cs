@@ -938,11 +938,23 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        var request = CreateBuildPublishRequest();
+        var existingTargets = GetExistingReplacementTargets(actionName, request);
+        if (existingTargets.Count > 0)
+        {
+            var details = string.Join(Environment.NewLine, existingTargets.Select(path => $"• {path}"));
+            var message = $"This operation will replace the generated API project and/or its previously generated artifacts at:{Environment.NewLine}{details}{Environment.NewLine}{Environment.NewLine}" +
+                          "Replacement proceeds only when ScriptDesk can verify that the generated contents are unchanged. Modified files, added files, and unowned destinations are preserved and cause the operation to stop. Continue?";
+            if (System.Windows.MessageBox.Show(this, message, $"Confirm {actionName} Replacement", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Warning) != System.Windows.MessageBoxResult.Yes)
+            {
+                RefreshBuildPublishStatus($"{actionName} canceled. Existing output was not changed.");
+                return;
+            }
+        }
         using var cancellation = new CancellationTokenSource();
         _buildPublishCancellation = cancellation;
         SetBuildPublishBusy(true);
         RefreshBuildPublishStatus($"{actionName} started.");
-        var request = CreateBuildPublishRequest();
         var progress = new Progress<ApiBuildPublishProgressUpdate>(update => RefreshBuildPublishStatus(update.StatusMessage));
 
         try
@@ -950,7 +962,7 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             var result = await Task.Run(
                 () => operation(request, cancellation.Token, progress),
                 cancellation.Token).ConfigureAwait(true);
-            ApplyBuildPublishResult(result);
+            ApplyBuildPublishResult(result, actionName);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
@@ -992,6 +1004,29 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             overwriteExistingGeneratedProject: true);
     }
 
+    private static IReadOnlyList<string> GetExistingReplacementTargets(string actionName, ApiBuildPublishRequest request)
+    {
+        var targets = new List<string>();
+        if (Directory.Exists(request.ProjectDirectory))
+            targets.Add(request.ProjectDirectory);
+        if (string.Equals(actionName, "Generate Project", StringComparison.Ordinal))
+            return targets;
+
+        var architectures = request.TargetArchitecture == ApiPublishTargetArchitecture.Both
+            ? new[] { ApiPublishTargetArchitecture.WinX64, ApiPublishTargetArchitecture.WinArm64 }
+            : new[] { request.TargetArchitecture };
+        foreach (var architecture in architectures)
+        {
+            var runtimeIdentifier = architecture == ApiPublishTargetArchitecture.WinArm64 ? "win-arm64" : "win-x64";
+            var output = string.Equals(actionName, "Build API", StringComparison.Ordinal)
+                ? Path.Combine(request.ProjectDirectory, "bin", "ScriptDeskBuild", runtimeIdentifier)
+                : Path.Combine(string.IsNullOrWhiteSpace(request.PublishDirectory) ? Path.Combine(request.ProjectDirectory, "publish") : Path.GetFullPath(request.PublishDirectory), runtimeIdentifier);
+            if (Directory.Exists(output) || File.Exists(output))
+                targets.Add(output);
+        }
+        return targets;
+    }
+
     private string EnsureBuildPublishProjectDirectory()
     {
         var configured = OutputDirectoryBox.Text?.Trim();
@@ -1011,21 +1046,14 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             ? architecture
             : ApiPublishTargetArchitecture.WinX64;
 
-    private void ApplyBuildPublishResult(ApiBuildPublishResult result)
+    private void ApplyBuildPublishResult(ApiBuildPublishResult result, string actionName)
     {
         GeneratedProjectPathBox.Text = result.ProjectDirectory ?? string.Empty;
         _lastBuildPublishOutputPath = result.OutputDirectory;
         BuildPublishOutputPathBox.Text = result.OutputDirectory;
-        OpenPublishFolderButton.IsEnabled = result.Succeeded &&
-                                            !string.IsNullOrWhiteSpace(result.OutputDirectory) &&
+        OpenPublishFolderButton.IsEnabled = !string.IsNullOrWhiteSpace(result.OutputDirectory) &&
                                             Directory.Exists(result.OutputDirectory);
-
-        var summary = result.SummaryMessage;
-        if (!string.IsNullOrWhiteSpace(result.DetailedLog))
-        {
-            summary = $"{summary}{Environment.NewLine}{DeveloperDiagnostics.SanitizePreview(result.DetailedLog, 4096)}";
-        }
-
+        var summary = ApiBuildPublishPresentation.Format(result, actionName);
         RefreshBuildPublishStatus(summary);
         if (!result.Succeeded)
         {

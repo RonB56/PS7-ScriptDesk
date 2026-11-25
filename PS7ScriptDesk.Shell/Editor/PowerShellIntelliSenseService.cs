@@ -148,6 +148,8 @@ namespace PS7ScriptDesk.Shell.Editor
             var source = documentSnapshot ?? editor.Document.CreateSnapshot();
             var caretOffset = Math.Clamp(editor.CaretOffset, 0, source.TextLength);
             var context = GetCompletionContext(source, caretOffset);
+            var qualifiedTypeContext = TryGetQualifiedTypeCompletionContext(context);
+            var popupContext = qualifiedTypeContext ?? context;
             var statementStart = FindStatementStart(source, caretOffset);
             var statementText = source.GetText(statementStart, caretOffset - statementStart);
             var statementContext = context with { ReplacementOffset = Math.Max(0, context.ReplacementOffset - statementStart) };
@@ -160,7 +162,9 @@ namespace PS7ScriptDesk.Shell.Editor
                 ? null
                 : localParameterValueContext with { ReplacementOffset = localParameterValueContext.ReplacementOffset + statementStart };
             var staticMemberContext = TryGetStaticMemberCompletionContext(string.Empty, context);
-            var memberContext = staticMemberContext is null ? TryGetMemberCompletionContext(string.Empty, context) : null;
+            var memberContext = staticMemberContext is null && qualifiedTypeContext is null
+                ? TryGetMemberCompletionContext(string.Empty, context)
+                : null;
             string? fullDocumentText = null;
             string GetFullDocumentText(string reason)
             {
@@ -197,17 +201,13 @@ namespace PS7ScriptDesk.Shell.Editor
             var fetchedParameterMetadata = false;
             var engineTimedOut = false;
             var completionSource = "none";
-            var completionKind = parameterContext is not null
-                ? "parameter"
-                : parameterValueContext is not null
-                    ? "parameter-value"
-                    : memberContext is not null
-                        ? "member"
-                        : staticMemberContext is not null
-                            ? "static-member"
-                            : isVariableContextRequest
-                                ? "variable"
-                                : "command";
+            var completionKind = GetCompletionKind(
+                parameterContext is not null,
+                parameterValueContext is not null,
+                memberContext is not null,
+                staticMemberContext is not null,
+                isVariableContextRequest,
+                qualifiedTypeContext is not null);
 
             LogFirstCompletionRequestIfNeeded(completionKind, context, includeEngine, engineWaitMilliseconds, forceCompletion);
 
@@ -267,7 +267,7 @@ namespace PS7ScriptDesk.Shell.Editor
             {
                 var immediateStaticWindow = BuildWindow(
                     editor,
-                    context,
+                    popupContext,
                     engineResult: null,
                     GetFullDocumentText("static-member script class candidates"),
                     parameterContext,
@@ -278,7 +278,8 @@ namespace PS7ScriptDesk.Shell.Editor
                     cachedCommandReferences,
                     pwshExecutablePath,
                     completionKind,
-                    forceCompletion);
+                    forceCompletion,
+                    isQualifiedTypeContext: false);
 
                 if (immediateStaticWindow is not null)
                 {
@@ -290,7 +291,7 @@ namespace PS7ScriptDesk.Shell.Editor
             {
                 var immediatePathWindow = BuildWindow(
                     editor,
-                    context,
+                    popupContext,
                     engineResult: null,
                     string.Empty,
                     parameterContext,
@@ -301,7 +302,8 @@ namespace PS7ScriptDesk.Shell.Editor
                     cachedCommandReferences,
                     pwshExecutablePath,
                     completionKind,
-                    forceCompletion);
+                    forceCompletion,
+                    isQualifiedTypeContext: false);
 
                 if (immediatePathWindow is not null)
                 {
@@ -370,7 +372,8 @@ namespace PS7ScriptDesk.Shell.Editor
                     pwshExecutablePath,
                     isParameterContextRequest,
                     HasUsableParameterMetadata(parameterCommandInfo),
-                    isVariableContextRequest);
+                    isVariableContextRequest,
+                    qualifiedTypeContext is not null);
             var shouldQueryAuthoritative = providerOnly
                 ? authoritativeCompletionAvailable
                 : ShouldQueryAuthoritative(
@@ -378,12 +381,15 @@ namespace PS7ScriptDesk.Shell.Editor
                     shouldQueryEngine,
                     isVariableContextRequest,
                     memberContext is not null,
-                    isParameterContextRequest);
+                    isParameterContextRequest,
+                    qualifiedTypeContext is not null);
             if (shouldQueryAuthoritative || shouldQueryEngine)
             {
-                var effectiveEngineWaitMilliseconds = memberContext is not null || staticMemberContext is not null
-                    ? Math.Max(engineWaitMilliseconds, 450)
-                    : engineWaitMilliseconds;
+                var effectiveEngineWaitMilliseconds = GetEffectiveCompletionWaitMilliseconds(
+                    engineWaitMilliseconds,
+                    qualifiedTypeContext is not null,
+                    memberContext is not null,
+                    staticMemberContext is not null);
                 if (shouldQueryAuthoritative && effectiveEngineWaitMilliseconds <= 0)
                 {
                     effectiveEngineWaitMilliseconds = 350;
@@ -401,6 +407,7 @@ namespace PS7ScriptDesk.Shell.Editor
                         ["isVariableContext"] = isVariableContextRequest,
                         ["isParameterContext"] = isParameterContextRequest,
                         ["isMemberContext"] = memberContext is not null,
+                        ["isQualifiedTypeContext"] = qualifiedTypeContext is not null,
                         ["authoritativeProviderAvailable"] = authoritativeCompletionAvailable,
                         ["providerOnly"] = providerOnly,
                         ["engineWaitMilliseconds"] = effectiveEngineWaitMilliseconds
@@ -435,7 +442,7 @@ namespace PS7ScriptDesk.Shell.Editor
             {
                 var providerWindow = BuildWindow(
                     editor,
-                    context,
+                    popupContext,
                     engineResult,
                     GetFullDocumentText("Tab completion candidate projection"),
                     parameterContext,
@@ -446,7 +453,8 @@ namespace PS7ScriptDesk.Shell.Editor
                     cachedCommandReferences,
                     pwshExecutablePath,
                     completionKind,
-                    forceCompletion);
+                    forceCompletion,
+                    qualifiedTypeContext is not null);
                 requestStopwatch.Stop();
                 AppLogger.Debug(
                     "EditorCompletion",
@@ -460,7 +468,7 @@ namespace PS7ScriptDesk.Shell.Editor
             var localDocumentText = needsDocumentScope
                 ? GetFullDocumentText("script-scoped local completion candidates")
                 : string.Empty;
-            var window = BuildWindow(editor, context, engineResult, localDocumentText, parameterContext, parameterValueContext, memberContext, staticMemberContext, parameterCommandInfo, cachedCommandReferences, pwshExecutablePath, completionKind, forceCompletion);
+            var window = BuildWindow(editor, popupContext, engineResult, localDocumentText, parameterContext, parameterValueContext, memberContext, staticMemberContext, parameterCommandInfo, cachedCommandReferences, pwshExecutablePath, completionKind, forceCompletion, qualifiedTypeContext is not null);
             requestStopwatch.Stop();
 
             if (window is not null)
@@ -588,12 +596,16 @@ namespace PS7ScriptDesk.Shell.Editor
                 5 => CompletionItemKind.Property,
                 6 => CompletionItemKind.Variable,
                 7 => CompletionItemKind.Type,
+                13 => CompletionItemKind.Type,
                 9 => CompletionItemKind.Namespace,
                 10 => CompletionItemKind.Property,
                 14 => CompletionItemKind.Keyword,
                 15 => CompletionItemKind.Text,
+                25 => CompletionItemKind.Type,
                 _ => CompletionItemKind.Command
             };
+
+        internal static CompletionItemKind MapCompletionKindForTesting(int lspKind) => MapCompletionKind(lspKind);
 
         internal static bool ShouldQueryEngineForTesting(
             string documentText,
@@ -606,7 +618,10 @@ namespace PS7ScriptDesk.Shell.Editor
             var parameterContext = TryGetParameterCompletionContext(documentText ?? string.Empty, context);
             var parameterValueContext = TryGetParameterValueCompletionContext(documentText ?? string.Empty, caretOffset, context);
             var staticMemberContext = TryGetStaticMemberCompletionContext(documentText ?? string.Empty, context);
-            var memberContext = staticMemberContext is null ? TryGetMemberCompletionContext(documentText ?? string.Empty, context) : null;
+            var qualifiedTypeContext = TryGetQualifiedTypeCompletionContext(context);
+            var memberContext = staticMemberContext is null && qualifiedTypeContext is null
+                ? TryGetMemberCompletionContext(documentText ?? string.Empty, context)
+                : null;
             var isParameterContextRequest = parameterContext is not null || parameterValueContext is not null;
             var isVariableContextRequest = IsVariableCompletionContext(context, memberContext, staticMemberContext);
 
@@ -616,7 +631,8 @@ namespace PS7ScriptDesk.Shell.Editor
                 pwshExecutablePath,
                 isParameterContextRequest,
                 hasUsableParameterMetadata: false,
-                isVariableContextRequest);
+                isVariableContextRequest,
+                qualifiedTypeContext is not null);
         }
 
         internal static bool ShouldQueryAuthoritativeForTesting(
@@ -625,14 +641,33 @@ namespace PS7ScriptDesk.Shell.Editor
             bool isVariableContext,
             bool isMemberContext,
             bool engineWouldBeQueried,
-            bool isParameterContext = false)
+            bool isParameterContext = false,
+            bool isQualifiedTypeContext = false)
         {
             return ShouldQueryAuthoritative(
                 providerAvailable,
                 engineWouldBeQueried && includeEngine,
                 isVariableContext,
                 isMemberContext,
-                isParameterContext);
+                isParameterContext,
+                isQualifiedTypeContext);
+        }
+
+        internal static string GetCompletionKindForTesting(string documentText, int caretOffset)
+        {
+            var context = GetCompletionContext(documentText ?? string.Empty, caretOffset);
+            var typeContext = TryGetQualifiedTypeCompletionContext(context);
+            var staticMemberContext = TryGetStaticMemberCompletionContext(documentText ?? string.Empty, context);
+            var memberContext = staticMemberContext is null && typeContext is null
+                ? TryGetMemberCompletionContext(documentText ?? string.Empty, context)
+                : null;
+            return GetCompletionKind(
+                isParameterContext: false,
+                isParameterValueContext: false,
+                memberContext is not null,
+                staticMemberContext is not null,
+                IsVariableCompletionContext(context, memberContext, staticMemberContext),
+                typeContext is not null);
         }
 
         internal static IReadOnlyList<PowerShellLocalCompletionCandidate> GetLocalVariableCompletionCandidatesForTesting(
@@ -833,7 +868,8 @@ namespace PS7ScriptDesk.Shell.Editor
             IReadOnlyList<PowerShellCommandReference> cachedCommandReferences,
             string? pwshExecutablePath,
             string completionKind,
-            bool forceCompletion)
+            bool forceCompletion,
+            bool isQualifiedTypeContext)
         {
             var candidates = new List<CompletionCandidate>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -841,7 +877,7 @@ namespace PS7ScriptDesk.Shell.Editor
             var isParameterValueContext = parameterValueContext is not null;
             var isMemberContext = memberContext is not null;
             var isStaticMemberContext = staticMemberContext is not null;
-            var isCommandSpecificContext = isParameterContext || isParameterValueContext || isMemberContext || isStaticMemberContext;
+            var isCommandSpecificContext = isParameterContext || isParameterValueContext || isMemberContext || isStaticMemberContext || isQualifiedTypeContext;
             var activeMatchFragment = staticMemberContext?.MemberFragment ?? memberContext?.MemberFragment ?? context.Fragment;
             var engineCandidateCount = 0;
             var parameterMetadataCandidateCount = 0;
@@ -864,6 +900,11 @@ namespace PS7ScriptDesk.Shell.Editor
                 bool requireFragmentMatch)
             {
                 if (string.IsNullOrWhiteSpace(completionText))
+                {
+                    return;
+                }
+
+                if (isQualifiedTypeContext && kind is not CompletionItemKind.Type and not CompletionItemKind.Namespace)
                 {
                     return;
                 }
@@ -1848,12 +1889,14 @@ namespace PS7ScriptDesk.Shell.Editor
             string? pwshExecutablePath,
             bool isParameterContextRequest,
             bool hasUsableParameterMetadata,
-            bool isVariableContextRequest)
+            bool isVariableContextRequest,
+            bool isQualifiedTypeContextRequest = false)
         {
             return includeEngine &&
                    engineWaitMilliseconds > 0 &&
                    !string.IsNullOrWhiteSpace(pwshExecutablePath) &&
-                   (!isParameterContextRequest || !hasUsableParameterMetadata);
+                   (!isParameterContextRequest || !hasUsableParameterMetadata) &&
+                   (!isQualifiedTypeContextRequest || includeEngine);
         }
 
         private static bool ShouldQueryAuthoritative(
@@ -1861,11 +1904,42 @@ namespace PS7ScriptDesk.Shell.Editor
             bool shouldQueryLegacyEngine,
             bool isVariableContext,
             bool isMemberContext,
-            bool isParameterContext)
+            bool isParameterContext,
+            bool isQualifiedTypeContext = false)
         {
             return providerAvailable &&
-                   (shouldQueryLegacyEngine || isVariableContext || isMemberContext || isParameterContext);
+                   (shouldQueryLegacyEngine || isVariableContext || isMemberContext || isParameterContext || isQualifiedTypeContext);
         }
+
+        private static string GetCompletionKind(
+            bool isParameterContext,
+            bool isParameterValueContext,
+            bool isMemberContext,
+            bool isStaticMemberContext,
+            bool isVariableContext,
+            bool isQualifiedTypeContext)
+            => isParameterContext
+                ? "parameter"
+                : isParameterValueContext
+                    ? "parameter-value"
+                    : isQualifiedTypeContext
+                        ? "type"
+                        : isMemberContext
+                            ? "member"
+                            : isStaticMemberContext
+                                ? "static-member"
+                                : isVariableContext
+                                    ? "variable"
+                                    : "command";
+
+        internal static int GetEffectiveCompletionWaitMilliseconds(
+            int requestedMilliseconds,
+            bool isQualifiedTypeContext,
+            bool isMemberContext,
+            bool isStaticMemberContext)
+            => isQualifiedTypeContext || isMemberContext || isStaticMemberContext
+                ? Math.Max(requestedMilliseconds, 450)
+                : requestedMilliseconds;
 
         private static ParameterCompletionContext? TryGetParameterCompletionContext(string documentText, CompletionContext context)
         {
@@ -2393,6 +2467,52 @@ namespace PS7ScriptDesk.Shell.Editor
                 memberReplacementOffset,
                 memberReplacementLength);
         }
+
+        private static CompletionContext? TryGetQualifiedTypeCompletionContext(CompletionContext context)
+        {
+            var fragment = context.Fragment;
+            if (fragment.Length < 2 || fragment[0] != '[' || !char.IsLetter(fragment[1]))
+            {
+                return null;
+            }
+
+            // A type literal starts with a bracketed type name. Keep the opening bracket
+            // outside the popup filtering segment and filter on the final type-name
+            // component. Provider insertion ranges remain item-owned and may cover a
+            // different span. Restrict this fast lexical check to type-name characters;
+            // paths and indexed expressions keep their existing completion classification.
+            for (var i = 1; i < fragment.Length; i++)
+            {
+                var ch = fragment[i];
+                if (!char.IsLetterOrDigit(ch) && ch is not '_' and not '.' and not '+' and not '`' and not ',')
+                {
+                    return null;
+                }
+            }
+
+            var lastDot = fragment.LastIndexOf('.');
+            var componentOffset = lastDot >= 0 ? lastDot + 1 : 1;
+            return context with
+            {
+                ReplacementOffset = context.ReplacementOffset + componentOffset,
+                ReplacementLength = Math.Max(0, context.ReplacementLength - componentOffset),
+                Fragment = fragment[componentOffset..]
+            };
+        }
+
+        internal static bool IsQualifiedTypeCompletionContextForTesting(string documentText, int caretOffset)
+        {
+            var context = GetCompletionContext(documentText ?? string.Empty, caretOffset);
+            return TryGetQualifiedTypeCompletionContext(context) is not null;
+        }
+
+        internal static bool ShouldQueryLegacyEngineForTesting(
+            string documentText,
+            int caretOffset,
+            bool includeEngine,
+            int engineWaitMilliseconds,
+            string? pwshExecutablePath)
+            => ShouldQueryEngineForTesting(documentText, caretOffset, includeEngine, engineWaitMilliseconds, pwshExecutablePath);
 
         private static bool LooksLikePathOrDriveFragment(string fragment, int dotIndex)
         {

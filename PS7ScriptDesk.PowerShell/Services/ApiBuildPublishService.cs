@@ -14,6 +14,7 @@ namespace PS7ScriptDesk.PowerShell.Services;
 
 public sealed class ApiBuildPublishService : IApiBuildPublishService
 {
+    private const string ArtifactManifestName = ".ps7scriptdesk-api-artifact.json";
     private const string HostExecutableName = "PS7ScriptDesk.RestApiProofHost.exe";
     private const int MaximumCapturedOutputCharacters = 64 * 1024;
     private readonly IApiProjectGenerator _projectGenerator;
@@ -47,7 +48,7 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
         try
         {
             ReportProgress(progress, "GeneratingProject", "Generating REST API project files.");
-            var generation = await GenerateProjectCoreAsync(request, cancellationToken).ConfigureAwait(false);
+            var generation = await GenerateProjectCoreAsync(request, cancellationToken, projectCoordinationHeld: false).ConfigureAwait(false);
             if (!generation.Succeeded)
             {
                 DeveloperDiagnostics.LogWarning(
@@ -62,7 +63,10 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
                     generation.SummaryMessage,
                     SanitizePublicLog(generation.DetailedLog),
                     generation.DestinationDirectory,
-                    generation.ProjectFilePath);
+                    generation.ProjectFilePath,
+                    wasCancelled: generation.WasCancelled,
+                    recoveryRequired: generation.RecoveryRequired,
+                    recoveryBackupPath: generation.RecoveryBackupPath);
             }
 
             DeveloperDiagnostics.LogInfo(
@@ -131,13 +135,21 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
         ArgumentNullException.ThrowIfNull(request);
         var operationId = $"{operationPrefix}-{Guid.NewGuid():N}";
         var artifacts = new List<ApiBuildPublishArtifact>();
+        var targetArchitectures = ExpandTargets(request.TargetArchitecture);
+        var artifactOutcomes = targetArchitectures.Select(target => new ApiBuildPublishArtifactOutcome(
+            target, ToRuntimeIdentifier(target), string.Empty, ApiArtifactOutcomeStatus.NotAttempted,
+            "This target has not been attempted.", false, false)).ToArray();
+        var stagedOutputs = new List<string>();
+        ApiProjectGenerationResult? generatedProject = null;
         var details = new StringBuilder();
         using var scope = DeveloperDiagnostics.BeginScope(operationId: operationId);
 
         try
         {
+            using var projectCoordination = await RecoverableArtifactTransaction.AcquireCoordinationAsync(request.ProjectDirectory, cancellationToken).ConfigureAwait(false);
             ReportProgress(progress, "GeneratingProject", "Generating REST API project files.");
-            var generation = await GenerateProjectCoreAsync(request, cancellationToken).ConfigureAwait(false);
+            var generation = await GenerateProjectCoreAsync(request, cancellationToken, projectCoordinationHeld: true).ConfigureAwait(false);
+            generatedProject = generation;
             if (!generation.Succeeded)
             {
                 DeveloperDiagnostics.LogWarning(
@@ -152,12 +164,17 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
                     generation.SummaryMessage,
                     SanitizePublicLog(generation.DetailedLog),
                     generation.DestinationDirectory,
-                    generation.ProjectFilePath);
+                    generation.ProjectFilePath,
+                    wasCancelled: generation.WasCancelled,
+                    recoveryRequired: generation.RecoveryRequired,
+                    recoveryBackupPath: generation.RecoveryBackupPath,
+                    artifactOutcomes: artifactOutcomes);
             }
 
             details.AppendLine(generation.DetailedLog);
-            foreach (var target in ExpandTargets(request.TargetArchitecture))
+            for (var targetIndex = 0; targetIndex < targetArchitectures.Count; targetIndex++)
             {
+                var target = targetArchitectures[targetIndex];
                 cancellationToken.ThrowIfCancellationRequested();
                 var runtimeIdentifier = ToRuntimeIdentifier(target);
                 ReportProgress(
@@ -174,47 +191,97 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
                         "The bundled REST API runtime could not be found.",
                         $"The bundled {runtimeIdentifier} REST API runtime is not available.",
                         operationId,
-                        generation);
+                        generation,
+                        completedArtifacts: artifacts,
+                        artifactOutcomes: MarkCurrentOutcome(artifactOutcomes, targetIndex, ApiArtifactOutcomeStatus.Failed, "Bundled runtime unavailable."));
                 }
 
                 var outputDirectory = ResolveOperationOutputDirectory(request, generation.DestinationDirectory, runtimeIdentifier, publish);
-                PrepareCleanOutputDirectory(generation.DestinationDirectory, outputDirectory);
-                CopyRuntimeLayout(runtimeRoot, outputDirectory, cancellationToken);
-                CopyGeneratedApiContent(generation.DestinationDirectory, outputDirectory, cancellationToken);
-                WriteLauncher(outputDirectory);
+                artifactOutcomes[targetIndex] = artifactOutcomes[targetIndex] with
+                {
+                    OutputDirectory = outputDirectory,
+                    Status = ApiArtifactOutcomeStatus.Failed,
+                    Message = "Processing started; no artifact has been committed."
+                };
+                var stagedOutputDirectory = RecoverableArtifactTransaction.CreateSiblingPath(outputDirectory, "staging");
+                stagedOutputs.Add(stagedOutputDirectory);
+                Directory.CreateDirectory(stagedOutputDirectory);
+                CopyRuntimeLayout(runtimeRoot, stagedOutputDirectory, cancellationToken);
+                CopyGeneratedApiContent(generation.DestinationDirectory, stagedOutputDirectory, cancellationToken);
+                WriteLauncher(stagedOutputDirectory);
 
-                var validation = ValidateOutput(outputDirectory, target, request.Configuration.SourceScript);
+                var validation = ValidateOutput(stagedOutputDirectory, target, request.Configuration.SourceScript);
                 if (!validation.IsValid)
                 {
+                    TryDeleteDirectory(stagedOutputDirectory);
                     return FailWithDiagnostics(
                         "The REST API artifact did not pass validation.",
                         string.Join(Environment.NewLine, validation.Errors),
                         operationId,
-                        generation);
+                        generation,
+                        completedArtifacts: artifacts,
+                        artifactOutcomes: MarkCurrentOutcome(artifactOutcomes, targetIndex, ApiArtifactOutcomeStatus.Failed, string.Join(Environment.NewLine, validation.Errors)));
                 }
 
-                var executablePath = Path.Combine(outputDirectory, HostExecutableName);
+                artifactOutcomes[targetIndex] = artifactOutcomes[targetIndex] with
+                {
+                    StructurallyValidated = true,
+                    Message = "Output passed structural validation; commit is pending."
+                };
+
+                RecoverableArtifactTransaction.WriteOwnedDirectoryManifest(stagedOutputDirectory, ArtifactManifestName);
+
+                var stagedExecutablePath = Path.Combine(stagedOutputDirectory, HostExecutableName);
                 var runtimeValidated = false;
                 if (!publish && IsCurrentArchitecture(target))
                 {
                     ReportProgress(progress, "ValidatingRuntime", "Starting the built REST API briefly to verify readiness.");
                     var smokeResult = await _smokeTester.VerifyAsync(
-                        outputDirectory,
-                        executablePath,
+                        stagedOutputDirectory,
+                        stagedExecutablePath,
                         Path.Combine("Config", "api.ps7api.json"),
                         cancellationToken).ConfigureAwait(false);
                     if (!smokeResult.Succeeded)
                     {
+                        TryDeleteDirectory(stagedOutputDirectory);
                         return FailWithDiagnostics(
                             "The REST API build failed runtime validation.",
                             smokeResult.DetailedLog,
                             operationId,
-                            generation);
+                            generation,
+                            completedArtifacts: artifacts,
+                            artifactOutcomes: MarkCurrentOutcome(artifactOutcomes, targetIndex, ApiArtifactOutcomeStatus.Failed, smokeResult.DetailedLog));
                     }
 
                     runtimeValidated = true;
                     details.AppendLine(smokeResult.DetailedLog);
                 }
+
+                var transaction = await RecoverableArtifactTransaction.CommitDirectoryAsync(
+                    stagedOutputDirectory,
+                    outputDirectory,
+                    path => ValidateOutput(path, target, request.Configuration.SourceScript).IsValid &&
+                            RecoverableArtifactTransaction.IsOwnedDirectoryUnmodified(path, ArtifactManifestName),
+                    path => RecoverableArtifactTransaction.IsOwnedDirectoryUnmodified(path, ArtifactManifestName),
+                    cancellationToken).ConfigureAwait(false);
+                if (!transaction.Succeeded)
+                {
+                    TryDeleteDirectory(stagedOutputDirectory);
+                    return FailWithDiagnostics(
+                        transaction.RecoveryRequired ? "The REST API artifact replacement failed and recovery is required." : "The REST API artifact could not be safely replaced; the previous artifact was preserved.",
+                        transaction.Message,
+                        operationId,
+                        generation,
+                        transaction.RecoveryRequired,
+                        transaction.BackupPath,
+                        artifacts,
+                        MarkCurrentOutcome(artifactOutcomes, targetIndex,
+                            transaction.RecoveryRequired ? ApiArtifactOutcomeStatus.RecoveryRequired : ApiArtifactOutcomeStatus.Failed,
+                            transaction.Message));
+                }
+                details.AppendLine(transaction.Message);
+
+                var executablePath = Path.Combine(outputDirectory, HostExecutableName);
 
                 var artifact = new ApiBuildPublishArtifact(
                     target,
@@ -224,6 +291,9 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
                     new FileInfo(executablePath).Length,
                     runtimeValidated);
                 artifacts.Add(artifact);
+                artifactOutcomes[targetIndex] = new ApiBuildPublishArtifactOutcome(
+                    target, runtimeIdentifier, outputDirectory, ApiArtifactOutcomeStatus.Committed,
+                    "Artifact committed and structurally validated.", true, runtimeValidated, artifact);
                 details.AppendLine($"{runtimeIdentifier}: {outputDirectory}");
             }
 
@@ -243,19 +313,32 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
                 SanitizePublicLog(details.ToString()),
                 generation.DestinationDirectory,
                 generation.ProjectFilePath,
-                artifacts);
+                artifacts,
+                artifactOutcomes);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            var cancellationSummary = artifacts.Count > 0
+                ? "REST API operation was cancelled after some validated artifacts were committed. Those completed outputs contain the new artifacts; remaining targets were not changed."
+                : generatedProject?.Succeeded == true
+                    ? "REST API operation was cancelled after the generated project was committed. The generated project may have been replaced; no build/publish artifact was reported as ready."
+                    : publish ? "REST API publish was cancelled before output replacement." : "REST API build was cancelled before output replacement.";
+            var cancellationDetails = artifacts.Count > 0
+                ? string.Join(Environment.NewLine, artifacts.Select(artifact => $"Completed output: {artifact.OutputDirectory}"))
+                : generatedProject?.Succeeded == true ? $"Generated project: {generatedProject.DestinationDirectory}" : "Existing output was not changed.";
             DeveloperDiagnostics.LogWarning(
                 "RestApiBuildPublish",
                 publish ? "REST API publish was cancelled." : "REST API build was cancelled.",
                 new Dictionary<string, object?> { ["operationId"] = operationId });
             return ApiBuildPublishResult.Failure(
-                publish ? "REST API publish was cancelled." : "REST API build was cancelled.",
-                "The operation was cancelled before a verified artifact was reported as ready.",
+                cancellationSummary,
+                cancellationDetails,
                 request.ProjectDirectory,
-                wasCancelled: true);
+                wasCancelled: true,
+                completedArtifacts: artifacts,
+                artifactOutcomes: artifactOutcomes.Select(outcome => outcome.Status == ApiArtifactOutcomeStatus.Failed
+                        ? outcome with { Status = ApiArtifactOutcomeStatus.Cancelled, Message = "Cancelled before this target was committed." }
+                        : outcome).ToArray());
         }
         catch (Exception exception)
         {
@@ -271,27 +354,42 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
             return ApiBuildPublishResult.Failure(
                 publish ? "REST API publish failed unexpectedly." : "REST API build failed unexpectedly.",
                 SanitizePublicLog(exception.Message),
-                request.ProjectDirectory);
+                request.ProjectDirectory,
+                completedArtifacts: artifacts,
+                artifactOutcomes: artifactOutcomes);
+        }
+        finally
+        {
+            foreach (var stagingDirectory in stagedOutputs)
+                TryDeleteDirectory(stagingDirectory);
         }
     }
 
     private async Task<ApiProjectGenerationResult> GenerateProjectCoreAsync(
         ApiBuildPublishRequest request,
-        CancellationToken cancellationToken)
-        => await _projectGenerator.GenerateAsync(
-            new ApiProjectGenerationRequest(
+        CancellationToken cancellationToken,
+        bool projectCoordinationHeld)
+    {
+        var generationRequest = new ApiProjectGenerationRequest(
                 request.SourceScriptPath,
                 request.Configuration,
                 request.ProjectDirectory,
                 request.ProjectName,
-                request.OverwriteExistingGeneratedProject),
-            cancellationToken).ConfigureAwait(false);
+                request.OverwriteExistingGeneratedProject);
+        if (projectCoordinationHeld && _projectGenerator is ApiProjectGenerator generator)
+            return await generator.GenerateUnderCoordinationAsync(generationRequest, cancellationToken).ConfigureAwait(false);
+        return await _projectGenerator.GenerateAsync(generationRequest, cancellationToken).ConfigureAwait(false);
+    }
 
     private static ApiBuildPublishResult FailWithDiagnostics(
         string summaryMessage,
         string detailedLog,
         string operationId,
-        ApiProjectGenerationResult generation)
+        ApiProjectGenerationResult generation,
+        bool recoveryRequired = false,
+        string? recoveryBackupPath = null,
+        IReadOnlyList<ApiBuildPublishArtifact>? completedArtifacts = null,
+        IReadOnlyList<ApiBuildPublishArtifactOutcome>? artifactOutcomes = null)
     {
         var safeLog = SanitizePublicLog(detailedLog);
         var metadata = new Dictionary<string, object?>
@@ -309,8 +407,21 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
             summaryMessage,
             safeLog,
             generation.DestinationDirectory,
-            generation.ProjectFilePath);
+            generation.ProjectFilePath,
+            recoveryRequired: recoveryRequired,
+            recoveryBackupPath: recoveryBackupPath,
+            completedArtifacts: completedArtifacts,
+            artifactOutcomes: artifactOutcomes);
     }
+
+    private static IReadOnlyList<ApiBuildPublishArtifactOutcome> MarkCurrentOutcome(
+        IReadOnlyList<ApiBuildPublishArtifactOutcome> outcomes,
+        int currentIndex,
+        ApiArtifactOutcomeStatus status,
+        string message)
+        => outcomes.Select((outcome, index) => index == currentIndex
+            ? outcome with { Status = status, Message = message }
+            : outcome).ToArray();
 
     private static IReadOnlyList<ApiPublishTargetArchitecture> ExpandTargets(ApiPublishTargetArchitecture architecture)
         => architecture == ApiPublishTargetArchitecture.Both
@@ -342,21 +453,13 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
         return Path.Combine(root, runtimeIdentifier);
     }
 
-    private static void PrepareCleanOutputDirectory(string projectDirectory, string outputDirectory)
+    private static void TryDeleteDirectory(string directoryPath)
     {
-        var fullProjectDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(projectDirectory));
-        var fullOutputDirectory = Path.GetFullPath(outputDirectory);
-        if (!fullOutputDirectory.StartsWith(fullProjectDirectory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(directoryPath) && Directory.Exists(directoryPath))
         {
-            throw new InvalidOperationException("The REST API build output must be inside the generated project directory.");
+            try { Directory.Delete(directoryPath, recursive: true); }
+            catch { /* Preserve cleanup failure for later inspection; the path is operation-owned staging. */ }
         }
-
-        if (Directory.Exists(fullOutputDirectory))
-        {
-            Directory.Delete(fullOutputDirectory, recursive: true);
-        }
-
-        Directory.CreateDirectory(fullOutputDirectory);
     }
 
     private static void CopyRuntimeLayout(string runtimeRoot, string outputDirectory, CancellationToken cancellationToken)

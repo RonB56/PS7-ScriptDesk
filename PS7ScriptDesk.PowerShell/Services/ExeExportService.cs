@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -33,6 +34,15 @@ namespace PS7ScriptDesk.PowerShell.Services
             {
                 return await ExportConfiguredScriptAsync(request, cancellationToken, progress).ConfigureAwait(false);
             }
+
+            var replacementAuthorization = request.ReplacementAuthorization;
+            if (replacementAuthorization is null)
+            {
+                if (!ExeExportReplacementAuthorization.TryCaptureAbsentDestination(request.OutputExecutablePath, out replacementAuthorization))
+                    return BuildFailureResult(request.OutputExecutablePath, "Replacement authorization is required.", "The existing executable was not authorized for replacement.");
+            }
+            if (!replacementAuthorization.Matches(request.OutputExecutablePath))
+                return BuildFailureResult(request.OutputExecutablePath, "The EXE destination changed after review.", "The selected destination no longer matches the state reviewed for export.");
 
             ReportProgress(progress, "ValidatingSource", "Validating the selected script, runtime, and destination.");
 
@@ -137,7 +147,7 @@ namespace PS7ScriptDesk.PowerShell.Services
                     publishedExecutablePath = discoveredExecutablePath;
                 }
 
-                var outputDirectory = Path.GetDirectoryName(request.OutputExecutablePath);
+                var outputDirectory = Path.GetDirectoryName(Path.GetFullPath(request.OutputExecutablePath));
                 if (string.IsNullOrWhiteSpace(outputDirectory))
                 {
                     return BuildFailureResult(
@@ -148,11 +158,27 @@ namespace PS7ScriptDesk.PowerShell.Services
 
                 failureStage = ExeExportFailureStage.CreateOutputDirectory;
                 ReportProgress(progress, "PreparingDestination", "Preparing the selected output folder.");
-                Directory.CreateDirectory(outputDirectory);
-
                 failureStage = ExeExportFailureStage.CopyExecutable;
                 ReportProgress(progress, "WritingExecutable", "Writing the executable to the selected destination.");
-                File.Copy(publishedExecutablePath, request.OutputExecutablePath, overwrite: true);
+                var legacyArchitecture = RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+                    ? ExeTargetArchitecture.Arm64
+                    : ExeTargetArchitecture.X64;
+                var legacyVerifier = new ExecutableVerifier();
+                var legacyCommit = await RecoverableArtifactTransaction.CommitFileAsync(
+                    publishedExecutablePath,
+                    request.OutputExecutablePath,
+                    path => legacyVerifier.Verify(path, legacyArchitecture).IsValid,
+                    cancellationToken,
+                    replacementAuthorization).ConfigureAwait(false);
+                if (!legacyCommit.Succeeded)
+                {
+                    return BuildFailureResult(
+                        request.OutputExecutablePath,
+                        legacyCommit.RecoveryRequired ? "Export failed and recovery is required." : "The exported executable could not be safely replaced.",
+                        legacyCommit.Message,
+                        recoveryRequired: legacyCommit.RecoveryRequired,
+                        recoveryBackupPath: legacyCommit.BackupPath);
+                }
 
                 ReportProgress(progress, "VerifyingExecutable", "Verifying the exported executable.");
                 if (!File.Exists(request.OutputExecutablePath))
@@ -182,6 +208,16 @@ namespace PS7ScriptDesk.PowerShell.Services
                     summaryMessage: "Export as EXE completed successfully.",
                     detailedLog: successLog.ToString().Trim());
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                DeveloperDiagnostics.LogWarning("ExeExport", "Legacy EXE export was cancelled before output commit.");
+                return new ExeExportResult(
+                    succeeded: false,
+                    outputExecutablePath: request.OutputExecutablePath,
+                    summaryMessage: "Export cancelled. The previous executable was not changed.",
+                    detailedLog: "The operation was cancelled before replacement began.",
+                    wasCancelled: true);
+            }
             catch (Exception ex)
             {
                 LogExportException(request, failureStage, runtimeIdentifier, ex);
@@ -202,6 +238,19 @@ namespace PS7ScriptDesk.PowerShell.Services
             IProgress<ExeExportProgressUpdate>? progress)
         {
             var configuration = request.Configuration!;
+            var replacementAuthorization = configuration.PackageFormat == ExePackageFormat.SingleFile
+                ? request.ReplacementAuthorization
+                : null;
+            if (configuration.PackageFormat == ExePackageFormat.SingleFile)
+            {
+                if (replacementAuthorization is null)
+                {
+                    if (!ExeExportReplacementAuthorization.TryCaptureAbsentDestination(configuration.OutputExecutablePath, out replacementAuthorization))
+                        return BuildFailureResult(configuration.OutputExecutablePath, "Replacement authorization is required.", "The existing executable was not authorized for replacement.");
+                }
+                if (!replacementAuthorization.Matches(configuration.OutputExecutablePath))
+                    return BuildFailureResult(configuration.OutputExecutablePath, "The EXE destination changed after review.", "The selected destination no longer matches the state reviewed for export.");
+            }
             var operationId = $"ExeExport-{Guid.NewGuid():N}";
             var validator = new ExeExportConfigurationValidator();
             ReportProgress(progress, "ValidatingConfiguration", "Validating export configuration.");
@@ -260,17 +309,51 @@ namespace PS7ScriptDesk.PowerShell.Services
                 var outputDirectory = Path.GetDirectoryName(configuration.OutputExecutablePath);
                 if (string.IsNullOrWhiteSpace(outputDirectory))
                     return BuildFailureResult(configuration.OutputExecutablePath, "The output destination is invalid.", "The destination does not have a valid directory.");
-                Directory.CreateDirectory(outputDirectory);
-                File.Copy(publishedExecutablePath, configuration.OutputExecutablePath, overwrite: true);
-                if (configuration.PackageFormat == ExePackageFormat.ApplicationFolder)
-                    CopyPublishCompanionFiles(publishDirectory, outputDirectory, publishedExecutablePath, configuration.OutputExecutablePath);
-
                 ReportProgress(progress, "FinalVerification", "Verifying the final executable at the requested destination.");
-                var finalVerification = verifier.Verify(configuration.OutputExecutablePath, configuration.Architecture);
-                if (!finalVerification.IsValid)
-                    return BuildFailureResult(configuration.OutputExecutablePath, "The copied output did not pass executable verification.", string.Join(Environment.NewLine, finalVerification.Errors));
+                RecoverableArtifactTransaction.Result commit;
+                if (configuration.PackageFormat == ExePackageFormat.SingleFile)
+                {
+                    commit = await RecoverableArtifactTransaction.CommitFileAsync(
+                        publishedExecutablePath,
+                        configuration.OutputExecutablePath,
+                        path => verifier.Verify(path, configuration.Architecture).IsValid,
+                        cancellationToken,
+                        replacementAuthorization).ConfigureAwait(false);
+                }
+                else
+                {
+                    var stagedFolder = RecoverableArtifactTransaction.CreateSiblingPath(outputDirectory, "staging");
+                    var stagedCleanupFailed = false;
+                    try
+                    {
+                        Directory.CreateDirectory(stagedFolder);
+                        CopyPublishFilesToStage(publishDirectory, stagedFolder, publishedExecutablePath, configuration.OutputExecutablePath);
+                        var stagedExe = Path.Combine(stagedFolder, Path.GetFileName(configuration.OutputExecutablePath));
+                        if (!File.Exists(stagedExe))
+                            return BuildFailureResult(configuration.OutputExecutablePath, "The application folder is incomplete.", "The staged folder did not contain the expected executable.");
+                        if (!ValidateApplicationFolder(stagedFolder, Path.GetFileName(configuration.OutputExecutablePath), generatedProject.AssemblyName, verifier, configuration.Architecture, configuration.PowerShellRuntimeModel == ExePowerShellRuntimeModel.Embedded))
+                            return BuildFailureResult(configuration.OutputExecutablePath, "The staged application folder failed validation.", "The existing application folder was not modified.");
+                        commit = await RecoverableArtifactTransaction.CommitFileSetAsync(
+                            stagedFolder,
+                            outputDirectory,
+                            path => ValidateApplicationFolder(path, Path.GetFileName(configuration.OutputExecutablePath), generatedProject.AssemblyName, verifier, configuration.Architecture, configuration.PowerShellRuntimeModel == ExePowerShellRuntimeModel.Embedded),
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    finally { stagedCleanupFailed = !TryDeleteDirectory(stagedFolder); }
+                    if (stagedCleanupFailed && commit.Succeeded)
+                        commit = commit with { Message = $"{commit.Message} Staging cleanup warning: the operation-owned directory remains at {stagedFolder}." };
+                }
+                if (!commit.Succeeded)
+                    return BuildFailureResult(
+                        configuration.OutputExecutablePath,
+                        commit.RecoveryRequired ? "Export failed and recovery is required." : "The exported output could not be safely replaced.",
+                        commit.Message,
+                        runtimeIdentifier: configuration.RuntimeIdentifier,
+                        recoveryRequired: commit.RecoveryRequired,
+                        recoveryBackupPath: commit.BackupPath);
 
                 var details = new StringBuilder();
+                details.AppendLine(commit.Message);
                 details.AppendLine($"Operation: {operationId}");
                 details.AppendLine($"Runtime identifier: {configuration.RuntimeIdentifier}");
                 details.AppendLine($"Deployment: {configuration.DeploymentModel}");
@@ -307,14 +390,64 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
         }
 
-        private static void CopyPublishCompanionFiles(string publishDirectory, string outputDirectory, string publishedExecutablePath, string outputExecutablePath)
+        private static void CopyPublishFilesToStage(string publishDirectory, string outputDirectory, string publishedExecutablePath, string outputExecutablePath)
         {
-            foreach (var path in Directory.EnumerateFiles(publishDirectory, "*", SearchOption.TopDirectoryOnly))
+            foreach (var path in Directory.EnumerateDirectories(publishDirectory, "*", SearchOption.AllDirectories))
+                Directory.CreateDirectory(Path.Combine(outputDirectory, Path.GetRelativePath(publishDirectory, path)));
+            foreach (var path in Directory.EnumerateFiles(publishDirectory, "*", SearchOption.AllDirectories))
             {
-                if (string.Equals(path, publishedExecutablePath, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                File.Copy(path, Path.Combine(outputDirectory, Path.GetFileName(path)), overwrite: true);
+                var relative = Path.GetRelativePath(publishDirectory, path);
+                if (string.Equals(Path.GetFullPath(path), Path.GetFullPath(publishedExecutablePath), StringComparison.OrdinalIgnoreCase))
+                    relative = Path.GetFileName(outputExecutablePath);
+                var destination = Path.Combine(outputDirectory, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(path, destination, overwrite: false);
             }
+        }
+
+        private static bool ValidateApplicationFolder(
+            string directory,
+            string executableFileName,
+            string assemblyName,
+            ExecutableVerifier verifier,
+            ExeTargetArchitecture architecture,
+            bool bundledRuntime)
+        {
+            if (!RecoverableArtifactTransaction.IsSafeDirectoryTree(directory))
+                return false;
+            var executablePath = Path.Combine(directory, executableFileName);
+            if (!verifier.Verify(executablePath, architecture).IsValid)
+                return false;
+            if (!File.Exists(Path.Combine(directory, $"{assemblyName}.dll")) ||
+                !File.Exists(Path.Combine(directory, $"{assemblyName}.deps.json")) ||
+                !File.Exists(Path.Combine(directory, $"{assemblyName}.runtimeconfig.json")))
+                return false;
+            return !bundledRuntime || ValidateBundledRuntimeFolder(Path.Combine(directory, "Runtime"));
+        }
+
+        private static bool ValidateBundledRuntimeFolder(string runtimeDirectory)
+        {
+            if (!File.Exists(Path.Combine(runtimeDirectory, "pwsh.exe")) ||
+                !File.Exists(Path.Combine(runtimeDirectory, "pwsh.deps.json")) ||
+                !File.Exists(Path.Combine(runtimeDirectory, "pwsh.runtimeconfig.json")) ||
+                !Directory.Exists(Path.Combine(runtimeDirectory, "Modules", "Microsoft.PowerShell.Utility")) ||
+                !Directory.Exists(Path.Combine(runtimeDirectory, "Modules", "Microsoft.PowerShell.Management")) ||
+                !File.Exists(Path.Combine(runtimeDirectory, "LICENSE.txt")) ||
+                !File.Exists(Path.Combine(runtimeDirectory, "ThirdPartyNotices.txt")))
+                return false;
+
+            var manifest = Path.Combine(runtimeDirectory, "runtime.manifest");
+            if (!File.Exists(manifest)) return false;
+            foreach (var line in File.ReadLines(manifest))
+            {
+                if (line.Length < 67 || line[64] != ' ' || line[65] != ' ') return false;
+                var relative = line[66..].Replace('/', Path.DirectorySeparatorChar);
+                var path = Path.GetFullPath(Path.Combine(runtimeDirectory, relative));
+                if (!path.StartsWith(Path.GetFullPath(runtimeDirectory) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !File.Exists(path)) return false;
+                using var stream = File.OpenRead(path);
+                if (!string.Equals(Convert.ToHexString(SHA256.HashData(stream)), line[..64], StringComparison.Ordinal)) return false;
+            }
+            return true;
         }
 
         private static string BuildProjectFile(string assemblyName)
@@ -841,13 +974,22 @@ internal static class Program
                 });
         }
 
-        private static ExeExportResult BuildFailureResult(string outputExecutablePath, string summaryMessage, string detailedLog)
+        private static ExeExportResult BuildFailureResult(
+            string outputExecutablePath,
+            string summaryMessage,
+            string detailedLog,
+            string? runtimeIdentifier = null,
+            bool recoveryRequired = false,
+            string? recoveryBackupPath = null)
         {
             return new ExeExportResult(
                 succeeded: false,
                 outputExecutablePath: outputExecutablePath,
                 summaryMessage: summaryMessage,
-                detailedLog: detailedLog);
+                detailedLog: detailedLog,
+                runtimeIdentifier: runtimeIdentifier,
+                recoveryRequired: recoveryRequired,
+                recoveryBackupPath: recoveryBackupPath);
         }
 
         private static void LogExportResultFailure(
@@ -908,19 +1050,21 @@ internal static class Program
             };
         }
 
-        private static void TryDeleteDirectory(string directoryPath)
+        private static bool TryDeleteDirectory(string directoryPath)
         {
             if (string.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath))
             {
-                return;
+                return true;
             }
 
             try
             {
                 Directory.Delete(directoryPath, recursive: true);
+                return true;
             }
             catch
             {
+                return false;
             }
         }
 

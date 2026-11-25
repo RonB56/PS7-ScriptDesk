@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -13,6 +14,7 @@ namespace PS7ScriptDesk.PowerShell.Services;
 public sealed class ApiProjectGenerator : IApiProjectGenerator
 {
     private const string MarkerFileName = ".ps7scriptdesk-generated-api";
+    private const string OwnershipManifestFileName = ".ps7scriptdesk-owned-files.json";
     private const string PowerShellSdkVersion = "7.6.2";
     private const string PowerShellHostedRuntimeVersion = "7.6.1";
     private static readonly TimeSpan[] FileSystemRetryDelays =
@@ -61,9 +63,20 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.WebSockets.WebSocketProtocol.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/WebSockets/WebSocketProtocol.cs")
     ];
 
-    public async Task<ApiProjectGenerationResult> GenerateAsync(
+    public Task<ApiProjectGenerationResult> GenerateAsync(
         ApiProjectGenerationRequest request,
         CancellationToken cancellationToken = default)
+        => GenerateCoreAsync(request, cancellationToken, acquireProjectCoordination: true);
+
+    internal Task<ApiProjectGenerationResult> GenerateUnderCoordinationAsync(
+        ApiProjectGenerationRequest request,
+        CancellationToken cancellationToken = default)
+        => GenerateCoreAsync(request, cancellationToken, acquireProjectCoordination: false);
+
+    private async Task<ApiProjectGenerationResult> GenerateCoreAsync(
+        ApiProjectGenerationRequest request,
+        CancellationToken cancellationToken,
+        bool acquireProjectCoordination)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -74,6 +87,9 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
         {
             cancellationToken.ThrowIfCancellationRequested();
             var destination = ValidateDestination(request);
+            using var projectCoordination = acquireProjectCoordination
+                ? await RecoverableArtifactTransaction.AcquireCoordinationAsync(destination, cancellationToken).ConfigureAwait(false)
+                : null;
             var projectName = MakeProjectName(request.ProjectName);
             var scriptFileName = MakeScriptFileName(request.SourceScriptPath);
             var scriptContent = await ReadScriptForMetadataAsync(request.SourceScriptPath, cancellationToken).ConfigureAwait(false);
@@ -115,7 +131,7 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
             }
 
             Directory.CreateDirectory(parent);
-            var stagingDirectory = Path.Combine(parent, $".{Path.GetFileName(destination)}.ps7api-staging-{Guid.NewGuid():N}");
+            var stagingDirectory = RecoverableArtifactTransaction.CreateSiblingPath(destination, "staging");
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -128,9 +144,27 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
                     request.Configuration,
                     cancellationToken).ConfigureAwait(false);
 
+                PreserveOwnedBuildOutputs(destination, stagingDirectory);
+
+                WriteOwnershipManifest(stagingDirectory);
+
                 cancellationToken.ThrowIfCancellationRequested();
-                PrepareDestinationForMove(destination, request.OverwriteExistingGeneratedProject);
-                await MoveDirectoryWithRetryAsync(stagingDirectory, destination, operationId, cancellationToken).ConfigureAwait(false);
+                var transaction = await RecoverableArtifactTransaction.CommitDirectoryAsync(
+                    stagingDirectory,
+                    destination,
+                    ValidateGeneratedProject,
+                    path => IsUnmodifiedGeneratedProject(path, request.OverwriteExistingGeneratedProject),
+                    cancellationToken,
+                    coordinationHeld: true).ConfigureAwait(false);
+                if (!transaction.Succeeded)
+                {
+                    return ApiProjectGenerationResult.Failure(
+                        transaction.RecoveryRequired ? "API project replacement failed and recovery is required." : "API project replacement failed; the previous project was preserved.",
+                        transaction.Message,
+                        destination,
+                        recoveryRequired: transaction.RecoveryRequired,
+                        recoveryBackupPath: transaction.BackupPath);
+                }
 
                 var generatedFiles = EnumerateGeneratedFiles(destination);
                 stopwatch.Stop();
@@ -151,7 +185,7 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
                     destination,
                     Path.Combine(destination, $"{projectName}.csproj"),
                     generatedFiles,
-                    $"Generated {generatedFiles.Count} files for {projectName}.");
+                    $"Generated {generatedFiles.Count} files for {projectName}. {transaction.Message}");
             }
             finally
             {
@@ -166,7 +200,8 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
                 new Dictionary<string, object?> { ["operationId"] = operationId });
             return ApiProjectGenerationResult.Failure(
                 "API project generation was cancelled.",
-                "The operation was cancelled before a complete generated project was reported.");
+                "The operation was cancelled before replacement began. Existing project contents remain unchanged.",
+                wasCancelled: true);
         }
         catch (Exception exception)
         {
@@ -244,48 +279,172 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
             throw new InvalidOperationException("The destination path is an existing file.");
         }
 
+        var source = Path.GetFullPath(request.SourceScriptPath);
+        if (IsWithin(destination, source) || IsWithin(source, destination))
+            throw new InvalidOperationException("The source script and generated project destination overlap.");
+        if (Directory.Exists(destination) && !RecoverableArtifactTransaction.IsSafeDirectoryTree(destination))
+            throw new InvalidOperationException("The destination contains a reparse point and cannot be safely replaced.");
+
         return destination;
     }
 
-    private static void PrepareDestinationForMove(string destination, bool overwriteExistingGeneratedProject)
+    private static bool IsWithin(string path, string possibleParent)
+        => path.StartsWith(Path.TrimEndingDirectorySeparator(possibleParent) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsUnmodifiedGeneratedProject(string destination, bool overwriteRequested)
     {
+        if (!overwriteRequested)
+            return false;
         if (!Directory.Exists(destination))
+            return true;
+        if (!Directory.EnumerateFileSystemEntries(destination).Any())
+            return true;
+        var manifestPath = Path.Combine(destination, OwnershipManifestFileName);
+        if (!File.Exists(Path.Combine(destination, MarkerFileName)) || !File.Exists(manifestPath))
+            return false;
+        try
         {
-            return;
+            using var document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+            if (document.RootElement.GetProperty("version").GetInt32() < 2 || !document.RootElement.TryGetProperty("directories", out var directoryEntries))
+                return false;
+            var expected = document.RootElement.GetProperty("files").EnumerateArray()
+                .ToDictionary(entry => ValidateManifestRelativePath(entry.GetProperty("path").GetString()), entry => entry.GetProperty("sha256").GetString()!, StringComparer.OrdinalIgnoreCase);
+            var actual = RecoverableArtifactTransaction.SnapshotDirectory(destination)
+                .Where(entry => !string.Equals(entry.Key, OwnershipManifestFileName, StringComparison.OrdinalIgnoreCase) && !IsBuildOutputPath(entry.Key))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+            var expectedDirectories = directoryEntries.EnumerateArray()
+                .Select(entry => ValidateManifestRelativePath(entry.GetString())).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var actualDirectories = Directory.EnumerateDirectories(destination, "*", SearchOption.AllDirectories)
+                .Select(path => Path.GetRelativePath(destination, path))
+                .Where(path => !IsBuildOutputPath(path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return RecoverableArtifactTransaction.SnapshotEquals(expected, actual) &&
+                   expectedDirectories.SetEquals(actualDirectories) && AreBuildOutputsOwned(destination);
         }
-
-        if (IsDirectoryEmpty(destination))
+        catch
         {
-            DeleteDirectoryWithRetry(destination, recursive: false, operationId: null, directoryKind: "emptyDestination");
-            return;
+            return false;
         }
-
-        var markerPath = Path.Combine(destination, MarkerFileName);
-        if (!File.Exists(markerPath))
-        {
-            throw new IOException("The destination directory is not empty and is not marked as a PS7 ScriptDesk generated API project.");
-        }
-
-        if (!overwriteExistingGeneratedProject)
-        {
-            throw new IOException("The destination already contains a generated API project. Enable overwrite to replace it.");
-        }
-
-        EnsureSafeGeneratedDirectoryForDeletion(destination);
-        DeleteDirectoryWithRetry(destination, recursive: true, operationId: null, directoryKind: "existingGeneratedDestination");
     }
 
-    private static void EnsureSafeGeneratedDirectoryForDeletion(string destination)
+    private static bool ValidateGeneratedProject(string directory)
     {
-        var fullPath = Path.GetFullPath(destination);
-        var parent = Path.GetDirectoryName(fullPath);
-        if (string.IsNullOrWhiteSpace(parent) ||
-            string.Equals(fullPath, parent, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), Path.GetPathRoot(fullPath)?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase) ||
-            !File.Exists(Path.Combine(fullPath, MarkerFileName)))
+        if (!RecoverableArtifactTransaction.IsSafeDirectoryTree(directory))
+            return false;
+        return File.Exists(Path.Combine(directory, MarkerFileName)) &&
+               File.Exists(Path.Combine(directory, OwnershipManifestFileName)) &&
+               Directory.EnumerateFiles(directory, "*.csproj", SearchOption.TopDirectoryOnly).Any() &&
+               File.Exists(Path.Combine(directory, "Program.cs")) &&
+               File.Exists(Path.Combine(directory, "Config", "api.ps7api.json")) &&
+               Directory.EnumerateFiles(Path.Combine(directory, "Scripts"), "*.ps1", SearchOption.TopDirectoryOnly).Any() &&
+               IsUnmodifiedGeneratedProject(directory, overwriteRequested: true);
+    }
+
+    private static void WriteOwnershipManifest(string directory)
+    {
+        var files = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .Where(path => !string.Equals(Path.GetFileName(path), OwnershipManifestFileName, StringComparison.OrdinalIgnoreCase))
+            .Where(path => !IsBuildOutputPath(Path.GetRelativePath(directory, path)))
+            .Select(path => new
+            {
+                path = Path.GetRelativePath(directory, path).Replace(Path.DirectorySeparatorChar, '/'),
+                sha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)))
+            })
+            .OrderBy(entry => entry.path, StringComparer.Ordinal)
+            .ToArray();
+        var directories = Directory.EnumerateDirectories(directory, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(directory, path))
+            .Where(path => !IsBuildOutputPath(path))
+            .Select(path => path.Replace(Path.DirectorySeparatorChar, '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+        WriteUtf8(Path.Combine(directory, OwnershipManifestFileName), JsonSerializer.Serialize(new { version = 2, files, directories }, SerializerOptions));
+    }
+
+    private static bool IsBuildOutputPath(string relativePath)
+        => string.Equals(relativePath, "bin", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(relativePath, Path.Combine("bin", "ScriptDeskBuild"), StringComparison.OrdinalIgnoreCase) ||
+           relativePath.StartsWith(Path.Combine("bin", "ScriptDeskBuild") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(relativePath, "publish", StringComparison.OrdinalIgnoreCase) ||
+           relativePath.StartsWith("publish" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+    private static void PreserveOwnedBuildOutputs(string source, string destination)
+    {
+        if (!AreBuildOutputsOwned(source))
+            throw new IOException("Existing API deployment output contains unverified files or directories. Choose a different project destination.");
+
+        foreach (var relativeRoot in new[] { Path.Combine("bin", "ScriptDeskBuild"), "publish" })
         {
-            throw new IOException("The existing destination could not be verified as a safe generated project directory.");
+            var sourceRoot = Path.Combine(source, relativeRoot);
+            if (!Directory.Exists(sourceRoot))
+                continue;
+            foreach (var child in Directory.EnumerateDirectories(sourceRoot, "*", SearchOption.TopDirectoryOnly))
+            {
+                if (!RecoverableArtifactTransaction.IsOwnedDirectoryUnmodified(child, ".ps7scriptdesk-api-artifact.json"))
+                    throw new IOException($"Existing API output has been modified or its ownership cannot be verified: {child}. Choose a different project destination.");
+                var relative = Path.GetRelativePath(source, child);
+                CopyTree(child, Path.Combine(destination, relative));
+            }
+            if (Directory.EnumerateFiles(sourceRoot, "*", SearchOption.TopDirectoryOnly).Any())
+                throw new IOException($"Existing API output contains unowned files: {sourceRoot}. Choose a different project destination.");
         }
+    }
+
+    private static bool AreBuildOutputsOwned(string projectDirectory)
+    {
+        try
+        {
+            var buildParent = Path.Combine(projectDirectory, "bin");
+            if (Directory.Exists(buildParent))
+            {
+                if (Directory.EnumerateFiles(buildParent, "*", SearchOption.TopDirectoryOnly).Any())
+                    return false;
+                var childDirectories = Directory.EnumerateDirectories(buildParent, "*", SearchOption.TopDirectoryOnly).ToArray();
+                var buildRoot = Path.Combine(buildParent, "ScriptDeskBuild");
+                if (childDirectories.Length == 0 || childDirectories.Any(path => !string.Equals(path, buildRoot, StringComparison.OrdinalIgnoreCase)))
+                    return false;
+                if (Directory.Exists(buildRoot) && !AreOwnedOutputRoot(buildRoot))
+                    return false;
+            }
+
+            var publishRoot = Path.Combine(projectDirectory, "publish");
+            if (Directory.Exists(publishRoot) && !AreOwnedOutputRoot(publishRoot))
+                return false;
+            return true;
+        }
+        catch { return false; }
+    }
+
+    private static bool AreOwnedOutputRoot(string root)
+    {
+        if (Directory.EnumerateFiles(root, "*", SearchOption.TopDirectoryOnly).Any())
+            return false;
+        var children = Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly).ToArray();
+        if (children.Length == 0)
+            return false; // An empty directory has no generated-output ownership proof.
+        return children.All(child => RecoverableArtifactTransaction.IsOwnedDirectoryUnmodified(child, ".ps7scriptdesk-api-artifact.json"));
+    }
+
+    private static void CopyTree(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (var directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+            Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, directory)));
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(source, file);
+            var target = Path.Combine(destination, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target, overwrite: false);
+        }
+    }
+
+    private static string ValidateManifestRelativePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) throw new IOException("The generated API ownership manifest contains an empty relative path.");
+        var normalized = path.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
+        if (Path.IsPathRooted(normalized) || normalized.Split(Path.DirectorySeparatorChar).Any(segment => segment is "" or "." or ".."))
+            throw new IOException("The generated API ownership manifest contains an unsafe relative path.");
+        return normalized;
     }
 
     private static void WriteConfiguration(string path, ApiPublishConfiguration configuration, string scriptFileName)
@@ -330,9 +489,6 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
             .Select(path => Path.GetRelativePath(destination, path).Replace('\\', '/'))
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
-
-    private static bool IsDirectoryEmpty(string directory)
-        => !Directory.EnumerateFileSystemEntries(directory).Any();
 
     private static void WriteUtf8(string path, string content)
     {

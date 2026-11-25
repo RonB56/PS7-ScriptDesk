@@ -138,7 +138,7 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
     }
 
     [Fact]
-    public async Task Generate_OverwritesOnlyMarkedGeneratedDestination()
+    public async Task Generate_RefusesProjectWithAddedFilesAndPreservesThem()
     {
         var sourcePath = WritePhase7Script("Phase7Api.ps1");
         var destination = Path.Combine(_testDirectory, "Overwrite");
@@ -151,9 +151,65 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
         var second = await generator.GenerateAsync(
             new ApiProjectGenerationRequest(sourcePath, CreatePhase7Configuration(), destination, "Phase7GeneratedApi", overwriteExistingGeneratedProject: true));
 
-        Assert.True(second.Succeeded, second.DetailedLog);
-        Assert.False(File.Exists(Path.Combine(destination, "stale.txt")));
+        Assert.False(second.Succeeded);
+        Assert.Contains("modified", second.DetailedLog, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("stale", await File.ReadAllTextAsync(Path.Combine(destination, "stale.txt")));
         Assert.True(File.Exists(Path.Combine(destination, "Phase7GeneratedApi.csproj")));
+    }
+
+    [Fact]
+    public async Task Generate_RefusesModifiedGeneratedFileAndPreservesContents()
+    {
+        var sourcePath = WritePhase7Script("Phase7Api.ps1");
+        var destination = Path.Combine(_testDirectory, "ModifiedGeneratedFile");
+        var generator = new ApiProjectGenerator();
+        var first = await generator.GenerateAsync(new ApiProjectGenerationRequest(sourcePath, CreatePhase7Configuration(), destination, "Phase7GeneratedApi"));
+        Assert.True(first.Succeeded, first.DetailedLog);
+        var projectPath = Path.Combine(destination, "Phase7GeneratedApi.csproj");
+        await File.AppendAllTextAsync(projectPath, "<!-- owner edit -->");
+
+        var second = await generator.GenerateAsync(new ApiProjectGenerationRequest(sourcePath, CreatePhase7Configuration(), destination, "Phase7GeneratedApi", overwriteExistingGeneratedProject: true));
+
+        Assert.False(second.Succeeded);
+        Assert.Contains("ownership", second.DetailedLog, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("owner edit", await File.ReadAllTextAsync(projectPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Generate_RefusesProjectWithEmptyDeveloperOwnedDirectory()
+    {
+        var sourcePath = WritePhase7Script("EmptyDirectoryOwnership.ps1");
+        var destination = Path.Combine(_testDirectory, "EmptyDirectoryOwnership");
+        var generator = new ApiProjectGenerator();
+        var first = await generator.GenerateAsync(new ApiProjectGenerationRequest(sourcePath, CreatePhase7Configuration(), destination, "Phase7GeneratedApi"));
+        Assert.True(first.Succeeded, first.DetailedLog);
+        var developerDirectory = Path.Combine(destination, "DeveloperNotes", "Empty");
+        Directory.CreateDirectory(developerDirectory);
+
+        var second = await generator.GenerateAsync(new ApiProjectGenerationRequest(
+            sourcePath,
+            CreatePhase7Configuration(),
+            destination,
+            "Phase7GeneratedApi",
+            overwriteExistingGeneratedProject: true));
+
+        Assert.False(second.Succeeded);
+        Assert.Contains("ownership", second.DetailedLog, StringComparison.OrdinalIgnoreCase);
+        Assert.True(Directory.Exists(developerDirectory));
+    }
+
+    [Fact]
+    public async Task Generate_ReplacesUnmodifiedOwnedProjectRecoverably()
+    {
+        var sourcePath = WritePhase7Script("Phase7Api.ps1");
+        var destination = Path.Combine(_testDirectory, "OwnedReplacement");
+        var generator = new ApiProjectGenerator();
+        var first = await generator.GenerateAsync(new ApiProjectGenerationRequest(sourcePath, CreatePhase7Configuration(), destination, "Phase7GeneratedApi"));
+        Assert.True(first.Succeeded, first.DetailedLog);
+        var second = await generator.GenerateAsync(new ApiProjectGenerationRequest(sourcePath, CreatePhase7Configuration(), destination, "Phase7GeneratedApi", overwriteExistingGeneratedProject: true));
+        Assert.True(second.Succeeded, second.DetailedLog);
+        Assert.True(File.Exists(Path.Combine(destination, "Phase7GeneratedApi.csproj")));
+        Assert.False(Directory.EnumerateDirectories(Path.GetDirectoryName(destination)!, ".OwnedReplacement.ps7-backup-*").Any());
     }
 
     [Fact]
