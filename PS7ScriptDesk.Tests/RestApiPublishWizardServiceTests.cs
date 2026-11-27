@@ -148,13 +148,144 @@ public sealed class RestApiPublishWizardServiceTests
         var store = new InMemoryConfigurationStore(existing);
         var service = new RestApiPublishWizardService(store, localTestHostServiceFactory: () => throw new InvalidOperationException("Local host service should not be created."));
 
-        var configuration = service.LoadOrCreateConfiguration(
+        var loaded = service.LoadOrCreateConfiguration(
             new ApiPublishWizardRequest("Widget API", sourcePath, "function Get-Widget {}"),
             CreateMetadata());
 
+        var configuration = loaded.Configuration;
         Assert.Equal("RestApiWizardServiceTests.ps1", configuration.SourceScript);
         Assert.Single(configuration.Endpoints);
         Assert.Equal("/api/get-widget", configuration.Endpoints[0].Rest.RouteTemplate);
+        Assert.False(configuration.Endpoints[0].IsEnabled);
+        Assert.Contains(loaded.Reconciliation.Findings, finding => finding.Kind == ApiPublishReconciliationFindingKind.NewFunction);
+    }
+
+    [Fact]
+    public void LoadOrCreateConfiguration_WhenSavedConfigurationCannotBeRead_BlocksInsteadOfCreatingReplacement()
+    {
+        var sourcePath = Path.Combine(Path.GetTempPath(), "UnreadableApiConfiguration.ps1");
+        var service = new RestApiPublishWizardService(new ThrowingConfigurationStore());
+
+        var loaded = service.LoadOrCreateConfiguration(
+            new ApiPublishWizardRequest("Widget API", sourcePath, "function Get-Widget {}"),
+            CreateMetadata());
+
+        Assert.True(loaded.Reconciliation.IsBlocked);
+        Assert.Contains(loaded.Reconciliation.Findings, finding => finding.Kind == ApiPublishReconciliationFindingKind.ConfigurationLoadFailure);
+        Assert.Empty(loaded.Configuration.Endpoints);
+    }
+
+    [Fact]
+    public void EndpointWizardRow_RoundTripsSupportedEndpointSettings()
+    {
+        var endpoint = new ApiEndpointConfiguration
+        {
+            EndpointId = "custom-id",
+            IsEnabled = false,
+            Transport = ApiTransport.ServerSentEvents,
+            PowerShellFunctionName = "Get-Widget",
+            DisplayName = "Widget stream",
+            Description = "Custom endpoint description",
+            TimeoutOverride = TimeSpan.FromSeconds(17),
+            RequiresAuthentication = false,
+            AuthenticationRequirementIsDefaulted = true,
+            AuthorizationPolicy = "WidgetPolicy",
+            Response = new ApiResponseBehavior
+            {
+                ReturnBareJsonResult = false,
+                NoOutputBehavior = ApiNoOutputBehavior.NoContent,
+                IncludeWarningStreamInLocalTest = false,
+                TreatNonTerminatingErrorsAsFailure = false
+            },
+            Rest =
+            {
+                Method = ApiHttpMethod.Post,
+                RouteTemplate = "/widgets/custom",
+                OperationId = "customWidget",
+                ConsumesContentType = "application/custom+json",
+                ProducesContentType = "application/widget+json",
+                SuccessStatusCode = 202,
+                Tags = ["Custom", "Widgets"],
+                IncludeInOpenApi = false
+            }
+        };
+        endpoint.ParameterBindings.Add(new ApiParameterBindingConfiguration
+        {
+            PowerShellParameterName = "Name",
+            Source = ApiParameterSource.ServerDefined,
+            Name = "serverName",
+            Required = ApiRequiredBehavior.Optional,
+            ServerValue = new ApiServerDefinedValue { Kind = ApiServerDefinedValueKind.EnvironmentVariable, Value = "WIDGET_NAME" },
+            IsSecretSensitive = true,
+            ArrayBinding = ApiArrayBindingBehavior.JsonArray,
+            TypeName = "string"
+        });
+
+        var row = RestApiEndpointRow.FromConfiguration(endpoint, ApiTransport.Rest);
+        var roundTripped = row.ToConfiguration();
+
+        Assert.Equal(endpoint.EndpointId, roundTripped.EndpointId);
+        Assert.Equal(endpoint.DisplayName, roundTripped.DisplayName);
+        Assert.Equal(endpoint.Transport, roundTripped.Transport);
+        Assert.Equal(endpoint.TimeoutOverride, roundTripped.TimeoutOverride);
+        Assert.Equal(endpoint.AuthorizationPolicy, roundTripped.AuthorizationPolicy);
+        Assert.Equal(endpoint.Response.ReturnBareJsonResult, roundTripped.Response.ReturnBareJsonResult);
+        Assert.Equal(endpoint.Response.NoOutputBehavior, roundTripped.Response.NoOutputBehavior);
+        Assert.Equal(endpoint.Rest.ConsumesContentType, roundTripped.Rest.ConsumesContentType);
+        Assert.Equal(endpoint.Rest.ProducesContentType, roundTripped.Rest.ProducesContentType);
+        Assert.Equal(endpoint.Rest.SuccessStatusCode, roundTripped.Rest.SuccessStatusCode);
+        Assert.Equal(endpoint.Rest.Tags, roundTripped.Rest.Tags);
+        Assert.Equal(endpoint.Rest.IncludeInOpenApi, roundTripped.Rest.IncludeInOpenApi);
+        Assert.Equal(endpoint.ParameterBindings[0].ServerValue!.Value, roundTripped.ParameterBindings[0].ServerValue!.Value);
+        Assert.True(roundTripped.AuthenticationRequirementIsDefaulted);
+
+        row.RequiresAuthentication = false;
+        Assert.True(row.AuthenticationRequirementIsDefaulted);
+        row.MarkAuthenticationPreferenceExplicit();
+        Assert.False(row.AuthenticationRequirementIsDefaulted);
+    }
+
+    [Fact]
+    public void EndpointRow_PreservesInheritedTransportAndAppliesDeliberateOverride()
+    {
+        var endpoint = ApiEndpointConfiguration.CreateRest("Get-Inherited", ApiHttpMethod.Get, "/inherited");
+        endpoint.Transport = null;
+        var row = RestApiEndpointRow.FromConfiguration(endpoint, ApiTransport.Rest);
+        Assert.Null(row.ToConfiguration().Transport);
+
+        row.Transport = ApiTransport.WebSocket.ToString();
+        row.MarkTransportOverrideExplicit();
+        var changed = row.ToConfiguration();
+
+        Assert.Equal(ApiTransport.WebSocket, changed.Transport);
+        Assert.Equal(endpoint.Rest.RouteTemplate, changed.Rest.RouteTemplate);
+    }
+
+    [Fact]
+    public void EndpointAndBindingRowsOwnNestedMutableConfigurationValues()
+    {
+        var endpoint = ApiEndpointConfiguration.CreateRest("Get-Copy", ApiHttpMethod.Get, "/copy");
+        endpoint.Rest.Tags = ["original"];
+        var binding = new ApiParameterBindingConfiguration
+        {
+            PowerShellParameterName = "Token",
+            Source = ApiParameterSource.ServerDefined,
+            ServerValue = new ApiServerDefinedValue { Kind = ApiServerDefinedValueKind.Literal, Value = "original" }
+        };
+        endpoint.ParameterBindings.Add(binding);
+
+        var row = RestApiEndpointRow.FromConfiguration(endpoint, ApiTransport.Rest);
+        row.ParameterBindings[0].ServerValue!.Value = "row edit";
+        row.Tags[0] = "row edit";
+        var output = row.ToConfiguration();
+        output.ParameterBindings[0].ServerValue!.Value = "output edit";
+        var second = ApiPublishConfigurationCopy.Clone(new ApiPublishConfiguration { Endpoints = [output] });
+        second.Endpoints[0].ParameterBindings[0].ServerValue!.Value = "second edit";
+
+        Assert.Equal("original", endpoint.ParameterBindings[0].ServerValue!.Value);
+        Assert.Equal("output edit", output.ParameterBindings[0].ServerValue!.Value);
+        Assert.Equal("original", endpoint.Rest.Tags[0]);
+        Assert.NotSame(output.ParameterBindings, second.Endpoints[0].ParameterBindings);
     }
 
     [Theory]
@@ -546,6 +677,18 @@ public sealed class RestApiPublishWizardServiceTests
         }
 
         public int SaveCount { get; private set; }
+    }
+
+    private sealed class ThrowingConfigurationStore : IApiPublishConfigurationStore
+    {
+        public string? GetCompanionPath(string? sourceScriptPath) => sourceScriptPath is null ? null : Path.ChangeExtension(sourceScriptPath, ".ps7api.json");
+
+        public bool ConfigurationExists(string sourceScriptPath) => true;
+
+        public ApiPublishConfiguration Load(string sourceScriptPath) => throw new InvalidDataException("Controlled test failure.");
+
+        public void Save(string sourceScriptPath, ApiPublishConfiguration configuration)
+            => throw new InvalidOperationException("A load failure must not save a replacement configuration.");
     }
 
 }

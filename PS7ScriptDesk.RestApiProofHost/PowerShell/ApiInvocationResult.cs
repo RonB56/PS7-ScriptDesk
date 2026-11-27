@@ -9,6 +9,7 @@ public enum ApiInvocationStatus
     InvalidFunction,
     QueueFull,
     QueueWaitTimedOut,
+    RunspaceLeaseTimedOut,
     CallerCanceled,
     InvocationTimedOut,
     PowerShellTerminatingFailure,

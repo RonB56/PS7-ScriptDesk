@@ -57,7 +57,7 @@ public sealed class TerminalArchitecturePolicyTests
             "Controls",
             "TerminalControl.xaml.cs");
         var handlerStart = source.IndexOf("term.attachCustomKeyEventHandler", StringComparison.Ordinal);
-        var handlerEnd = source.IndexOf("// Do not turn right-click into paste", handlerStart, StringComparison.Ordinal);
+        var handlerEnd = source.IndexOf("var rightClickCopyRequestId", handlerStart, StringComparison.Ordinal);
         Assert.True(handlerStart >= 0 && handlerEnd > handlerStart);
         var handler = source[handlerStart..handlerEnd];
 
@@ -65,6 +65,38 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.Contains("return false;", handler, StringComparison.Ordinal);
         Assert.Contains("return true; // no selection → pass through as \\x03 (SIGINT)", handler, StringComparison.Ordinal);
         Assert.Contains("term.clearSelection()", handler, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TerminalRightClickClipboard_UsesScopedCopyOrSharedPasteAndWaitsForCopySuccess()
+    {
+        var source = ReadRepositoryFile(
+            "PS7ScriptDesk.Shell",
+            "Controls",
+            "TerminalControl.xaml.cs");
+        var contextMenuStart = source.IndexOf("terminalElement.addEventListener('contextmenu'", StringComparison.Ordinal);
+        var contextMenuEnd = source.IndexOf("var resizeFramePending", contextMenuStart, StringComparison.Ordinal);
+        Assert.True(contextMenuStart >= 0 && contextMenuEnd > contextMenuStart);
+        var contextMenu = source[contextMenuStart..contextMenuEnd];
+
+        Assert.Contains("if (e.shiftKey)", contextMenu, StringComparison.Ordinal);
+        Assert.Contains("term.modes.mouseTrackingMode !== 'none'", contextMenu, StringComparison.Ordinal);
+        Assert.Contains("e.preventDefault()", contextMenu, StringComparison.Ordinal);
+        Assert.Contains("if (term.hasSelection())", contextMenu, StringComparison.Ordinal);
+        Assert.Contains("type: 'copy', requestId: requestId, text: selectionText", contextMenu, StringComparison.Ordinal);
+        Assert.Contains("post({ type: 'paste_request' })", contextMenu, StringComparison.Ordinal);
+        Assert.DoesNotContain("pointerdown", contextMenu, StringComparison.Ordinal);
+        Assert.DoesNotContain("mouseup", contextMenu, StringComparison.Ordinal);
+
+        Assert.Contains("if (resultParts[1] === '1' && term.hasSelection()) term.clearSelection()", source, StringComparison.Ordinal);
+        Assert.Contains("PostToWebView(\"copy_result\", $\"{copyRequestId.Value}:{(copySucceeded ? 1 : 0)}\")", source, StringComparison.Ordinal);
+        Assert.Contains("System.Windows.Clipboard.SetText(copyText, System.Windows.TextDataFormat.UnicodeText)", source, StringComparison.Ordinal);
+        Assert.Contains("PostToWebView(\"paste\", pasteText)", source, StringComparison.Ordinal);
+        Assert.Contains("paste: function (d)", source, StringComparison.Ordinal);
+        Assert.Contains("term.paste(d)", source, StringComparison.Ordinal);
+        Assert.Contains("term.onData(function (data)", source, StringComparison.Ordinal);
+        Assert.Contains("case \"input\":", source, StringComparison.Ordinal);
+        Assert.Contains("inputHandlers.Invoke(data)", source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -180,7 +212,7 @@ public sealed class TerminalArchitecturePolicyTests
         Assert.Contains("command: 'leave_terminal'", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("binaryInputBridge: false", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("mousePasteGesture: 'shift-right-click'", terminalControlSource, StringComparison.Ordinal);
-        Assert.Contains("if (!e.shiftKey) return", terminalControlSource, StringComparison.Ordinal);
+        Assert.Contains("if (e.shiftKey)", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("Light: traditionalTerminalTheme", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("IseBlue: traditionalTerminalTheme", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("term.onData", terminalControlSource, StringComparison.Ordinal);

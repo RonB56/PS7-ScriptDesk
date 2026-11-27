@@ -110,6 +110,10 @@
                                     <ComboBox.ItemContainerStyle>
                                         <Style TargetType="{x:Type ComboBoxItem}" BasedOn="{StaticResource {x:Type ComboBoxItem}}">
                                             <Setter Property="IsEnabled" Value="{Binding IsSelectable}" />
+                                            <Setter Property="ToolTip" Value="{Binding HelpText}" />
+                                            <Setter Property="ToolTipService.ShowOnDisabled" Value="True" />
+                                            <Setter Property="ToolTipService.InitialShowDelay" Value="500" />
+                                            <Setter Property="ToolTipService.ShowDuration" Value="60000" />
                                         </Style>
                                     </ComboBox.ItemContainerStyle>
                                 </ComboBox>
@@ -131,15 +135,25 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                                 <RowDefinition Height="2*" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
-                            <TextBlock Text="{Binding EndpointSummaryText, RelativeSource={RelativeSource AncestorType=Window}}"
+                            <TextBlock x:Name="EndpointSummaryTextBlock" Text="{Binding EndpointSummaryText, RelativeSource={RelativeSource AncestorType=Window}}"
                                        Foreground="{DynamicResource Theme.Text.Secondary}"
                                        TextWrapping="Wrap" />
+                            <StackPanel x:Name="ReconciliationFindingsPanel" Grid.Row="1" Visibility="Collapsed" Margin="0,8,0,0">
+                                <TextBlock x:Name="ReconciliationFindingsText" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource Theme.Text.Secondary}"
+                                           AutomationProperties.Name="Configuration reconciliation findings" />
+                                <CheckBox x:Name="ReconciliationResolutionBox" Margin="0,6,0,0" Visibility="Collapsed"
+                                          Content="I reviewed these findings and accept the listed configuration updates and removals."
+                                          Checked="ConfigurationEdited" Unchecked="ConfigurationEdited"
+                                          help:ContextHelp.Key="ReconciliationResolutionBox" />
+                            </StackPanel>
                             <DataGrid x:Name="EndpointGrid"
-                                      Grid.Row="1"
+                                      Grid.Row="2"
                                       Margin="0,12,0,14"
                                       AutoGenerateColumns="False"
                                       CanUserAddRows="False"
@@ -147,6 +161,8 @@
                                       HeadersVisibility="Column"
                                       SelectionMode="Single"
                                       SelectionChanged="EndpointGrid_SelectionChanged"
+                                      BeginningEdit="EndpointGrid_BeginningEdit"
+                                      CellEditEnding="EndpointGrid_CellEditEnding"
                                       ItemsSource="{Binding Endpoints, RelativeSource={RelativeSource AncestorType=Window}}">
                                 <DataGrid.Columns>
                                     <DataGridCheckBoxColumn Header="Use" Binding="{Binding IsEnabled, UpdateSourceTrigger=PropertyChanged}" Width="52" />
@@ -158,15 +174,15 @@
                                     <DataGridTextColumn Header="Method" Binding="{Binding Method, UpdateSourceTrigger=PropertyChanged}" Width="95" />
                                     <DataGridTextColumn Header="Route" Binding="{Binding RouteTemplate, UpdateSourceTrigger=PropertyChanged}" Width="2*" />
                                     <DataGridTextColumn Header="Operation" Binding="{Binding OperationId, UpdateSourceTrigger=PropertyChanged}" Width="*" />
-                                    <DataGridCheckBoxColumn Header="Auth" Binding="{Binding RequiresAuthentication, UpdateSourceTrigger=PropertyChanged}" Width="60" />
+                                    <DataGridCheckBoxColumn Header="Auth" SortMemberPath="RequiresAuthentication" Binding="{Binding RequiresAuthentication, UpdateSourceTrigger=PropertyChanged}" Width="60" />
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock Grid.Row="2"
+                            <TextBlock x:Name="SelectedEndpointParameterTextBlock" Grid.Row="3"
                                        Text="{Binding SelectedEndpointParameterText, RelativeSource={RelativeSource AncestorType=Window}}"
                                        Foreground="{DynamicResource Theme.Text.Secondary}"
                                        TextWrapping="Wrap" />
                             <DataGrid x:Name="ParameterGrid"
-                                      Grid.Row="3"
+                                      Grid.Row="4"
                                       Margin="0,8,0,0"
                                       AutoGenerateColumns="False"
                                       CanUserAddRows="False"
@@ -228,7 +244,7 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <TextBox x:Name="OutputDirectoryBox" TextChanged="ConfigurationEdited" />
-                                    <Button Grid.Column="1" Content="Browse..." Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="BrowseOutputDirectory_Click" />
+                                    <Button Grid.Column="1" Content="Browse..." Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" x:Name="BrowseOutputDirectoryButton" Click="BrowseOutputDirectory_Click" />
                                 </Grid>
 
                                 <CheckBox x:Name="PreserveGeneratedProjectBox" Grid.Row="7" Grid.Column="1" Margin="12,0,0,0" Content="Keep generated project files after publishing" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited" />
@@ -359,7 +375,7 @@
                                     <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
                                 <TextBlock x:Name="LocalTestResponseSummaryText" AutomationProperties.LiveSetting="Polite" TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text.Secondary}" />
-                                <TabControl Grid.Row="1" Margin="0,8,0,8">
+                                <TabControl x:Name="LocalTestViews" Grid.Row="1" Margin="0,8,0,8">
                                     <TabItem Header="Response">
                                         <TextBox x:Name="LocalTestResponseBox" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="API test response" />
                                     </TabItem>
@@ -426,6 +442,13 @@
                                           HorizontalAlignment="Left"
                                           TextSearch.TextPath="DisplayName"
                                           SelectedValuePath="Architecture">
+                                    <ComboBox.ItemContainerStyle>
+                                        <Style TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}">
+                                            <Setter Property="ToolTip" Value="{Binding HelpText}" />
+                                            <Setter Property="ToolTipService.InitialShowDelay" Value="500" />
+                                            <Setter Property="ToolTipService.ShowDuration" Value="60000" />
+                                        </Style>
+                                    </ComboBox.ItemContainerStyle>
                                     <ComboBox.ItemTemplate>
                                         <DataTemplate>
                                             <TextBlock Text="{Binding DisplayName}" />

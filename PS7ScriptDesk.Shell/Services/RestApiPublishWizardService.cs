@@ -3,6 +3,7 @@ using System.Windows;
 using System.IO;
 using PS7ScriptDesk.Application.Diagnostics;
 using PS7ScriptDesk.Application.Interfaces;
+using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.PowerShell.Services;
 using PS7ScriptDesk.Shell.Dialogs;
@@ -40,17 +41,18 @@ public sealed class RestApiPublishWizardService : IRestApiPublishWizardService
             });
 
         var metadata = new PowerShellApiMetadataService().Analyze(request.ScriptContent, request.SourceScriptPath);
-        var configuration = LoadOrCreateConfiguration(request, metadata);
+        var loaded = LoadOrCreateConfiguration(request, metadata);
         var dialog = new RestApiPublishWizardWindow(
             request,
             metadata,
-            configuration,
+            loaded.Configuration,
             _configurationStore,
             _localTestHostServiceFactory(),
             _buildPublishServiceFactory())
         {
             Owner = System.Windows.Application.Current?.MainWindow
         };
+        dialog.SetReconciliation(loaded.Reconciliation);
 
         if (dialog.ShowDialog() != true || dialog.Configuration is null)
         {
@@ -74,33 +76,45 @@ public sealed class RestApiPublishWizardService : IRestApiPublishWizardService
         return dialog.Configuration;
     }
 
-    internal ApiPublishConfiguration LoadOrCreateConfiguration(ApiPublishWizardRequest request, ApiMetadataResult metadata)
+    internal (ApiPublishConfiguration Configuration, ApiPublishConfigurationReconciliation Reconciliation) LoadOrCreateConfiguration(ApiPublishWizardRequest request, ApiMetadataResult metadata)
     {
+        bool configurationExists;
         try
         {
-            if (_configurationStore.ConfigurationExists(request.SourceScriptPath))
-            {
-                var existing = _configurationStore.Load(request.SourceScriptPath);
-                if (string.IsNullOrWhiteSpace(existing.SourceScript))
-                {
-                    existing.SourceScript = Path.GetFileName(request.SourceScriptPath);
-                }
-
-                if (existing.Endpoints.Count == 0)
-                {
-                    existing.Endpoints = CreateDefaultEndpoints(metadata, existing.Api.DefaultRoutePrefix);
-                }
-
-                return existing;
-            }
+            configurationExists = _configurationStore.ConfigurationExists(request.SourceScriptPath);
         }
         catch (Exception ex)
         {
             DeveloperDiagnostics.LogException(
                 "RestApiPublish",
                 ex,
-                "Existing REST API companion configuration could not be loaded; creating a fresh wizard configuration.",
+                "REST API companion configuration availability could not be checked; refusing to create a replacement configuration.",
                 new Dictionary<string, object?> { ["sourceFileName"] = Path.GetFileName(request.SourceScriptPath) });
+            return CreateBlockedLoadResult(request, metadata);
+        }
+
+        if (configurationExists)
+        {
+            try
+            {
+                var existing = ApiPublishConfigurationCopy.Clone(_configurationStore.Load(request.SourceScriptPath));
+                if (string.IsNullOrWhiteSpace(existing.SourceScript))
+                {
+                    existing.SourceScript = Path.GetFileName(request.SourceScriptPath);
+                }
+
+                var existingConfigurationReconciliation = new ApiPublishConfigurationReconciler().Reconcile(existing, metadata);
+                return (existing, existingConfigurationReconciliation);
+            }
+            catch (Exception ex)
+            {
+                DeveloperDiagnostics.LogException(
+                    "RestApiPublish",
+                    ex,
+                    "Existing REST API companion configuration could not be loaded or reconciled; refusing to create a replacement configuration.",
+                    new Dictionary<string, object?> { ["sourceFileName"] = Path.GetFileName(request.SourceScriptPath) });
+                return CreateBlockedLoadResult(request, metadata);
+            }
         }
 
         var configuration = ApiPublishConfiguration.CreateDefaultForScriptPath(request.SourceScriptPath);
@@ -111,95 +125,41 @@ public sealed class RestApiPublishWizardService : IRestApiPublishWizardService
         configuration.Security.Mode = ApiSecurityMode.LocalTestNoAuthentication;
         configuration.Security.AllowNoAuthenticationForLocalTest = true;
         configuration.OpenApi.EnableSwaggerUiForLocalTest = true;
-        configuration.Endpoints = CreateDefaultEndpoints(metadata, configuration.Api.DefaultRoutePrefix);
-        return configuration;
+        var metadataIsComplete = ApiPublishConfigurationReconciler.IsMetadataComplete(metadata);
+        configuration.Endpoints = metadataIsComplete
+            ? CreateDefaultEndpoints(metadata, configuration.Api.DefaultRoutePrefix)
+            : [];
+        ApiAuthenticationIntentPolicy.Apply(configuration);
+        var findings = metadataIsComplete
+            ? Array.Empty<ApiPublishReconciliationFinding>()
+            : new[] { new ApiPublishReconciliationFinding(ApiPublishReconciliationFindingKind.InvalidMetadata,
+                metadata.ParsedSuccessfully
+                    ? "One or more PowerShell parameter declarations have incomplete static metadata. Review the affected declarations before saving, testing, building, or publishing this API."
+                    : "PowerShell metadata discovery failed. Fix the script before saving, testing, building, or publishing this API.") };
+        var reconciliation = new ApiPublishConfigurationReconciliation(configuration, findings, metadataIsComplete);
+        return (configuration, reconciliation);
+    }
+
+    private static (ApiPublishConfiguration Configuration, ApiPublishConfigurationReconciliation Reconciliation) CreateBlockedLoadResult(
+        ApiPublishWizardRequest request,
+        ApiMetadataResult metadata)
+    {
+        var configuration = ApiPublishConfiguration.CreateDefaultForScriptPath(request.SourceScriptPath);
+        var finding = new ApiPublishReconciliationFinding(
+            ApiPublishReconciliationFindingKind.ConfigurationLoadFailure,
+            "The saved API configuration could not be read or reconciled. The existing file was left untouched; fix or restore it before continuing.");
+        return (configuration, new ApiPublishConfigurationReconciliation(
+            configuration,
+            [finding],
+            ApiPublishConfigurationReconciler.IsMetadataComplete(metadata)));
     }
 
     internal static List<ApiEndpointConfiguration> CreateDefaultEndpoints(ApiMetadataResult metadata, string routePrefix)
     {
-        var prefix = NormalizeRoutePrefix(routePrefix);
         return metadata.Functions
             .Where(function => function.IsPublishable)
-            .Select(function =>
-            {
-                var route = $"{prefix}/{Slugify(function.Name)}";
-                return new ApiEndpointConfiguration
-                {
-                    EndpointId = ApiEndpointConfiguration.CreateStableEndpointId(function.Name),
-                    Transport = ApiTransport.Rest,
-                    PowerShellFunctionName = function.Name,
-                    DisplayName = function.Name,
-                    Description = function.CommentHelp?.Synopsis ?? string.Empty,
-                    RequiresAuthentication = false,
-                    Rest =
-                    {
-                        Method = ApiHttpMethod.Get,
-                        RouteTemplate = route,
-                        OperationId = ToOperationId(function.Name),
-                        Tags = ["PowerShell"],
-                        IncludeInOpenApi = true
-                    },
-                    ParameterBindings = function.Parameters
-                        .Select(parameter => new ApiParameterBindingConfiguration
-                        {
-                            PowerShellParameterName = parameter.Name,
-                            Source = ApiParameterSource.Query,
-                            Name = ToCamelCase(parameter.Name),
-                            Required = parameter.MandatoryState == ApiParameterMandatoryState.Mandatory
-                                ? ApiRequiredBehavior.Required
-                                : ApiRequiredBehavior.Optional,
-                            TypeName = parameter.DeclaredTypeName ?? (parameter.IsSwitch ? "bool" : "string"),
-                            ArrayBinding = parameter.IsArray ? ApiArrayBindingBehavior.RepeatedValues : ApiArrayBindingBehavior.RepeatedValues
-                        })
-                        .ToList()
-                };
-            })
+            .Select(function => ApiPublishEndpointDefaults.Create(function, routePrefix))
             .ToList();
     }
 
-    private static string NormalizeRoutePrefix(string routePrefix)
-    {
-        var value = string.IsNullOrWhiteSpace(routePrefix) ? "/api" : routePrefix.Trim();
-        value = "/" + value.Trim('/');
-        return value == "/" ? "/api" : value;
-    }
-
-    private static string Slugify(string value)
-    {
-        var cleaned = Regex.Replace(value.Trim(), @"[^A-Za-z0-9]+", "-").Trim('-').ToLowerInvariant();
-        return string.IsNullOrWhiteSpace(cleaned) ? "endpoint" : cleaned;
-    }
-
-    private static string ToOperationId(string value)
-    {
-        var parts = Regex.Split(value.Trim(), @"[^A-Za-z0-9]+")
-            .Where(part => !string.IsNullOrWhiteSpace(part))
-            .ToArray();
-        if (parts.Length == 0)
-        {
-            return "invokeEndpoint";
-        }
-
-        return char.ToLowerInvariant(parts[0][0]) + parts[0][1..] + string.Concat(parts.Skip(1).Select(ToPascalCase));
-    }
-
-    private static string ToCamelCase(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return "value";
-        }
-
-        return char.ToLowerInvariant(value[0]) + value[1..];
-    }
-
-    private static string ToPascalCase(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return string.Empty;
-        }
-
-        return char.ToUpperInvariant(value[0]) + value[1..];
-    }
 }

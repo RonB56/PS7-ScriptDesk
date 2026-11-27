@@ -110,8 +110,11 @@ public sealed class WholeApplicationVisualConsistencyTests
         var mainWindowCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
         var appCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "App.xaml.cs");
 
-        Assert.Contains("StoreUpdateStartupState.TryStartManualCheck", mainWindowCode, StringComparison.Ordinal);
-        Assert.Contains("ShowManualStoreUpdateWindow(completed.Service, completed.Result)", mainWindowCode, StringComparison.Ordinal);
+        var presenterCode = ReadRepositoryFile("PS7ScriptDesk.Shell", "Presentation", "StoreUpdatePresenter.cs");
+        Assert.Contains("await _storeUpdatePresenter.CheckForUpdatesAsync(sender)", mainWindowCode, StringComparison.Ordinal);
+        Assert.Contains("_storeUpdatePresenter.ShowStoreUpdateBanner(service, result)", mainWindowCode, StringComparison.Ordinal);
+        Assert.Contains("StoreUpdateStartupState.TryStartManualCheck", presenterCode, StringComparison.Ordinal);
+        Assert.Contains("ShowManualStoreUpdateWindow(completed.Service, completed.Result)", presenterCode, StringComparison.Ordinal);
 
         Assert.Contains("!storeUpdateCheckResult.ShouldShowAutomaticNotification", appCode, StringComparison.Ordinal);
         Assert.Contains("ShowStoreUpdateBanner(storeUpdateService, storeUpdateCheckResult)", appCode, StringComparison.Ordinal);

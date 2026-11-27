@@ -129,6 +129,8 @@ public sealed class ApiEndpointConfiguration
     public List<ApiParameterBindingConfiguration> ParameterBindings { get; set; } = new();
     public TimeSpan? TimeoutOverride { get; set; }
     public bool RequiresAuthentication { get; set; } = true;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? AuthenticationRequirementIsDefaulted { get; set; }
     public string AuthorizationPolicy { get; set; } = string.Empty;
     public ApiResponseBehavior Response { get; set; } = new();
 

@@ -19,7 +19,8 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
         int retainedStreamLimit,
         CancellationToken cancellationToken,
         Func<ApiInvocationStatus> cancellationStatusProvider,
-        PowerShellInvocationStreamSink? streamSink = null)
+        PowerShellInvocationStreamSink? streamSink = null,
+        int maximumOutputItems = int.MaxValue)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(poolLease);
@@ -30,9 +31,15 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
         using var input = new PSDataCollection<PSObject>();
         using var output = new PSDataCollection<PSObject>();
         using var invocationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var liveRecordSubscriptions = streamSink is null
-            ? Array.Empty<Action>()
-            : AttachLiveRecordHandlers(output, powerShell.Streams, streamSink, invocationCancellation);
+        var resourceLimitExceeded = 0;
+        var liveRecordSubscriptions = AttachLiveRecordHandlers(
+            output, powerShell.Streams, streamSink, Math.Max(1, maximumOutputItems),
+            Math.Max(1, retainedStreamLimit), invocationCancellation,
+            () => Interlocked.Exchange(ref resourceLimitExceeded, 1));
+        ApiInvocationStatus CurrentCancellationStatus()
+            => Volatile.Read(ref resourceLimitExceeded) == 1
+                ? ApiInvocationStatus.SerializationOutputLimitFailure
+                : cancellationStatusProvider();
         input.Complete();
         powerShell.RunspacePool = poolLease.Pool;
         powerShell.AddCommand(request.FunctionName, useLocalScope: true);
@@ -68,7 +75,7 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
 
         var cancellationSignal = new TaskCompletionSource<ApiInvocationStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var cancellationRegistration = invocationCancellation.Token.Register(() =>
-            cancellationSignal.TrySetResult(cancellationStatusProvider()));
+            cancellationSignal.TrySetResult(CurrentCancellationStatus()));
 
         try
         {
@@ -88,9 +95,7 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
 
                 return ApiInvocationResult.Failure(
                     status,
-                    status == ApiInvocationStatus.InvocationTimedOut
-                        ? "The PowerShell invocation timed out."
-                        : "The PowerShell invocation was canceled.",
+                    CancellationMessage(status),
                     CaptureStreams(powerShell.Streams, retainedStreamLimit),
                     stopwatch.Elapsed,
                     poolLease.Generation,
@@ -117,12 +122,10 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
         {
             stopwatch.Stop();
             poolLease.RequestPoolRebuild = true;
-            var status = cancellationStatusProvider();
+            var status = CurrentCancellationStatus();
             return ApiInvocationResult.Failure(
                 status,
-                status == ApiInvocationStatus.InvocationTimedOut
-                    ? "The PowerShell invocation timed out."
-                    : "The PowerShell invocation was canceled.",
+                CancellationMessage(status),
                 CaptureStreams(powerShell.Streams, retainedStreamLimit),
                 stopwatch.Elapsed,
                 poolLease.Generation,
@@ -155,16 +158,28 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
     private IReadOnlyList<Action> AttachLiveRecordHandlers(
         PSDataCollection<PSObject> output,
         PSDataStreams streams,
-        PowerShellInvocationStreamSink streamSink,
-        CancellationTokenSource invocationCancellation)
+        PowerShellInvocationStreamSink? streamSink,
+        int maximumOutputItems,
+        int maximumStreamRecords,
+        CancellationTokenSource invocationCancellation,
+        Action onResourceLimitExceeded)
     {
         var subscriptions = new List<Action>(6);
-
+        var outputCount = 0;
         EventHandler<DataAddedEventArgs> outputHandler = (_, args) =>
-            PublishLiveRecord(
-                PowerShellInvocationStreamRecord.ForOutput(output[args.Index]),
-                streamSink,
-                invocationCancellation);
+        {
+            if (Interlocked.Increment(ref outputCount) > maximumOutputItems)
+            {
+                onResourceLimitExceeded();
+                invocationCancellation.Cancel();
+                return;
+            }
+
+            if (streamSink is not null)
+            {
+                PublishLiveRecord(PowerShellInvocationStreamRecord.ForOutput(output[args.Index]), streamSink, invocationCancellation);
+            }
+        };
         output.DataAdded += outputHandler;
         subscriptions.Add(() => output.DataAdded -= outputHandler);
 
@@ -173,35 +188,45 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
             PowerShellInvocationStreamKind.Warning,
             record => record.Message,
             streamSink,
+            maximumStreamRecords,
             invocationCancellation,
+            onResourceLimitExceeded,
             subscriptions);
         AttachStreamHandler(
             streams.Verbose,
             PowerShellInvocationStreamKind.Verbose,
             record => record.Message,
             streamSink,
+            maximumStreamRecords,
             invocationCancellation,
+            onResourceLimitExceeded,
             subscriptions);
         AttachStreamHandler(
             streams.Debug,
             PowerShellInvocationStreamKind.Debug,
             record => record.Message,
             streamSink,
+            maximumStreamRecords,
             invocationCancellation,
+            onResourceLimitExceeded,
             subscriptions);
         AttachStreamHandler(
             streams.Information,
             PowerShellInvocationStreamKind.Information,
             record => record.MessageData?.ToString() ?? string.Empty,
             streamSink,
+            maximumStreamRecords,
             invocationCancellation,
+            onResourceLimitExceeded,
             subscriptions);
         AttachStreamHandler(
             streams.Error,
             PowerShellInvocationStreamKind.Error,
             FormatSafeErrorRecord,
             streamSink,
+            maximumStreamRecords,
             invocationCancellation,
+            onResourceLimitExceeded,
             subscriptions);
 
         _logger?.LogInformation("PowerShell live stream handlers attached.");
@@ -212,15 +237,30 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
         PSDataCollection<TRecord> stream,
         PowerShellInvocationStreamKind kind,
         Func<TRecord, string?> messageFactory,
-        PowerShellInvocationStreamSink streamSink,
+        PowerShellInvocationStreamSink? streamSink,
+        int maximumStreamRecords,
         CancellationTokenSource invocationCancellation,
+        Action onResourceLimitExceeded,
         List<Action> subscriptions)
     {
+        var recordCount = 0;
         EventHandler<DataAddedEventArgs> handler = (_, args) =>
-            PublishLiveRecord(
-                PowerShellInvocationStreamRecord.ForStream(kind, Cap(SanitizeStreamMessage(messageFactory(stream[args.Index])))),
-                streamSink,
-                invocationCancellation);
+        {
+            if (Interlocked.Increment(ref recordCount) > maximumStreamRecords)
+            {
+                onResourceLimitExceeded();
+                invocationCancellation.Cancel();
+                return;
+            }
+
+            if (streamSink is not null)
+            {
+                PublishLiveRecord(
+                    PowerShellInvocationStreamRecord.ForStream(kind, Cap(SanitizeStreamMessage(messageFactory(stream[args.Index])))),
+                    streamSink,
+                    invocationCancellation);
+            }
+        };
         stream.DataAdded += handler;
         subscriptions.Add(() => stream.DataAdded -= handler);
     }
@@ -349,6 +389,15 @@ public sealed class PowerShellFunctionInvoker : IPowerShellFunctionInvoker
             ApiInvocationStatus.PowerShellValidationFailure => "The PowerShell invocation parameters failed validation.",
             ApiInvocationStatus.PowerShellNonTerminatingError => "The configured PowerShell operation reported a non-terminating error.",
             _ => "The configured PowerShell operation could not be completed."
+        };
+
+    private static string CancellationMessage(ApiInvocationStatus status)
+        => status switch
+        {
+            ApiInvocationStatus.InvocationTimedOut => "The PowerShell invocation timed out.",
+            ApiInvocationStatus.SerializationOutputLimitFailure => "The PowerShell output or stream limit was exceeded.",
+            ApiInvocationStatus.HostUnavailable => "The PowerShell host is unavailable.",
+            _ => "The PowerShell invocation was canceled."
         };
 
     private static string SanitizeStreamMessage(string? value)

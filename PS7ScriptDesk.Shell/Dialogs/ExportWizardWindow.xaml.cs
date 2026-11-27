@@ -30,6 +30,7 @@ public partial class ExportWizardWindow : Window
             SelectPreset(_configuration.Preset);
             LoadConfiguration();
             DependencyList.ItemsSource = request.Dependencies.Select(dependency => $"{dependency.Kind}: {dependency.Value} — {dependency.Message}");
+            ContextualWizardHelp.Apply(this, ExportWizardHelpDefinitions.Exe);
         }
         finally
         {

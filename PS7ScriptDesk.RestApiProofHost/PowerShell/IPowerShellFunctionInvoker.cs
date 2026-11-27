@@ -8,5 +8,6 @@ public interface IPowerShellFunctionInvoker
         int retainedStreamLimit,
         CancellationToken cancellationToken,
         Func<ApiInvocationStatus> cancellationStatusProvider,
-        PowerShellInvocationStreamSink? streamSink = null);
+        PowerShellInvocationStreamSink? streamSink = null,
+        int maximumOutputItems = int.MaxValue);
 }

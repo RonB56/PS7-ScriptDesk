@@ -63,6 +63,20 @@ For behavior or state-machine changes, **consider** whether existing diagnostics
 
 Solution: `PS7ScriptDesk.slnx` (verify actual projects/configuration). Use the existing Windows/.NET 10/PowerShell 7 toolchain; do not alter machine-wide tooling or security settings without approval.
 
+### Mandatory Codex development verification
+
+When verification is required, first read `docs\LocalOnly_NotForGitHub\DevelopmentTools\README.md`. Use the installed authoritative runners in `C:\Users\rbarn\source\repos\PowerShellStudio\docs\LocalOnly_NotForGitHub\DevelopmentTools`: `Invoke-ScriptDeskBuild.ps1` for routine ScriptDesk compilation, `Invoke-ScriptDeskTests.ps1` for focused automated tests, and `Invoke-ScriptDeskMetrics.ps1` for source complexity measurements. Invoke them with `C:\Program Files\PowerShell\7\pwsh.exe`. Do not construct alternative routine build, test, or metric collectors.
+
+Examples (check `$LASTEXITCODE` after each command; stop on nonzero):
+
+```powershell
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File 'C:\Users\rbarn\source\repos\PowerShellStudio\docs\LocalOnly_NotForGitHub\DevelopmentTools\Invoke-ScriptDeskBuild.ps1' -Target Tests
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File 'C:\Users\rbarn\source\repos\PowerShellStudio\docs\LocalOnly_NotForGitHub\DevelopmentTools\Invoke-ScriptDeskTests.ps1' -Filter 'FullyQualifiedName~EditorColorUtilitiesTests'
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File 'C:\Users\rbarn\source\repos\PowerShellStudio\docs\LocalOnly_NotForGitHub\DevelopmentTools\Invoke-ScriptDeskMetrics.ps1' -RelativePath 'PS7ScriptDesk.Shell\MainWindow.xaml.cs'
+```
+
+Keep verification bounded and forward-only: do not automatically retry a failed command, silently switch execution environments, or request elevation merely to obtain a passing result. Record actual exit codes, test counts, and evidence paths. Do not load SDK Roslyn assemblies into PowerShell's default assembly load context. Preserve the installed collectors and their methodology; document any future approved version change. If a runner is missing or fails, report the exact blocker; do not recreate or modify it. Any exceptional verification outside these runners requires specific justification and authorization. Existing bounded-testing and failure-stop policies below still apply. These requirements govern Codex verification only, not the owner's normal Visual Studio workflow.
+
 1. Review changed files for accidental edits; build the smallest appropriate affected target. Use a solution-wide build only when warranted.
 2. Run focused tests relevant to the change. Prefer existing **bounded production-service acceptance runners** for console/session behavior; avoid unnecessary new harnesses and duplicate suites.
 3. For VSTest/testhost or MSBuild infrastructure stalls, record the exact failure, perform **at most one** targeted diagnostic if justified, then stop that route and report the blocker. Do not repeatedly retry, weaken tests, or present a workaround as a platform repair.

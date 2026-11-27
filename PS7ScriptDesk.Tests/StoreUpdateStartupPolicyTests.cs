@@ -77,8 +77,10 @@ public sealed class StoreUpdateStartupPolicyTests
         var windowRestartIndex = updateWindowSource.IndexOf("TryRestartAfterSuccessfulInstall", StringComparison.Ordinal);
         Assert.True(windowNoticeIndex >= 0 && windowNoticeIndex < windowRestartIndex);
 
-        Assert.Contains("StoreUpdateStartupState.TryStartManualCheck", mainWindowSource, StringComparison.Ordinal);
-        Assert.Contains("await checkTask!", mainWindowSource, StringComparison.Ordinal);
+        var presenterSource = ReadRepositoryFile("PS7ScriptDesk.Shell", "Presentation", "StoreUpdatePresenter.cs");
+        Assert.Contains("await _storeUpdatePresenter.CheckForUpdatesAsync(sender)", mainWindowSource, StringComparison.Ordinal);
+        Assert.Contains("StoreUpdateStartupState.TryStartManualCheck", presenterSource, StringComparison.Ordinal);
+        Assert.Contains("await checkTask!", presenterSource, StringComparison.Ordinal);
         Assert.Contains("Check for _Updates", mainWindowXaml, StringComparison.Ordinal);
     }
 

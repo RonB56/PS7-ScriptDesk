@@ -65,7 +65,7 @@
                         <TextBlock Text="Application name" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><TextBox x:Name="ApplicationNameBox" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited"/>
                         <TextBlock Grid.Row="1" Text="Application type" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><ComboBox x:Name="ApplicationTypeBox" Grid.Row="1" Grid.Column="1" Margin="12,0,0,10" SelectionChanged="ConfigurationEdited"><ComboBoxItem Tag="AutoDetect" Content="Auto Detect (Console if uncertain)"/><ComboBoxItem Tag="Console" Content="Console Application"/><ComboBoxItem Tag="WindowsGui" Content="Windows GUI Application"/></ComboBox>
                         <TextBlock Grid.Row="2" Text="Description" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><TextBox x:Name="DescriptionBox" Grid.Row="2" Grid.Column="1" Margin="12,0,0,10" TextChanged="ConfigurationEdited"/>
-                        <TextBlock Grid.Row="3" Text="Icon (.ico)" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><Grid Grid.Row="3" Grid.Column="1" Margin="12,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox x:Name="IconBox" TextChanged="ConfigurationEdited"/><Button Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="BrowseIcon_Click"/></Grid>
+                        <TextBlock Grid.Row="3" Text="Icon (.ico)" VerticalAlignment="Center" Style="{StaticResource CaptionTextStyle}"/><Grid Grid.Row="3" Grid.Column="1" Margin="12,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox x:Name="IconBox" TextChanged="ConfigurationEdited"/><Button Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" x:Name="BrowseIconButton" Click="BrowseIcon_Click"/></Grid>
                         <CheckBox x:Name="AdministratorBox" Grid.Row="4" Grid.Column="1" Content="Require Administrator (shows UAC prompt; changes drag-and-drop and file-access behavior)" Checked="ConfigurationEdited" Unchecked="ConfigurationEdited"/>
                     </Grid>
                 </TabItem>
@@ -104,7 +104,7 @@
                 <TabItem Header="Review" Style="{StaticResource WizardStepTabItemStyle}" ToolTip="Step 6: Confirm output and export">
                     <ScrollViewer Margin="0,18,0,0" VerticalScrollBarVisibility="Auto"><StackPanel>
                         <TextBlock Text="Output executable" Style="{StaticResource SectionHeaderTextStyle}"/>
-                        <Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox x:Name="OutputBox" TextChanged="ConfigurationEdited"/><Button Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="BrowseOutput_Click"/></Grid>
+                        <Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox x:Name="OutputBox" TextChanged="ConfigurationEdited"/><Button Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Style="{StaticResource WizardSecondaryButtonStyle}" x:Name="BrowseOutputButton" Click="BrowseOutput_Click"/></Grid>
                         <TextBlock Text="Review your configuration" Margin="0,18,0,0" Style="{StaticResource SectionHeaderTextStyle}"/>
                         <Border Margin="0,8,0,0" Style="{StaticResource WizardSectionCardStyle}"><StackPanel><TextBlock Text="Application" Style="{StaticResource CaptionTextStyle}"/><TextBlock x:Name="ReviewApplicationText" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
                         <Border Style="{StaticResource WizardSectionCardStyle}"><StackPanel><TextBlock Text="Platform and runtime" Style="{StaticResource CaptionTextStyle}"/><TextBlock x:Name="ReviewPlatformText" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
@@ -121,7 +121,7 @@
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="BackButton" Content="Back" Margin="0,0,8,0" Style="{StaticResource WizardSecondaryButtonStyle}" Click="BackButton_Click" IsEnabled="False" />
                 <Button x:Name="NextButton" Content="Next" Margin="0,0,8,0" Style="{StaticResource WizardPrimaryButtonStyle}" Click="NextButton_Click" IsDefault="True" />
-                <Button Content="Cancel" Style="{StaticResource WizardTertiaryButtonStyle}" IsCancel="True" Click="CancelButton_Click" />
+                <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource WizardTertiaryButtonStyle}" IsCancel="True" Click="CancelButton_Click" />
             </StackPanel>
         </Border>
     </Grid>

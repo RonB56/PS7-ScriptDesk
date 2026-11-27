@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -39,6 +39,7 @@
     <EmbeddedResource Include="..\PS7ScriptDesk.Application\Interfaces\IApiMetadataService.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Application.Interfaces.IApiMetadataService.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.Application\Interfaces\IApiPublishConfigurationValidator.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Application.Interfaces.IApiPublishConfigurationValidator.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.Application\Services\ApiPublishConfigurationValidator.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Application.Services.ApiPublishConfigurationValidator.cs" />
+    <EmbeddedResource Include="..\PS7ScriptDesk.Application\Services\ApiParameterValueConverter.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.Application.Services.ApiParameterValueConverter.cs" />
     <EmbeddedResource Include="Services\PowerShellApiMetadataService.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.PowerShell.Services.PowerShellApiMetadataService.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\Api\ApiEndpointParameterBinder.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiEndpointParameterBinder.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\Api\ApiEndpointDiscoveryMapper.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiEndpointDiscoveryMapper.cs" />
@@ -65,6 +66,7 @@
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\ServerSentEvents\SseEndpointMapper.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.ServerSentEvents.SseEndpointMapper.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\WebSockets\WebSocketEndpointMapper.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.WebSockets.WebSocketEndpointMapper.cs" />
     <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\WebSockets\WebSocketProtocol.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.WebSockets.WebSocketProtocol.cs" />
+    <EmbeddedResource Include="..\PS7ScriptDesk.RestApiProofHost\Hosting\RestApiProofHostFactory.cs" LogicalName="PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Hosting.RestApiProofHostFactory.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -72,3 +74,4 @@
   </ItemGroup>
 
 </Project>
+

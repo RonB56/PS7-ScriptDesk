@@ -37,6 +37,7 @@ public sealed class PowerShellApiMetadataService : IApiMetadataService
 
         var warnings = new List<ApiMetadataWarning>();
         warnings.AddRange(FindUnsupportedScriptWarnings(ast));
+        warnings.AddRange(FindUnsupportedInitializationWarnings(ast));
 
         var functions = ast
             .FindAll(static node => node is FunctionDefinitionAst, searchNestedScriptBlocks: true)
@@ -61,9 +62,11 @@ public sealed class PowerShellApiMetadataService : IApiMetadataService
         var isTopLevel = parentFunction is null;
         var constructKind = function.IsFilter ? ApiFunctionConstructKind.Filter : ApiFunctionConstructKind.Function;
         var paramBlock = function.Body?.ParamBlock;
-        var parameters = paramBlock?.Parameters
-            .Select(BuildParameterMetadata)
-            .ToList() ?? new List<ApiParameterMetadata>();
+        var declaredParameters = function.Parameters is { Count: > 0 }
+            ? function.Parameters
+            : paramBlock?.Parameters;
+        var parameters = declaredParameters?.Select(BuildParameterMetadata).ToList()
+                         ?? new List<ApiParameterMetadata>();
         var isAdvanced = HasAttribute(paramBlock?.Attributes, "CmdletBinding");
         var outputTypes = ExtractOutputTypes(paramBlock?.Attributes, warnings);
 
@@ -499,6 +502,42 @@ public sealed class PowerShellApiMetadataService : IApiMetadataService
                     "Runtime function creation is not treated as a statically declared publishable function.",
                     ToExtent(command.Extent)));
             }
+        }
+
+        return warnings;
+    }
+
+    private static IReadOnlyList<ApiMetadataWarning> FindUnsupportedInitializationWarnings(Ast ast)
+    {
+        var warnings = new List<ApiMetadataWarning>();
+        if (ast is not ScriptBlockAst scriptBlock)
+        {
+            return warnings;
+        }
+
+        if (scriptBlock.ParamBlock is not null)
+        {
+            warnings.Add(new ApiMetadataWarning(
+                "UnsupportedScriptInitialization",
+                "Script-level parameters are not part of the API endpoint contract. Declare parameters on endpoint functions instead.",
+                ToExtent(scriptBlock.ParamBlock.Extent)));
+        }
+
+        IEnumerable<StatementAst> statements = scriptBlock.EndBlock?.Statements ?? Enumerable.Empty<StatementAst>();
+        foreach (var statement in statements.Where(statement => statement is not FunctionDefinitionAst))
+        {
+            warnings.Add(new ApiMetadataWarning(
+                "UnsupportedScriptInitialization",
+                "Top-level executable statements are not run by API metadata discovery or the API host. Move initialization into a supported module or function before generating or launching this API.",
+                ToExtent(statement.Extent)));
+        }
+
+        foreach (var usingStatement in scriptBlock.UsingStatements)
+        {
+            warnings.Add(new ApiMetadataWarning(
+                "UnsupportedScriptInitialization",
+                "Script-level using statements are not applied by the API host. Resolve the dependency in a supported deployment before generating or launching this API.",
+                ToExtent(usingStatement.Extent)));
         }
 
         return warnings;

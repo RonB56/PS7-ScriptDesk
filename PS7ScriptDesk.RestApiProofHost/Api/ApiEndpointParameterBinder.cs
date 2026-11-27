@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Management.Automation;
 using System.Text.Json;
 using PS7ScriptDesk.Domain.Models;
+using PS7ScriptDesk.Application.Services;
 
 namespace PS7ScriptDesk.RestApiProofHost.Api;
 
@@ -59,19 +60,9 @@ public sealed class ApiEndpointParameterBinder
                     $"Required parameter '{binding.Name}' is missing.");
             }
 
-            if (IsSwitchType(binding.TypeName) && IsDisabledSwitchValue(converted.Value))
-            {
-                if (IsRequired(binding))
-                {
-                    return ApiParameterBindingResult.Invalid(
-                        "MissingParameter",
-                        $"Required parameter '{binding.Name}' is missing.");
-                }
-
-                continue;
-            }
-
-            values[binding.PowerShellParameterName] = converted.Value;
+            values[binding.PowerShellParameterName] = IsSwitchType(binding.TypeName) && converted.Value is bool switchValue
+                ? new SwitchParameter(switchValue)
+                : converted.Value;
         }
 
         return ApiParameterBindingResult.Valid(values);
@@ -111,183 +102,6 @@ public sealed class ApiEndpointParameterBinder
     private static bool IsMissingRequiredValue(object? value)
         => value is null || value is string text && string.IsNullOrWhiteSpace(text);
 
-    private static bool IsDisabledSwitchValue(object? value)
-        => value is SwitchParameter switchParameter && !switchParameter.IsPresent;
-
-    private static bool IsSwitchType(string typeName)
-        => string.Equals(typeName, "switch", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(typeName, "System.Management.Automation.SwitchParameter", StringComparison.OrdinalIgnoreCase);
-}
-
-public sealed class ApiParameterValueConverter
-{
-    public static ApiParameterValueConverter Shared { get; } = new();
-
-    public ApiConvertedParameterValue Convert(object? value, string? typeName)
-    {
-        var normalizedType = string.IsNullOrWhiteSpace(typeName) ? "string" : typeName.Trim();
-        return value switch
-        {
-            JsonElement element => ConvertJsonElement(element, normalizedType),
-            _ => ConvertString(System.Convert.ToString(value, CultureInfo.InvariantCulture), normalizedType)
-        };
-    }
-
-    private static ApiConvertedParameterValue ConvertJsonElement(JsonElement element, string typeName)
-    {
-        if (element.ValueKind == JsonValueKind.Null)
-        {
-            return ApiConvertedParameterValue.Valid(null);
-        }
-
-        if (IsStringType(typeName))
-        {
-            return element.ValueKind == JsonValueKind.String
-                ? ApiConvertedParameterValue.Valid(element.GetString())
-                : ApiConvertedParameterValue.Valid(element.ToString());
-        }
-
-        if (IsIntType(typeName))
-        {
-            if (element.ValueKind == JsonValueKind.String)
-            {
-                return int.TryParse(element.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
-                    ? ApiConvertedParameterValue.Valid(parsed)
-                    : ApiConvertedParameterValue.Invalid("Expected an integer value.");
-            }
-
-            return element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out var value)
-                ? ApiConvertedParameterValue.Valid(value)
-                : ApiConvertedParameterValue.Invalid("Expected an integer value.");
-        }
-
-        if (IsLongType(typeName))
-        {
-            if (element.ValueKind == JsonValueKind.String)
-            {
-                return long.TryParse(element.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
-                    ? ApiConvertedParameterValue.Valid(parsed)
-                    : ApiConvertedParameterValue.Invalid("Expected a long integer value.");
-            }
-
-            return element.ValueKind == JsonValueKind.Number && element.TryGetInt64(out var value)
-                ? ApiConvertedParameterValue.Valid(value)
-                : ApiConvertedParameterValue.Invalid("Expected a long integer value.");
-        }
-
-        if (IsDoubleType(typeName))
-        {
-            if (element.ValueKind == JsonValueKind.String)
-            {
-                return double.TryParse(element.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
-                    ? ApiConvertedParameterValue.Valid(parsed)
-                    : ApiConvertedParameterValue.Invalid("Expected a numeric value.");
-            }
-
-            return element.ValueKind == JsonValueKind.Number && element.TryGetDouble(out var value)
-                ? ApiConvertedParameterValue.Valid(value)
-                : ApiConvertedParameterValue.Invalid("Expected a numeric value.");
-        }
-
-        if (IsBoolType(typeName))
-        {
-            return element.ValueKind is JsonValueKind.True or JsonValueKind.False
-                ? ApiConvertedParameterValue.Valid(element.GetBoolean())
-                : ApiConvertedParameterValue.Invalid("Expected a boolean value.");
-        }
-
-        if (IsSwitchType(typeName))
-        {
-            if (element.ValueKind is JsonValueKind.True or JsonValueKind.False)
-            {
-                return ApiConvertedParameterValue.Valid(new SwitchParameter(element.GetBoolean()));
-            }
-
-            if (element.ValueKind == JsonValueKind.String &&
-                bool.TryParse(element.GetString(), out var parsed))
-            {
-                return ApiConvertedParameterValue.Valid(new SwitchParameter(parsed));
-            }
-
-            return ApiConvertedParameterValue.Invalid("Expected a boolean switch value.");
-        }
-
-        return ApiConvertedParameterValue.Valid(element.ToString());
-    }
-
-    private static ApiConvertedParameterValue ConvertString(string? value, string typeName)
-    {
-        if (value is null)
-        {
-            return ApiConvertedParameterValue.Valid(null);
-        }
-
-        if (IsStringType(typeName))
-        {
-            return ApiConvertedParameterValue.Valid(value);
-        }
-
-        if (IsIntType(typeName))
-        {
-            return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
-                ? ApiConvertedParameterValue.Valid(parsed)
-                : ApiConvertedParameterValue.Invalid("Expected an integer value.");
-        }
-
-        if (IsLongType(typeName))
-        {
-            return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
-                ? ApiConvertedParameterValue.Valid(parsed)
-                : ApiConvertedParameterValue.Invalid("Expected a long integer value.");
-        }
-
-        if (IsDoubleType(typeName))
-        {
-            return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
-                ? ApiConvertedParameterValue.Valid(parsed)
-                : ApiConvertedParameterValue.Invalid("Expected a numeric value.");
-        }
-
-        if (IsBoolType(typeName))
-        {
-            return bool.TryParse(value, out var parsed)
-                ? ApiConvertedParameterValue.Valid(parsed)
-                : ApiConvertedParameterValue.Invalid("Expected a boolean value.");
-        }
-
-        if (IsSwitchType(typeName))
-        {
-            return bool.TryParse(value, out var parsed)
-                ? ApiConvertedParameterValue.Valid(new SwitchParameter(parsed))
-                : ApiConvertedParameterValue.Invalid("Expected a boolean switch value.");
-        }
-
-        return ApiConvertedParameterValue.Valid(value);
-    }
-
-    private static bool IsStringType(string typeName)
-        => string.Equals(typeName, "string", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(typeName, "System.String", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsIntType(string typeName)
-        => string.Equals(typeName, "int", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(typeName, "int32", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(typeName, "System.Int32", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsLongType(string typeName)
-        => string.Equals(typeName, "long", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(typeName, "int64", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(typeName, "System.Int64", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsDoubleType(string typeName)
-        => string.Equals(typeName, "double", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(typeName, "System.Double", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsBoolType(string typeName)
-        => string.Equals(typeName, "bool", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(typeName, "boolean", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(typeName, "System.Boolean", StringComparison.OrdinalIgnoreCase);
-
     private static bool IsSwitchType(string typeName)
         => string.Equals(typeName, "switch", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(typeName, "System.Management.Automation.SwitchParameter", StringComparison.OrdinalIgnoreCase);
@@ -297,12 +111,6 @@ public sealed record ApiParameterBindingValue(bool IsPresent, object? Value)
 {
     public static ApiParameterBindingValue Missing { get; } = new(false, null);
     public static ApiParameterBindingValue Present(object? value) => new(true, value);
-}
-
-public sealed record ApiConvertedParameterValue(bool IsValid, object? Value, string? ErrorMessage)
-{
-    public static ApiConvertedParameterValue Valid(object? value) => new(true, value, null);
-    public static ApiConvertedParameterValue Invalid(string message) => new(false, null, message);
 }
 
 public sealed record ApiParameterBindingResult(
@@ -317,3 +125,4 @@ public sealed record ApiParameterBindingResult(
     public static ApiParameterBindingResult Invalid(string errorCode, string errorMessage)
         => new(false, new Dictionary<string, object?>(), errorCode, errorMessage);
 }
+

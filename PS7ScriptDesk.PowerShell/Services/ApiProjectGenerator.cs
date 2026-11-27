@@ -35,6 +35,7 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
         new("PS7ScriptDesk.ApiProjectRuntime.Application.Interfaces.IApiMetadataService.cs", "Runtime/PS7ScriptDesk.Application/Interfaces/IApiMetadataService.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.Application.Interfaces.IApiPublishConfigurationValidator.cs", "Runtime/PS7ScriptDesk.Application/Interfaces/IApiPublishConfigurationValidator.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.Application.Services.ApiPublishConfigurationValidator.cs", "Runtime/PS7ScriptDesk.Application/Services/ApiPublishConfigurationValidator.cs"),
+        new("PS7ScriptDesk.ApiProjectRuntime.Application.Services.ApiParameterValueConverter.cs", "Runtime/PS7ScriptDesk.Application/Services/ApiParameterValueConverter.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.PowerShell.Services.PowerShellApiMetadataService.cs", "Runtime/PS7ScriptDesk.PowerShell/Services/PowerShellApiMetadataService.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiEndpointParameterBinder.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/Api/ApiEndpointParameterBinder.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Api.ApiEndpointDiscoveryMapper.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/Api/ApiEndpointDiscoveryMapper.cs"),
@@ -60,8 +61,12 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.PowerShell.RunspacePoolManager.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/PowerShell/RunspacePoolManager.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.ServerSentEvents.SseEndpointMapper.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/ServerSentEvents/SseEndpointMapper.cs"),
         new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.WebSockets.WebSocketEndpointMapper.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/WebSockets/WebSocketEndpointMapper.cs"),
-        new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.WebSockets.WebSocketProtocol.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/WebSockets/WebSocketProtocol.cs")
+        new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.WebSockets.WebSocketProtocol.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/WebSockets/WebSocketProtocol.cs"),
+        new("PS7ScriptDesk.ApiProjectRuntime.RestApiProofHost.Hosting.RestApiProofHostFactory.cs", "Runtime/PS7ScriptDesk.RestApiProofHost/Hosting/RestApiProofHostFactory.cs")
     ];
+
+    internal static IReadOnlyList<string> RequiredRuntimeResourceNames
+        => RuntimeSourceFiles.Select(file => file.ResourceName).ToArray();
 
     public Task<ApiProjectGenerationResult> GenerateAsync(
         ApiProjectGenerationRequest request,
@@ -101,6 +106,12 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
                 validation.AddError("API200", "The source script contains parse errors and cannot be generated as an API project.", "$.sourceScript");
             }
 
+            foreach (var initializationWarning in metadata.Warnings.Where(warning =>
+                         string.Equals(warning.Code, "UnsupportedScriptInitialization", StringComparison.Ordinal)))
+            {
+                validation.AddError("API201", initializationWarning.Message, "$.sourceScript");
+            }
+
             if (!validation.IsValid)
             {
                 DeveloperDiagnostics.LogWarning(
@@ -130,6 +141,12 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
                     destination);
             }
 
+            // Resolve the complete production inventory before staging or replacing any project artifact.
+            var runtimeSources = RuntimeSourceFiles.ToDictionary(
+                file => file.ResourceName,
+                file => ReadEmbeddedRuntimeSource(file.ResourceName),
+                StringComparer.Ordinal);
+
             Directory.CreateDirectory(parent);
             var stagingDirectory = RecoverableArtifactTransaction.CreateSiblingPath(destination, "staging");
             try
@@ -142,6 +159,7 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
                     scriptFileName,
                     request.SourceScriptPath,
                     request.Configuration,
+                    runtimeSources,
                     cancellationToken).ConfigureAwait(false);
 
                 PreserveOwnedBuildOutputs(destination, stagingDirectory);
@@ -229,6 +247,7 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
         string scriptFileName,
         string sourceScriptPath,
         ApiPublishConfiguration configuration,
+        IReadOnlyDictionary<string, string> runtimeSources,
         CancellationToken cancellationToken)
     {
         WriteUtf8(Path.Combine(projectDirectory, MarkerFileName), "PS7 ScriptDesk generated API project\n");
@@ -244,7 +263,7 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
             cancellationToken.ThrowIfCancellationRequested();
             WriteUtf8(
                 Path.Combine(projectDirectory, sourceFile.OutputPath.Replace('/', Path.DirectorySeparatorChar)),
-                ReadEmbeddedRuntimeSource(sourceFile.ResourceName));
+                runtimeSources[sourceFile.ResourceName]);
         }
 
         await Task.CompletedTask;
@@ -479,7 +498,9 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
     {
         var assembly = typeof(ApiProjectGenerator).Assembly;
         using var stream = assembly.GetManifestResourceStream(resourceName)
-                           ?? throw new InvalidOperationException($"The API runtime template resource '{resourceName}' was not found.");
+                           ?? throw new InvalidOperationException(
+                               $"The API runtime template resource '{resourceName}' was not found in assembly '{assembly.FullName}' ({assembly.Location}). " +
+                               $"Available API runtime resources: {string.Join(", ", assembly.GetManifestResourceNames().Where(name => name.StartsWith("PS7ScriptDesk.ApiProjectRuntime.", StringComparison.Ordinal)).OrderBy(name => name, StringComparer.Ordinal))}.");
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
         return reader.ReadToEnd();
     }
@@ -620,97 +641,25 @@ public sealed class ApiProjectGenerator : IApiProjectGenerator
 
     private static string BuildProgramSource()
         => """
-using System.Text.Json;
-using PS7ScriptDesk.Application.Services;
-using PS7ScriptDesk.Domain.Models;
-using PS7ScriptDesk.PowerShell.Services;
-using PS7ScriptDesk.RestApiProofHost.Api;
-using PS7ScriptDesk.RestApiProofHost.PowerShell;
-using PS7ScriptDesk.RestApiProofHost.ServerSentEvents;
-using PS7ScriptDesk.RestApiProofHost.WebSockets;
+using PS7ScriptDesk.RestApiProofHost.Hosting;
 
-var builder = WebApplication.CreateBuilder(args);
-var contentRoot = builder.Environment.ContentRootPath;
-var configuration = LoadConfiguration(contentRoot);
-var scriptPath = ResolveScriptPath(contentRoot, configuration);
-var metadata = LoadStaticMetadata(scriptPath);
-var validation = new ApiPublishConfigurationValidator().Validate(configuration, metadata);
-if (!validation.IsValid)
+var url = "http://127.0.0.1:5274";
+for (var index = 0; index < args.Length; index++)
 {
-    throw new InvalidOperationException("Generated API configuration is invalid: " + string.Join("; ", validation.Errors.Select(error => error.Code)));
+    if (string.Equals(args[index], "--url", StringComparison.Ordinal) && index + 1 < args.Length)
+    {
+        url = args[++index];
+    }
 }
 
-builder.WebHost.ConfigureKestrel(options =>
+await using var host = await RestApiProofHostFactory.StartAsync(new RestApiProofHostOptions
 {
-    options.Limits.MaxRequestBodySize = Math.Max(1, configuration.Runtime.RequestBodySizeLimitBytes);
+    Url = url,
+    ContentRootPath = AppContext.BaseDirectory,
+    ConfigurationRelativePath = Path.Combine("Config", "api.ps7api.json")
 });
-
-builder.Services.AddSingleton(configuration);
-builder.Services.AddSingleton(metadata);
-builder.Services.AddSingleton<ApiKeyAuthenticationService>();
-builder.Services.AddSingleton(ApiEndpointParameterBinder.Shared);
-builder.Services.AddSingleton(RestParameterBinder.Shared);
-builder.Services.AddSingleton<OpenApiDocumentBuilder>();
-builder.Services.AddSingleton(PowerShellResultNormalizer.Shared);
-builder.Services.AddSingleton<RunspacePoolManager>();
-builder.Services.AddSingleton<IPowerShellFunctionInvoker, PowerShellFunctionInvoker>();
-builder.Services.AddSingleton<PowerShellInvocationCoordinator>();
-
-var app = builder.Build();
-app.UseWebSockets();
-app.MapGet("/healthz", () => Results.Json(new { status = "Ready" }, ApiJsonOptions.Shared));
-ApiEndpointDiscoveryMapper.MapEndpointDiscovery(app);
-OpenApiEndpointMapper.MapOpenApiEndpoints(app);
-RestEndpointMapper.MapConfiguredEndpoints(app);
-SseEndpointMapper.MapSseEndpoints(app);
-WebSocketEndpointMapper.MapWebSocketEndpoints(app);
-
-var coordinator = app.Services.GetRequiredService<PowerShellInvocationCoordinator>();
-await coordinator.InitializeAsync(
-    scriptPath,
-    configuration.Endpoints.Where(endpoint => endpoint.IsEnabled).Select(endpoint => endpoint.PowerShellFunctionName),
-    configuration.Runtime,
-    app.Lifetime.ApplicationStopping);
-
-await app.RunAsync();
-
-static ApiPublishConfiguration LoadConfiguration(string contentRoot)
-{
-    var configurationPath = Path.Combine(contentRoot, "Config", "api.ps7api.json");
-    using var stream = File.OpenRead(configurationPath);
-    return JsonSerializer.Deserialize<ApiPublishConfiguration>(stream, ApiJsonOptions.Shared)
-           ?? throw new InvalidDataException("The generated API configuration is empty.");
-}
-
-static string ResolveScriptPath(string contentRoot, ApiPublishConfiguration configuration)
-{
-    var scriptFileName = Path.GetFileName(configuration.SourceScript);
-    if (string.IsNullOrWhiteSpace(scriptFileName))
-    {
-        throw new InvalidDataException("The generated API configuration does not identify a script file.");
-    }
-
-    var scriptPath = Path.GetFullPath(Path.Combine(contentRoot, "Scripts", scriptFileName));
-    var scriptsRoot = Path.GetFullPath(Path.Combine(contentRoot, "Scripts"));
-    if (!scriptPath.StartsWith(scriptsRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) &&
-        !string.Equals(scriptPath, scriptsRoot, StringComparison.OrdinalIgnoreCase))
-    {
-        throw new InvalidDataException("The generated API script path is invalid.");
-    }
-
-    if (!File.Exists(scriptPath))
-    {
-        throw new FileNotFoundException("The generated API script file was not found.");
-    }
-
-    return scriptPath;
-}
-
-static ApiMetadataResult LoadStaticMetadata(string scriptPath)
-{
-    var source = File.ReadAllText(scriptPath);
-    return new PowerShellApiMetadataService().Analyze(source);
-}
+Console.WriteLine($"PS7 ScriptDesk API listening on {host.BaseAddress}");
+await host.WaitForShutdownAsync();
 """;
 
     private static string BuildAppSettings()
@@ -784,3 +733,4 @@ static ApiMetadataResult LoadStaticMetadata(string scriptPath)
 
     private sealed record RuntimeSourceFile(string ResourceName, string OutputPath);
 }
+

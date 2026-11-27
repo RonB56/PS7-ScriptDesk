@@ -59,6 +59,26 @@ function Get-Test {
     }
 
     [Fact]
+    public void InlineSignatureParameters_PreserveTypesDefaultsAndValidation()
+    {
+        var function = SingleFunction("function Get-Greeting([ValidateSet('Hi','Hello')][string]$Name = 'Hi', [switch]$Loud) { \"Hello $Name\" }");
+
+        AssertParameter(function, "Name", "string", isSwitch: false);
+        AssertParameter(function, "Loud", "switch", isSwitch: true);
+        Assert.Equal("'Hi'", function.Parameters.Single(parameter => parameter.Name == "Name").DefaultValueExpression);
+        Assert.Contains(function.Parameters.Single(parameter => parameter.Name == "Name").ValidationAttributes,
+            attribute => attribute.Name == "ValidateSet");
+    }
+
+    [Fact]
+    public void TopLevelInitialization_IsFlaggedWithoutExecutingSource()
+    {
+        var result = _service.Analyze("$script:Initialized = $true`nfunction Get-Test { 'ok' }");
+
+        Assert.Contains(result.Warnings, warning => warning.Code == "UnsupportedScriptInitialization");
+    }
+
+    [Fact]
     public void MandatoryParameter_OmittedValueMeansTrue()
     {
         var parameter = SingleParameter("""

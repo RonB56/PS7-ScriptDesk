@@ -233,9 +233,11 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
 
                 var stagedExecutablePath = Path.Combine(stagedOutputDirectory, HostExecutableName);
                 var runtimeValidated = false;
-                if (!publish && IsCurrentArchitecture(target))
+                if (IsCurrentArchitecture(target))
                 {
-                    ReportProgress(progress, "ValidatingRuntime", "Starting the built REST API briefly to verify readiness.");
+                    ReportProgress(progress, "ValidatingRuntime", publish
+                        ? "Starting the published REST API briefly to verify readiness."
+                        : "Starting the built REST API briefly to verify readiness.");
                     var smokeResult = await _smokeTester.VerifyAsync(
                         stagedOutputDirectory,
                         stagedExecutablePath,
@@ -255,6 +257,7 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
 
                     runtimeValidated = true;
                     details.AppendLine(smokeResult.DetailedLog);
+                    details.AppendLine("Verification level: compatible-architecture process startup and /healthz readiness. No representative API invocation was performed.");
                 }
 
                 var transaction = await RecoverableArtifactTransaction.CommitDirectoryAsync(
@@ -293,7 +296,10 @@ public sealed class ApiBuildPublishService : IApiBuildPublishService
                 artifacts.Add(artifact);
                 artifactOutcomes[targetIndex] = new ApiBuildPublishArtifactOutcome(
                     target, runtimeIdentifier, outputDirectory, ApiArtifactOutcomeStatus.Committed,
-                    "Artifact committed and structurally validated.", true, runtimeValidated, artifact);
+                    runtimeValidated
+                        ? "Artifact committed; structural validation and compatible-architecture startup/readiness passed. API invocation was not tested."
+                        : "Artifact committed and structurally validated; runtime startup was not attempted on this architecture.",
+                    true, runtimeValidated, artifact);
                 details.AppendLine($"{runtimeIdentifier}: {outputDirectory}");
             }
 

@@ -1,6 +1,7 @@
 using System.Net;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using PS7ScriptDesk.Application.Services;
 using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.RestApiProofHost.Api;
 using PS7ScriptDesk.RestApiProofHost.PowerShell;
@@ -26,6 +27,11 @@ public static class RestApiProofHostFactory
         var configuration = LoadConfiguration(contentRoot, options.ConfigurationRelativePath);
         var scriptPath = Path.Combine(contentRoot, "Scripts", configuration.SourceScript);
         var metadata = LoadStaticMetadata(scriptPath);
+        var validation = new ApiPublishConfigurationValidator().Validate(configuration, metadata);
+        if (!validation.IsValid)
+        {
+            throw new InvalidDataException("The REST API configuration is invalid: " + string.Join("; ", validation.Errors.Select(error => error.Code)));
+        }
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {

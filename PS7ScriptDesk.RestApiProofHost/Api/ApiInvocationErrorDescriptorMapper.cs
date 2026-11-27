@@ -29,6 +29,11 @@ public static class ApiInvocationErrorDescriptorMapper
                 "PowerShell host busy.",
                 StatusCodes.Status429TooManyRequests,
                 "The PowerShell invocation queue wait timed out."),
+            ApiInvocationStatus.RunspaceLeaseTimedOut => new(
+                "runspace-lease-timeout",
+                "PowerShell host busy.",
+                StatusCodes.Status503ServiceUnavailable,
+                "A PowerShell runspace was not available before the lease timeout."),
             ApiInvocationStatus.CallerCanceled => new(
                 "caller-canceled",
                 "PowerShell invocation canceled.",

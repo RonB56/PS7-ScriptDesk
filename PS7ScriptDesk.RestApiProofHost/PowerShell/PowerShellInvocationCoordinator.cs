@@ -151,19 +151,40 @@ public sealed class PowerShellInvocationCoordinator : IAsyncDisposable
                 timeout = TimeSpan.FromSeconds(30);
             }
 
-            using var timeoutSource = new CancellationTokenSource(timeout);
-            using var invocationCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            using var leaseTimeoutSource = new CancellationTokenSource(
+                _runtimeOptions.QueueWaitTimeout > TimeSpan.Zero ? _runtimeOptions.QueueWaitTimeout : TimeSpan.FromSeconds(10));
+            using var leaseCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 callerAndShutdown.Token,
-                timeoutSource.Token);
+                leaseTimeoutSource.Token);
+            RunspacePoolLease lease;
+            try
+            {
+                lease = await _poolManager.AcquireLeaseAsync(leaseCancellation.Token);
+            }
+            catch (OperationCanceledException) when (leaseTimeoutSource.IsCancellationRequested &&
+                                                     !callerAndShutdown.IsCancellationRequested)
+            {
+                var leaseTimeout = ApiInvocationResult.Failure(
+                    ApiInvocationStatus.RunspaceLeaseTimedOut,
+                    "A PowerShell runspace was not available before the lease timeout.");
+                TrackResult(leaseTimeout);
+                return leaseTimeout;
+            }
 
-            await using var lease = await _poolManager.AcquireLeaseAsync(invocationCancellation.Token);
+            await using (lease)
+            using (var timeoutSource = new CancellationTokenSource(timeout))
+            using (var invocationCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                       callerAndShutdown.Token,
+                       timeoutSource.Token))
+            {
             var result = await _functionInvoker.InvokeAsync(
                 request,
                 lease,
                 _runtimeOptions.MaximumRetainedStreamEntries,
                 invocationCancellation.Token,
                 () => ClassifyCancellation(cancellationToken, timeoutSource.Token),
-                streamSink);
+                streamSink,
+                Math.Max(1, _runtimeOptions.ResponseItemLimit));
 
             TrackResult(result);
             stopwatch.Stop();
@@ -173,10 +194,11 @@ public sealed class PowerShellInvocationCoordinator : IAsyncDisposable
                 result.Status,
                 stopwatch.ElapsedMilliseconds);
             return result;
+            }
         }
         catch (OperationCanceledException)
         {
-            var status = cancellationToken.IsCancellationRequested
+            var status = cancellationToken.IsCancellationRequested || callerAndShutdown.IsCancellationRequested && !_shutdown.IsCancellationRequested
                 ? ApiInvocationStatus.CallerCanceled
                 : ApiInvocationStatus.HostUnavailable;
             var result = ApiInvocationResult.Failure(

@@ -33,6 +33,20 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
     }
 
     [Fact]
+    public void CompiledAssembly_ContainsEveryResourceRequiredByProductionGenerator()
+    {
+        var assembly = typeof(ApiProjectGenerator).Assembly;
+        var available = assembly.GetManifestResourceNames().ToHashSet(StringComparer.Ordinal);
+        var missing = ApiProjectGenerator.RequiredRuntimeResourceNames
+            .Where(resourceName => !available.Contains(resourceName))
+            .ToArray();
+
+        Assert.True(
+            missing.Length == 0,
+            $"Missing API runtime template resources in '{assembly.FullName}' ({assembly.Location}): {string.Join(", ", missing)}");
+    }
+
+    [Fact]
     public async Task Generate_WritesInspectableSelfContainedProjectWithoutLocalPathLeakage()
     {
         var sourcePath = WritePhase7Script("Phase7Api.ps1");
@@ -43,6 +57,7 @@ public sealed class RestApiProjectGeneratorTests : IDisposable
         Assert.True(result.Succeeded, result.DetailedLog);
         Assert.True(File.Exists(Path.Combine(destination, "Phase7GeneratedApi.csproj")));
         Assert.True(File.Exists(Path.Combine(destination, "Program.cs")));
+        Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "Hosting", "RestApiProofHostFactory.cs")));
         Assert.True(File.Exists(Path.Combine(destination, "Config", "api.ps7api.json")));
         Assert.True(File.Exists(Path.Combine(destination, "Scripts", "Phase7Api.ps1")));
         Assert.True(File.Exists(Path.Combine(destination, "Runtime", "PS7ScriptDesk.RestApiProofHost", "Api", "RestEndpointMapper.cs")));

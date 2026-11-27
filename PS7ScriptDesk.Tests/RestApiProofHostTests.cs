@@ -186,7 +186,8 @@ public sealed class RestApiProofHostTests
         Assert.Equal(false, enabled.Parameters["IncludeEnvironment"]);
 
         Assert.True(disabled.IsValid, disabled.ErrorMessage);
-        Assert.False(disabled.Parameters.ContainsKey("IncludeDescriptions"));
+        Assert.True(disabled.Parameters.ContainsKey("IncludeDescriptions"));
+        Assert.False(Assert.IsType<SwitchParameter>(disabled.Parameters["IncludeDescriptions"]).IsPresent);
         Assert.Equal(false, disabled.Parameters["IncludeEnvironment"]);
     }
 

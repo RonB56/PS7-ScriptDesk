@@ -417,7 +417,7 @@ namespace PS7ScriptDesk.Shell.Editor
                 return candidate;
             }
 
-            var contrastRatio = GetContrastRatio(candidateColor, backgroundColor);
+            var contrastRatio = EditorColorUtilities.GetContrastRatio(candidateColor, backgroundColor);
             if (contrastRatio >= MinimumSyntaxTextContrastRatio)
             {
                 return candidate;
@@ -458,7 +458,7 @@ namespace PS7ScriptDesk.Shell.Editor
 
         private static WpfBrush GetContrastSafeFallbackBrush(string groupName, WpfColor backgroundColor)
         {
-            var backgroundIsLight = GetRelativeLuminance(backgroundColor) >= 0.5d;
+            var backgroundIsLight = EditorColorUtilities.GetRelativeLuminance(backgroundColor) >= 0.5d;
             return FreezeBrush(GetContrastSafeFallbackColor(groupName, backgroundIsLight));
         }
 
@@ -474,30 +474,6 @@ namespace PS7ScriptDesk.Shell.Editor
             "Number"    => backgroundIsLight ? WpfColor.FromRgb(4, 120, 87)    : WpfColor.FromRgb(187, 247, 208),
             _           => backgroundIsLight ? WpfColor.FromRgb(17, 24, 39)    : WpfColor.FromRgb(226, 232, 240),
         };
-
-        private static double GetContrastRatio(WpfColor foreground, WpfColor background)
-        {
-            var foregroundLuminance = GetRelativeLuminance(foreground);
-            var backgroundLuminance = GetRelativeLuminance(background);
-            var lighter = Math.Max(foregroundLuminance, backgroundLuminance);
-            var darker = Math.Min(foregroundLuminance, backgroundLuminance);
-            return (lighter + 0.05d) / (darker + 0.05d);
-        }
-
-        private static double GetRelativeLuminance(WpfColor color)
-        {
-            return (0.2126d * LinearizeSrgbChannel(color.R)) +
-                   (0.7152d * LinearizeSrgbChannel(color.G)) +
-                   (0.0722d * LinearizeSrgbChannel(color.B));
-        }
-
-        private static double LinearizeSrgbChannel(byte value)
-        {
-            var normalized = value / 255d;
-            return normalized <= 0.03928d
-                ? normalized / 12.92d
-                : Math.Pow((normalized + 0.055d) / 1.055d, 2.4d);
-        }
 
         private static WpfBrush FreezeBrush(WpfColor color)
         {

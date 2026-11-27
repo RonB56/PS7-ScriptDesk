@@ -424,6 +424,27 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
                 continue;
             }
 
+            var expectedType = ApiPublishEndpointDefaults.GetApiTypeName(parameter);
+            if (!ApiPublishConfigurationReconciler.AreTypesCompatible(binding.TypeName, expectedType))
+            {
+                result.AddError("API104", $"Binding for parameter '{parameter.Name}' declares '{binding.TypeName}', but current PowerShell metadata declares '{expectedType}'. Reconcile the mapping before saving or publishing.", $"{endpointPath}.parameterBindings", endpointId, parameter.Name);
+            }
+
+            if (binding.Source == ApiParameterSource.ServerDefined &&
+                binding.ServerValue?.Kind == ApiServerDefinedValueKind.Literal)
+            {
+                var converted = ApiParameterValueConverter.Shared.Convert(
+                    binding.ServerValue.Value,
+                    parameter.DeclaredTypeName ?? (parameter.IsSwitch ? "switch" : "string"));
+                if (!converted.IsValid)
+                {
+                    result.AddError(
+                        "API105",
+                        $"Server-defined literal for parameter '{parameter.Name}' is incompatible with declared type '{expectedType}': {converted.ErrorMessage}",
+                        $"{endpointPath}.parameterBindings", endpointId, parameter.Name);
+                }
+            }
+
             ValidateParameterType(parameter, endpointPath, endpointId, result);
         }
 
@@ -435,11 +456,30 @@ public sealed class ApiPublishConfigurationValidator : IApiPublishConfigurationV
             }
 
             if (parameter.MandatoryState == ApiParameterMandatoryState.Mandatory &&
-                !endpoint.ParameterBindings.Any(binding => string.Equals(binding.PowerShellParameterName, parameter.Name, StringComparison.OrdinalIgnoreCase)))
+                !endpoint.ParameterBindings.Any(binding => IsViableMandatoryBinding(binding, parameter.Name)))
             {
                 result.AddError("API095", $"Mandatory parameter '{parameter.Name}' requires a viable API binding.", $"{endpointPath}.parameterBindings", endpointId, parameter.Name);
             }
         }
+    }
+
+    private static bool IsViableMandatoryBinding(ApiParameterBindingConfiguration binding, string parameterName)
+    {
+        if (!string.Equals(binding.PowerShellParameterName, parameterName, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (binding.Source == ApiParameterSource.ServerDefined)
+        {
+            return binding.ServerValue is not null &&
+                   (binding.ServerValue.Kind != ApiServerDefinedValueKind.EnvironmentVariable ||
+                    !string.IsNullOrWhiteSpace(binding.ServerValue.Value)) &&
+                   (binding.ServerValue.Kind != ApiServerDefinedValueKind.Literal ||
+                    !string.IsNullOrWhiteSpace(binding.ServerValue.Value));
+        }
+
+        return !string.IsNullOrWhiteSpace(binding.Name) && binding.Required != ApiRequiredBehavior.Optional;
     }
 
     private static void ValidateParameterType(

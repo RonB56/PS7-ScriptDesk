@@ -1169,11 +1169,30 @@ namespace PS7ScriptDesk.Shell.Controls
                   return true;
                 });
 
-                // Do not turn right-click into paste: terminal mouse protocols need
-                // unmodified pointer events. Shift+right-click is the explicit paste path.
+                var rightClickCopyRequestId = 0;
+                var pendingRightClickCopyRequestId = 0;
                 terminalElement.addEventListener('contextmenu', function(e) {
-                  if (!e.shiftKey) return;
+                  // Preserve the existing Shift+right-click paste gesture. Native
+                  // terminal mouse reporting keeps unmodified right-click events.
+                  if (e.shiftKey) {
+                    e.preventDefault();
+                    focusTerminal('terminal.contextmenu.paste');
+                    post({ type: 'paste_request' });
+                    return;
+                  }
+                  if (term.modes && term.modes.mouseTrackingMode !== 'none') return;
+
                   e.preventDefault();
+                  focusTerminal('terminal.contextmenu');
+                  if (term.hasSelection()) {
+                    var selectionText = term.getSelection();
+                    if (!selectionText) return;
+                    var requestId = ++rightClickCopyRequestId;
+                    pendingRightClickCopyRequestId = requestId;
+                    post({ type: 'copy', requestId: requestId, text: selectionText });
+                    return;
+                  }
+
                   post({ type: 'paste_request' });
                 });
 
@@ -1321,6 +1340,15 @@ namespace PS7ScriptDesk.Shell.Controls
                 try {
                   var msg = (typeof e.data === 'string') ? JSON.parse(e.data) : e.data;
                   if (!termApi || !msg || !msg.type) return;
+                  if (msg.type === 'copy_result' && typeof msg.data === 'string') {
+                    var resultParts = msg.data.split(':');
+                    var completedRequestId = Number(resultParts[0]);
+                    if (completedRequestId === pendingRightClickCopyRequestId) {
+                      if (resultParts[1] === '1' && term.hasSelection()) term.clearSelection();
+                      pendingRightClickCopyRequestId = 0;
+                    }
+                    return;
+                  }
                   if      (msg.type === 'output_b64' && typeof msg.data === 'string') {
                     const generation = Number.isSafeInteger(msg.generation) ? msg.generation : null;
                     const sequence = Number.isSafeInteger(msg.sequence) ? msg.sequence : null;
@@ -5132,6 +5160,11 @@ namespace PS7ScriptDesk.Shell.Controls
                     case "copy":
                         // JavaScript requests that selected text be copied to the clipboard.
                         // Must run on the UI thread (already here — WebMessageReceived fires on UI thread).
+                        var copySucceeded = false;
+                        var copyRequestId = root.TryGetProperty("requestId", out var copyRequestIdProp) &&
+                                            copyRequestIdProp.TryGetInt32(out var parsedCopyRequestId)
+                            ? parsedCopyRequestId
+                            : (int?)null;
                         if (root.TryGetProperty("text", out var copyTextProp))
                         {
                             var copyText = copyTextProp.GetString();
@@ -5153,6 +5186,7 @@ namespace PS7ScriptDesk.Shell.Controls
                                 try
                                 {
                                     System.Windows.Clipboard.SetText(copyText, System.Windows.TextDataFormat.UnicodeText);
+                                    copySucceeded = true;
                                     ResetClipboardFailureEpisode(ClipboardCopyOperation);
                                     AppLogger.Debug("Terminal", $"Terminal selection copied to the Windows clipboard. Length={copyLength}, Lines={copyLineCount}, ContentOmitted=True.");
                                     DeveloperDiagnostics.LogStateTransition(
@@ -5174,6 +5208,10 @@ namespace PS7ScriptDesk.Shell.Controls
                                     LogClipboardFailure(ClipboardCopyOperation, ex);
                                 }
                             }
+                        }
+                        if (copyRequestId is not null)
+                        {
+                            PostToWebView("copy_result", $"{copyRequestId.Value}:{(copySucceeded ? 1 : 0)}");
                         }
                         break;
 

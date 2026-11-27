@@ -31,10 +31,13 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     private readonly ApiLocalTestConsoleService _localTestConsoleService;
     private readonly IApiBuildPublishService _buildPublishService;
     private ApiPublishConfiguration _configuration;
+    private ApiPublishConfigurationReconciliation? _reconciliation;
     private RestApiEndpointRow? _selectedEndpointRow;
     private CancellationTokenSource? _buildPublishCancellation;
     private string _lastBuildPublishOutputPath = string.Empty;
     private bool _isInitializing;
+    private RestApiEndpointRow? _authenticationEditRow;
+    private bool _legacyAuthenticationWarning;
     private bool _isLocalTestBusy;
     private bool _isBuildPublishBusy;
     private string _localTestHostStatusText = "Local API test host is not running.";
@@ -77,6 +80,7 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             RefreshBuildPublishStatus("Ready to generate the REST API project.");
             ApplyLocalTestStatus(_localTestHostService.CurrentStatus);
             ApplyLocalTestConsoleState(_localTestConsoleService.State, _localTestConsoleService.SessionId, null);
+            ContextualWizardHelp.Apply(this, ExportWizardHelpDefinitions.Api, ExportWizardHelpDefinitions.ApiGridColumns);
         }
         finally
         {
@@ -88,6 +92,18 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    public void SetReconciliation(ApiPublishConfigurationReconciliation reconciliation)
+    {
+        _reconciliation = reconciliation ?? throw new ArgumentNullException(nameof(reconciliation));
+        var findings = reconciliation.Findings;
+        ReconciliationFindingsText.Text = findings.Count == 0
+            ? string.Empty
+            : string.Join(Environment.NewLine, findings.Select(finding => $"• {finding.Message}"));
+        ReconciliationFindingsPanel.Visibility = findings.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        ReconciliationResolutionBox.Visibility = reconciliation.RequiresExplicitResolution ? Visibility.Visible : Visibility.Collapsed;
+        ReconciliationResolutionBox.IsChecked = false;
+    }
 
     public ObservableCollection<RestApiEndpointRow> Endpoints { get; } = new();
 
@@ -119,8 +135,10 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     {
         var options = new List<RestApiSecurityModeOption>
         {
-            new(ApiSecurityMode.LocalTestNoAuthentication, "Local test only, no authentication", IsSelectable: true),
-            new(ApiSecurityMode.ApiKey, "API key", IsSelectable: true)
+            new(ApiSecurityMode.LocalTestNoAuthentication, "Local test only, no authentication", IsSelectable: true,
+                ExportWizardHelpDefinitions.ApiSecurityOptions[ApiSecurityMode.LocalTestNoAuthentication.ToString()]),
+            new(ApiSecurityMode.ApiKey, "API key", IsSelectable: true,
+                ExportWizardHelpDefinitions.ApiSecurityOptions[ApiSecurityMode.ApiKey.ToString()])
         };
 
         if (!IsRestV1SecurityModeSupported(currentMode))
@@ -128,7 +146,8 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             options.Add(new RestApiSecurityModeOption(
                 currentMode,
                 $"{GetSecurityModeDisplayName(currentMode)} (Not available in REST V1)",
-                IsSelectable: false));
+                IsSelectable: false,
+                ExportWizardHelpDefinitions.ApiSecurityOptions["Unsupported"]));
         }
 
         return options;
@@ -137,9 +156,9 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
     internal static IReadOnlyList<ApiPublishTargetArchitectureOption> CreatePublishTargetOptions()
         =>
         [
-            new(ApiPublishTargetArchitecture.WinX64, "Windows x64"),
-            new(ApiPublishTargetArchitecture.WinArm64, "Windows ARM64"),
-            new(ApiPublishTargetArchitecture.Both, "Both")
+            new(ApiPublishTargetArchitecture.WinX64, "Windows x64", ExportWizardHelpDefinitions.ApiTargetArchitectureOptions[ApiPublishTargetArchitecture.WinX64.ToString()]),
+            new(ApiPublishTargetArchitecture.WinArm64, "Windows ARM64", ExportWizardHelpDefinitions.ApiTargetArchitectureOptions[ApiPublishTargetArchitecture.WinArm64.ToString()]),
+            new(ApiPublishTargetArchitecture.Both, "Both", ExportWizardHelpDefinitions.ApiTargetArchitectureOptions[ApiPublishTargetArchitecture.Both.ToString()])
         ];
 
     internal static RestApiSecurityModeUiState CreateSecurityModeUiState(ApiSecurityMode mode)
@@ -244,7 +263,34 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         _configuration.Runtime.DefaultInvocationTimeout = TimeSpan.FromSeconds(timeoutSeconds);
         _configuration.Runtime.ResponseByteLimit = responseByteLimit;
         _configuration.Endpoints = Endpoints.Select(row => row.ToConfiguration()).ToList();
+        var authenticationResult = ApiAuthenticationIntentPolicy.Apply(_configuration);
+        _legacyAuthenticationWarning |= authenticationResult.LegacyEndpointsProtected.Count > 0;
+        UpdateSecurityModeGuidance(securityMode);
+        foreach (var row in Endpoints)
+        {
+            var effectiveEndpoint = _configuration.Endpoints.First(endpoint =>
+                string.Equals(endpoint.EndpointId, row.EndpointId, StringComparison.OrdinalIgnoreCase));
+            row.SetProgrammaticAuthentication(effectiveEndpoint.RequiresAuthentication);
+        }
         _configuration.SourceScript = Path.GetFileName(_request.SourceScriptPath);
+
+        if (_reconciliation is { IsBlocked: true })
+        {
+            ValidationText.Text = "The saved API configuration or current PowerShell metadata could not be used safely. Resolve the listed issue before saving, testing, building, or publishing.";
+            return false;
+        }
+
+        if (_reconciliation is { RequiresExplicitResolution: true } && ReconciliationResolutionBox.IsChecked != true)
+        {
+            ValidationText.Text = "Review the reconciliation findings and confirm their listed mapping updates and removals before saving, testing, building, or publishing.";
+            return false;
+        }
+
+        if (_reconciliation is { MetadataIsValid: false })
+        {
+            ValidationText.Text = "Current PowerShell metadata is invalid. Fix script parsing before saving, testing, building, or publishing.";
+            return false;
+        }
 
         var validation = new ApiPublishConfigurationValidator().Validate(_configuration, _metadata);
         if (!validation.IsValid)
@@ -572,6 +618,49 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         }
     }
 
+    private void EndpointGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e)
+    {
+        if (e.EditAction != DataGridEditAction.Commit || e.Row.Item is not RestApiEndpointRow row)
+        {
+            if (e.Row.Item is RestApiEndpointRow canceledRow && IsAuthenticationColumn(e.Column))
+            {
+                canceledRow.EndAuthenticationEdit(commit: false);
+                if (ReferenceEquals(_authenticationEditRow, canceledRow))
+                {
+                    _authenticationEditRow = null;
+                }
+            }
+            return;
+        }
+
+        if (IsAuthenticationColumn(e.Column))
+        {
+            row.EndAuthenticationEdit(commit: true);
+            if (ReferenceEquals(_authenticationEditRow, row))
+            {
+                _authenticationEditRow = null;
+            }
+        }
+        else if (string.Equals(e.Column.Header?.ToString(), "Transport", StringComparison.Ordinal))
+        {
+            row.MarkTransportOverrideExplicit();
+        }
+    }
+
+    private void EndpointGrid_BeginningEdit(object sender, DataGridBeginningEditEventArgs e)
+    {
+        if (e.Row.Item is not RestApiEndpointRow row || !IsAuthenticationColumn(e.Column))
+        {
+            return;
+        }
+
+        row.BeginAuthenticationEdit();
+        _authenticationEditRow = row;
+    }
+
+    private static bool IsAuthenticationColumn(DataGridColumn column)
+        => string.Equals(column.SortMemberPath, nameof(RestApiEndpointRow.RequiresAuthentication), StringComparison.Ordinal);
+
     private void LocalTestEndpointBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_isInitializing)
@@ -706,8 +795,38 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        if (ReferenceEquals(sender, SecurityModeBox))
+        {
+            SynchronizeEndpointAuthenticationForSelectedMode();
+        }
         UpdateSecurityModeUi();
         RefreshMetadataSummary();
+    }
+
+    private void SynchronizeEndpointAuthenticationForSelectedMode()
+    {
+        if (_isInitializing || !IsLoaded || SecurityModeBox is null ||
+            !TryReadSelectedSecurityMode(out var securityMode))
+        {
+            return;
+        }
+
+        // Materialize only endpoint/security state. Unrelated wizard validation must not
+        // block immediate checkbox synchronization, and nothing is persisted here.
+        _configuration.Security.Mode = securityMode;
+        _configuration.Endpoints = Endpoints.Select(row => row.ToConfiguration()).ToList();
+        var result = ApiAuthenticationIntentPolicy.Apply(_configuration);
+        _legacyAuthenticationWarning |= result.LegacyEndpointsProtected.Count > 0;
+
+        foreach (var row in Endpoints)
+        {
+            var effectiveEndpoint = _configuration.Endpoints.FirstOrDefault(endpoint =>
+                string.Equals(endpoint.EndpointId, row.EndpointId, StringComparison.OrdinalIgnoreCase));
+            if (effectiveEndpoint is not null)
+            {
+                row.SetProgrammaticAuthentication(effectiveEndpoint.RequiresAuthentication);
+            }
+        }
     }
 
     private void BrowseOutputDirectory_Click(object sender, RoutedEventArgs e)
@@ -1345,8 +1464,7 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         AllowNoAuthBox.IsEnabled = state.ShowLocalNoAuthControls;
         UnsupportedSecurityModeText.Visibility = state.ShowUnsupportedModeMessage ? Visibility.Visible : Visibility.Collapsed;
         UnsupportedSecurityModeText.Text = state.UnsupportedModeText;
-        SecurityGuidanceText.Text = state.GuidanceText;
-
+        UpdateSecurityModeGuidance(mode);
         if (state.ShowUnsupportedModeMessage)
         {
             ValidationText.Text = $"API042: {state.UnsupportedModeText}";
@@ -1354,6 +1472,15 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         else if (ValidationText.Text.StartsWith("API042:", StringComparison.Ordinal))
         {
             ValidationText.Text = string.Empty;
+        }
+    }
+
+    private void UpdateSecurityModeGuidance(ApiSecurityMode mode)
+    {
+        SecurityGuidanceText.Text = CreateSecurityModeUiState(mode).GuidanceText;
+        if (_legacyAuthenticationWarning)
+        {
+            SecurityGuidanceText.Text += " Legacy endpoints with unknown authentication intent were protected. Review these endpoints before saving.";
         }
     }
 
@@ -1389,12 +1516,12 @@ public partial class RestApiPublishWizardWindow : Window, INotifyPropertyChanged
         };
 }
 
-public sealed record RestApiSecurityModeOption(ApiSecurityMode Mode, string DisplayName, bool IsSelectable)
+public sealed record RestApiSecurityModeOption(ApiSecurityMode Mode, string DisplayName, bool IsSelectable, string HelpText = "")
 {
     public override string ToString() => DisplayName;
 }
 
-public sealed record ApiPublishTargetArchitectureOption(ApiPublishTargetArchitecture Architecture, string DisplayName)
+public sealed record ApiPublishTargetArchitectureOption(ApiPublishTargetArchitecture Architecture, string DisplayName, string HelpText = "")
 {
     public override string ToString() => DisplayName;
 }
@@ -1408,6 +1535,7 @@ public sealed record RestApiSecurityModeUiState(
 
 public sealed class RestApiParameterBindingRow
 {
+    private ApiParameterBindingConfiguration? _sourceBinding;
     public string PowerShellParameterName { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public ApiParameterSource Source { get; set; } = ApiParameterSource.Query;
@@ -1424,6 +1552,7 @@ public sealed class RestApiParameterBindingRow
         ApiParameterMetadata? metadata)
         => new()
         {
+            _sourceBinding = ApiPublishConfigurationCopy.Clone(binding),
             PowerShellParameterName = binding.PowerShellParameterName,
             Name = binding.Name,
             Source = binding.Source,
@@ -1432,23 +1561,26 @@ public sealed class RestApiParameterBindingRow
                 ? metadata?.DeclaredTypeName ?? (metadata?.IsSwitch == true ? "bool" : "string")
                 : binding.TypeName,
             ValidationSummary = BuildValidationSummary(metadata),
-            ServerValue = binding.ServerValue,
+            ServerValue = binding.ServerValue is null ? null : new ApiServerDefinedValue { Kind = binding.ServerValue.Kind, Value = binding.ServerValue.Value },
             IsSecretSensitive = binding.IsSecretSensitive,
             ArrayBinding = binding.ArrayBinding
         };
 
     public ApiParameterBindingConfiguration ToConfiguration()
-        => new()
-        {
-            PowerShellParameterName = PowerShellParameterName,
-            Source = Source,
-            Name = Name,
-            Required = Required,
-            ServerValue = ServerValue,
-            IsSecretSensitive = IsSecretSensitive,
-            ArrayBinding = ArrayBinding,
-            TypeName = TypeName
-        };
+    {
+        var binding = _sourceBinding is null
+            ? new ApiParameterBindingConfiguration()
+            : ApiPublishConfigurationCopy.Clone(_sourceBinding);
+        binding.PowerShellParameterName = PowerShellParameterName;
+        binding.Source = Source;
+        binding.Name = Name;
+        binding.Required = Required;
+        binding.ServerValue = ServerValue is null ? null : new ApiServerDefinedValue { Kind = ServerValue.Kind, Value = ServerValue.Value };
+        binding.IsSecretSensitive = IsSecretSensitive;
+        binding.ArrayBinding = ArrayBinding;
+        binding.TypeName = TypeName;
+        return binding;
+    }
 
     private static string BuildValidationSummary(ApiParameterMetadata? metadata)
     {
@@ -1472,44 +1604,112 @@ public sealed class RestApiParameterBindingRow
     }
 }
 
-public sealed class RestApiEndpointRow
+public sealed class RestApiEndpointRow : INotifyPropertyChanged
 {
+    private bool _requiresAuthentication;
+    private bool _authenticationEditActive;
+    private bool _authenticationValueBeforeEdit;
+    private bool? _authenticationIntentBeforeEdit;
+    private ApiEndpointConfiguration? _sourceEndpoint;
+    private bool _transportOverrideExplicitlyEdited;
+
     public bool IsEnabled { get; set; }
     public string EndpointId { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
     public string FunctionName { get; set; } = string.Empty;
     public string Transport { get; set; } = ApiTransport.Rest.ToString();
+    public ApiTransport? TransportOverride { get; set; }
     public string Method { get; set; } = ApiHttpMethod.Get.ToString();
     public string RouteTemplate { get; set; } = string.Empty;
     public string OperationId { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
-    public bool RequiresAuthentication { get; set; }
+    public bool RequiresAuthentication
+    {
+        get => _requiresAuthentication;
+        set
+        {
+            if (_requiresAuthentication == value)
+            {
+                return;
+            }
+
+            _requiresAuthentication = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RequiresAuthentication)));
+        }
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
+    public bool? AuthenticationRequirementIsDefaulted { get; set; }
+    public string ConsumesContentType { get; set; } = "application/json";
+    public string ProducesContentType { get; set; } = "application/json";
+    public int SuccessStatusCode { get; set; } = 200;
+    public List<string> Tags { get; set; } = new();
+    public bool IncludeInOpenApi { get; set; } = true;
+    public TimeSpan? TimeoutOverride { get; set; }
+    public string AuthorizationPolicy { get; set; } = string.Empty;
+    public ApiResponseBehavior Response { get; set; } = new();
     public List<ApiParameterBindingConfiguration> ParameterBindings { get; set; } = new();
+
+    public void MarkAuthenticationPreferenceExplicit() => AuthenticationRequirementIsDefaulted = false;
+    public void SetProgrammaticAuthentication(bool value) => RequiresAuthentication = value;
+    public void BeginAuthenticationEdit()
+    {
+        _authenticationValueBeforeEdit = RequiresAuthentication;
+        _authenticationIntentBeforeEdit = AuthenticationRequirementIsDefaulted;
+        _authenticationEditActive = true;
+    }
+
+    public void EndAuthenticationEdit(bool commit)
+    {
+        if (!_authenticationEditActive)
+        {
+            return;
+        }
+
+        if (!commit)
+        {
+            RequiresAuthentication = _authenticationValueBeforeEdit;
+            AuthenticationRequirementIsDefaulted = _authenticationIntentBeforeEdit;
+        }
+        else if (RequiresAuthentication != _authenticationValueBeforeEdit)
+        {
+            MarkAuthenticationPreferenceExplicit();
+        }
+
+        _authenticationEditActive = false;
+    }
+    public void MarkTransportOverrideExplicit() => _transportOverrideExplicitlyEdited = true;
 
     public static RestApiEndpointRow FromConfiguration(ApiEndpointConfiguration endpoint, ApiTransport defaultTransport)
         => new()
         {
+            _sourceEndpoint = ApiPublishConfigurationCopy.Clone(endpoint),
             IsEnabled = endpoint.IsEnabled,
             EndpointId = endpoint.EndpointId,
+            DisplayName = endpoint.DisplayName,
             FunctionName = endpoint.PowerShellFunctionName,
             Transport = (endpoint.Transport ?? defaultTransport).ToString(),
+            TransportOverride = endpoint.Transport,
             Method = endpoint.Rest.Method.ToString(),
             RouteTemplate = endpoint.Rest.RouteTemplate,
             OperationId = endpoint.Rest.OperationId,
             Description = endpoint.Description,
             RequiresAuthentication = endpoint.RequiresAuthentication,
-            ParameterBindings = endpoint.ParameterBindings
-                .Select(binding => new ApiParameterBindingConfiguration
-                {
-                    PowerShellParameterName = binding.PowerShellParameterName,
-                    Source = binding.Source,
-                    Name = binding.Name,
-                    Required = binding.Required,
-                    ServerValue = binding.ServerValue,
-                    IsSecretSensitive = binding.IsSecretSensitive,
-                    ArrayBinding = binding.ArrayBinding,
-                    TypeName = binding.TypeName
-                })
-                .ToList()
+            AuthenticationRequirementIsDefaulted = endpoint.AuthenticationRequirementIsDefaulted,
+            ConsumesContentType = endpoint.Rest.ConsumesContentType,
+            ProducesContentType = endpoint.Rest.ProducesContentType,
+            SuccessStatusCode = endpoint.Rest.SuccessStatusCode,
+            Tags = endpoint.Rest.Tags.ToList(),
+            IncludeInOpenApi = endpoint.Rest.IncludeInOpenApi,
+            TimeoutOverride = endpoint.TimeoutOverride,
+            AuthorizationPolicy = endpoint.AuthorizationPolicy,
+            Response = new ApiResponseBehavior
+            {
+                ReturnBareJsonResult = endpoint.Response.ReturnBareJsonResult,
+                NoOutputBehavior = endpoint.Response.NoOutputBehavior,
+                IncludeWarningStreamInLocalTest = endpoint.Response.IncludeWarningStreamInLocalTest,
+                TreatNonTerminatingErrorsAsFailure = endpoint.Response.TreatNonTerminatingErrorsAsFailure
+            },
+            ParameterBindings = endpoint.ParameterBindings.Select(ApiPublishConfigurationCopy.Clone).ToList()
         };
 
     public ApiEndpointConfiguration ToConfiguration()
@@ -1520,24 +1720,43 @@ public sealed class RestApiEndpointRow
         var transport = Enum.TryParse<ApiTransport>(Transport, ignoreCase: true, out var parsedTransport)
             ? parsedTransport
             : ApiTransport.Rest;
-        return new ApiEndpointConfiguration
+        var endpoint = _sourceEndpoint is null
+            ? new ApiEndpointConfiguration()
+            : ApiPublishConfigurationCopy.Clone(_sourceEndpoint);
+        endpoint.EndpointId = string.IsNullOrWhiteSpace(EndpointId) ? ApiEndpointConfiguration.CreateStableEndpointId(FunctionName) : EndpointId;
+        endpoint.IsEnabled = IsEnabled;
+        endpoint.Transport = _transportOverrideExplicitlyEdited ? transport : TransportOverride;
+        endpoint.PowerShellFunctionName = FunctionName;
+        endpoint.DisplayName = string.IsNullOrWhiteSpace(DisplayName) ? FunctionName : DisplayName;
+        endpoint.Description = Description;
+        endpoint.RequiresAuthentication = RequiresAuthentication;
+        endpoint.AuthenticationRequirementIsDefaulted = AuthenticationRequirementIsDefaulted;
+        endpoint.TimeoutOverride = TimeoutOverride;
+        endpoint.AuthorizationPolicy = AuthorizationPolicy;
+        endpoint.Response = new ApiResponseBehavior
         {
-            EndpointId = string.IsNullOrWhiteSpace(EndpointId) ? ApiEndpointConfiguration.CreateStableEndpointId(FunctionName) : EndpointId,
-            IsEnabled = IsEnabled,
-            Transport = transport,
-            PowerShellFunctionName = FunctionName,
-            DisplayName = FunctionName,
-            Description = Description,
-            RequiresAuthentication = RequiresAuthentication,
-            Rest =
-            {
-                Method = method,
-                RouteTemplate = RouteTemplate,
-                OperationId = string.IsNullOrWhiteSpace(OperationId) ? FunctionName : OperationId,
-                Tags = ["PowerShell"],
-                IncludeInOpenApi = true
-            },
-            ParameterBindings = ParameterBindings
+            ReturnBareJsonResult = Response.ReturnBareJsonResult,
+            NoOutputBehavior = Response.NoOutputBehavior,
+            IncludeWarningStreamInLocalTest = Response.IncludeWarningStreamInLocalTest,
+            TreatNonTerminatingErrorsAsFailure = Response.TreatNonTerminatingErrorsAsFailure
         };
+        endpoint.Rest.Method = method;
+        endpoint.Rest.RouteTemplate = RouteTemplate;
+        endpoint.Rest.OperationId = string.IsNullOrWhiteSpace(OperationId) ? FunctionName : OperationId;
+        endpoint.Rest.ConsumesContentType = ConsumesContentType;
+        endpoint.Rest.ProducesContentType = ProducesContentType;
+        endpoint.Rest.SuccessStatusCode = SuccessStatusCode;
+        endpoint.Rest.Tags = Tags.ToList();
+        endpoint.Rest.IncludeInOpenApi = IncludeInOpenApi;
+        endpoint.ParameterBindings = ParameterBindings.Select(binding =>
+        {
+            var copy = ApiPublishConfigurationCopy.Clone(binding);
+            if (binding.ServerValue is not null)
+            {
+                copy.ServerValue = new ApiServerDefinedValue { Kind = binding.ServerValue.Kind, Value = binding.ServerValue.Value };
+            }
+            return copy;
+        }).ToList();
+        return endpoint;
     }
 }

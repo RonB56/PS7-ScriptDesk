@@ -422,7 +422,8 @@ public sealed class StreamingInvocationContractTests
             int retainedStreamLimit,
             CancellationToken cancellationToken,
             Func<ApiInvocationStatus> cancellationStatusProvider,
-            PowerShellInvocationStreamSink? streamSink = null)
+            PowerShellInvocationStreamSink? streamSink = null,
+            int maximumOutputItems = int.MaxValue)
             => InvokeAndPublishAsync(request, cancellationToken, streamSink);
 
         private async Task<ApiInvocationResult> InvokeAndPublishAsync(

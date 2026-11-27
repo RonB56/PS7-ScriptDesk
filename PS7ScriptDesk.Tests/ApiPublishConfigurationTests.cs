@@ -385,6 +385,62 @@ public sealed class ApiPublishConfigurationTests
         Assert.Contains(result.Errors, error => error.Code == "API081");
     }
 
+    [Theory]
+    [InlineData("123", true)]
+    [InlineData("0", true)]
+    [InlineData("ABC", false)]
+    public void ServerDefinedIntegerLiteral_UsesRuntimeConversionContract(string value, bool expectedValid)
+    {
+        const string script = "function Get-Result { param([Parameter(Mandatory)][int]$Count) return $Count }";
+        var configuration = ValidConfiguration("Get-Result");
+        configuration.Endpoints[0].ParameterBindings =
+        [
+            new ApiParameterBindingConfiguration
+            {
+                PowerShellParameterName = "Count",
+                Source = ApiParameterSource.ServerDefined,
+                Required = ApiRequiredBehavior.Required,
+                TypeName = "int",
+                ServerValue = new ApiServerDefinedValue { Kind = ApiServerDefinedValueKind.Literal, Value = value }
+            }
+        ];
+
+        var result = _validator.Validate(configuration, _metadataService.Analyze(script));
+
+        Assert.Equal(expectedValid, result.IsValid);
+        Assert.Equal(!expectedValid, result.Errors.Any(error => error.Code == "API105"));
+    }
+
+    [Fact]
+    public void ServerDefinedBooleanFalseAndDeferredEnvironmentValueRemainValid()
+    {
+        const string script = "function Get-Result { param([Parameter(Mandatory)][bool]$Enabled) return $Enabled }";
+        var configuration = ValidConfiguration("Get-Result");
+        configuration.Endpoints[0].ParameterBindings =
+        [
+            new ApiParameterBindingConfiguration
+            {
+                PowerShellParameterName = "Enabled",
+                Source = ApiParameterSource.ServerDefined,
+                Required = ApiRequiredBehavior.Required,
+                TypeName = "bool",
+                ServerValue = new ApiServerDefinedValue { Kind = ApiServerDefinedValueKind.Literal, Value = "false" }
+            }
+        ];
+
+        var literalResult = _validator.Validate(configuration, _metadataService.Analyze(script));
+        Assert.True(literalResult.IsValid);
+
+        configuration.Endpoints[0].ParameterBindings[0].ServerValue = new ApiServerDefinedValue
+        {
+            Kind = ApiServerDefinedValueKind.EnvironmentVariable,
+            Value = "UNSET_BUT_STRUCTURALLY_VALID"
+        };
+        var deferredResult = _validator.Validate(configuration, _metadataService.Analyze(script));
+        Assert.True(deferredResult.IsValid);
+        Assert.DoesNotContain(deferredResult.Errors, error => error.Code == "API105");
+    }
+
     [Fact]
     public void ApiKeySecretValue_IsNotRepresentedInDurableModel()
     {

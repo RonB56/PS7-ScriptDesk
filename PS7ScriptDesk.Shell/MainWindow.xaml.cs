@@ -52,6 +52,7 @@ using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.Shell.Help;
 using PS7ScriptDesk.Shell.Layout;
 using PS7ScriptDesk.Shell.Native;
+using PS7ScriptDesk.Shell.Presentation;
 using PS7ScriptDesk.Shell.Services;
 using PS7ScriptDesk.Shell.Themes;
 using PS7ScriptDesk.UI.ViewModels;
@@ -148,6 +149,7 @@ namespace PS7ScriptDesk.Shell
         private readonly IDisposable _terminalOutputObservationSubscription;
         private TerminalObserverLifetime? _terminalObserverLifetime;
         private MainWindowViewModel? _viewModel;
+        private readonly StoreUpdatePresenter _storeUpdatePresenter;
         private CommandPaletteWindow? _commandPaletteWindow;
         private long _terminalInputSequence;
         private const string ThemeIconSuccessResourceKey = "Theme.Icon.Success";
@@ -475,35 +477,7 @@ namespace PS7ScriptDesk.Shell
 
         internal void ShowStoreUpdateBanner(StoreUpdateService service, StoreUpdateCheckResult result)
         {
-            if (!Dispatcher.CheckAccess())
-            {
-                Dispatcher.BeginInvoke(() => ShowStoreUpdateBanner(service, result));
-                return;
-            }
-
-            if (StoreUpdateBannerHost.Content is StoreUpdateBanner)
-            {
-                return;
-            }
-
-            var banner = new StoreUpdateBanner(service, result);
-            banner.DismissRequested += StoreUpdateBanner_DismissRequested;
-            StoreUpdateBannerHost.Content = banner;
-            StoreUpdateBannerHost.Visibility = Visibility.Visible;
-            DeveloperDiagnostics.LogDecision("StoreUpdate", "InlineBannerPresentation", "Displayed the optional Store update as a dedicated shell layout region.", "Shown",
-                new Dictionary<string, object?> { ["currentVersion"] = result.PackageVersion, ["updateCount"] = result.UpdateCount });
-        }
-
-        private void StoreUpdateBanner_DismissRequested(object? sender, EventArgs e)
-        {
-            if (sender is StoreUpdateBanner banner)
-            {
-                banner.DismissRequested -= StoreUpdateBanner_DismissRequested;
-            }
-
-            StoreUpdateBannerHost.Content = null;
-            StoreUpdateBannerHost.Visibility = Visibility.Collapsed;
-            DeveloperDiagnostics.LogDecision("StoreUpdate", "InlineBannerPresentation", "Collapsed the optional Store update banner after dismissal.", "Hidden");
+            _storeUpdatePresenter.ShowStoreUpdateBanner(service, result);
         }
 
         private static void OnIsContextHelpEnabledChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -595,6 +569,13 @@ namespace PS7ScriptDesk.Shell
 
 
             InitializeComponent();
+            _storeUpdatePresenter = new StoreUpdatePresenter(this, StoreUpdateBannerHost, status =>
+            {
+                if (ViewModel is not null)
+                {
+                    ViewModel.StatusText = status;
+                }
+            });
             AttachSplitterInputForensics(EditorConsoleColumnSplitter);
             AttachSplitterInputForensics(DebugPanelSplitter);
             AttachSplitterInputForensics(SideBySideDebugSplitter);
@@ -3651,208 +3632,7 @@ namespace PS7ScriptDesk.Shell
 
         private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
         {
-            DeveloperDiagnostics.LogUserAction(
-                "StoreUpdate",
-                "ManualCheckRequested",
-                "User requested a fresh Microsoft Store update check.");
-
-            using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(70));
-            if (!StoreUpdateStartupState.TryStartManualCheck(cancellation.Token, out var checkTask))
-            {
-                if (ViewModel is not null)
-                {
-                    ViewModel.StatusText = "A Store update check is already in progress.";
-                }
-                return;
-            }
-
-            var closed = false;
-            void CancelOnClose(object? _, EventArgs __)
-            {
-                closed = true;
-                cancellation.Cancel();
-            }
-
-            Closed += CancelOnClose;
-            if (sender is WpfMenuItem menuItem)
-            {
-                menuItem.IsEnabled = false;
-            }
-
-            if (ViewModel is not null)
-            {
-                ViewModel.StatusText = "Checking Microsoft Store for updates...";
-            }
-
-            if (StoreUpdateBannerHost.Content is StoreUpdateBanner banner)
-            {
-                banner.DismissRequested -= StoreUpdateBanner_DismissRequested;
-                StoreUpdateBannerHost.Content = null;
-                StoreUpdateBannerHost.Visibility = Visibility.Collapsed;
-            }
-
-            try
-            {
-                var completed = await checkTask!;
-                if (closed)
-                {
-                    return;
-                }
-
-                DeveloperDiagnostics.LogDecision(
-                    "StoreUpdate",
-                    "ManualCheckCompleted",
-                    "Fresh Microsoft Store update check completed.",
-                    ClassifyStoreUpdateResult(completed.Result),
-                    BuildStoreUpdateDiagnosticsProperties(completed.Result, "HelpMenu"));
-                ShowManualStoreUpdateWindow(completed.Service, completed.Result);
-            }
-            catch (OperationCanceledException) when (closed)
-            {
-                // The owning window is gone; no result window should be shown.
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("StoreUpdate", "Manual Microsoft Store update check failed.", ex);
-                DeveloperDiagnostics.LogException("StoreUpdate", ex, "Manual Microsoft Store update check failed.");
-                if (!closed)
-                {
-                    var failedResult = new StoreUpdateCheckResult
-                    {
-                        AvailabilityState = StoreUpdateAvailabilityState.UpdateCheckUnavailable,
-                        StatusMessage = cancellation.IsCancellationRequested
-                            ? "Microsoft Store update check timed out."
-                            : "Microsoft Store update check failed.",
-                        ExceptionSummary = $"{ex.GetType().Name}: {ex.Message}",
-                        ShouldShowManualInstructions = true,
-                        ManualInstructions = "Microsoft Store -> Library -> Get updates."
-                    };
-                    ShowManualStoreUpdateWindow(StoreUpdateStartupState.Read().Service ?? new StoreUpdateService(), failedResult);
-                }
-            }
-            finally
-            {
-                Closed -= CancelOnClose;
-                if (!closed && sender is WpfMenuItem enabledMenuItem)
-                {
-                    enabledMenuItem.IsEnabled = true;
-                }
-            }
-        }
-
-        private void ShowManualStoreUpdateWindow(StoreUpdateService storeUpdateService, StoreUpdateCheckResult checkResult)
-        {
-            var updateWindow = new StoreUpdateWindow(storeUpdateService, checkResult, isMandatory: checkResult.HasMandatoryUpdate)
-            {
-                Owner = this
-            };
-
-            var resultKind = ClassifyStoreUpdateResult(checkResult);
-            DeveloperDiagnostics.LogDecision(
-                "StoreUpdate",
-                "ManualUpdateWindowDisplay",
-                "Manual Store update result window displayed.",
-                checkResult.HasMandatoryUpdate ? "ShownMandatoryDialog" : "ShownModelessWindow",
-                BuildStoreUpdateDiagnosticsProperties(checkResult, "HelpMenu"));
-
-            if (ViewModel is not null)
-            {
-                ViewModel.StatusText = resultKind switch
-                {
-                    "MandatoryUpdate" => "Mandatory update detected.",
-                    "UpdateAvailable" => "Update available.",
-                    "NoUpdateAvailable" => "No updates available.",
-                    "ManualInstructions" => "Manual Store update instructions shown.",
-                    "LocalBuildUnavailable" => "Store updates are not available for this local build.",
-                    "CheckUnavailable" => "Update check unavailable.",
-                    "Failure" => "Update check failed.",
-                    _ => "Update check complete."
-                };
-            }
-
-            if (checkResult.HasMandatoryUpdate)
-            {
-                updateWindow.ShowDialog();
-                System.Windows.Application.Current?.Shutdown(0);
-                return;
-            }
-
-            updateWindow.Show();
-            updateWindow.Activate();
-        }
-
-        private static IReadOnlyDictionary<string, object?> BuildStoreUpdateDiagnosticsProperties(StoreUpdateCheckResult? checkResult, string invocation)
-        {
-            var properties = new Dictionary<string, object?>
-            {
-                ["invocation"] = invocation,
-                ["cancellationSupported"] = false
-            };
-
-            if (checkResult is null)
-            {
-                properties["resultAvailable"] = false;
-                return properties;
-            }
-
-            properties["resultAvailable"] = true;
-            properties["packagingKind"] = checkResult.PackagingKind.ToString();
-            properties["availabilityState"] = checkResult.AvailabilityState.ToString();
-            properties["storeUpdateCheckAvailable"] = checkResult.StoreUpdateCheckAvailable;
-            properties["storeContextAttempted"] = checkResult.StoreContextAttempted;
-            properties["storeContextAvailable"] = checkResult.StoreContextAvailable;
-            properties["isDevelopmentMode"] = checkResult.IsDevelopmentMode;
-            properties["packageName"] = checkResult.PackageName;
-            properties["packageFamilyName"] = checkResult.PackageFamilyName;
-            properties["packagePublisherId"] = checkResult.PackagePublisherId;
-            properties["packageVersion"] = checkResult.PackageVersion;
-            properties["packageSignatureKind"] = checkResult.PackageSignatureKind;
-            properties["packageIdentityApi"] = checkResult.PackageIdentityApi;
-            properties["packageTypeAvailable"] = checkResult.PackageTypeAvailable;
-            properties["packageCurrentAvailable"] = checkResult.PackageCurrentAvailable;
-            properties["packageIdentityReadSucceeded"] = checkResult.PackageIdentityReadSucceeded;
-            properties["packageIdentityReadFailure"] = checkResult.PackageIdentityReadFailure;
-            properties["packageIdentityFallbackSource"] = checkResult.PackageIdentityFallbackSource;
-            properties["perPackageUpdateListReturned"] = checkResult.PerPackageUpdateListReturned;
-            properties["updateCount"] = checkResult.UpdateCount;
-            properties["hasMandatoryUpdate"] = checkResult.HasMandatoryUpdate;
-            properties["hasConfirmedInstallableUpdate"] = checkResult.HasConfirmedInstallableUpdate;
-            properties["shouldShowManualInstructions"] = checkResult.ShouldShowManualInstructions;
-            properties["resultKind"] = ClassifyStoreUpdateResult(checkResult);
-            properties["exceptionSummary"] = string.IsNullOrWhiteSpace(checkResult.ExceptionSummary) ? null : checkResult.ExceptionSummary;
-            return properties;
-        }
-
-        private static string ClassifyStoreUpdateResult(StoreUpdateCheckResult checkResult)
-        {
-            if (!string.IsNullOrWhiteSpace(checkResult.ExceptionSummary))
-            {
-                return "Failure";
-            }
-
-            if (checkResult.HasMandatoryUpdate)
-            {
-                return "MandatoryUpdate";
-            }
-
-            if (checkResult.HasConfirmedInstallableUpdate)
-            {
-                return "UpdateAvailable";
-            }
-
-            if (checkResult.PackagingKind == StoreUpdatePackagingKind.UnpackagedLocalBuild)
-            {
-                return "LocalBuildUnavailable";
-            }
-
-            return checkResult.AvailabilityState switch
-            {
-                StoreUpdateAvailabilityState.NoUpdateAvailable => "NoUpdateAvailable",
-                StoreUpdateAvailabilityState.ManualCheckRequired => "ManualInstructions",
-                StoreUpdateAvailabilityState.UpdateCheckUnavailable => "CheckUnavailable",
-                StoreUpdateAvailabilityState.ConfirmedUpdateAvailable => "UpdateAvailable",
-                _ => "Unknown"
-            };
+            await _storeUpdatePresenter.CheckForUpdatesAsync(sender);
         }
 
         private void About_Click(object sender, RoutedEventArgs e)
@@ -8537,7 +8317,7 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            if (!TryNormalizeHexColor(tag, out var normalizedHex))
+            if (!EditorColorUtilities.TryNormalizeHexColor(tag, out var normalizedHex))
             {
                 return;
             }
@@ -8589,7 +8369,7 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            if (!TryNormalizeHexColor(tag, out var normalizedHex))
+            if (!EditorColorUtilities.TryNormalizeHexColor(tag, out var normalizedHex))
             {
                 return;
             }
@@ -8649,14 +8429,14 @@ namespace PS7ScriptDesk.Shell
         private void ApplyEditorHighlightSettings(TextEditor editorTextEditor)
         {
             var selectionBackgroundColor = GetEffectiveSelectionBackgroundColor();
-            var selectionBackgroundBrush = CreateFrozenBrush(selectionBackgroundColor);
+            var selectionBackgroundBrush = EditorColorUtilities.CreateFrozenBrush(selectionBackgroundColor);
             SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionBrush", selectionBackgroundBrush);
             SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionBorder", null);
             SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionCornerRadius", 0d);
 
             if (ViewModel?.ForceHighContrastSelectedText ?? true)
             {
-                var selectionForegroundBrush = CreateFrozenBrush(GetBestTextColorForBackground(selectionBackgroundColor));
+                var selectionForegroundBrush = EditorColorUtilities.CreateFrozenBrush(EditorColorUtilities.GetBestTextColorForBackground(selectionBackgroundColor));
                 SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionForeground", selectionForegroundBrush);
             }
             else if (!ClearDependencyPropertyIfAvailable(editorTextEditor.TextArea, "SelectionForegroundProperty"))
@@ -8664,7 +8444,7 @@ namespace PS7ScriptDesk.Shell
                 SetPropertyIfAvailable(editorTextEditor.TextArea, "SelectionForeground", null);
             }
 
-            var currentLineBackgroundBrush = CreateFrozenBrush(GetEffectiveCurrentLineBackgroundColor());
+            var currentLineBackgroundBrush = EditorColorUtilities.CreateFrozenBrush(GetEffectiveCurrentLineBackgroundColor());
             SetPropertyIfAvailable(editorTextEditor.TextArea.TextView, "CurrentLineBackground", currentLineBackgroundBrush);
 
             editorTextEditor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
@@ -8685,7 +8465,7 @@ namespace PS7ScriptDesk.Shell
 
         private void UpdateSelectionPresetMenuState(string? selectedHex)
         {
-            var normalized = NormalizeComparableHex(selectedHex);
+            var normalized = EditorColorUtilities.NormalizeComparableHex(selectedHex);
             SelectionThemeDefaultMenuItem.IsChecked = normalized is null;
             SetPresetMenuItemChecked(SelectionPowerShellBlueMenuItem, normalized);
             SetPresetMenuItemChecked(SelectionNavyMenuItem, normalized);
@@ -8696,7 +8476,7 @@ namespace PS7ScriptDesk.Shell
 
         private void UpdateCurrentLinePresetMenuState(string? selectedHex)
         {
-            var normalized = NormalizeComparableHex(selectedHex);
+            var normalized = EditorColorUtilities.NormalizeComparableHex(selectedHex);
             CurrentLineThemeDefaultMenuItem.IsChecked = normalized is null;
             SetPresetMenuItemChecked(CurrentLineSubtleNavyMenuItem, normalized);
             SetPresetMenuItemChecked(CurrentLineSoftSlateMenuItem, normalized);
@@ -8708,115 +8488,17 @@ namespace PS7ScriptDesk.Shell
         {
             menuItem.IsChecked = selectedHex is not null &&
                                  menuItem.Tag is string tag &&
-                                 string.Equals(NormalizeComparableHex(tag), selectedHex, StringComparison.OrdinalIgnoreCase);
+                                 string.Equals(EditorColorUtilities.NormalizeComparableHex(tag), selectedHex, StringComparison.OrdinalIgnoreCase);
         }
 
         private string? PromptForEditorColorHex(string title, string instruction, WpfColor initialColor)
         {
-            var result = (string?)null;
-            var initialHex = FormatColorHex(initialColor);
-
-            var dialog = new Window
-            {
-                Owner = this,
-                Title = title,
-                SizeToContent = SizeToContent.WidthAndHeight,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                ResizeMode = ResizeMode.NoResize,
-                Background = TryFindResource("Theme.Surface.Primary") as WpfBrush ?? WpfBrushes.White,
-                Foreground = TryFindResource("Theme.Text.Primary") as WpfBrush ?? WpfBrushes.Black
-            };
-
-            var root = new StackPanel
-            {
-                Margin = new Thickness(16),
-                MinWidth = 360
-            };
-
-            var instructionText = new TextBlock
-            {
-                Text = instruction,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 10)
-            };
-
-            var input = new WpfTextBox
-            {
-                Text = initialHex,
-                MinWidth = 220,
-                Margin = new Thickness(0, 0, 0, 10)
-            };
-
-            var preview = new Border
-            {
-                Height = 28,
-                CornerRadius = new CornerRadius(4),
-                BorderThickness = new Thickness(1),
-                BorderBrush = TryFindResource("Theme.Border.Strong") as WpfBrush ?? WpfBrushes.Gray,
-                Background = CreateFrozenBrush(initialColor),
-                Margin = new Thickness(0, 0, 0, 14)
-            };
-
-            input.TextChanged += (_, _) =>
-            {
-                if (TryNormalizeHexColor(input.Text, out var normalizedHex) && TryParseHexColor(normalizedHex, out var parsedColor))
-                {
-                    preview.Background = CreateFrozenBrush(parsedColor);
-                }
-            };
-
-            var buttons = new StackPanel
-            {
-                Orientation = WpfOrientation.Horizontal,
-                HorizontalAlignment = WpfHorizontalAlignment.Right
-            };
-
-            var okButton = new WpfButton
-            {
-                Content = "OK",
-                IsDefault = true,
-                MinWidth = 82,
-                Margin = new Thickness(0, 0, 8, 0)
-            };
-
-            var cancelButton = new WpfButton
-            {
-                Content = "Cancel",
-                IsCancel = true,
-                MinWidth = 82
-            };
-
-            okButton.Click += (_, _) =>
-            {
-                if (!TryNormalizeHexColor(input.Text, out var normalizedHex))
-                {
-                    ShowIdeMessage("Invalid Color", "Please enter a valid color in #RRGGBB format. Example: #0F4C81");
-                    input.Focus();
-                    input.SelectAll();
-                    return;
-                }
-
-                result = normalizedHex;
-                dialog.DialogResult = true;
-            };
-
-            buttons.Children.Add(okButton);
-            buttons.Children.Add(cancelButton);
-            root.Children.Add(instructionText);
-            root.Children.Add(input);
-            root.Children.Add(preview);
-            root.Children.Add(buttons);
-            dialog.Content = root;
-
-            input.SelectAll();
-            input.Focus();
-
-            return dialog.ShowDialog() == true ? result : null;
+            return EditorColorDialog.Prompt(this, title, instruction, initialColor, ShowIdeMessage);
         }
 
         private WpfColor GetEffectiveSelectionBackgroundColor()
         {
-            if (TryParseHexColor(ViewModel?.EditorSelectionBackgroundHex, out var customColor))
+            if (EditorColorUtilities.TryParseHexColor(ViewModel?.EditorSelectionBackgroundHex, out var customColor))
             {
                 return customColor;
             }
@@ -8836,7 +8518,7 @@ namespace PS7ScriptDesk.Shell
 
         private WpfColor GetEffectiveCurrentLineBackgroundColor()
         {
-            if (TryParseHexColor(ViewModel?.EditorCurrentLineBackgroundHex, out var customColor))
+            if (EditorColorUtilities.TryParseHexColor(ViewModel?.EditorCurrentLineBackgroundHex, out var customColor))
             {
                 return customColor;
             }
@@ -8864,104 +8546,6 @@ namespace PS7ScriptDesk.Shell
 
             color = WpfColors.Transparent;
             return false;
-        }
-
-        private static bool TryNormalizeHexColor(string? value, out string normalizedHex)
-        {
-            normalizedHex = string.Empty;
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                return false;
-            }
-
-            var text = value.Trim();
-            if (!text.StartsWith("#", StringComparison.Ordinal))
-            {
-                text = "#" + text;
-            }
-
-            if (text.Length == 4)
-            {
-                text = $"#{text[1]}{text[1]}{text[2]}{text[2]}{text[3]}{text[3]}";
-            }
-
-            if (text.Length != 7)
-            {
-                return false;
-            }
-
-            if (!byte.TryParse(text.Substring(1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _) ||
-                !byte.TryParse(text.Substring(3, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _) ||
-                !byte.TryParse(text.Substring(5, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _))
-            {
-                return false;
-            }
-
-            normalizedHex = text.ToUpperInvariant();
-            return true;
-        }
-
-        private static string? NormalizeComparableHex(string? value)
-        {
-            return TryNormalizeHexColor(value, out var normalizedHex) ? normalizedHex : null;
-        }
-
-        private static bool TryParseHexColor(string? value, out WpfColor color)
-        {
-            if (!TryNormalizeHexColor(value, out var normalizedHex))
-            {
-                color = WpfColors.Transparent;
-                return false;
-            }
-
-            color = WpfColor.FromRgb(
-                byte.Parse(normalizedHex.Substring(1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture),
-                byte.Parse(normalizedHex.Substring(3, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture),
-                byte.Parse(normalizedHex.Substring(5, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
-            return true;
-        }
-
-        private static string FormatColorHex(WpfColor color)
-        {
-            return $"#{color.R:X2}{color.G:X2}{color.B:X2}";
-        }
-
-        private static WpfSolidColorBrush CreateFrozenBrush(WpfColor color)
-        {
-            var brush = new WpfSolidColorBrush(color);
-            brush.Freeze();
-            return brush;
-        }
-
-        private static WpfColor GetBestTextColorForBackground(WpfColor backgroundColor)
-        {
-            var whiteContrast = GetContrastRatio(WpfColors.White, backgroundColor);
-            var blackContrast = GetContrastRatio(WpfColors.Black, backgroundColor);
-            return whiteContrast >= blackContrast ? WpfColors.White : WpfColors.Black;
-        }
-
-        private static double GetContrastRatio(WpfColor foreground, WpfColor background)
-        {
-            var foregroundLuminance = GetRelativeLuminance(foreground);
-            var backgroundLuminance = GetRelativeLuminance(background);
-            var lighter = Math.Max(foregroundLuminance, backgroundLuminance);
-            var darker = Math.Min(foregroundLuminance, backgroundLuminance);
-            return (lighter + 0.05d) / (darker + 0.05d);
-        }
-
-        private static double GetRelativeLuminance(WpfColor color)
-        {
-            return (0.2126d * LinearizeSrgbChannel(color.R)) +
-                   (0.7152d * LinearizeSrgbChannel(color.G)) +
-                   (0.0722d * LinearizeSrgbChannel(color.B));
-        }
-
-        private static double LinearizeSrgbChannel(byte value)
-        {
-            var normalized = value / 255d;
-            return normalized <= 0.03928d
-                ? normalized / 12.92d
-                : Math.Pow((normalized + 0.055d) / 1.055d, 2.4d);
         }
 
         private static bool SetPropertyIfAvailable(object target, string propertyName, object? value)

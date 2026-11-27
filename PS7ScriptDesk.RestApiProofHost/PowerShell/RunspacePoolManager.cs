@@ -275,6 +275,14 @@ public sealed class RunspacePoolManager : IAsyncDisposable
             throw new InvalidOperationException("The proof host sample script contains parse errors.");
         }
 
+        if (ast.ParamBlock is not null ||
+            ast.EndBlock?.Statements.Any(statement => statement is not FunctionDefinitionAst) == true ||
+            ast.UsingStatements.Count > 0)
+        {
+            throw new InvalidOperationException(
+                "Top-level script initialization is unsupported by the API runtime. API scripts may contain function declarations only; move initialization into a separately prepared deployment module or function before starting the host.");
+        }
+
         var functions = ast.FindAll(
                 node => node is FunctionDefinitionAst function &&
                         function.Parent is not FunctionDefinitionAst &&
@@ -284,10 +292,31 @@ public sealed class RunspacePoolManager : IAsyncDisposable
 
         foreach (var function in functions)
         {
+            var body = function.Body.Extent.Text;
+            if (function.Parameters is { Count: > 0 })
+            {
+                var inlineParameters = string.Join(", ", function.Parameters.Select(parameter => parameter.Extent.Text));
+                body = AddInlineParameterBlock(body, inlineParameters);
+            }
+
             initialSessionState.Commands.Add(new SessionStateFunctionEntry(
                 function.Name,
-                NormalizeFunctionBody(function.Body.Extent.Text)));
+                NormalizeFunctionBody(body)));
         }
+    }
+
+    private static string AddInlineParameterBlock(string bodyText, string parameterDeclarations)
+    {
+        var trimmed = bodyText.Trim();
+        if (trimmed.Length < 2 || trimmed[0] != '{' || trimmed[^1] != '}')
+        {
+            throw new InvalidOperationException("A function with inline parameters has an unsupported body shape and cannot be registered safely.");
+        }
+
+        var statements = trimmed[1..^1].Trim();
+        return string.IsNullOrWhiteSpace(statements)
+            ? $"{{ param({parameterDeclarations}) }}"
+            : $"{{ param({parameterDeclarations}){Environment.NewLine}{statements}{Environment.NewLine}}}";
     }
 
     private static string NormalizeFunctionBody(string bodyText)
