@@ -1,6 +1,6 @@
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using PS7ScriptDesk.Application.Utilities;
 
 namespace PS7ScriptDesk.PowerShell.Services;
 
@@ -10,19 +10,14 @@ namespace PS7ScriptDesk.PowerShell.Services;
 /// </summary>
 internal static class PsesPackageRuntimeStager
 {
-    private const int ErrorInsufficientBuffer = 122;
+    public static string? TryGetCurrentPackageFullName() => ExternalProcessPathContract.TryGetCurrentPackageFullName();
 
-    public static string? TryGetCurrentPackageFullName()
-    {
-        if (!OperatingSystem.IsWindows()) return null;
+    internal static string ResolveExternalProcessDataRoot() => ExternalProcessPathContract.DataRoot;
 
-        var length = 0;
-        if (GetCurrentPackageFullName(ref length, null) != ErrorInsufficientBuffer || length <= 0)
-            return null;
+    internal static string ResolveExternalProcessDataRoot(string? packageFullName, string? packageFamilyName, string localAppData)
+        => ExternalProcessPathContract.ResolveDataRoot(packageFullName, packageFamilyName, localAppData);
 
-        var name = new StringBuilder(length);
-        return GetCurrentPackageFullName(ref length, name) == 0 ? name.ToString() : null;
-    }
+    internal static string ResolveExternalProcessTempRoot() => ExternalProcessPathContract.TempRoot;
 
     public static string Stage(string sourceRoot, string packageFullName, string localAppData)
     {
@@ -94,6 +89,4 @@ internal static class PsesPackageRuntimeStager
         return true;
     }
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
-    private static extern int GetCurrentPackageFullName(ref int packageFullNameLength, StringBuilder? packageFullName);
 }

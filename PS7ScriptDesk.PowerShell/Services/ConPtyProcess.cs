@@ -281,11 +281,47 @@ internal sealed class ConPtyProcess : IAsyncDisposable
         return selected;
     }
 
-    private static string BuildCommandLine(string executable, IReadOnlyList<string> arguments)
+    internal static string BuildCommandLine(string executable, IReadOnlyList<string> arguments)
         => string.Join(" ", new[] { Quote(executable) }.Concat(arguments.Select(Quote)));
 
-    private static string Quote(string value)
-        => value.Length == 0 ? "\"\"" : value.Any(char.IsWhiteSpace) || value.Contains('"') ? "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"" : value;
+    internal static string Quote(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.Length == 0)
+            return "\"\"";
+
+        if (!value.Any(char.IsWhiteSpace) && !value.Contains('"'))
+            return value;
+
+        var result = new System.Text.StringBuilder(value.Length + 2);
+        result.Append('"');
+        var backslashes = 0;
+        foreach (var character in value)
+        {
+            if (character == '\\')
+            {
+                backslashes++;
+                continue;
+            }
+
+            if (character == '"')
+            {
+                result.Append('\\', (backslashes * 2) + 1);
+                result.Append('"');
+            }
+            else
+            {
+                result.Append('\\', backslashes);
+                result.Append(character);
+            }
+
+            backslashes = 0;
+        }
+
+        result.Append('\\', backslashes * 2);
+        result.Append('"');
+        return result.ToString();
+    }
 
     internal sealed record ProcessIdentity(Process Process, int ProcessId);
 

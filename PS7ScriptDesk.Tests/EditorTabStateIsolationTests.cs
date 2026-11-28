@@ -65,9 +65,10 @@ public sealed class EditorTabStateIsolationTests
     public void DocumentRebindUninstallsFoldingAndGuardsDeferredFocusByIdentity()
     {
         var main = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+        var controller = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "Editor", "EditorFoldingController.cs");
 
-        Assert.Contains("UninstallFoldingManager(editorTextEditor)", main, StringComparison.Ordinal);
-        Assert.Contains("FoldingManager.Uninstall(foldingManager)", main, StringComparison.Ordinal);
+        Assert.Contains("_editorFoldingController.UninstallFoldingManager(editorTextEditor)", main, StringComparison.Ordinal);
+        Assert.Contains("FoldingManager.Uninstall(foldingManager)", controller, StringComparison.Ordinal);
         Assert.Contains("_documentSessionsByTab.TryGetValue(targetTab, out var targetSession)", main, StringComparison.Ordinal);
         Assert.Contains("ReferenceEquals(editorTextEditor.Document, targetSession.Document)", main, StringComparison.Ordinal);
         Assert.Contains("focusRequestVersion != Volatile.Read", main, StringComparison.Ordinal);
@@ -82,20 +83,21 @@ public sealed class EditorTabStateIsolationTests
     public void FoldingStateIsCapturedPerSessionBeforeUninstallAndRestoredAfterCurrentParse()
     {
         var main = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+        var controller = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "Editor", "EditorFoldingController.cs");
         var unregisterStart = main.IndexOf("private void UnregisterEditor(TextEditor editorTextEditor)", StringComparison.Ordinal);
-        var unregisterEnd = main.IndexOf("private void UninstallFoldingManager", unregisterStart, StringComparison.Ordinal);
+        var unregisterEnd = main.IndexOf("private void EditorTab_PropertyChanged", unregisterStart, StringComparison.Ordinal);
         var unregister = main[unregisterStart..unregisterEnd];
         Assert.True(unregister.IndexOf("CaptureFoldedRegionState(editorTextEditor)", StringComparison.Ordinal) <
                     unregister.IndexOf("UninstallFoldingManager(editorTextEditor)", StringComparison.Ordinal));
 
-        var applyStart = main.IndexOf("manager.UpdateFoldings(ranges.Select", StringComparison.Ordinal);
-        var applyEnd = main.IndexOf("applyStopwatch.Stop();", applyStart, StringComparison.Ordinal);
+        var applyStart = controller.IndexOf("manager.UpdateFoldings(ranges.Select", StringComparison.Ordinal);
+        var applyEnd = controller.IndexOf("applyStopwatch.Stop();", applyStart, StringComparison.Ordinal);
         Assert.True(applyStart >= 0 && applyEnd > applyStart);
-        var apply = main[applyStart..applyEnd];
+        var apply = controller[applyStart..applyEnd];
         Assert.Contains("session.FoldedRegionStateSnapshot", apply, StringComparison.Ordinal);
         Assert.Contains("stateSnapshot.FindFoldedRanges(snapshot.TextSource, ranges)", apply, StringComparison.Ordinal);
         Assert.Contains("session.ClearFoldedRegionState()", apply, StringComparison.Ordinal);
-        Assert.Contains("session.IsRegistrationCurrent(snapshot)", main, StringComparison.Ordinal);
+        Assert.Contains("session.IsRegistrationCurrent(snapshot)", controller, StringComparison.Ordinal);
     }
 
     [Fact]

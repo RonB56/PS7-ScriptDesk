@@ -94,8 +94,7 @@ public sealed class RunFileSnapshotBehaviorTests
         var runtimePath = Environment.GetEnvironmentVariable("PS7SCRIPT_DESK_TEST_PWSH")
             ?? @"C:\Program Files\PowerShell\7\pwsh.exe";
         var psesRoot = Environment.GetEnvironmentVariable("PS7SCRIPTDESK_PSES_ROOT")
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".vscode", "extensions", "ms-vscode.powershell-2025.4.0", "modules");
+            ?? Path.Combine(AppContext.BaseDirectory, "PSES");
         if (!File.Exists(runtimePath) ||
             !File.Exists(Path.Combine(psesRoot, "PowerShellEditorServices", "Start-EditorServices.ps1")))
             throw Xunit.Sdk.SkipException.ForSkip("Run File bridge lifecycle verification requires PowerShell 7 and PSES.");

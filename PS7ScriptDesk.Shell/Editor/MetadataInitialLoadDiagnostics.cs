@@ -47,7 +47,7 @@ namespace PS7ScriptDesk.Shell.Editor
 
         public string LogPath { get; }
 
-        public static string MetadataLogDirectory => Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Logs", "Metadata");
+        public static string MetadataLogDirectory => Path.Combine(ExternalProcessPathContract.ApplicationDataRoot, "Logs", "Metadata");
 
         public static MetadataInitialLoadDiagnostics? TryCreate(PowerShellRuntimeInfo runtimeInfo)
         {
@@ -325,7 +325,7 @@ namespace PS7ScriptDesk.Shell.Editor
             AppendLine($"AppLogger.CurrentLogDirectory: {AppLogger.CurrentLogDirectory}");
             LogDirectoryState("Metadata cache root", EditorMetadataCacheStore.GetCacheRootDirectory(), createIfMissing: true);
             LogDirectoryState("Metadata worker root", EditorMetadataBuilderHost.GetMetadataWorkerRootDirectory(), createIfMissing: true);
-            LogDirectoryState("BackgroundPowerShell root", Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "BackgroundPowerShell"), createIfMissing: false);
+            LogDirectoryState("BackgroundPowerShell root", Path.Combine(ExternalProcessPathContract.ApplicationDataRoot, "BackgroundPowerShell"), createIfMissing: false);
             var packageInfo = DetectPackageInfo();
             AppendLine($"Package family name: {packageInfo.PackageFamilyName}");
             AppendLine($"Package LocalAppData path guess: {packageInfo.PackageLocalAppDataPath}");
@@ -626,57 +626,14 @@ namespace PS7ScriptDesk.Shell.Editor
         {
             try
             {
-                var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                var packageFamilyFromPath = ExtractPackageFamilyName(localAppData);
-                var packageFamilyFromRuntime = TryGetPackageFamilyNameFromRuntime();
-                var packageFamily = !string.IsNullOrWhiteSpace(packageFamilyFromRuntime)
-                    ? packageFamilyFromRuntime
-                    : packageFamilyFromPath;
-                var packageLocalAppDataPath = string.IsNullOrWhiteSpace(packageFamily)
-                    ? string.Empty
-                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Packages", packageFamily, "LocalCache", ApplicationBranding.InternalName);
-                return (!string.IsNullOrWhiteSpace(packageFamilyFromRuntime) || !string.IsNullOrWhiteSpace(packageFamilyFromPath), packageFamily ?? string.Empty, packageLocalAppDataPath);
+                var fullName = ExternalProcessPathContract.TryGetCurrentPackageFullName();
+                if (fullName is null) return (false, string.Empty, string.Empty);
+                return (true, ExternalProcessPathContract.TryGetCurrentPackageFamilyName() ?? string.Empty,
+                    ExternalProcessPathContract.ApplicationDataRoot);
             }
             catch
             {
                 return (false, string.Empty, string.Empty);
-            }
-        }
-
-        private static string ExtractPackageFamilyName(string localAppData)
-        {
-            if (string.IsNullOrWhiteSpace(localAppData))
-            {
-                return string.Empty;
-            }
-
-            var marker = $"{Path.DirectorySeparatorChar}Packages{Path.DirectorySeparatorChar}";
-            var index = localAppData.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (index < 0)
-            {
-                return string.Empty;
-            }
-
-            var remainder = localAppData[(index + marker.Length)..];
-            var separatorIndex = remainder.IndexOf(Path.DirectorySeparatorChar);
-            return separatorIndex >= 0 ? remainder[..separatorIndex] : remainder;
-        }
-
-        private static string TryGetPackageFamilyNameFromRuntime()
-        {
-            try
-            {
-                var packageType = Type.GetType("Windows.ApplicationModel.Package, Windows, ContentType=WindowsRuntime");
-                var currentProperty = packageType?.GetProperty("Current", BindingFlags.Public | BindingFlags.Static);
-                var currentPackage = currentProperty?.GetValue(null);
-                var idProperty = currentPackage?.GetType().GetProperty("Id");
-                var packageId = idProperty?.GetValue(currentPackage);
-                var familyNameProperty = packageId?.GetType().GetProperty("FamilyName");
-                return familyNameProperty?.GetValue(packageId)?.ToString() ?? string.Empty;
-            }
-            catch
-            {
-                return string.Empty;
             }
         }
 

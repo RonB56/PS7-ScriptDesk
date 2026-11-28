@@ -805,7 +805,7 @@ namespace PS7ScriptDesk.Shell.Editor
             }
 
             return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                ExternalProcessPathContract.DataRoot,
                 ApplicationBranding.InternalName,
                 "EditorMetadataCache");
         }

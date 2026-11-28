@@ -122,10 +122,10 @@ public sealed class FoldRegionSelectorTests
         var registrationStart = main.IndexOf("private void RegisterEditor(TextEditor editorTextEditor)", StringComparison.Ordinal);
         var registrationEnd = main.IndexOf("private int IncrementEditorRegistrationVersion", registrationStart, StringComparison.Ordinal);
         var registration = main[registrationStart..registrationEnd];
-        Assert.Contains("ScheduleFolding(editorTextEditor, debounceMilliseconds: 0)", registration, StringComparison.Ordinal);
+        Assert.Contains("_editorFoldingController.ScheduleFolding(editorTextEditor, debounceMilliseconds: 0)", registration, StringComparison.Ordinal);
         Assert.Contains("editorTextEditor.PreviewKeyDown += EditorTextEditor_PreviewKeyDown", main, StringComparison.Ordinal);
         Assert.Contains("new(\"editor.toggleFold\"", main, StringComparison.Ordinal);
-        Assert.Contains("ToggleFoldAtCaret(editor)", main, StringComparison.Ordinal);
+        Assert.Contains("_editorFoldingController.ToggleFoldAtCaret(editor)", main, StringComparison.Ordinal);
     }
 
     private static Region? Select(IEnumerable<Region> regions, int caretOffset, int caretLine)

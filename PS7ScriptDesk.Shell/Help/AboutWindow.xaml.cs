@@ -1,29 +1,43 @@
 using System.Reflection;
+using System.Diagnostics;
 using System.Windows;
 using PS7ScriptDesk.Application.Utilities;
+using PS7ScriptDesk.Shell.Dialogs;
 
 namespace PS7ScriptDesk.Shell.Help;
 
 public partial class AboutWindow : Window
 {
-    public AboutWindow()
+    private readonly Action? _openLogsFolder;
+    private readonly Action? _createSupportPackage;
+    private readonly Action? _copyDiagnostics;
+
+    public AboutWindow(string? powerShellRuntimeVersion = null, Action? openLogsFolder = null,
+        Action? createSupportPackage = null, Action? copyDiagnostics = null)
     {
         InitializeComponent();
 
-        var presentation = CreatePresentation();
+        _openLogsFolder = openLogsFolder;
+        _createSupportPackage = createSupportPackage;
+        _copyDiagnostics = copyDiagnostics;
+        var presentation = CreatePresentation(powerShellRuntimeVersion);
         ProductNameText.Text = presentation.ProductName;
         VersionText.Text = presentation.VersionText;
         DescriptionText.Text = presentation.Description;
         PackageMetadataText.Text = presentation.PackageMetadataText;
+        PowerShellRuntimeText.Text = presentation.PowerShellRuntimeText;
     }
 
-    internal static AboutWindowPresentation CreatePresentation()
+    internal static AboutWindowPresentation CreatePresentation(string? powerShellRuntimeVersion = null)
     {
         return new AboutWindowPresentation(
             ApplicationBranding.PublicName,
             $"Version {GetRunningVersionText()}",
             ApplicationBranding.Tagline,
-            GetPackageMetadataText());
+            GetPackageMetadataText(),
+            string.IsNullOrWhiteSpace(powerShellRuntimeVersion)
+                ? "PowerShell runtime version: Unavailable"
+                : $"PowerShell runtime version: {powerShellRuntimeVersion}");
     }
 
     internal static string GetRunningVersionText()
@@ -81,10 +95,34 @@ public partial class AboutWindow : Window
     {
         Close();
     }
+
+    private void RepositoryLink_Click(object sender, RoutedEventArgs e) => OpenPublicLink("https://github.com/RonB56/PS7-ScriptDesk");
+
+    private void IssueLink_Click(object sender, RoutedEventArgs e) => OpenPublicLink("https://github.com/RonB56/PS7-ScriptDesk/issues");
+
+    private static void OpenPublicLink(string url)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception exception)
+        {
+            _ = new IdeMessageDialog(null, "Unable to Open Support Link",
+                $"Open this address manually:\n{url}\n\n{exception.Message}").ShowDialog();
+        }
+    }
+
+    private void OpenLogsButton_Click(object sender, RoutedEventArgs e) => _openLogsFolder?.Invoke();
+
+    private void CreateSupportPackageButton_Click(object sender, RoutedEventArgs e) => _createSupportPackage?.Invoke();
+
+    private void CopyDiagnosticsButton_Click(object sender, RoutedEventArgs e) => _copyDiagnostics?.Invoke();
 }
 
 internal sealed record AboutWindowPresentation(
     string ProductName,
     string VersionText,
     string Description,
-    string PackageMetadataText);
+    string PackageMetadataText,
+    string PowerShellRuntimeText);

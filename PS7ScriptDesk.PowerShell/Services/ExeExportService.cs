@@ -71,7 +71,7 @@ namespace PS7ScriptDesk.PowerShell.Services
             }
 
             var tempRoot = Path.Combine(
-                Path.GetTempPath(),
+                ExternalProcessPathContract.TempRoot,
                 ApplicationBranding.InternalName,
                 "ExeExport",
                 Guid.NewGuid().ToString("N"));
@@ -269,7 +269,7 @@ namespace PS7ScriptDesk.PowerShell.Services
 
             ReportProgress(progress, "AnalyzingSource", "Analyzing script dependencies and portability warnings.");
             var dependencies = new PowerShellDependencyAnalyzer().Analyze(request.ScriptContent);
-            var temporaryRoot = Path.Combine(ApplicationBranding.LocalApplicationDataRoot, "Temp", "ExeExport", Guid.NewGuid().ToString("N"));
+            var temporaryRoot = Path.Combine(ExternalProcessPathContract.ApplicationDataRoot, "Temp", "ExeExport", Guid.NewGuid().ToString("N"));
             var projectDirectory = Path.Combine(temporaryRoot, "project");
             var publishDirectory = Path.Combine(temporaryRoot, "publish");
             var verifier = new ExecutableVerifier();

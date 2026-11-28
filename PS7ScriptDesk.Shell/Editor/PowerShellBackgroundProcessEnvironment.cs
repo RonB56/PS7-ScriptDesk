@@ -99,6 +99,7 @@ namespace PS7ScriptDesk.Shell.Editor
             startInfo.Environment["POWERSHELL_CLI_TELEMETRY_OPTOUT"] = environmentInfo.PowerShellCliTelemetryOptOut;
             startInfo.Environment["TEMP"] = environmentInfo.TempPath;
             startInfo.Environment["TMP"] = environmentInfo.TmpPath;
+            startInfo.Environment["LOCALAPPDATA"] = environmentInfo.LocalAppData;
 
             if (!string.IsNullOrWhiteSpace(environmentInfo.PsModulePath))
             {
@@ -139,7 +140,7 @@ namespace PS7ScriptDesk.Shell.Editor
             try
             {
                 var normalizedPurpose = SanitizePathSegment(purpose);
-                var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                var localAppData = ExternalProcessPathContract.DataRoot;
                 if (string.IsNullOrWhiteSpace(localAppData))
                 {
                     failureReason = "LocalAppData could not be resolved.";

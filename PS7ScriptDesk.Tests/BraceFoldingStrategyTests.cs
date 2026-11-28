@@ -37,7 +37,7 @@ public sealed class BraceFoldingStrategyTests
     [Fact]
     public void ClassMethodsSwitchClausesAndNestedScriptBlocksAreFoldable()
     {
-        const string script = "class Example {\n  [void] Run() {\n    $action = {\n      switch (1) {\n        1 { 'one' }\n        default { 'other' }\n      }\n    }\n  }\n}";
+        const string script = "class Example {\n  [void] Run() {\n    $action = {\n      switch (1) {\n        1 {\n          'one'\n        }\n        default {\n          'other'\n        }\n      }\n    }\n  }\n}";
         var ranges = _strategy.CreateFoldings(script);
 
         Assert.Contains(ranges, range => range.Name == "class Example");
@@ -47,6 +47,16 @@ public sealed class BraceFoldingStrategyTests
         Assert.Contains(ranges, range => range.Name == "switch default");
         Assert.Contains(ranges, range => range.Name == "script block");
         AssertValidNestedRanges(script, ranges);
+    }
+
+    [Fact]
+    public void SingleLineSwitchClausesDoNotProduceIndividualFoldingRanges()
+    {
+        const string script = "switch (1) { 1 { 'one' } default { 'other' } }";
+        var ranges = _strategy.CreateFoldings(script);
+
+        Assert.DoesNotContain(ranges, range => range.Name == "switch clause");
+        Assert.DoesNotContain(ranges, range => range.Name == "switch default");
     }
 
     [Fact]
@@ -134,16 +144,17 @@ public sealed class BraceFoldingStrategyTests
     public void EditorPipelineUsesSnapshotWorkerAndValidatesBeforeDispatcherApply()
     {
         var main = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "MainWindow.xaml.cs");
+        var controller = TestRepositoryPaths.ReadFile("PS7ScriptDesk.Shell", "Editor", "EditorFoldingController.cs");
         var registrationStart = main.IndexOf("private void RegisterEditor(TextEditor editorTextEditor)", StringComparison.Ordinal);
         var registrationEnd = main.IndexOf("private int IncrementEditorRegistrationVersion", registrationStart, StringComparison.Ordinal);
         var registration = main[registrationStart..registrationEnd];
-        Assert.Contains("ScheduleFolding(editorTextEditor)", registration, StringComparison.Ordinal);
+        Assert.Contains("_editorFoldingController.ScheduleFolding(editorTextEditor, debounceMilliseconds: 0)", registration, StringComparison.Ordinal);
         Assert.DoesNotContain("CreateFoldings(", registration, StringComparison.Ordinal);
         Assert.Contains("Task.Run(", main, StringComparison.Ordinal);
-        Assert.Contains("session.CaptureSnapshot()", main, StringComparison.Ordinal);
-        Assert.Contains("session.IsRegistrationCurrent(snapshot)", main, StringComparison.Ordinal);
-        Assert.Contains("manager.UpdateFoldings(ranges.Select", main, StringComparison.Ordinal);
-        Assert.Contains("CancelPendingFolding(editor)", main, StringComparison.Ordinal);
+        Assert.Contains("session.CaptureSnapshot()", controller, StringComparison.Ordinal);
+        Assert.Contains("session.IsRegistrationCurrent(snapshot)", controller, StringComparison.Ordinal);
+        Assert.Contains("manager.UpdateFoldings(ranges.Select", controller, StringComparison.Ordinal);
+        Assert.Contains("CancelPendingFolding(editor)", controller, StringComparison.Ordinal);
     }
 
     private static string CreateScript(int lineCount)

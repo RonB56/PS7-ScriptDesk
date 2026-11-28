@@ -1,5 +1,6 @@
 using PS7ScriptDesk.Application.Interfaces;
 using PS7ScriptDesk.Application.Diagnostics;
+using PS7ScriptDesk.Application.Utilities;
 using PS7ScriptDesk.Domain.Models;
 
 namespace PS7ScriptDesk.Infrastructure.Services;
@@ -57,9 +58,10 @@ public sealed class GitService : IGitService
         if (string.IsNullOrWhiteSpace(repositoryRoot) || !Directory.Exists(repositoryRoot))
             return GitCommandResult.Failed("InvalidRepository", "The Git repository is no longer available.", TimeSpan.Zero);
 
-        var messagePath = Path.Combine(Path.GetTempPath(), $"PS7ScriptDesk-commit-{Guid.NewGuid():N}.txt");
+        var messagePath = Path.Combine(ExternalProcessPathContract.TempRoot, $"PS7ScriptDesk-commit-{Guid.NewGuid():N}.txt");
         try
         {
+            Directory.CreateDirectory(Path.GetDirectoryName(messagePath)!);
             await File.WriteAllTextAsync(messagePath, message, new System.Text.UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             var result = await _commandRunner.RunAsync(Path.GetFullPath(repositoryRoot), new[] { "commit", "-F", messagePath }, TimeSpan.FromSeconds(120), cancellationToken).ConfigureAwait(false);
             return result;

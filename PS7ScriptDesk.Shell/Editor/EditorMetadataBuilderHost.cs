@@ -67,7 +67,7 @@ namespace PS7ScriptDesk.Shell.Editor
         public static string GetMetadataWorkerRootDirectory()
         {
             return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                ExternalProcessPathContract.DataRoot,
                 ApplicationBranding.InternalName,
                 "MetadataWorker");
         }
@@ -312,6 +312,8 @@ namespace PS7ScriptDesk.Shell.Editor
             process.StartInfo.ArgumentList.Add("-File");
             process.StartInfo.ArgumentList.Add(workerArtifacts.ScriptPath);
             var backgroundEnvironmentApplied = PowerShellBackgroundProcessEnvironment.Apply(process.StartInfo, "MetadataBuilder", runtimePath);
+            if (!backgroundEnvironmentApplied)
+                throw new InvalidOperationException("The isolated metadata PowerShell environment could not be prepared; inspect the application log for the directory failure.");
             var configuredModulePath = GetEnvironmentValue(process.StartInfo, "PSModulePath");
 
             MetadataPerformanceLog.AppendSection(performanceLogPath, "External PowerShell worker process");

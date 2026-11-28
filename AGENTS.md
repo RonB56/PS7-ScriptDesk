@@ -61,6 +61,8 @@ For behavior or state-machine changes, **consider** whether existing diagnostics
 
 ## 7. Build, testing, and acceptance — bounded by risk
 
+Any production feature that exchanges application-owned filesystem paths with an external process must review that boundary and use `ExternalProcessPathContract` for physical paths when packaged. Keep user-owned scripts, chosen export destinations, installed executable/module paths, and internal-only storage distinct. Each production release requires genuine clean MSIX installation verification of startup and initial IntelliSense metadata generation; unpackaged tests and synthetic package fixtures do not establish installed-package acceptance. Warm-cache verification alone is insufficient.
+
 Solution: `PS7ScriptDesk.slnx` (verify actual projects/configuration). Use the existing Windows/.NET 10/PowerShell 7 toolchain; do not alter machine-wide tooling or security settings without approval.
 
 ### Mandatory Codex development verification
@@ -77,12 +79,23 @@ Examples (check `$LASTEXITCODE` after each command; stop on nonzero):
 
 Keep verification bounded and forward-only: do not automatically retry a failed command, silently switch execution environments, or request elevation merely to obtain a passing result. Record actual exit codes, test counts, and evidence paths. Do not load SDK Roslyn assemblies into PowerShell's default assembly load context. Preserve the installed collectors and their methodology; document any future approved version change. If a runner is missing or fails, report the exact blocker; do not recreate or modify it. Any exceptional verification outside these runners requires specific justification and authorization. Existing bounded-testing and failure-stop policies below still apply. These requirements govern Codex verification only, not the owner's normal Visual Studio workflow.
 
+For the DEV-ENV-BUILD-03 result schema, inspect `result.json` and its `Classification`, `ExitCode`, and `CallerExitCode` alongside the captured logs. `Prepared`, `Running`, and `Terminating` are interim states, not PASS or FAIL. If the command interface yields before completion, wait on that invocation and inspect the same evidence directory; do not infer a failed build from an initially empty binary log. See `DevelopmentTools\README.md` for failure and timeout interpretation.
+
 1. Review changed files for accidental edits; build the smallest appropriate affected target. Use a solution-wide build only when warranted.
 2. Run focused tests relevant to the change. Prefer existing **bounded production-service acceptance runners** for console/session behavior; avoid unnecessary new harnesses and duplicate suites.
 3. For VSTest/testhost or MSBuild infrastructure stalls, record the exact failure, perform **at most one** targeted diagnostic if justified, then stop that route and report the blocker. Do not repeatedly retry, weaken tests, or present a workaround as a platform repair.
 4. Re-run only the failing or directly affected checks after a concrete fix; reserve broad regression for requested or high-risk changes.
 5. State precise coverage: source inspection, compilation, synthetic/unit test, live production-service test, and **owner-operated WPF GUI UAT are different levels**. Do not claim GUI acceptance from service-level results or use GUI automation.
 6. Check newly introduced warnings and state which acceptance criteria passed, failed, or remain unverified. A successful build alone does not prove runtime behavior.
+
+### Risk-based owner UAT
+
+- Pure utility extraction may need no separate GUI UAT when independent review and automated coverage are sufficient.
+- Ordinary implementation assignments should present one to three consolidated owner UAT scenarios simultaneously.
+- Avoid repeating behavior already adequately covered by automated tests. Expand manual testing only for identified material risks or explicit acceptance requirements.
+- Isolate and retest failing behavior without repeating unrelated scenarios that passed.
+- Preserve comprehensive milestone and final regression requirements.
+- Record actual outcomes. Waived or unexecuted tests are not PASS.
 
 For interactive terminal changes, check Run/Interrupt restoration **without an extra Enter**, prompt/cursor placement, echoed input and Backspace for `Read-Host`, native input/output, and continuity of the shared session. For async/lifecycle changes, test relevant cancellation, repeat, failure/recovery, shutdown, and UI-thread cases.
 

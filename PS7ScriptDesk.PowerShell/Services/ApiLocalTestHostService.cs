@@ -427,7 +427,7 @@ public sealed class ApiLocalTestHostService : IApiLocalTestHostService
         }
 
         return Path.Combine(
-            ApplicationBranding.LocalApplicationDataRoot,
+            ExternalProcessPathContract.ApplicationDataRoot,
             "Temp",
             "ApiLocalTest",
             Guid.NewGuid().ToString("N"),

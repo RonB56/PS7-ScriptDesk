@@ -1,0 +1,42 @@
+<Window x:Class="PS7ScriptDesk.Shell.StartupFailureWindow"
+        x:ClassModifier="internal"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Terminal Startup Failed"
+        Width="620"
+        SizeToContent="Height"
+        MinHeight="300"
+        MaxHeight="620"
+        ResizeMode="CanResize"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource Theme.App.Background}"
+        Style="{StaticResource IdeSecondaryWindowStyle}"
+        AutomationProperties.Name="Terminal startup failure">
+    <Grid Margin="{StaticResource Padding.Card}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock x:Name="FailureDescriptionText" Grid.Row="0" Text="PS7 ScriptDesk could not start the interactive PowerShell terminal."
+                   Style="{StaticResource IdeDialogTitleStyle}" TextWrapping="Wrap" />
+        <TextBlock Grid.Row="1" Margin="0,10,0,8"
+                   Text="The editor remains available. Copy the details or open diagnostic logs for support."
+                   Style="{StaticResource IdeDialogDescriptionStyle}" TextWrapping="Wrap" />
+        <TextBox x:Name="FailureDetailsText" Grid.Row="2" MinHeight="90" MaxHeight="360"
+                 IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
+                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                 AutomationProperties.Name="Terminal startup failure details" />
+        <TextBlock x:Name="CopyStatusText" Grid.Row="3" Margin="0,8,0,0" TextWrapping="Wrap"
+                   Style="{StaticResource IdeDialogDescriptionStyle}" AutomationProperties.LiveSetting="Polite" />
+        <WrapPanel Grid.Row="4" Margin="0,14,0,0" HorizontalAlignment="Right">
+            <Button Margin="0,0,8,0" Content="Copy Details" Click="CopyDetails_Click" />
+            <Button Margin="0,0,8,0" Content="Open Logs Folder" Click="OpenLogs_Click" />
+            <Button Content="Dismiss" IsDefault="True" Click="Dismiss_Click"
+                    Style="{StaticResource IdeDialogPrimaryButtonStyle}" />
+        </WrapPanel>
+    </Grid>
+</Window>

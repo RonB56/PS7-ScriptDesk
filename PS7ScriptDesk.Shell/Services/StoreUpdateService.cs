@@ -695,17 +695,14 @@ namespace PS7ScriptDesk.Shell.Services
 
         private static class NativePackageIdentity
         {
-            private const int ErrorInsufficientBuffer = 122;
-            private const int AppModelErrorNoPackage = 15700;
-
             public static string TryGetCurrentPackageFullName(out string status)
             {
-                return TryReadCurrentPackageString(GetCurrentPackageFullName, out status);
+                return TryReadCurrentPackageString(ExternalProcessPathContract.TryGetCurrentPackageFullName, out status);
             }
 
             public static string TryGetCurrentPackageFamilyName(out string status)
             {
-                return TryReadCurrentPackageString(GetCurrentPackageFamilyName, out status);
+                return TryReadCurrentPackageString(ExternalProcessPathContract.TryGetCurrentPackageFamilyName, out status);
             }
 
             public static string TryGetStagedPackageOrigin(string packageFullName, out string status)
@@ -728,27 +725,19 @@ namespace PS7ScriptDesk.Shell.Services
                 }
             }
 
-            private static string TryReadCurrentPackageString(CurrentPackageStringReader reader, out string status)
+            private static string TryReadCurrentPackageString(Func<string?> reader, out string status)
             {
-                var length = 0;
-                var initialBuffer = new StringBuilder(0);
-                var initialError = reader(ref length, initialBuffer);
-                if (initialError == AppModelErrorNoPackage)
+                try
                 {
-                    status = FormatNativeStatus(initialError);
+                    var value = reader();
+                    status = value is null ? "APPMODEL_ERROR_NO_PACKAGE" : "Success";
+                    return value ?? string.Empty;
+                }
+                catch (Exception ex)
+                {
+                    status = BuildExceptionSummary(ex);
                     return string.Empty;
                 }
-
-                if (initialError != ErrorInsufficientBuffer || length <= 0)
-                {
-                    status = FormatNativeStatus(initialError);
-                    return string.Empty;
-                }
-
-                var buffer = new StringBuilder(length);
-                var error = reader(ref length, buffer);
-                status = FormatNativeStatus(error);
-                return error == 0 ? buffer.ToString().TrimEnd('\0') : string.Empty;
             }
 
             private static string FormatNativeStatus(int error)
@@ -756,19 +745,11 @@ namespace PS7ScriptDesk.Shell.Services
                 return error switch
                 {
                     0 => "Success",
-                    ErrorInsufficientBuffer => "ERROR_INSUFFICIENT_BUFFER",
-                    AppModelErrorNoPackage => "APPMODEL_ERROR_NO_PACKAGE",
+                    122 => "ERROR_INSUFFICIENT_BUFFER",
+                    15700 => "APPMODEL_ERROR_NO_PACKAGE",
                     _ => $"Win32Error={error}"
                 };
             }
-
-            private delegate int CurrentPackageStringReader(ref int packageNameLength, StringBuilder packageName);
-
-            [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-            private static extern int GetCurrentPackageFullName(ref int packageFullNameLength, StringBuilder packageFullName);
-
-            [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-            private static extern int GetCurrentPackageFamilyName(ref int packageFamilyNameLength, StringBuilder packageFamilyName);
 
             [DllImport("api-ms-win-appmodel-runtime-l1-1-1.dll", CharSet = CharSet.Unicode)]
             private static extern int GetStagedPackageOrigin(string packageFullName, out NativePackageOrigin origin);

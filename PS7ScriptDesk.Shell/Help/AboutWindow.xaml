@@ -17,6 +17,9 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <Border Grid.Row="0"
@@ -49,7 +52,29 @@
                    Style="{StaticResource IdeDialogFieldHelpStyle}"
                    AutomationProperties.Name="Package metadata status" />
 
-        <Button Grid.Row="3"
+        <TextBlock x:Name="PowerShellRuntimeText"
+                   Grid.Row="3"
+                   Margin="0,10,0,0"
+                   TextWrapping="Wrap"
+                   Style="{StaticResource IdeDialogFieldHelpStyle}"
+                   AutomationProperties.Name="PowerShell runtime version" />
+
+        <StackPanel Grid.Row="4" Margin="0,14,0,0" Orientation="Horizontal">
+            <TextBlock Margin="0,0,16,0" VerticalAlignment="Center">
+                <Hyperlink Click="RepositoryLink_Click">Project repository</Hyperlink>
+            </TextBlock>
+            <TextBlock VerticalAlignment="Center">
+                <Hyperlink Click="IssueLink_Click">Report an issue</Hyperlink>
+            </TextBlock>
+        </StackPanel>
+
+        <WrapPanel Grid.Row="5" Margin="0,14,0,0">
+            <Button Margin="0,0,8,8" Content="Open Logs Folder" Click="OpenLogsButton_Click" />
+            <Button Margin="0,0,8,8" Content="Create Support Package" Click="CreateSupportPackageButton_Click" />
+            <Button Margin="0,0,8,8" Content="Copy Diagnostic Information" Click="CopyDiagnosticsButton_Click" />
+        </WrapPanel>
+
+        <Button Grid.Row="6"
                 Margin="0,18,0,0"
                 HorizontalAlignment="Right"
                 Content="Close"

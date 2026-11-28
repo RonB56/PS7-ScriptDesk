@@ -1,6 +1,7 @@
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -10,12 +11,121 @@ using PS7ScriptDesk.Domain.Models;
 using PS7ScriptDesk.Shell;
 using PS7ScriptDesk.Shell.Dialogs;
 using PS7ScriptDesk.Shell.Editor;
+using PS7ScriptDesk.Shell.Presentation;
 
 namespace PS7ScriptDesk.Tests;
 
 [Collection("WpfUi")]
 public sealed class UiScaleWpfBehaviorTests
 {
+    [Fact]
+    public void DeveloperDiagnosticsMenuController_ReflectsSettingsAndEnabledState()
+    {
+        RunOnStaThread(() =>
+        {
+            var settings = new ApplicationSettings
+            {
+                IsDeveloperDiagnosticsEnabled = true,
+                IsDeveloperDiagnosticsVerboseUiEnabled = true,
+                IsDeveloperDiagnosticsVerboseDebuggerEnabled = false,
+                IsDeveloperDiagnosticsVerboseTerminalEnabled = false,
+                IsDeveloperDiagnosticsVerboseEditorEnabled = true
+            };
+            var enabled = new MenuItem();
+            var ui = new MenuItem();
+            var debugger = new MenuItem();
+            var terminal = new MenuItem();
+            var editor = new MenuItem();
+            var layout = new MenuItem();
+            var controller = new DeveloperDiagnosticsMenuController(settings,
+                new DeveloperDiagnosticsMenuControls(enabled, ui, debugger, terminal, editor, layout),
+                () => { }, _ => { });
+
+            controller.UpdateMenuState();
+            Assert.True(enabled.IsChecked);
+            Assert.True(ui.IsChecked);
+            Assert.False(debugger.IsChecked);
+            Assert.False(terminal.IsChecked);
+            Assert.True(editor.IsChecked);
+            Assert.All(new[] { ui, debugger, terminal, editor, layout }, item => Assert.True(item.IsEnabled));
+
+            settings.IsDeveloperDiagnosticsEnabled = false;
+            controller.UpdateMenuState();
+            Assert.False(enabled.IsChecked);
+            Assert.True(ui.IsChecked);
+            Assert.True(editor.IsChecked);
+            Assert.All(new[] { ui, debugger, terminal, editor, layout }, item => Assert.False(item.IsEnabled));
+        });
+    }
+
+    [Fact]
+    public void UiScaleMenuController_BuildsPresetsSynchronizesChecksAndUnsubscribesOnDispose()
+    {
+        RunOnStaThread(() =>
+        {
+            var service = new TrackingUiScaleService();
+            var menu = new MenuItem();
+            var controller = new UiScaleMenuController(service, menu);
+            controller.Initialize();
+
+            var presets = menu.Items.Cast<MenuItem>().ToArray();
+            controller.Initialize();
+            Assert.Equal(presets.Length, menu.Items.Count);
+            Assert.All(presets, item => Assert.Contains(item, menu.Items.Cast<MenuItem>()));
+            Assert.Equal(1, service.SubscriptionCount);
+            Assert.Equal(service.SupportedPercentages, presets.Select(item => (int)item.Tag).ToArray());
+            Assert.All(presets, item =>
+            {
+                var percentage = (int)item.Tag;
+                Assert.Equal($"{percentage}%", item.Header);
+                Assert.True(item.IsCheckable);
+                Assert.Equal($"Set application UI Scale to {percentage}%", item.ToolTip);
+                Assert.Equal($"UI Scale {percentage} percent", AutomationProperties.GetName(item));
+                Assert.Equal(percentage == 100, item.IsChecked);
+            });
+
+            var preset = presets.Single(item => (int)item.Tag == 150);
+            preset.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent, preset));
+            Assert.Equal(150, service.CurrentPercentage);
+            Assert.True(preset.IsChecked);
+            Assert.False(presets.Single(item => (int)item.Tag == 100).IsChecked);
+
+            controller.Dispose();
+            controller.Dispose();
+            Assert.Equal(0, service.SubscriptionCount);
+            controller.Initialize();
+            Assert.Equal(presets.Length, menu.Items.Count);
+            Assert.Equal(0, service.SubscriptionCount);
+            service.SetPercentage(125, "UnitTest");
+            Assert.True(preset.IsChecked);
+            Assert.False(presets.Single(item => (int)item.Tag == 125).IsChecked);
+        });
+    }
+
+    [Fact]
+    public void UiScaleMenuController_DoesNotRefreshFromQueuedScaleChangeAfterDispose()
+    {
+        RunOnStaThread(() =>
+        {
+            var service = new TrackingUiScaleService();
+            var menu = new MenuItem();
+            var controller = new UiScaleMenuController(service, menu);
+            controller.Initialize();
+            var presets = menu.Items.Cast<MenuItem>().ToArray();
+
+            Task.Run(() => service.SetPercentage(150, "UnitTest")).GetAwaiter().GetResult();
+            controller.Dispose();
+            service.SetPercentageWithoutNotification(125);
+
+            WpfTestDispatcher.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+
+            Assert.True(presets.Single(item => (int)item.Tag == 100).IsChecked);
+            Assert.False(presets.Single(item => (int)item.Tag == 125).IsChecked);
+            Assert.False(presets.Single(item => (int)item.Tag == 150).IsChecked);
+            Assert.Equal(0, service.SubscriptionCount);
+        });
+    }
+
     [Fact]
     public void AttachedWindowRoot_UpdatesVisualBoundsWhenScaleServiceChanges()
     {
@@ -402,6 +512,51 @@ public sealed class UiScaleWpfBehaviorTests
 
     private static void RunOnStaThread(Action action)
         => WpfTestDispatcher.Run(action);
+
+    private sealed class TrackingUiScaleService : IUiScaleService
+    {
+        private EventHandler? _scaleChanged;
+        private int _currentPercentage = 100;
+
+        public IReadOnlyList<int> SupportedPercentages { get; } = [75, 100, 125, 150, 175, 200];
+
+        public int CurrentPercentage => _currentPercentage;
+
+        public double CurrentFactor => CurrentPercentage / 100d;
+
+        public int SubscriptionCount { get; private set; }
+
+        public event EventHandler? ScaleChanged
+        {
+            add
+            {
+                _scaleChanged += value;
+                SubscriptionCount++;
+            }
+            remove
+            {
+                _scaleChanged -= value;
+                SubscriptionCount--;
+            }
+        }
+
+        public void SetPercentage(int percentage, string source = "User")
+        {
+            _currentPercentage = percentage;
+            _scaleChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        public void SetPercentageWithoutNotification(int percentage) => _currentPercentage = percentage;
+
+        public void Increase(string source = "User") => SetPercentage(CurrentPercentage + 25, source);
+
+        public void Decrease(string source = "User") => SetPercentage(CurrentPercentage - 25, source);
+
+        public void Reset(string source = "User") => SetPercentage(100, source);
+
+        public int NormalizePersistedPercentage(int? percentage)
+            => SupportedPercentages.Contains(percentage ?? 100) ? percentage ?? 100 : 100;
+    }
 
     private sealed class FakeApiPublishConfigurationStore : IApiPublishConfigurationStore
     {

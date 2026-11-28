@@ -19,7 +19,7 @@ namespace PS7ScriptDesk.Application.Utilities
                 return false;
             }
 
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var localAppData = ExternalProcessPathContract.DataRoot;
             if (string.IsNullOrWhiteSpace(localAppData))
             {
                 failureReason = "LocalAppData could not be resolved.";
@@ -91,7 +91,7 @@ namespace PS7ScriptDesk.Application.Utilities
         {
             return TryValidateManagedRootDirectory(
                 candidateRoot,
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                ExternalProcessPathContract.DataRoot,
                 AppContext.BaseDirectory,
                 Environment.CurrentDirectory,
                 out normalizedRoot,

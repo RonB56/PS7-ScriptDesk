@@ -477,7 +477,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             throw new FileNotFoundException("PSES Start-EditorServices.ps1 was not found.", startScript);
 
         var sessionRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            PsesPackageRuntimeStager.ResolveExternalProcessDataRoot(),
             "PS7ScriptDesk", "PSES", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(sessionRoot);
         var sessionDetailsPath = Path.Combine(sessionRoot, "session.json");
@@ -926,11 +926,12 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
         var statusMarkerId = requestId.ToString("N", CultureInfo.InvariantCulture);
         var statusVariable = "__ps7sd_status_" + statusMarkerId;
         var stagedScriptVariable = "__ps7sd_editor_" + statusMarkerId;
-        var statusPath = Path.Combine(Path.GetTempPath(), "PS7ScriptDesk-" + statusMarkerId + ".status");
+        var statusPath = Path.Combine(PsesPackageRuntimeStager.ResolveExternalProcessTempRoot(), "PS7ScriptDesk-" + statusMarkerId + ".status");
         var quotedStatusPath = QuotePowerShellSingleQuotedString(statusPath);
 
         try
         {
+            Directory.CreateDirectory(Path.GetDirectoryName(statusPath)!);
             try
             {
                 await _structuredExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -982,7 +983,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             {
                 // The user text is an intact file-level PowerShell execution unit. In
                 // particular, #Requires and advanced-script headers stay at the top.
-                var snapshotDirectory = Path.Combine(Path.GetTempPath(), "PS7ScriptDesk", "EditorExecution");
+                var snapshotDirectory = Path.Combine(PsesPackageRuntimeStager.ResolveExternalProcessTempRoot(), "PS7ScriptDesk", "EditorExecution");
                 Directory.CreateDirectory(snapshotDirectory);
                 snapshotPath = Path.Combine(snapshotDirectory, "editor-" + statusMarkerId + ".ps1");
                 await using (var snapshotStream = new FileStream(snapshotPath, FileMode.CreateNew, FileAccess.Write,
@@ -3380,11 +3381,11 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             if (packageFullName is null &&
                 string.Equals(Directory.GetParent(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory))?.Name,
                     "WindowsApps", StringComparison.OrdinalIgnoreCase))
-                packageFullName = Path.GetFileName(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory));
+                throw new InvalidOperationException("PSES is installed in WindowsApps but Windows package identity is unavailable. Check the package installation and restart ScriptDesk.");
             return packageFullName is null
                 ? packagedRoot
                 : PsesPackageRuntimeStager.Stage(packagedRoot, packageFullName,
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+                    PsesPackageRuntimeStager.ResolveExternalProcessDataRoot());
         }
         var extensions = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".vscode", "extensions");
         var candidates = Directory.Exists(extensions)
@@ -4014,7 +4015,7 @@ public sealed class PsesOwnedInteractiveSessionService : ILiveConsoleService, IA
             return sourceDirectory;
         }
 
-        return Path.Combine(Path.GetTempPath(), "PS7ScriptDesk", "EditorExecution");
+        return Path.Combine(PsesPackageRuntimeStager.ResolveExternalProcessTempRoot(), "PS7ScriptDesk", "EditorExecution");
     }
 
     internal static async Task<string> CreateRunFileSnapshotAsync(

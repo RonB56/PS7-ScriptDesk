@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using PS7ScriptDesk.Application.Utilities;
 
 namespace PS7ScriptDesk.PowerShell.Services;
 
@@ -46,7 +47,7 @@ internal static class PsesExecutionPolicyDiagnostics
             return "EnvironmentOverride";
         var bundled = Path.Combine(AppContext.BaseDirectory, "PSES");
         if (string.Equals(root, bundled, StringComparison.OrdinalIgnoreCase)) return "Bundled";
-        var cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        var cacheRoot = Path.Combine(ExternalProcessPathContract.DataRoot,
             "PS7ScriptDesk", "PSES", "RuntimeCache") + Path.DirectorySeparatorChar;
         if (root.StartsWith(cacheRoot, StringComparison.OrdinalIgnoreCase)) return "PackagedStaging";
         return "ExtensionOrOther";

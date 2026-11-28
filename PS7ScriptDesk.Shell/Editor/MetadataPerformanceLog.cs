@@ -39,7 +39,7 @@ namespace PS7ScriptDesk.Shell.Editor
         public static string GetLogDirectory()
         {
             return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                ExternalProcessPathContract.DataRoot,
                 ApplicationBranding.InternalName,
                 "Logs");
         }
