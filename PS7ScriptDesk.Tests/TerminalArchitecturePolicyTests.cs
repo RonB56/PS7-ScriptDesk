@@ -158,19 +158,13 @@ public sealed class TerminalArchitecturePolicyTests
             "PS7ScriptDesk.Shell",
             "Controls",
             "TerminalControl.xaml.cs");
-        var debugSessionSource = ReadRepositoryFile(
-            "PS7ScriptDesk.Shell",
-            "Debugger",
-            "PsesDebugSession.cs");
-
+        Assert.Contains("new PsesDapDebugSession(authoritativeDebugEndpoint)", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("PreserveVisibleTranscript", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("RestoreVisiblePromptAfterDebug", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("BuildVisiblePromptTextForDebugCompletion", shellSource, StringComparison.Ordinal);
         Assert.DoesNotContain("ShouldSuppressPromptRedrawChunk", terminalControlSource, StringComparison.Ordinal);
         Assert.DoesNotContain("DeferResizeDuringTranscriptPreservation", terminalControlSource, StringComparison.Ordinal);
         Assert.Contains("await debugSession.StopAsync", shellSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("Task.WaitAll", debugSessionSource, StringComparison.Ordinal);
-        Assert.Contains("WaitForExitAsync", debugSessionSource, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -79,5 +79,13 @@ public sealed class SecondaryDialogContractTests
         {
             Assert.True(xaml.Contains(marker, StringComparison.Ordinal) || code.Contains(marker, StringComparison.Ordinal), $"Missing interaction marker: {marker}");
         }
+
+        Assert.Contains("FindReplaceWindow(Window ownerWindow, EditorFindReplaceController controller", code, StringComparison.Ordinal);
+        Assert.Contains("_controller.ExecuteFindNext", code, StringComparison.Ordinal);
+        Assert.Contains("_controller.ExecuteFindPrev", code, StringComparison.Ordinal);
+        Assert.Contains("_controller.ExecuteReplace(", code, StringComparison.Ordinal);
+        Assert.Contains("_controller.ExecuteReplaceAll(", code, StringComparison.Ordinal);
+        Assert.Contains("_controller.GetFindResults", code, StringComparison.Ordinal);
+        Assert.Contains("_controller.NavigateToFindResult", code, StringComparison.Ordinal);
     }
 }

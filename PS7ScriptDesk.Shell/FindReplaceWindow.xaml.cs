@@ -4,19 +4,20 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PS7ScriptDesk.Shell.Editor;
 using PS7ScriptDesk.Shell.Help;
 
 namespace PS7ScriptDesk.Shell
 {
     public partial class FindReplaceWindow : Window
     {
-        private readonly MainWindow _ownerWindow;
+        private readonly EditorFindReplaceController _controller;
         private readonly ObservableCollection<FindResultRow> _results = new();
         private bool _isRefreshingResults;
 
-        public FindReplaceWindow(MainWindow ownerWindow, string initialFindText, string initialReplaceText, bool matchCase)
+        internal FindReplaceWindow(Window ownerWindow, EditorFindReplaceController controller, string initialFindText, string initialReplaceText, bool matchCase)
         {
-            _ownerWindow = ownerWindow ?? throw new ArgumentNullException(nameof(ownerWindow));
+            _controller = controller ?? throw new ArgumentNullException(nameof(controller));
             InitializeComponent();
 
             Owner = ownerWindow;
@@ -93,28 +94,28 @@ namespace PS7ScriptDesk.Shell
         private void FindNext_Click(object sender, RoutedEventArgs e)
         {
             StatusText.Text = string.Empty;
-            _ownerWindow.ExecuteFindNext(FindText, MatchCase, WholeWord, UseRegex);
+            _controller.ExecuteFindNext(FindText, MatchCase, WholeWord, UseRegex);
             RefreshResults(showStatus: false);
         }
 
         private void FindPrev_Click(object sender, RoutedEventArgs e)
         {
             StatusText.Text = string.Empty;
-            _ownerWindow.ExecuteFindPrev(FindText, MatchCase, WholeWord, UseRegex);
+            _controller.ExecuteFindPrev(FindText, MatchCase, WholeWord, UseRegex);
             RefreshResults(showStatus: false);
         }
 
         private void Replace_Click(object sender, RoutedEventArgs e)
         {
             StatusText.Text = string.Empty;
-            _ownerWindow.ExecuteReplace(FindText, ReplaceText, MatchCase, WholeWord, UseRegex);
+            _controller.ExecuteReplace(FindText, ReplaceText, MatchCase, WholeWord, UseRegex);
             RefreshResults(showStatus: false);
         }
 
         private void ReplaceAll_Click(object sender, RoutedEventArgs e)
         {
             StatusText.Text = string.Empty;
-            _ownerWindow.ExecuteReplaceAll(FindText, ReplaceText, MatchCase, WholeWord, UseRegex);
+            _controller.ExecuteReplaceAll(FindText, ReplaceText, MatchCase, WholeWord, UseRegex);
             RefreshResults(showStatus: true);
         }
 
@@ -184,7 +185,7 @@ namespace PS7ScriptDesk.Shell
                 IReadOnlyList<FindResultRow> matches;
                 try
                 {
-                    matches = _ownerWindow.GetFindResults(FindText, MatchCase, WholeWord, UseRegex);
+                    matches = _controller.GetFindResults(FindText, MatchCase, WholeWord, UseRegex);
                 }
                 catch (ArgumentException ex)
                 {
@@ -228,7 +229,7 @@ namespace PS7ScriptDesk.Shell
                 return;
             }
 
-            _ownerWindow.NavigateToFindResult(result.Offset, result.Length, result.Line, result.Column);
+            _controller.NavigateToFindResult(result.Offset, result.Length, result.Line, result.Column);
         }
 
         private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
